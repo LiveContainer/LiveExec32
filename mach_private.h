@@ -4,6 +4,11 @@
 
 __BEGIN_DECLS
 
+#define DTRACEHIOC              (('d' << 24) | ('t' << 16) | ('h' << 8))
+#define DTRACEHIOC_ADD          (DTRACEHIOC | 1)        /* add helper */
+#define DTRACEHIOC_REMOVE       (DTRACEHIOC | 2)        /* remove helper */
+#define DTRACEHIOC_ADDDOF       (DTRACEHIOC | 3)        /* add helper DOF */
+
 #define PTHREAD_FEATURE_DISPATCHFUNC	0x01		/* same as WQOPS_QUEUE_NEWSPISUPP, checks for dispatch function support */
 #define PTHREAD_FEATURE_FINEPRIO		0x02		/* are fine grained prioirities available */
 #define PTHREAD_FEATURE_BSDTHREADCTL	0x04		/* is the bsdthread_ctl syscall available */

@@ -1,5 +1,6 @@
 ARCHS := arm64
 TARGET := iphone:clang:latest:16.0
+GO_EASY_ON_ME := 1
 #TARGET_CODESIGN = fastPathSign
 PACKAGE_FORMAT := ipa
 
@@ -14,8 +15,9 @@ LiveExec32_FILES = \
   HostFrameworks/Foundation/Foundation.mm \
   HostFrameworks/CoreGraphics/CoreGraphics.mm \
   HostFrameworks/UIKit/UIKit.mm
-LiveExec32_CFLAGS = -Iinclude -DDYNARMIC_MASTER -Wno-error
-LiveExec32_LDFLAGS = -Llib -ldynarmic
+LiveExec32_CFLAGS = -Iinclude -DDYNARMIC_MASTER
+LiveExec32_CCFLAGS = -std=c++17
+LiveExec32_LDFLAGS = -L./Resources/Frameworks -ldynarmic
 LiveExec32_CODESIGN_FLAGS = -Sentitlements.plist
 #LiveExec32_INSTALL_PATH = /usr/local/bin
 

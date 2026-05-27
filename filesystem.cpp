@@ -19,7 +19,7 @@ void LC32Filesystem::addMountpoint(string guest, string host) {
 }
 
 // Translate path between emulated mount point paths
-bool LC32Filesystem::pathLeftToRight(vector<string> leftVec, vector<string> rightVec, char *input, char *output) {
+bool LC32Filesystem::pathLeftToRight(vector<string> leftVec, vector<string> rightVec, const char *input, char *output) {
     if(input[0] != '/') {
         // guest->host will catch this beforehand, and host->guest should never reach this
         abort();
@@ -44,7 +44,7 @@ bool LC32Filesystem::pathLeftToRight(vector<string> leftVec, vector<string> righ
     return true;
 }
 
-bool LC32Filesystem::pathGuestToHost(char *input, char *output) {
+bool LC32Filesystem::pathGuestToHost(const char *input, char *output) {
     // FIXME: resolving guest symlink (eg /tmp -> /private/var/tmp -> (host)/tmp)
     if(input[0] != '/') {
         // relative path is more complex as we have to prepend cwd then translate the path back and forth
@@ -65,11 +65,11 @@ bool LC32Filesystem::pathGuestToHost(u32 inputAddr, char *output) {
     return pathGuestToHost(input.hostPtr, output);
 }
 
-bool LC32Filesystem::pathHostToGuest(char *input, char *output) {
+bool LC32Filesystem::pathHostToGuest(const char *input, char *output) {
     return pathLeftToRight(hostmpVec, guestmpVec, input, output);
 }
 
-bool LC32Filesystem::pathHostToGuest(char *input, u32 outputAddr) {
+bool LC32Filesystem::pathHostToGuest(const char *input, u32 outputAddr) {
     DynarmicHostString output(outputAddr);
     return pathLeftToRight(hostmpVec, guestmpVec, input, output.hostPtrForWriting());
 }

@@ -18,11 +18,6 @@
 #include "filesystem.h"
 #include "32bit.h"
 
-// TSB (thread local variables)
-#define ARM_REG_C13_C0_3 113
-#define ARM_REG_SP Reg::SP
-#define ARM_REG_PC Reg::PC
-
 #define PAGE_TABLE_ADDRESS_SPACE_BITS 36
 #define DYN_PAGE_BITS 12 // 4k
 #define DYN_PAGE_SIZE (1ULL << DYN_PAGE_BITS)

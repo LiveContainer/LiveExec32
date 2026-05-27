@@ -33,5 +33,5 @@ void CFRelease(CFTypeRef ref) {
 __attribute__((constructor)) void __CFInitialize() {
     // Since we cannot link against Foundation, we have to change superclass at runtime
     // Actually, internal CF does this aswel
-    class_setSuperclass(__CFConstantStringClassReference, objc_getClass("NSMutableString"));
+    class_setSuperclass(objc_getClass("__NSCFString"), objc_getClass("NSMutableString"));
 }

@@ -1,0 +1,35 @@
+# diff frameworks of classes.plist and classes_full.plist. Some frameworks are removed so the generator will run correctly inside LiveExec32. FIXME
+
+< 	<key>AVFAudio</key>
+< 	<key>AVFoundation</key>
+< 	<key>AVKit</key>
+< 	<key>Accounts</key>
+< 	<key>CloudKit</key>
+< 	<key>CoreLocation</key>
+< 	<key>EventKit</key>
+< 	<key>EventKitUI</key>
+< 	<key>GameController</key>
+< 	<key>GameKit</key>
+< 	<key>GameplayKit</key>
+< 	<key>HealthKit</key>
+< 	<key>HealthKitUI</key>
+< 	<key>HomeKit</key>
+< 	<key>MapKit</key>
+< 	<key>MessageUI</key>
+< 	<key>Messages</key>
+< 	<key>Metal</key>
+< 	<key>MetalKit</key>
+< 	<key>MetalPerformanceShaders</key>
+< 	<key>NetworkExtension</key>
+< 	<key>NotificationCenter</key>
+< 	<key>PassKit</key>
+< 	<key>Photos</key>
+< 	<key>PhotosUI</key>
+< 	<key>QuickLook</key>
+< 	<key>Social</key>
+< 	<key>Speech</key>
+< 	<key>SpriteKit</key>
+< 	<key>StoreKit</key>
+< 	<key>VideoSubscriberAccount</key>
+< 	<key>WatchConnectivity</key>
+< 	<key>WatchKit</key>

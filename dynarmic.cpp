@@ -631,21 +631,27 @@ int guest_sigprocmask(int how, u32 guest_set, u32 guest_oldset) {
 
 int guest_ioctl(int fildes, u32 request, u32 guest_r2) {
     switch(request) {
-    case TIOCSCTTY:
-    case TIOCEXCL:
-    case TIOCSBRK:
-    case TIOCCBRK:
-    case TIOCPTYGRANT:
-    case TIOCPTYUNLK:
-    //case DTRACEHIOC_REMOVE: 
-    //case BIOCFLUSH:
-    //case BIOCPROMISC:
-        return syscallRetCarry(SYS_ioctl, fildes, request, guest_r2, 0,0,0,0);
-    case FIODTYPE:
-        int host_r2;
-        int result = syscallRetCarry(SYS_ioctl, fildes, request, &host_r2, 0,0,0,0);
-        sharedHandle.ucb->MemoryWrite32(guest_r2, host_r2);
-        return result;
+        case TIOCSCTTY:
+        case TIOCEXCL:
+        case TIOCSBRK:
+        case TIOCCBRK:
+        case TIOCPTYGRANT:
+        case TIOCPTYUNLK:
+            //case DTRACEHIOC_REMOVE:
+            //case BIOCFLUSH:
+            //case BIOCPROMISC:
+            return syscallRetCarry(SYS_ioctl, fildes, request, guest_r2, 0,0,0,0);
+        case FIODTYPE: {
+            int host_r2;
+            int result = syscallRetCarry(SYS_ioctl, fildes, request, &host_r2, 0,0,0,0);
+            sharedHandle.ucb->MemoryWrite32(guest_r2, host_r2);
+            return result;
+        }
+        case DTRACEHIOC_ADD:
+        case DTRACEHIOC_ADDDOF:
+        case DTRACEHIOC_REMOVE:
+        case 0x80046804: // FIXME?
+            return -1;
     }
     printf("Unhandled ioctl request: %d (0x%x)\n", request, request);
     sharedHandle.ucb->ExceptionRaised(0xDEADDEAD, Dynarmic::A32::Exception::Yield);
@@ -897,7 +903,7 @@ static void load_symbols_for_image(guest_file_mapping *mapping, void(^iterator)(
   struct nlist *host_symtab = (struct nlist *)((uintptr_t)header + symtab_cmd->symoff);
   u64 host_strtab = (u32)((uintptr_t)header + symtab_cmd->stroff);
 
-  struct nlist *symtab = (struct nlist *)(mapping->start + symtab_cmd->symoff);
+  struct nlist *symtab = (struct nlist *)((u64)mapping->start + symtab_cmd->symoff);
   u32 strtab = (u32)(mapping->start + symtab_cmd->stroff);
   iterator(mapping->start, "(unknown symbol)");
   if(!get_memory(strtab)) {
@@ -1591,7 +1597,7 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 }
                 typedef u32(*HostCall)(u32, u32, u32);
                 HostCall hostCall = (HostCall)((u64)cpu->Regs()[0] | ((u64)cpu->Regs()[1] << 32));
-                cpu->Regs()[0] = hostCall(cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[ARM_REG_SP]);
+                cpu->Regs()[0] = hostCall(cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[Reg::SP]);
                 break;
             }
             case 1003: { // LC32GuestToHostCString
@@ -1623,7 +1629,7 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 }
                 u64 host_self = (u64)cpu->Regs()[0] | ((u64)cpu->Regs()[1] << 32);
                 u64 host_cmd = (u64)cpu->Regs()[2] | ((u64)cpu->Regs()[3] << 32);
-                u64 result = LC32InvokeHostSelector(host_self, host_cmd, cpu->Regs()[ARM_REG_SP]);
+                u64 result = LC32InvokeHostSelector(host_self, host_cmd, cpu->Regs()[Reg::SP]);
                 cpu->Regs()[0] = (u32)result;
                 cpu->Regs()[1] = (u32)(result >> 32);
                 break;

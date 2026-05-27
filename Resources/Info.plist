@@ -49,6 +49,8 @@
 	<array/>
 	<key>CFBundleVersion</key>
 	<string>2</string>
+	<key>LC32BitTranslationLayer</key>
+	<true/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>

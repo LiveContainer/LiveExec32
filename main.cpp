@@ -28,10 +28,6 @@
 #define SEG_DATA_CONST  "__DATA_CONST"
 
 // /var/mobile/Documents/TrollExperiments/CProjects/dynarmic
-#define DEFAULT_ROOT_PATH "/private/var/mobile/Documents/TrollExperiments/CProjects/dynarmic/iOS10RAMDisk"
-#define DEFAULT_DYLD_PATH DEFAULT_ROOT_PATH "/usr/lib/dyld"
-
-extern "C" {
 
 u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
   int fd = open(path, O_RDONLY);
@@ -42,37 +38,36 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
   size_t len = ALIGN_SIZE(file_info.st_size);
   uintptr_t map = (uintptr_t)mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
   close(fd);
-  guestMappings[guestMappingLen].hostAddr = map;
 
   // Map mach_header first
   //u32 addr = Dynarmic_direct_mmap(target, 0x1000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, map, 0);
 
   guestMappings[guestMappingLen].name = strdup(basename((char *)path));
 
-  struct mach_header *header;
-  // FIXME: may not work
+  // FIXME: may leak other unused slices
   if(*(uint32_t *)map == FAT_CIGAM) {
     struct fat_header *fatheader = (struct fat_header *)map;
-    struct fat_arch *arch = (struct fat_arch *)(map + sizeof(struct fat_header));
+    struct fat_arch *arch = (struct fat_arch *)&fatheader[1];
+    map = 0;
     for(int i = 0; i < OSSwapInt32(fatheader->nfat_arch); i++) {
       int subtype = OSSwapInt32(arch->cpusubtype);
       int offset = OSSwapInt32(arch->offset);
       if(subtype == CPU_SUBTYPE_ARM_V7S) {
-        header = (struct mach_header *)(map + offset);
+        map = (uintptr_t)fatheader + offset;
         // preferred subtype
         break;
       } else if(subtype == CPU_SUBTYPE_ARM_V7) {
-        header = (struct mach_header *)(map + offset);
+        map = (uintptr_t)fatheader + offset;
         // look for armv7s
-      } else if(subtype == CPU_SUBTYPE_ARM_V6 && !header) {
-        header = (struct mach_header *)(map + offset);
+      } else if(subtype == CPU_SUBTYPE_ARM_V6 && !map) {
+        map = (uintptr_t)fatheader + offset;
         // look for armv7s or armv7
       }
-      arch = (struct fat_arch *)((uintptr_t)arch + sizeof(struct fat_arch));
+      arch = &arch[1];
     }
-  } else {
-    header = (struct mach_header *)map;
   }
+  guestMappings[guestMappingLen].hostAddr = map;
+  struct mach_header *header = (struct mach_header *)map;
   assert(header->magic == MH_MAGIC && header->cputype == CPU_TYPE_ARM);
 
   uintptr_t cur = (uintptr_t)header + sizeof(mach_header);
@@ -118,9 +113,9 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
       for (int i = 0; i < 13; i++) {
         threadHandle.jit->Regs()[i] = state->__r[i];
       }
-      threadHandle.jit->Regs()[13] = state->__sp;
-      threadHandle.jit->Regs()[14] = state->__lr;
-      threadHandle.jit->Regs()[15] = state->__pc;
+      threadHandle.jit->Regs()[Reg::SP] = state->__sp;
+      threadHandle.jit->Regs()[Reg::LR] = state->__lr;
+      threadHandle.jit->Regs()[Reg::PC] = state->__pc;
       threadHandle.jit->SetCpsr(state->__cpsr);
     }
   }
@@ -141,7 +136,7 @@ u32 prependString(u32& address, const char* fmt, ...) {
   char buffer[1000];
   va_list args;
   va_start(args, fmt);
-  u32 len = vsprintf(buffer, fmt, args);
+  u32 len = vsnprintf(buffer, sizeof(buffer), fmt, args);
   va_end(args);
 
   address -= len + 1;
@@ -149,40 +144,53 @@ u32 prependString(u32& address, const char* fmt, ...) {
   return address;
 }
 
-int main(int argc, char* argv[], char* envp[]) {
-  const char *execPath;
-  if (getppid() == 1) {
-    // test app
-    execPath = "/var/mobile/Documents/TrollExperiments/CProjects/dynarmic/ipas/FS3 Mobile.app/FS3 Mobile";
-//"/var/mobile/Documents/TrollExperiments/CProjects/dynarmic/LiveExec32/test/a.out";
-  } else if (argc == 1) {
-    printf("Usage: %s <path> argv...\n", argv[0]);
-    return 1;
-  } else {
-    execPath = argv[1];
-  }
+void setupPathEnvs(char* argv0) {
+  char path[PATH_MAX];
 
-  Dynarmic_nativeInitialize();
-  u32 execAddr = Dynarmic_map_file(false, 0x11000000, execPath);
-
-  setenv("DYLD_PATH", DEFAULT_DYLD_PATH, 0);
-  const char *dyldPath = getenv("DYLD_PATH");
-  printf("Loading dyld at DYLD_PATH %s\n", dyldPath);
-  Dynarmic_map_file(true, 0x10000000, dyldPath);
-  printf("entry point: 0x%x\n", threadHandle.jit->Regs()[15]);
-
-  setenv("ROOT_PATH", DEFAULT_ROOT_PATH, 0);
+  // resolve default rootfs path to /path/to/LiveExec32.app/RootFS
+  snprintf(path, sizeof(path), "%s/RootFS", dirname(argv0));
+  setenv("ROOT_PATH", path, 0);
   const char *rootPath = getenv("ROOT_PATH");
-  chdir(rootPath);
   if (getuid() == 0) {
     chroot(rootPath);
     chdir("/");
   } else {
+    chdir(rootPath);
     //sharedHandle.fs->addMountpoint("/rootfs", "/");
     sharedHandle.fs->addMountpoint("/", rootPath);
     sharedHandle.fs->addMountpoint("/dev", "/dev");
-    sharedHandle.fs->addMountpoint("/private/var/tmp", "/private/var/tmp");
+    // redirecting symlink doesn't work currently, so we add both
+    sharedHandle.fs->addMountpoint("/private/var", "/private/var");
+    sharedHandle.fs->addMountpoint("/var", "/var");
   }
+
+  // resolve default dyld path to ${ROOT_PATH}/usr/lib/dyld
+  const char *guestDyldPath = "/usr/lib/dyld";
+  sharedHandle.fs->pathGuestToHost(guestDyldPath, path);
+  setenv("DYLD_PATH", path, 0);
+}
+
+extern "C"
+int main(int argc, char* argv[], char* envp[]) {
+  if (argc == 1) {
+    //printf("Usage: %s <path> argv...\n", argv[0]);
+    // TODO: display help or setup wizard
+    return 1;
+  }
+
+  // initialize page table, callback, Jit objects, paths
+  Dynarmic_nativeInitialize();
+  setupPathEnvs(argv[0]);
+
+  // map the main executable first
+  const char *execPath = argv[1];
+  u32 execAddr = Dynarmic_map_file(false, 0x11000000, execPath);
+
+  // map dyld
+  const char *dyldPath = getenv("DYLD_PATH");
+  printf("Loading dyld at DYLD_PATH %s\n", dyldPath);
+  Dynarmic_map_file(true, 0x10000000, dyldPath);
+  printf("entry point: 0x%x\n", threadHandle.jit->Regs()[15]);
 
   // commpage 0xffff4000+0x1000
   u32 commpage = Dynarmic_mmap(0xffff4000, 0x1000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
@@ -227,8 +235,6 @@ int main(int argc, char* argv[], char* envp[]) {
     //prependString(dyldStackPtr, "OBJC_PRINT_LOAD_METHODS=1"),
     //prependString(dyldStackPtr, "OBJC_PRINT_RESOLVED_METHODS=1"),
     //prependString(dyldStackPtr, "OBJC_PRINT_CLASS_SETUP=1"),
-    //prependString(dyldStackPtr, "DYLD_LIBRARY_PATH=%1$s/usr/lib:%1$s/usr/lib/system", rootPath),
-    //prependString(dyldStackPtr, "DYLD_FRAMEWORK_PATH=%1$s/System/Library/Frameworks:%1$s/System/Library/PrivateFrameworks", rootPath),
     prependString(dyldStackPtr, "DYLD_SHARED_REGION=private"),
     prependString(dyldStackPtr, "DYLD_PRINT_OPTS=1"),
     prependString(dyldStackPtr, "DYLD_PRINT_ENV=1"),
@@ -272,10 +278,9 @@ int main(int argc, char* argv[], char* envp[]) {
   // write main executable base
   sharedHandle.ucb->MemoryWrite32(dyldStackPtr -= sizeof(u32), execAddr);
 
-  printf("stack ptr now 0x%x\n", dyldStackPtr);
+  printf("LC32: stack ptr now 0x%x\n", dyldStackPtr);
 
+  // Go!
   Dynarmic_reg_1write(13, dyldStackPtr);
   Dynarmic_emu_1start(threadHandle.jit->Regs()[15]);
-}
-
 }

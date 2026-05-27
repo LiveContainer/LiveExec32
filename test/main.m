@@ -51,8 +51,11 @@
 // NSLog doesn't work yet
 #define printObjC(...) printf("%s\n", [NSString stringWithFormat:__VA_ARGS__].UTF8String)
 
+const char *lzma_version_string();
+
 int main(int argc, char **argv) {
   printf("Hello world from 32bit!\n");
+  printf("LZMA ver %s\n", lzma_version_string());
 
   UIView *testView = [UIView new];
   CGRect frame = testView.frame;

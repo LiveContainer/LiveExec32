@@ -321,7 +321,8 @@
     for(MethodParameter *param in self.parameters) {
         [call appendFormat:@", %@", param.parameterToBePassed];
     }
-    [call appendString:@");"];
+    // Add a null last arg
+    [call appendString:@", 0);"];
     return call;
 }
 
@@ -535,12 +536,17 @@ int main(int argc, char **argv) {
 
     // UIKit ONLY!!!!!!
     NSString *uikitPath = @"/System/Library/Frameworks/UIKit.framework/UIKit";
-    NSArray<Class> *classes = @[
-        CLS(UIDynamicSystemColor), CLS(UIDynamicColor), CLS(UILayoutContainerView), CLS(UICachedDeviceWhiteColor), CLS(UIDeviceWhiteColor), CLS(UIDeviceRGBColor),
-        CLS(UILayoutContainerView), CLS(UITableViewCellLayoutManager), CLS(_UIMoreListTableView), CLS(UIMoreListCellLayoutManager), CLS(UIMoreListController),
-        CLS(UIMoreNavigationController), CLS(UINibDecoder)
+    NSArray<NSString *> *classes = @[
+        @"UIDynamicSystemColor", @"UIDynamicColor", @"UILayoutContainerView", @"UICachedDeviceWhiteColor", @"UIDeviceWhiteColor", @"UIDeviceRGBColor",
+        @"UILayoutContainerView", @"UITableViewCellLayoutManager", @"_UIMoreListTableView", @"UIMoreListCellLayoutManager", @"UIMoreListController",
+        @"UIMoreNavigationController", @"UINibDecoder"
     ];
-    for(Class cls in classes) {
+    for(NSString *clsStr in classes) {
+        Class cls = NSClassFromString(clsStr);
+        if(!cls) {
+            NSLog(@"Didn't find class %@", clsStr);
+            continue;
+        }
         NSString *outPath = @"../../GuestFrameworks/UIKit";
         [NSFileManager.defaultManager createDirectoryAtPath:outPath withIntermediateDirectories:YES attributes:@{} error:nil];
 
