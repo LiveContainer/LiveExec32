@@ -1,5 +1,5 @@
 ARCHS := armv7s
-TARGET := iphone:clang:latest:10.3
+TARGET := iphone:clang:16.5:10.3
 GO_EASY_ON_ME = 1
 
 ADDITIONAL_CFLAGS = -I../GuestFrameworks

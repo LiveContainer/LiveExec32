@@ -1,6 +1,9 @@
 @import ObjectiveC;
 #import <Foundation/Foundation.h>
 
+#define CRSetCrashLogMessage(msg) __assert_rtn(NULL, __FILE__, __LINE__, msg)
+#define HALT __builtin_trap()
+
 @interface NSObject(LC32)
 - (instancetype)initWithHostSelf:(uint64_t)host_self;
 - (void)bindHostSelf:(uint64_t)ptr;
