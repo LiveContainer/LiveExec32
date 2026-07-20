@@ -76,45 +76,45 @@ bool LC32Filesystem::pathHostToGuest(const char *input, u32 outputAddr) {
 
 #if 0
 void test() {
-  LC32Filesystem fs;
-  fs.addMountpoint("/var/mobile", "/var/tmp");
-  fs.addMountpoint("/rootfs", "/");
-  fs.addMountpoint("/", "/var/mobile/rootfs");
-  char buffer[PATH_MAX];
-
-  // host to guest rootfs
-  bzero(buffer, PATH_MAX);
-  fs.pathHostToGuest("/var/mobile/rootfs/var/mobile/hello.txt", buffer);
-  printf("path=%s\n", buffer);
-
-  // host to guest unmounted
-  bzero(buffer, PATH_MAX);
-  fs.pathHostToGuest("/var/unmounted/tmp/mobile/fake/hello.txt", buffer);
-  printf("path=%s\n", buffer);
-
-  // host to guest mounted
-  bzero(buffer, PATH_MAX);
-  fs.pathHostToGuest("/var/tmp/test/fake/hello.txt", buffer);
-  printf("path=%s\n", buffer);
-
-  // guest to host rootfs
-  bzero(buffer, PATH_MAX);
-  fs.pathGuestToHost("/rootfs", buffer);
-  printf("GTHpath=%s\n", buffer);
-
-  // guest to host rootfs
-  bzero(buffer, PATH_MAX);
-  fs.pathGuestToHost("/rootfs/var/mobile/test.txt", buffer);
-  printf("GTHpath=%s\n", buffer);
-
-  // guest mounted to host
-  bzero(buffer, PATH_MAX);
-  fs.pathGuestToHost("/var/mobile/test.txt", buffer);
-  printf("GTHpath=%s\n", buffer);
-
-  // guest to host rootfs
-  bzero(buffer, PATH_MAX);
-  fs.pathGuestToHost("/System/Library/test.txt", buffer);
-  printf("GTHpath=%s\n", buffer);
+    LC32Filesystem fs;
+    fs.addMountpoint("/var/mobile", "/var/tmp");
+    fs.addMountpoint("/rootfs", "/");
+    fs.addMountpoint("/", "/var/mobile/rootfs");
+    char buffer[PATH_MAX];
+    
+    // host to guest rootfs
+    bzero(buffer, PATH_MAX);
+    fs.pathHostToGuest("/var/mobile/rootfs/var/mobile/hello.txt", buffer);
+    printf("path=%s\n", buffer);
+    
+    // host to guest unmounted
+    bzero(buffer, PATH_MAX);
+    fs.pathHostToGuest("/var/unmounted/tmp/mobile/fake/hello.txt", buffer);
+    printf("path=%s\n", buffer);
+    
+    // host to guest mounted
+    bzero(buffer, PATH_MAX);
+    fs.pathHostToGuest("/var/tmp/test/fake/hello.txt", buffer);
+    printf("path=%s\n", buffer);
+    
+    // guest to host rootfs
+    bzero(buffer, PATH_MAX);
+    fs.pathGuestToHost("/rootfs", buffer);
+    printf("GTHpath=%s\n", buffer);
+    
+    // guest to host rootfs
+    bzero(buffer, PATH_MAX);
+    fs.pathGuestToHost("/rootfs/var/mobile/test.txt", buffer);
+    printf("GTHpath=%s\n", buffer);
+    
+    // guest mounted to host
+    bzero(buffer, PATH_MAX);
+    fs.pathGuestToHost("/var/mobile/test.txt", buffer);
+    printf("GTHpath=%s\n", buffer);
+    
+    // guest to host rootfs
+    bzero(buffer, PATH_MAX);
+    fs.pathGuestToHost("/System/Library/test.txt", buffer);
+    printf("GTHpath=%s\n", buffer);
 }
 #endif

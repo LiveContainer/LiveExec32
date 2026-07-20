@@ -49,39 +49,39 @@
 
 class Reg {
 public:
-  enum RegEnum {
-    R0,
-    R1,
-    R2,
-    R3,
-    R4,
-    R5,
-    R6,
-    R7,
-    R8,
-    R9,
-    R10,
-    R11,
-    R12,
-    R13,
-    R14,
-    R15,
-    SP = R13,
-    LR = R14,
-    PC = R15,
-    INVALID_REG = 99
-  };
+    enum RegEnum {
+        R0,
+        R1,
+        R2,
+        R3,
+        R4,
+        R5,
+        R6,
+        R7,
+        R8,
+        R9,
+        R10,
+        R11,
+        R12,
+        R13,
+        R14,
+        R15,
+        SP = R13,
+        LR = R14,
+        PC = R15,
+        INVALID_REG = 99
+    };
 };
 
 class ExtReg {
 public:
-  enum ExtRegEnum {
-    // clang-format off
-    S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31,
-    D0, D1, D2, D3, D4, D5, D6, D7, D8, D9, D10, D11, D12, D13, D14, D15, D16, D17, D18, D19, D20, D21, D22, D23, D24, D25, D26, D27, D28, D29, D30, D31,
-    Q0, Q1, Q2, Q3, Q4, Q5, Q6, Q7, Q8, Q9, Q10, Q11, Q12, Q13, Q14, Q15
-    // clang-format on
-  };
+    enum ExtRegEnum {
+        // clang-format off
+        S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31,
+        D0, D1, D2, D3, D4, D5, D6, D7, D8, D9, D10, D11, D12, D13, D14, D15, D16, D17, D18, D19, D20, D21, D22, D23, D24, D25, D26, D27, D28, D29, D30, D31,
+        Q0, Q1, Q2, Q3, Q4, Q5, Q6, Q7, Q8, Q9, Q10, Q11, Q12, Q13, Q14, Q15
+        // clang-format on
+    };
 };
 
 struct guest_file_mapping {
@@ -94,8 +94,8 @@ extern int guestMappingLen;
 extern guest_file_mapping guestMappings[1000];
 
 typedef struct memory_page {
-  void *addr;
-  int perms;
+    void *addr;
+    int perms;
 } *t_memory_page;
 
 KHASH_MAP_INIT_INT64(memory, t_memory_page)
@@ -103,11 +103,11 @@ KHASH_MAP_INIT_INT64(memory, t_memory_page)
 using Vector = std::array<std::uint64_t, 2>;
 
 typedef struct context32 {
-  std::array<std::uint32_t, 16> regs;
-  std::array<std::uint32_t, 64> extRegs;
-  std::uint32_t cpsr;
-  std::uint32_t fpscr;
-  std::uint32_t uro;
+    std::array<std::uint32_t, 16> regs;
+    std::array<std::uint32_t, 64> extRegs;
+    std::uint32_t cpsr;
+    std::uint32_t fpscr;
+    std::uint32_t uro;
 } *t_context32;
 
 
@@ -203,22 +203,22 @@ __BEGIN_DECLS
 
 class DynarmicCallbacks32;
 typedef struct {
-  khash_t(memory) *memory;
-  size_t num_page_table_entries;
-  void **page_table;
-  union {
-    DynarmicCallbacks32 *cb;
-    Dynarmic::A32::UserCallbacks *ucb;
-  };
-  Dynarmic::ExclusiveMonitor *monitor;
-  LC32Filesystem *fs;
-  u32 guest_dlsym, guest_LC32InvokeGuestC;
-  dyld_all_image_infos_32 *dyld_info_section;
+    khash_t(memory) *memory;
+    size_t num_page_table_entries;
+    void **page_table;
+    union {
+        DynarmicCallbacks32 *cb;
+        Dynarmic::A32::UserCallbacks *ucb;
+    };
+    Dynarmic::ExclusiveMonitor *monitor;
+    LC32Filesystem *fs;
+    u32 guest_dlsym, guest_LC32InvokeGuestC;
+    dyld_all_image_infos_32 *dyld_info_section;
 } dynarmic;
 
 typedef struct {
-  Dynarmic::A32::Jit *jit;
-  DynarmicCpsr *cpsr;
+    Dynarmic::A32::Jit *jit;
+    DynarmicCpsr *cpsr;
 } dynarmic_thread;
 
 // Handles
