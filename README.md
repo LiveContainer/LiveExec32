@@ -13,15 +13,12 @@ There are also missing syscalls that I have yet to provide to pass through. Plea
 pzb -g 058-75249-062.dmg http://appldnld.apple.com/ios10.3.3/091-23384-20170719-CA966D80-6977-11E7-9F96-3E9100BA0AE3/iPhone_4.0_32bit_10.3.3_14G60_Restore.ipsw
 xpwntool 058-75249-062.dmg ramdisk.dmg -k
 ```
-- Mount the dmg and copy its contents
+- Extract the dmg
 ```bash
-# Run the following commands as root
-disk=$(hdik ramdisk.dmg); echo $disk
-mount_hfs -o ro $disk /var/mnt
-cp -rp /var/mnt /var/mobile/ramdisk32
-umount -f $disk; hdik -e $disk
-rm ramdisk.dmg 058-75249-062.dmg
+7z x ramdisk.dmg
+# extracted files go into ramdisk/
 ```
+
 - Replace all of `/var/mobile/Documents/TrollExperiments` with your paths
 - Compile this project using theos
 - Launch a binary and profit. Please note that chroot is internally done otherwise you will hit bad memory access errors. I'm investigating it and will provide a fix.

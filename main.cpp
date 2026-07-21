@@ -31,7 +31,10 @@
 
 u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
     int fd = open(path, O_RDONLY);
-    assert (fd != -1);
+    if (fd < 0) {
+        printf("Dynarmic_map_file %s failed: %s\n", path, strerror(errno));
+        exit(1);
+    }
     
     struct stat file_info;
     fstat(fd, &file_info);

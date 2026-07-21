@@ -900,9 +900,6 @@ static void load_symbols_for_image(guest_file_mapping *mapping, void(^iterator)(
     // Find base symbol/string table addresses
     // FIXME: symbol resolution for dyld shared cache
 #if 1
-    struct nlist *host_symtab = (struct nlist *)((uintptr_t)header + symtab_cmd->symoff);
-    u64 host_strtab = (u32)((uintptr_t)header + symtab_cmd->stroff);
-    
     struct nlist *symtab = (struct nlist *)((u64)mapping->start + symtab_cmd->symoff);
     u32 strtab = (u32)(mapping->start + symtab_cmd->stroff);
     iterator(mapping->start, "(unknown symbol)");
@@ -912,10 +909,8 @@ static void load_symbols_for_image(guest_file_mapping *mapping, void(^iterator)(
     
     for(int i=0; i < symtab_cmd->nsyms; i++) {
         u32 addr = strtab + sharedHandle.ucb->MemoryRead32((u32)(u64)&symtab[i].n_un.n_strx);
-        //u32 host_addr = host_strtab +
         if(!get_memory(addr)) continue;
         u64 symbolAddr = sharedHandle.ucb->MemoryRead32((u32)(u64)&symtab[i].n_value) + slide;
-        u64 hostSymbolAddr = host_symtab[i].n_value + slide;
         DynarmicHostString host_sym(addr);
         if(*host_sym.hostPtr) {
             iterator(symbolAddr, (const char *)host_sym.hostPtr);
