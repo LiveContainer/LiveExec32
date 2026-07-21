@@ -4,3 +4,6 @@ packages/
 *.o
 a.out
 *.dSYM
+tmp/
+Generator/GenerateShimAPI/GenerateShimObjC
+Generator/GenerateShimAPI/GenerateShimOpenGLES

@@ -21,5 +21,10 @@ LiveExec32_LDFLAGS = -L./Resources/Frameworks -ldynarmic
 LiveExec32_CODESIGN_FLAGS = -Sentitlements.plist
 #LiveExec32_INSTALL_PATH = /usr/local/bin
 
+after-all::
+	@vtool -arch arm64 -set-build-version 6 11.0 11.0 -replace -output $(THEOS_OBJ_DIR)/LiveExec32.app/LiveExec32{,}
+	@vtool -arch arm64 -set-build-version 6 11.0 11.0 -replace -output $(THEOS_OBJ_DIR)/LiveExec32.app/Frameworks/libdynarmic.dylib{,}
+	@ldid -S $(THEOS_OBJ_DIR)/LiveExec32.app
+
 include $(THEOS_MAKE_PATH)/application.mk
 #include $(THEOS_MAKE_PATH)/tool.mk
