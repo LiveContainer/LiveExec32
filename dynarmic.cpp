@@ -1,4 +1,5 @@
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
@@ -38,7 +39,7 @@
 #include "32bit.h"
 
 
-#define IGNORE_BAD_MEM_ACCESS 1
+#define IGNORE_BAD_MEM_ACCESS 0
 #define TRACE_RW 0
 #define TRACE_BRANCH 0
 #define TRACE_SVC 0
@@ -49,8 +50,81 @@
 #define CS_OPS_STATUS 0
 #define CS_ENFORCEMENT 0x00001000
 
-#define msgh_request_port	msgh_remote_port
-#define msgh_reply_port		msgh_local_port
+#define msgh_request_port    msgh_remote_port
+#define msgh_reply_port        msgh_local_port
+
+static std::atomic<int> guestStopSignal{SIGTRAP};
+static std::atomic<int> pendingGuestFatalSignal{0};
+static std::atomic<bool> reemitPendingGuestStop{false};
+
+struct DebuggerSoftwareBreakpoint {
+    u32 address;
+    size_t kind;
+    std::array<uint8_t, sizeof(uint32_t)> original;
+    std::array<uint8_t, sizeof(uint32_t)> trap;
+};
+static std::vector<DebuggerSoftwareBreakpoint> debuggerSoftwareBreakpoints;
+
+static void SetGuestStopSignal(int signal, bool pending) {
+    if (signal <= 0 || signal >= NSIG) {
+        signal = SIGABRT;
+    }
+    guestStopSignal.store(signal, std::memory_order_relaxed);
+    if (!pending) {
+        pendingGuestFatalSignal.store(0, std::memory_order_relaxed);
+        reemitPendingGuestStop.store(false, std::memory_order_relaxed);
+    } else {
+        pendingGuestFatalSignal.store(signal, std::memory_order_relaxed);
+    }
+}
+
+static bool ConsumePendingGuestStop() {
+    if (!reemitPendingGuestStop.exchange(false, std::memory_order_relaxed)) {
+        return false;
+    }
+
+    const int signal = pendingGuestFatalSignal.load(std::memory_order_relaxed);
+    if (signal <= 0) {
+        return false;
+    }
+    guestStopSignal.store(signal, std::memory_order_relaxed);
+    return true;
+}
+
+static void UpdateGuestStopSignalForHalt(Dynarmic::HaltReason reason) {
+    if (Dynarmic::Has(reason, LC32HaltReasonInterrupt)) {
+        SetGuestStopSignal(SIGINT, false);
+    } else if (Dynarmic::Has(reason, Dynarmic::HaltReason::MemoryAbort)) {
+        SetGuestStopSignal(SIGSEGV, true);
+    } else if (!Dynarmic::Has(reason, LC32HaltReasonTrap)) {
+        // A normal single-step or any non-fault emulator stop must not retain
+        // the signal from an earlier fatal stop.
+        SetGuestStopSignal(SIGTRAP, false);
+    }
+}
+
+static int FindGuestMapping(u32 loadAddress) {
+    for (int i = 0; i < guestMappingLen; ++i) {
+        if (guestMappings[i].start == loadAddress) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void RemoveGuestMapping(u32 loadAddress) {
+    const int index = FindGuestMapping(loadAddress);
+    if (index < 0) {
+        return;
+    }
+
+    free(const_cast<char *>(guestMappings[index].name));
+    for (int i = index; i + 1 < guestMappingLen; ++i) {
+        guestMappings[i] = guestMappings[i + 1];
+    }
+    guestMappings[--guestMappingLen] = {};
+    ++guestMappingGeneration;
+}
 
 struct symbolicated_call {
     u32 address;
@@ -195,7 +269,7 @@ int guest_shm_open(u32 guest_name, int oflag, int mode) {
     return syscallRetCarry(SYS_shm_open, host_name.hostPtr, oflag, mode);
 }
 
-int	 guest_pthread_getugid_np(u32 uid, u32 gid) {
+int     guest_pthread_getugid_np(u32 uid, u32 gid) {
     uid_t host_uid, host_gid;
     int result = pthread_getugid_np(&host_uid, &host_gid);
     sharedHandle.ucb->MemoryWrite32(uid, host_uid);
@@ -212,12 +286,12 @@ union MachMessage_##function { \
 // FIXME: cannot call mach_msg(2)_trap directly
 mach_msg_return_t
 guest_mach_msg_trap(u32 guest_msg,
-		 mach_msg_option_t option,
-		 mach_msg_size_t send_size,
-		 mach_msg_size_t rcv_size,
-		 mach_port_t rcv_name,
-		 mach_msg_timeout_t timeout,
-		 mach_port_t notify) {
+         mach_msg_option_t option,
+         mach_msg_size_t send_size,
+         mach_msg_size_t rcv_size,
+         mach_port_t rcv_name,
+         mach_msg_timeout_t timeout,
+         mach_port_t notify) {
     mach_msg_return_t result = MACH_MSG_SUCCESS;
 
     char *host_msg = (char *)malloc(MAX(send_size, rcv_size));
@@ -277,16 +351,62 @@ guest_mach_msg_trap(u32 guest_msg,
                 while(seg->cmd != LC_SEGMENT || strcmp(seg->segname, SEG_TEXT) != 0){
                     seg = (struct segment_command *)((uintptr_t)seg + seg->cmdsize);
                 }
-                guestMappings[guestMappingLen].name = strdup(basename(imagePath));
-                guestMappings[guestMappingLen].start = imageAddress;
-                guestMappings[guestMappingLen].end = imageAddress + seg->vmsize;
-                guestMappings[guestMappingLen].hostAddr = (uintptr_t)get_memory(imageAddress);
-                printf("LC32: added image %s (0x%08x-0x%08x)\n", guestMappings[guestMappingLen].name, guestMappings[guestMappingLen].start, guestMappings[guestMappingLen].end);
-                guestMappingLen++;
+                char hostImagePath[PATH_MAX];
+                const bool debuggerPathResolved =
+                    ResolveDebuggerImagePath(imagePath, hostImagePath);
+                const char *mappingName =
+                    debuggerPathResolved ? hostImagePath : imagePath;
+
+                int mappingIndex = FindGuestMapping(imageAddress);
+                if (mappingIndex >= 0) {
+                    // Preserve a known-good standalone path when dyld repeats
+                    // the executable or dyld with only a guest-path fallback.
+                    if (guestMappings[mappingIndex].debuggerPathResolved ||
+                        !debuggerPathResolved) {
+                        continue;
+                    }
+                    free(const_cast<char *>(guestMappings[mappingIndex].name));
+                } else {
+                    if (guestMappingLen >= 1000) {
+                        fprintf(stderr,
+                                "LC32: too many mapped images for debugger\n");
+                        break;
+                    }
+                    mappingIndex = guestMappingLen++;
+                }
+
+                guestMappings[mappingIndex].name = strdup(mappingName);
+                guestMappings[mappingIndex].debuggerPathResolved =
+                    debuggerPathResolved;
+                guestMappings[mappingIndex].start = imageAddress;
+                guestMappings[mappingIndex].end =
+                    imageAddress + seg->vmsize;
+                guestMappings[mappingIndex].hostAddr =
+                    (uintptr_t)get_memory(imageAddress);
+                // Even when ROOT_PATH only contains a dyld shared cache, LLDB
+                // can resolve this original guest path through its matching
+                // DeviceSupport Symbols tree.
+                ++guestMappingGeneration;
+                printf("LC32: added image %s (0x%08x-0x%08x)\n",
+                       guestMappings[mappingIndex].name,
+                       guestMappings[mappingIndex].start,
+                       guestMappings[mappingIndex].end);
             }
             __attribute__((fallthrough));
         }
-        case DYLD_PROCESS_INFO_NOTIFY_UNLOAD_ID:
+        case DYLD_PROCESS_INFO_NOTIFY_UNLOAD_ID: {
+            if (host_header->msgh_id == DYLD_PROCESS_INFO_NOTIFY_UNLOAD_ID) {
+                const dyld_process_info_notify_header *Mess =
+                    (dyld_process_info_notify_header *)host_header;
+                const dyld_process_info_image_entry *entries =
+                    (dyld_process_info_image_entry *)((uintptr_t)Mess +
+                                                      Mess->imagesOffset);
+                for (unsigned i = 0; i < Mess->imageCount; ++i) {
+                    RemoveGuestMapping((u32)entries[i].loadAddress);
+                }
+            }
+            __attribute__((fallthrough));
+        }
         case DYLD_PROCESS_INFO_NOTIFY_MAIN_ID: {
             host_header->msgh_bits        = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND);
             host_header->msgh_id          = 0;
@@ -335,7 +455,7 @@ guest_mach_msg_trap(u32 guest_msg,
         case 78945670: {
             MACH_MSG_UNION(_notify_server_register_check, Mess);
             // this Mach trap is missing on arm64
-	         host_header->msgh_size = sizeof(Mess->Out);
+             host_header->msgh_size = sizeof(Mess->Out);
             Mess->Out.size = 0;
             Mess->Out.slot = 0;
             Mess->Out.token = 0;
@@ -517,7 +637,18 @@ int guest_gettimeofday(u32 guest_tp, u32 guest_tzp) {
     //assert(!guest_tzp);
     struct timeval host_tp;
     int result = syscallRetCarry(SYS_gettimeofday, &host_tp, NULL, 0,0,0,0,0);
-    Dynarmic_mem_1write(guest_tp, sizeof(host_tp), (char *)&host_tp);
+    if (result == 0 && guest_tp != 0) {
+        // time_t/suseconds_t are 64-bit in the arm64 host ABI but 32-bit in
+        // this armv7 guest ABI.  Copying sizeof(host_tp) would overwrite the
+        // eight bytes following the guest timeval.
+        timeval_32 guest_tp_value = {
+            .tv_sec = static_cast<int32_t>(host_tp.tv_sec),
+            .tv_usec = static_cast<int32_t>(host_tp.tv_usec),
+        };
+        Dynarmic_mem_1write(
+            guest_tp, sizeof(guest_tp_value),
+            reinterpret_cast<char *>(&guest_tp_value));
+    }
     return result;
 }
 
@@ -863,6 +994,7 @@ int guest_abort_with_payload(u32 reason_namespace, u64 reason_code, u32 guest_pa
 ////////
 int guestMappingLen = 0;
 guest_file_mapping guestMappings[1000];
+size_t guestMappingGeneration = 0;
 
 static void load_symbols_for_image(guest_file_mapping *mapping, void(^iterator)(u32 address, const char *name)) {
     u32 slide = mapping->start; // FIXME: properly calculate this slide
@@ -967,6 +1099,7 @@ inline void *get_memory(u64 vaddr) {
 
 class DynarmicCallbacks32 final : public Dynarmic::A32::UserCallbacks {
 private:
+    bool dumpingBacktrace = false;
     ~DynarmicCallbacks32() = default;
 
 public:
@@ -992,6 +1125,11 @@ public:
             DumpBacktrace(false);
         }
 #endif
+        if (vaddr > UINT32_MAX - (sizeof(uint32_t) - 1) ||
+            get_memory(vaddr) == nullptr ||
+            get_memory(vaddr + sizeof(uint32_t) - 1) == nullptr) {
+            return std::nullopt;
+        }
         return MemoryRead32(vaddr, false);
     }
     u16 MemoryReadThumbCode(u32 vaddr) {
@@ -1000,10 +1138,24 @@ public:
         return code;
     }
 
+    /*
+     * Yield to the remote debugger without running the built-in backtrace.
+     * The latter reads more guest memory and can recursively fault before
+     * gdbstub gets a chance to report the original stop.
+     */
+    void StopForDebugger(int signal, bool pendingSignal) {
+        SetGuestStopSignal(signal, pendingSignal);
+        cpu->HaltExecution(LC32HaltReasonTrap);
+    }
+
 // FIXME: sometimes it will try to access 0x4, 0x8 and 0xc, I disassembled and found nothing, is there something to do with cpsr? For now let it do stuff in an empty page...
     void HandleBadMemoryAccess() {
 #if !IGNORE_BAD_MEM_ACCESS
-        DumpCrashReport();
+        // Diagnostic frame walking is not guest execution.  A failed unwind
+        // read must not replace the original debugger stop with SIGSEGV.
+        if (!dumpingBacktrace) {
+            StopForDebugger(SIGSEGV, true);
+        }
 #endif
     }
 
@@ -1035,11 +1187,11 @@ public:
             return dest[0];
         } else {
             fprintf(stderr, "MemoryRead16[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
-            // trace = tolerance bad mềm access, else crash
+            // trace = tolerance bad mem access, else crash
             if(trace) {
                 HandleBadMemoryAccess();
             } else {
-                DumpCrashReport();
+                DumpCrashReport(SIGSEGV);
             }
             return 0;
         }
@@ -1063,11 +1215,11 @@ public:
             return dest[0];
         } else {
             fprintf(stderr, "MemoryRead32[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
-            // trace = tolerance bad mềm access, else crash
+            // trace = tolerance bad mem access, else crash
             if(trace) {
                 HandleBadMemoryAccess();
             } else {
-                DumpCrashReport();
+                DumpCrashReport(SIGSEGV);
             }
             return 0;
         }
@@ -1193,35 +1345,100 @@ public:
         if(code) {
             fprintf(stderr, "Unicorn fallback @ 0x%x for %lu instructions (instr = 0x%08X)", pc, num_instructions, *(cpsr->isThumb() ? MemoryReadThumbCode(pc) : MemoryReadCode(pc)));
         }
-        DumpCrashReport();
+        cpu->Regs()[Reg::PC] = pc;
+        DumpCrashReport(SIGILL);
     }
 
     void ExceptionRaised(u32 pc, Dynarmic::A32::Exception exception) override {
-        bool isBkpt = exception == Dynarmic::A32::Exception::Breakpoint;
-        u32 code = *(cpsr->isThumb() ? MemoryReadThumbCode(pc) : MemoryReadCode(pc));
-        if(isBkpt) {
-            printf("Breakpoint!\n");
-            DumpCrashReport();
-        } else if ((code & 0xFFFF) == 0xDEFE) {
+        const bool isBkpt =
+            exception == Dynarmic::A32::Exception::Breakpoint;
+        const bool isDebuggerBreakpoint =
+            isBkpt && Dynarmic_debugger_has_breakpoint(pc);
+        const bool inspectInstruction =
+            isBkpt ||
+            exception == Dynarmic::A32::Exception::UndefinedInstruction ||
+            exception == Dynarmic::A32::Exception::UnpredictableInstruction ||
+            exception == Dynarmic::A32::Exception::DecodeError;
+        u32 code = 0;
+        if (inspectInstruction) {
+            code = cpsr->isThumb() ? MemoryReadThumbCode(pc)
+                                   : MemoryReadCode(pc).value_or(0);
+        }
+        int signal = SIGABRT;
+        bool replayInstruction = false;
+
+        switch (exception) {
+        case Dynarmic::A32::Exception::Breakpoint:
+            signal = SIGTRAP;
+            break;
+        case Dynarmic::A32::Exception::UndefinedInstruction:
+        case Dynarmic::A32::Exception::UnpredictableInstruction:
+        case Dynarmic::A32::Exception::DecodeError:
+            signal = SIGILL;
+            replayInstruction = true;
+            break;
+        case Dynarmic::A32::Exception::NoExecuteFault:
+            signal = SIGSEGV;
+            replayInstruction = true;
+            break;
+        default:
+            break;
+        }
+
+        // LLVM uses UDF #0xDEFE for an explicit trap. It is a bad-instruction
+        // fault, not a debugger breakpoint.
+        if ((code & 0xFFFF) == 0xDEFE) {
+            signal = SIGILL;
+            replayInstruction = true;
+        }
+
+        /*
+         * Dynarmic has already advanced r15 when it invokes ExceptionRaised.
+         * Synchronous faults must replay the faulting instruction.  A
+         * debugger-planted BKPT must also report the breakpoint's address so
+         * LLDB can match it and temporarily restore/step the original
+         * instruction.  A BKPT that belongs to the guest itself keeps the
+         * architectural post-instruction PC.
+         */
+        if (replayInstruction || isDebuggerBreakpoint) {
+            cpu->Regs()[Reg::PC] = pc;
+        }
+
+        if (isBkpt) {
+            fprintf(stderr, "%s breakpoint at 0x%08x\n",
+                    isDebuggerBreakpoint ? "Debugger-managed" : "Guest",
+                    pc);
+            StopForDebugger(SIGTRAP, false);
+            return;
+        }
+
+        if ((code & 0xFFFF) == 0xDEFE) {
             printf("ExceptionRaised[%s->%s:%d]: pc=0x%x, exception=%d, code=TRAP\n", __FILE__, __func__, __LINE__, pc, exception);
-            DumpCrashReport();
+            DumpCrashReport(signal);
         } else {
             printf("ExceptionRaised[%s->%s:%d]: pc=0x%x, exception=%d, code=0x%08X\n", __FILE__, __func__, __LINE__, pc, exception, code);
-            DumpCrashReport();
+            DumpCrashReport(signal);
         }
     }
 
-    void DumpCrashReport() {
-        DumpBacktrace(true);
+    void DumpCrashReport(int signal = SIGABRT, bool pendingSignal = true) {
+        DumpBacktrace(true, signal, pendingSignal);
     }
     
-    void DumpBacktrace(bool crash) {
-        static bool crashing = false;
-        if (crashing) {
+    void DumpBacktrace(bool crash,
+                       int signal = SIGABRT,
+                       bool pendingSignal = true) {
+        if (dumpingBacktrace) {
             printf("Caught error while dumping call stack\n");
+            if (crash) {
+                cpu->HaltExecution(LC32HaltReasonTrap);
+            }
             return;
         }
-        crashing = true;
+        if (crash) {
+            SetGuestStopSignal(signal, pendingSignal);
+        }
+        dumpingBacktrace = true;
 
         printf("# %s\n", crash ? "CRASHED" : "Branch");
         printf("Registers: \n");
@@ -1264,8 +1481,10 @@ public:
             printf("%3d: 0x%08x-0x%08x %s\n", i, guestMappings[i].start, guestMappings[i].end, guestMappings[i].name);
         }
 
-        crashing = crash;
-        if (crash) abort();
+        dumpingBacktrace = false;
+        if (crash) {
+            cpu->HaltExecution(LC32HaltReasonTrap);
+        }
     }
 
     void CallSVC(u32 swi) override {
@@ -1399,7 +1618,9 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             }
             case SYS_exit: // 1
                 printf("Guest exited with code %d\n", cpu->Regs()[0]);
-                exit(cpu->Regs()[0]);
+                if(cpu->IsExecuting()) {
+                    cpu->HaltExecution(LC32HaltReasonExit);
+                }
                 break;
             case SYS_fork: // 2
                 printf("fork() not supported\n");
@@ -1518,8 +1739,17 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                     break;
 #endif
             case 328:
-                printf("pthread_kill called\n");
-                DumpCrashReport();
+                printf("pthread_kill called with signal %u\n", cpu->Regs()[1]);
+                if (cpu->Regs()[1] == 0) {
+                    // Signal zero only probes whether the target thread exists.
+                    cpu->Regs()[0] = 0;
+                } else if (cpu->Regs()[1] >= NSIG) {
+                    cpu->Regs()[0] =
+                        return_with_carry_direct(EINVAL, true);
+                } else {
+                    cpu->Regs()[0] = 0;
+                    DumpCrashReport(static_cast<int>(cpu->Regs()[1]));
+                }
                 break;
             case 329:
                 cpu->Regs()[0] = guest_pthread_sigmask(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
@@ -1571,7 +1801,7 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 break;
             case SYS_abort_with_payload:
                 cpu->Regs()[0] = guest_abort_with_payload(cpu->Regs()[0], cpu->Regs()[1] | ((u64)cpu->Regs()[2] << 32), cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5], cpu->Regs()[6] | ((u64)cpu->Regs()[8] << 32));
-                DumpCrashReport();
+                DumpCrashReport(SIGABRT);
                 break;
             case (int)0x80000000:
                 NR = cpu->Regs()[3];
@@ -1649,10 +1879,10 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 assert(cpu->IsExecuting());
                 // We're returning from guest call
                 cpu->HaltExecution(LC32HaltReasonRetFromGuest);
-                return;
+                break;
             default:
                 printf("Unhandled svc number: %d\n", NR);
-                DumpCrashReport();
+                DumpCrashReport(SIGSYS);
                 break;
         }
 #if TRACE_SVC
@@ -1729,6 +1959,7 @@ bool Dynarmic_nativeInitialize() {
         config.global_monitor = sharedHandle.monitor;
         config.always_little_endian = false;
         config.wall_clock_cntpct = true;
+        config.check_halt_on_memory_access = true;
         //    config.page_table_pointer_mask_bits = DYN_PAGE_BITS;
         
         //    config.unsafe_optimizations = true;
@@ -2031,6 +2262,247 @@ int Dynarmic_mem_1read(u64 address, u64 size, char* dest) {
     return 0;
 }
 
+static bool DebuggerMemoryRangeIsValid(u64 address, u64 size) {
+    constexpr u64 addressSpaceSize = UINT64_C(1) << 32;
+    return address < addressSpaceSize &&
+           size <= addressSpaceSize - address;
+}
+
+static bool DebuggerRangesOverlap(u64 firstAddress,
+                                  u64 firstSize,
+                                  u64 secondAddress,
+                                  u64 secondSize) {
+    return firstSize != 0 && secondSize != 0 &&
+           firstAddress < secondAddress + secondSize &&
+           secondAddress < firstAddress + firstSize;
+}
+
+static bool DebuggerMemoryRangeIsMapped(u64 address, u64 size) {
+    const u64 end = address + size;
+    for (u64 page = address & ~DYN_PAGE_MASK; page < end;
+         page += DYN_PAGE_SIZE) {
+        if (get_memory_page(page) == nullptr) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/*
+ * RSP memory reads describe the logical inferior memory.  Software
+ * breakpoints are a debugger implementation detail, so overlay the saved
+ * instruction bytes over the physically planted trap before replying.
+ */
+int Dynarmic_debugger_mem_read(u64 address, u64 size, char* dest) {
+    if (!DebuggerMemoryRangeIsValid(address, size) ||
+        (size != 0 && dest == nullptr) ||
+        Dynarmic_mem_1read(address, size, dest) != 0) {
+        return 1;
+    }
+
+    for (const DebuggerSoftwareBreakpoint &breakpoint :
+         debuggerSoftwareBreakpoints) {
+        if (!DebuggerRangesOverlap(address, size, breakpoint.address,
+                                   breakpoint.kind)) {
+            continue;
+        }
+
+        const u64 overlapStart =
+            address > breakpoint.address ? address : breakpoint.address;
+        const u64 requestEnd = address + size;
+        const u64 breakpointEnd = breakpoint.address + breakpoint.kind;
+        const u64 overlapEnd =
+            requestEnd < breakpointEnd ? requestEnd : breakpointEnd;
+        memcpy(dest + overlapStart - address,
+               breakpoint.original.data() +
+                   (overlapStart - breakpoint.address),
+               overlapEnd - overlapStart);
+    }
+    return 0;
+}
+
+/*
+ * A debugger memory write changes the logical instruction beneath any
+ * active software breakpoint.  Keep the physical trap planted, update the
+ * bytes that will be restored by z0, and invalidate translated code for the
+ * whole modified range.
+ */
+int Dynarmic_debugger_mem_write(u64 address, u64 size, char* src) {
+    if (!DebuggerMemoryRangeIsValid(address, size) ||
+        (size != 0 && src == nullptr) ||
+        !DebuggerMemoryRangeIsMapped(address, size)) {
+        return 1;
+    }
+    if (size == 0) {
+        return 0;
+    }
+
+    std::vector<uint8_t> physical(
+        reinterpret_cast<uint8_t *>(src),
+        reinterpret_cast<uint8_t *>(src) + size);
+    for (const DebuggerSoftwareBreakpoint &breakpoint :
+         debuggerSoftwareBreakpoints) {
+        if (!DebuggerRangesOverlap(address, size, breakpoint.address,
+                                   breakpoint.kind)) {
+            continue;
+        }
+
+        const u64 overlapStart =
+            address > breakpoint.address ? address : breakpoint.address;
+        const u64 requestEnd = address + size;
+        const u64 breakpointEnd = breakpoint.address + breakpoint.kind;
+        const u64 overlapEnd =
+            requestEnd < breakpointEnd ? requestEnd : breakpointEnd;
+        memcpy(physical.data() + overlapStart - address,
+               breakpoint.trap.data() +
+                   (overlapStart - breakpoint.address),
+               overlapEnd - overlapStart);
+    }
+
+    if (Dynarmic_mem_1write(
+            address, size,
+            reinterpret_cast<char *>(physical.data())) != 0) {
+        return 1;
+    }
+
+    for (DebuggerSoftwareBreakpoint &breakpoint :
+         debuggerSoftwareBreakpoints) {
+        if (!DebuggerRangesOverlap(address, size, breakpoint.address,
+                                   breakpoint.kind)) {
+            continue;
+        }
+
+        const u64 overlapStart =
+            address > breakpoint.address ? address : breakpoint.address;
+        const u64 requestEnd = address + size;
+        const u64 breakpointEnd = breakpoint.address + breakpoint.kind;
+        const u64 overlapEnd =
+            requestEnd < breakpointEnd ? requestEnd : breakpointEnd;
+        memcpy(breakpoint.original.data() +
+                   (overlapStart - breakpoint.address),
+               reinterpret_cast<uint8_t *>(src) +
+                   (overlapStart - address),
+               overlapEnd - overlapStart);
+    }
+
+    if (threadHandle.jit != nullptr) {
+        threadHandle.jit->InvalidateCacheRange(
+            static_cast<u32>(address), static_cast<size_t>(size));
+    }
+    return 0;
+}
+
+static u32 NormalizeDebuggerBreakpointAddress(u64 address, size_t kind) {
+    if (address > UINT32_MAX) {
+        return UINT32_MAX;
+    }
+    const u32 guestAddress = static_cast<u32>(address);
+    return kind == sizeof(uint16_t) ? guestAddress & ~1u : guestAddress;
+}
+
+bool Dynarmic_debugger_has_breakpoint(u32 address) {
+    address &= ~1u;
+    for (const DebuggerSoftwareBreakpoint &breakpoint :
+         debuggerSoftwareBreakpoints) {
+        if (breakpoint.address == address) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Dynarmic_debugger_set_breakpoint(u64 address, size_t kind) {
+    if (kind != sizeof(uint16_t) && kind != sizeof(uint32_t)) {
+        return false;
+    }
+
+    const u32 guestAddress =
+        NormalizeDebuggerBreakpointAddress(address, kind);
+    if (guestAddress == UINT32_MAX ||
+        (kind == sizeof(uint32_t) &&
+         (guestAddress & (sizeof(uint32_t) - 1)) != 0)) {
+        return false;
+    }
+
+    for (const DebuggerSoftwareBreakpoint &breakpoint :
+         debuggerSoftwareBreakpoints) {
+        if (breakpoint.address == guestAddress &&
+            breakpoint.kind == kind) {
+            return true;
+        }
+        if (DebuggerRangesOverlap(guestAddress, kind, breakpoint.address,
+                                  breakpoint.kind)) {
+            return false;
+        }
+    }
+
+    DebuggerSoftwareBreakpoint breakpoint = {
+        .address = guestAddress,
+        .kind = kind,
+        .original = {},
+        .trap = {},
+    };
+    if (Dynarmic_mem_1read(guestAddress, kind,
+                           reinterpret_cast<char *>(
+                               breakpoint.original.data())) != 0) {
+        return false;
+    }
+
+    const uint32_t instruction =
+        kind == sizeof(uint16_t) ? 0x0000BE00u : 0xE1200070u;
+    memcpy(breakpoint.trap.data(), &instruction, kind);
+    // Allocate registry storage before modifying guest code so the running
+    // process can never contain an untracked trap instruction.
+    debuggerSoftwareBreakpoints.push_back(breakpoint);
+    if (Dynarmic_mem_1write(
+            guestAddress, kind,
+            reinterpret_cast<char *>(
+                debuggerSoftwareBreakpoints.back().trap.data())) != 0) {
+        debuggerSoftwareBreakpoints.pop_back();
+        return false;
+    }
+    if (threadHandle.jit != NULL) {
+        threadHandle.jit->InvalidateCacheRange(guestAddress, kind);
+    }
+    return true;
+}
+
+bool Dynarmic_debugger_delete_breakpoint(u64 address, size_t kind) {
+    (void)kind;
+    if (address > UINT32_MAX) {
+        return false;
+    }
+
+    /*
+     * LLDB derives ARM breakpoint kind again when disabling a site.  Its
+     * answer can differ from the kind used by the earlier Z0 packet (for
+     * example, Z0(...,2) followed by z0(...,4) for Thumb code).  The active
+     * record is authoritative: locate it by canonical address and restore
+     * the exact byte count saved when it was installed.
+     */
+    const u32 guestAddress = static_cast<u32>(address) & ~1u;
+    for (auto it = debuggerSoftwareBreakpoints.begin();
+         it != debuggerSoftwareBreakpoints.end(); ++it) {
+        if (it->address != guestAddress) {
+            continue;
+        }
+        if (Dynarmic_mem_1write(
+                guestAddress, it->kind,
+                reinterpret_cast<char *>(it->original.data())) != 0) {
+            return false;
+        }
+        if (threadHandle.jit != NULL) {
+            threadHandle.jit->InvalidateCacheRange(
+                guestAddress, it->kind);
+        }
+        debuggerSoftwareBreakpoints.erase(it);
+        return true;
+    }
+
+    // GDB remote breakpoint removal is idempotent.
+    return true;
+}
+
 /*
  * Class:     com_github_unidbg_arm_backend_dynarmic_Dynarmic
  * Method:    reg_write
@@ -2113,9 +2585,13 @@ int Dynarmic_reg_1write_1c13_1c0_13(int value) {
  * Method:    emu_start
  * Signature: (JJ)I
  */
-int Dynarmic_emu_1start(u32 pc) {
+Dynarmic::HaltReason Dynarmic_emu_1start(u32 pc) {
+    Dynarmic::HaltReason reason;
     Dynarmic::A32::Jit *jit = threadHandle.jit;
     if(jit) {
+      if (ConsumePendingGuestStop()) {
+        return LC32HaltReasonTrap;
+      }
       Dynarmic::A32::Jit *cpu = jit;
       if(pc & 1) {
         cpu->SetCpsr(0x00000030); // Thumb user mode
@@ -2123,13 +2599,67 @@ int Dynarmic_emu_1start(u32 pc) {
         cpu->SetCpsr(0x000001d0); // Arm user mode
       }
       cpu->Regs()[15] = (u32) (pc & ~1);
-      while(cpu->Run() == LC32HaltReasonSVC) {
+      while((reason = cpu->Run()) == LC32HaltReasonSVC) {
         sharedHandle.ucb->CallSVC(0x80);
       }
     } else {
-      return 1;
+      return LC32HaltReasonTrap;
     }
-  return 0;
+  UpdateGuestStopSignalForHalt(reason);
+  return reason;
+}
+
+Dynarmic::HaltReason Dynarmic_emu_1resume() {
+    Dynarmic::A32::Jit *jit = threadHandle.jit;
+    if (!jit) {
+        return LC32HaltReasonTrap;
+    }
+    if (ConsumePendingGuestStop()) {
+        return LC32HaltReasonTrap;
+    }
+
+    Dynarmic::HaltReason reason;
+    while ((reason = jit->Run()) == LC32HaltReasonSVC) {
+        sharedHandle.ucb->CallSVC(0x80);
+    }
+    UpdateGuestStopSignalForHalt(reason);
+    return reason;
+}
+
+Dynarmic::HaltReason Dynarmic_emu_1step() {
+    Dynarmic::A32::Jit *jit = threadHandle.jit;
+    if (!jit) {
+        return LC32HaltReasonTrap;
+    }
+    if (ConsumePendingGuestStop()) {
+        return LC32HaltReasonTrap;
+    }
+
+    Dynarmic::HaltReason reason;
+    while ((reason = jit->Step()) == LC32HaltReasonSVC) {
+        sharedHandle.ucb->CallSVC(0x80);
+    }
+    UpdateGuestStopSignalForHalt(reason);
+    return reason;
+}
+
+int Dynarmic_emu_1get_1stop_1signal() {
+    return guestStopSignal.load(std::memory_order_relaxed);
+}
+
+void Dynarmic_emu_1set_1resume_1signal(int signal) {
+    const int pending =
+        pendingGuestFatalSignal.load(std::memory_order_relaxed);
+    if (signal > 0 && signal == pending) {
+        reemitPendingGuestStop.store(true, std::memory_order_relaxed);
+        return;
+    }
+
+    // Signal zero is the lowercase c/s suppression path.  A different signal
+    // also cannot faithfully deliver the pending guest fault, so let execution
+    // proceed instead of re-reporting stale state.
+    pendingGuestFatalSignal.store(0, std::memory_order_relaxed);
+    reemitPendingGuestStop.store(false, std::memory_order_relaxed);
 }
 
 /*
@@ -2138,10 +2668,13 @@ int Dynarmic_emu_1start(u32 pc) {
  * Signature: (J)I
  */
 int Dynarmic_emu_1stop() {
-    Dynarmic::A32::Jit *jit = threadHandle.jit;
+    // on_interrupt is invoked by mini-gdbstub's socket-reader thread. That
+    // thread has no thread-local dynarmic_thread, so use the JIT published by
+    // the shared callbacks instead of threadHandle.jit.
+    DynarmicCallbacks32 *callbacks = sharedHandle.cb;
+    Dynarmic::A32::Jit *jit = callbacks ? callbacks->cpu : NULL;
     if(jit) {
-      Dynarmic::A32::Jit *cpu = jit;
-      cpu->HaltExecution();
+      jit->HaltExecution(LC32HaltReasonInterrupt);
     } else {
       return 1;
     }

@@ -13,10 +13,13 @@
 
 #include <dynarmic/exclusive_monitor.h>
 #endif
-
 #include "khash.h"
 #include "filesystem.h"
 #include "32bit.h"
+
+extern "C" {
+#include <gdbstub.h>
+}
 
 #define PAGE_TABLE_ADDRESS_SPACE_BITS 36
 #define DYN_PAGE_BITS 12 // 4k
@@ -46,6 +49,9 @@
 
 #define LC32HaltReasonSVC Dynarmic::HaltReason::UserDefined1
 #define LC32HaltReasonRetFromGuest Dynarmic::HaltReason::UserDefined2
+#define LC32HaltReasonExit Dynarmic::HaltReason::UserDefined3
+#define LC32HaltReasonTrap Dynarmic::HaltReason::UserDefined4
+#define LC32HaltReasonInterrupt Dynarmic::HaltReason::UserDefined5
 
 class Reg {
 public:
@@ -89,9 +95,12 @@ struct guest_file_mapping {
     uint64_t hostAddr;
     uint32_t start;
     uint32_t end;
+    bool debuggerPathResolved;
 };
 extern int guestMappingLen;
 extern guest_file_mapping guestMappings[1000];
+extern size_t guestMappingGeneration;
+bool ResolveDebuggerImagePath(const char *guestPath, char *hostPath);
 
 typedef struct memory_page {
     void *addr;
@@ -214,6 +223,9 @@ typedef struct {
     LC32Filesystem *fs;
     u32 guest_dlsym, guest_LC32InvokeGuestC;
     dyld_all_image_infos_32 *dyld_info_section;
+    u32 dyld_info_guest_address;
+    u32 dyld_load_address;
+    gdbstub_t gdbstub;
 } dynarmic;
 
 typedef struct {
@@ -236,12 +248,21 @@ u32 Dynarmic_mmap(u32 address, u32 size, int protection, int flags, int fildes, 
 int Dynarmic_mprotect(u64 address, u64 size, int perms);
 int Dynarmic_mem_1write(u64 address, u64 size, char* src);
 int Dynarmic_mem_1read(u64 address, u64 size, char* dest);
+int Dynarmic_debugger_mem_read(u64 address, u64 size, char* dest);
+int Dynarmic_debugger_mem_write(u64 address, u64 size, char* src);
+bool Dynarmic_debugger_set_breakpoint(u64 address, size_t kind);
+bool Dynarmic_debugger_delete_breakpoint(u64 address, size_t kind);
+bool Dynarmic_debugger_has_breakpoint(u32 address);
 int Dynarmic_reg_1write(int index, u32 value);
 u32 Dynarmic_reg_1read(int index);
 int Dynarmic_reg_1read_1cpsr();
 int Dynarmic_reg_1write_1cpsr(int value);
 int Dynarmic_reg_1write_1c13_1c0_13(int value);
-int Dynarmic_emu_1start(u32 pc);
+Dynarmic::HaltReason Dynarmic_emu_1start(u32 pc);
+Dynarmic::HaltReason Dynarmic_emu_1resume();
+Dynarmic::HaltReason Dynarmic_emu_1step();
+int Dynarmic_emu_1get_1stop_1signal();
+void Dynarmic_emu_1set_1resume_1signal(int signal);
 int Dynarmic_emu_1stop();
 void* Dynarmic_context_1alloc();
 void Dynarmic_context_1restore(t_context32 ctx);

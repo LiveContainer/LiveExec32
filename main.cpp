@@ -11,6 +11,7 @@
 #include <libgen.h>
 
 #include <dlfcn.h>
+#include <dirent.h>
 #include <sys/mman.h>
 #include <mach-o/fat.h>
 #include <mach-o/getsect.h>
@@ -22,12 +23,707 @@
 #include <sys/syscall.h>
 
 #include <string.h>
+#include <ctype.h>
+#include <algorithm>
+#include <string>
+#include <vector>
 #include "dynarmic.h"
 #include "arm_dynarmic_cp15.h"
 
 #define SEG_DATA_CONST  "__DATA_CONST"
 
-// /var/mobile/Documents/TrollExperiments/CProjects/dynarmic
+static std::string guestOSVersion;
+static std::string guestOSBuild;
+static std::string debuggerSymbolsRoot;
+
+bool ResolveDebuggerImagePath(const char *guestPath, char *hostPath) {
+    if (guestPath == NULL || hostPath == NULL || guestPath[0] != '/') {
+        return false;
+    }
+    if (sharedHandle.fs->pathGuestToHost(guestPath, hostPath) &&
+        access(hostPath, R_OK) == 0) {
+        return true;
+    }
+    if (debuggerSymbolsRoot.empty()) {
+        return false;
+    }
+
+    const int length = snprintf(hostPath, PATH_MAX, "%s%s",
+                                debuggerSymbolsRoot.c_str(), guestPath);
+    return length > 0 && length < PATH_MAX && access(hostPath, R_OK) == 0;
+}
+
+enum {
+    GDB_ARM_REG_COUNT = 17,
+    GDB_ARM_CPSR_REGNO = 16,
+};
+
+static size_t emu_get_reg_bytes(int regno) {
+    return regno >= 0 && regno < GDB_ARM_REG_COUNT ? sizeof(uint32_t) : 0;
+}
+static int emu_read_reg(void *args __attribute__((unused)), int index, void *value) {
+    if (index < 0 || index >= GDB_ARM_REG_COUNT || value == NULL) {
+        return EINVAL;
+    }
+
+    const uint32_t reg = index == GDB_ARM_CPSR_REGNO
+                             ? static_cast<uint32_t>(Dynarmic_reg_1read_1cpsr())
+                             : Dynarmic_reg_1read(index);
+    memcpy(value, &reg, sizeof(reg));
+    return 0;
+}
+static int emu_write_reg(void *args __attribute__((unused)), int index, void *value) {
+    if (index < 0 || index >= GDB_ARM_REG_COUNT || value == NULL) {
+        return EINVAL;
+    }
+
+    uint32_t reg;
+    memcpy(&reg, value, sizeof(reg));
+    return index == GDB_ARM_CPSR_REGNO ? Dynarmic_reg_1write_1cpsr(reg)
+                                        : Dynarmic_reg_1write(index, reg);
+}
+static int emu_read_mem(void *args __attribute__((unused)), size_t addr, size_t len, void *val) {
+    if (addr > UINT32_MAX || len > UINT32_MAX - addr || (len != 0 && val == NULL)) {
+        return EFAULT;
+    }
+    return Dynarmic_debugger_mem_read(
+               addr, len, static_cast<char *>(val))
+               ? EFAULT
+               : 0;
+}
+static int emu_write_mem(void *args __attribute__((unused)), size_t addr, size_t len, void *val) {
+    if (addr > UINT32_MAX || len > UINT32_MAX - addr || (len != 0 && val == NULL)) {
+        return EFAULT;
+    }
+    return Dynarmic_debugger_mem_write(
+               addr, len, static_cast<char *>(val))
+               ? EFAULT
+               : 0;
+}
+static bool emu_set_bp(void *args __attribute__((unused)),
+                       size_t addr,
+                       size_t kind,
+                       bp_type_t type) {
+    return type == BP_SOFTWARE &&
+           Dynarmic_debugger_set_breakpoint(addr, kind);
+}
+static bool emu_del_bp(void *args __attribute__((unused)),
+                       size_t addr,
+                       size_t kind,
+                       bp_type_t type) {
+    return type == BP_SOFTWARE &&
+           Dynarmic_debugger_delete_breakpoint(addr, kind);
+}
+static gdb_action_t emu_action_for_halt(Dynarmic::HaltReason reason) {
+    return Dynarmic::Has(reason, LC32HaltReasonExit) ? ACT_SHUTDOWN : ACT_RESUME;
+}
+static gdb_action_t emu_cont(void *args __attribute__((unused))) {
+    return emu_action_for_halt(Dynarmic_emu_1resume());
+}
+static gdb_action_t emu_stepi(void *args __attribute__((unused))) {
+    return emu_action_for_halt(Dynarmic_emu_1step());
+}
+static void emu_on_interrupt(void *args __attribute__((unused))) {
+    Dynarmic_emu_1stop();
+}
+static int emu_get_stop_signal(void *args __attribute__((unused))) {
+    return Dynarmic_emu_1get_1stop_1signal();
+}
+static void emu_set_resume_signal(void *args __attribute__((unused)),
+                                  int signal) {
+    // There is no host signal to inject into Dynarmic.  Fatal guest signals
+    // are kept pending so LLDB's C/S actions re-report the unresolved stop;
+    // lowercase c/s clears the pending signal by passing zero here.
+    Dynarmic_emu_1set_1resume_1signal(signal);
+}
+static bool GetMainBinaryMetadata(u32 *slide, const uuid_command **uuid) {
+    if (guestMappingLen == 0 || guestMappings[0].start == 0) {
+        return false;
+    }
+
+    const mach_header *header =
+        reinterpret_cast<const mach_header *>(guestMappings[0].hostAddr);
+    if (header == NULL || header->magic != MH_MAGIC) {
+        return false;
+    }
+
+    uintptr_t cursor = reinterpret_cast<uintptr_t>(header) + sizeof(*header);
+    const uintptr_t commandsEnd = cursor + header->sizeofcmds;
+    if (commandsEnd < cursor) {
+        return false;
+    }
+
+    bool foundSlide = false;
+    const uuid_command *foundUUID = NULL;
+    for (uint32_t i = 0; i < header->ncmds; ++i) {
+        if (cursor > commandsEnd ||
+            commandsEnd - cursor < sizeof(load_command)) {
+            return false;
+        }
+        const load_command *command = reinterpret_cast<const load_command *>(cursor);
+        if (command->cmdsize < sizeof(*command) ||
+            command->cmdsize > commandsEnd - cursor) {
+            return false;
+        }
+        if (command->cmd == LC_SEGMENT) {
+            const segment_command *segment = reinterpret_cast<const segment_command *>(command);
+            if (!foundSlide &&
+                strncmp(segment->segname, "__PAGEZERO",
+                        sizeof(segment->segname)) != 0) {
+                *slide = guestMappings[0].start - segment->vmaddr;
+                foundSlide = true;
+            }
+        } else if (command->cmd == LC_UUID &&
+                   command->cmdsize >= sizeof(uuid_command)) {
+            foundUUID = reinterpret_cast<const uuid_command *>(command);
+        }
+        cursor += command->cmdsize;
+    }
+
+    if (uuid != NULL) {
+        *uuid = foundUUID;
+    }
+    return foundSlide;
+}
+static const char *emu_get_offsets(void *args __attribute__((unused))) {
+    static char offsets[64];
+    u32 slide;
+    if (!GetMainBinaryMetadata(&slide, NULL)) {
+        return NULL;
+    }
+
+    // qOffsets takes the load slide, not the mapped __TEXT address: LLDB adds
+    // this value to file addresses.
+    snprintf(offsets, sizeof(offsets), "Text=%x;Data=%x;Bss=%x", slide,
+             slide, slide);
+    return offsets;
+}
+static const char *emu_get_libraries_xml(void *args __attribute__((unused))) {
+    static std::string libraryList;
+    static size_t snapshotGeneration = static_cast<size_t>(-1);
+    if (snapshotGeneration == guestMappingGeneration) {
+        return libraryList.c_str();
+    }
+
+    libraryList.clear();
+    libraryList.reserve(static_cast<size_t>(guestMappingLen) * 128);
+    libraryList = "<?xml version=\"1.0\"?><library-list version=\"1.0\">";
+
+    for (int i = 0; i < guestMappingLen; ++i) {
+        const guest_file_mapping &mapping = guestMappings[i];
+        if (mapping.name == NULL || mapping.start == 0 ||
+            (mapping.debuggerPathResolved &&
+             access(mapping.name, R_OK) != 0)) {
+            continue;
+        }
+
+        // dyld can notify us about the executable and dyld again.  Reporting
+        // the same load address twice only creates duplicate modules in LLDB.
+        bool duplicate = false;
+        for (int previous = 0; previous < i; ++previous) {
+            if (guestMappings[previous].start == mapping.start &&
+                guestMappings[previous].name != NULL &&
+                (!guestMappings[previous].debuggerPathResolved ||
+                 access(guestMappings[previous].name, R_OK) == 0)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) {
+            continue;
+        }
+
+        std::string entry = "<library name=\"";
+        for (const char *p = mapping.name; *p != '\0'; ++p) {
+            switch (*p) {
+            case '&': entry += "&amp;"; break;
+            case '\"': entry += "&quot;"; break;
+            case '\'': entry += "&apos;"; break;
+            case '<': entry += "&lt;"; break;
+            case '>': entry += "&gt;"; break;
+            default: entry += *p; break;
+            }
+        }
+
+        // LLDB's qXfer:libraries parser takes the first <section> address as
+        // the absolute module base.
+        char suffix[80];
+        snprintf(suffix, sizeof(suffix),
+                 "\"><section address=\"0x%x\"/></library>", mapping.start);
+        entry += suffix;
+        libraryList += entry;
+    }
+    libraryList += "</library-list>";
+    snapshotGeneration = guestMappingGeneration;
+    return libraryList.c_str();
+}
+static size_t emu_get_libraries_generation(void *args __attribute__((unused))) {
+    return guestMappingGeneration;
+}
+static const char *emu_get_os_version(void *args __attribute__((unused))) {
+    return guestOSVersion.empty() ? NULL : guestOSVersion.c_str();
+}
+static const char *emu_get_os_build(void *args __attribute__((unused))) {
+    return guestOSBuild.empty() ? NULL : guestOSBuild.c_str();
+}
+static size_t emu_get_shlib_info_addr(void *args __attribute__((unused))) {
+    return sharedHandle.dyld_info_guest_address;
+}
+struct DebuggerMachOImage {
+    mach_header header;
+    uint8_t uuid[16];
+    bool hasUUID;
+    std::vector<segment_command> segments;
+};
+
+static bool ReadDebuggerMachOImage(u32 loadAddress,
+                                   DebuggerMachOImage *image) {
+    if (image == NULL ||
+        loadAddress > UINT32_MAX - sizeof(mach_header) ||
+        Dynarmic_mem_1read(loadAddress, sizeof(image->header),
+                           reinterpret_cast<char *>(&image->header)) != 0 ||
+        image->header.magic != MH_MAGIC ||
+        image->header.sizeofcmds > 1024 * 1024 ||
+        loadAddress > UINT32_MAX - sizeof(mach_header) -
+                          image->header.sizeofcmds) {
+        return false;
+    }
+
+    image->hasUUID = false;
+    image->segments.clear();
+    std::vector<uint8_t> commands(image->header.sizeofcmds);
+    if (!commands.empty() &&
+        Dynarmic_mem_1read(loadAddress + sizeof(mach_header),
+                           commands.size(),
+                           reinterpret_cast<char *>(commands.data())) != 0) {
+        return false;
+    }
+
+    size_t cursor = 0;
+    for (uint32_t i = 0; i < image->header.ncmds; ++i) {
+        if (cursor > commands.size() ||
+            commands.size() - cursor < sizeof(load_command)) {
+            return false;
+        }
+
+        load_command command;
+        memcpy(&command, commands.data() + cursor, sizeof(command));
+        if (command.cmdsize < sizeof(command) ||
+            command.cmdsize > commands.size() - cursor) {
+            return false;
+        }
+
+        if (command.cmd == LC_SEGMENT &&
+            command.cmdsize >= sizeof(segment_command)) {
+            segment_command segment;
+            memcpy(&segment, commands.data() + cursor, sizeof(segment));
+            image->segments.push_back(segment);
+        } else if (command.cmd == LC_UUID &&
+                   command.cmdsize >= sizeof(uuid_command)) {
+            uuid_command uuid;
+            memcpy(&uuid, commands.data() + cursor, sizeof(uuid));
+            memcpy(image->uuid, uuid.uuid, sizeof(image->uuid));
+            image->hasUUID = true;
+        }
+        cursor += command.cmdsize;
+    }
+    return !image->segments.empty();
+}
+
+struct DebuggerDyldImageInfo32 {
+    u32 imageLoadAddress;
+    u32 imageFilePath;
+    u32 imageFileModDate;
+};
+
+static bool ReadDebuggerCString(u32 address, std::string *value) {
+    if (address == 0 || value == NULL) {
+        return false;
+    }
+    value->clear();
+    while (value->size() < PATH_MAX - 1) {
+        const char *chunk =
+            static_cast<const char *>(get_memory(address));
+        if (chunk == NULL) {
+            return false;
+        }
+        const size_t pageRemaining =
+            DYN_PAGE_SIZE - (address & DYN_PAGE_MASK);
+        const size_t available =
+            std::min(pageRemaining, PATH_MAX - 1 - value->size());
+        const char *terminator =
+            static_cast<const char *>(memchr(chunk, '\0', available));
+        const size_t length =
+            terminator != NULL ? static_cast<size_t>(terminator - chunk)
+                               : available;
+        value->append(chunk, length);
+        if (terminator != NULL) {
+            return true;
+        }
+        if (address > UINT32_MAX - available) {
+            return false;
+        }
+        address += static_cast<u32>(available);
+    }
+    return false;
+}
+
+/*
+ * dyld calls its debugger notifier before it sends this process's synthetic
+ * Mach-port image notification.  LLDB immediately asks for full information
+ * about the addresses passed to that notifier, so seed the debugger mappings
+ * directly from the stopped notifier's r1/r2 arguments.
+ */
+static void RegisterDebuggerImagesFromDyldNotification() {
+    const u32 mode = Dynarmic_reg_1read(0);
+    const u32 count = Dynarmic_reg_1read(1);
+    const u32 infosAddress = Dynarmic_reg_1read(2);
+    if (mode != 0 || count == 0 || count > 4096 || infosAddress == 0 ||
+        count > (UINT32_MAX - infosAddress) /
+                    sizeof(DebuggerDyldImageInfo32)) {
+        return;
+    }
+
+    std::vector<DebuggerDyldImageInfo32> infos(count);
+    if (Dynarmic_mem_1read(
+            infosAddress, infos.size() * sizeof(infos[0]),
+            reinterpret_cast<char *>(infos.data())) != 0) {
+        return;
+    }
+
+    for (const DebuggerDyldImageInfo32 &info : infos) {
+        if (info.imageLoadAddress == 0 || info.imageFilePath == 0) {
+            continue;
+        }
+
+        std::string guestPath;
+        if (!ReadDebuggerCString(info.imageFilePath, &guestPath) ||
+            guestPath.empty() || guestPath[0] != '/') {
+            continue;
+        }
+
+        char hostPath[PATH_MAX];
+        const bool pathResolved =
+            ResolveDebuggerImagePath(guestPath.c_str(), hostPath);
+        const char *mappingName =
+            pathResolved ? hostPath : guestPath.c_str();
+
+        DebuggerMachOImage image;
+        if (!ReadDebuggerMachOImage(info.imageLoadAddress, &image)) {
+            continue;
+        }
+        u32 textSize = 0;
+        for (const segment_command &segment : image.segments) {
+            if (strncmp(segment.segname, SEG_TEXT,
+                        sizeof(segment.segname)) == 0) {
+                textSize = segment.vmsize;
+                break;
+            }
+        }
+        if (textSize == 0 ||
+            info.imageLoadAddress > UINT32_MAX - textSize) {
+            continue;
+        }
+
+        int mappingIndex = -1;
+        for (int i = 0; i < guestMappingLen; ++i) {
+            if (guestMappings[i].start == info.imageLoadAddress) {
+                mappingIndex = i;
+                break;
+            }
+        }
+        if (mappingIndex >= 0) {
+            if (guestMappings[mappingIndex].debuggerPathResolved ||
+                !pathResolved) {
+                continue;
+            }
+        } else {
+            if (guestMappingLen >= 1000) {
+                break;
+            }
+            mappingIndex = guestMappingLen++;
+        }
+
+        char *newName = strdup(mappingName);
+        if (newName == NULL) {
+            if (mappingIndex == guestMappingLen - 1 &&
+                guestMappings[mappingIndex].name == NULL) {
+                --guestMappingLen;
+            }
+            continue;
+        }
+        free(const_cast<char *>(guestMappings[mappingIndex].name));
+        guestMappings[mappingIndex].name = newName;
+        guestMappings[mappingIndex].debuggerPathResolved = pathResolved;
+        guestMappings[mappingIndex].start = info.imageLoadAddress;
+        guestMappings[mappingIndex].end = info.imageLoadAddress + textSize;
+        guestMappings[mappingIndex].hostAddr =
+            reinterpret_cast<uintptr_t>(get_memory(info.imageLoadAddress));
+        ++guestMappingGeneration;
+    }
+}
+
+static void FormatDebuggerUUID(const uint8_t uuid[16], char output[37]) {
+    snprintf(
+        output, 37,
+        "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-"
+        "%02X%02X%02X%02X%02X%02X",
+        uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6],
+        uuid[7], uuid[8], uuid[9], uuid[10], uuid[11], uuid[12],
+        uuid[13], uuid[14], uuid[15]);
+}
+
+static void AppendDebuggerJSONString(std::string &output,
+                                     const char *value,
+                                     size_t length) {
+    output.push_back('"');
+    for (size_t i = 0; i < length; ++i) {
+        const unsigned char byte = static_cast<unsigned char>(value[i]);
+        switch (byte) {
+        case '"': output += "\\\""; break;
+        case '\\': output += "\\\\"; break;
+        case '\b': output += "\\b"; break;
+        case '\f': output += "\\f"; break;
+        case '\n': output += "\\n"; break;
+        case '\r': output += "\\r"; break;
+        case '\t': output += "\\t"; break;
+        default:
+            if (byte < 0x20) {
+                char escape[7];
+                snprintf(escape, sizeof(escape), "\\u%04x", byte);
+                output += escape;
+            } else {
+                output.push_back(static_cast<char>(byte));
+            }
+            break;
+        }
+    }
+    output.push_back('"');
+}
+
+static bool IsDebuggerMappingUsable(int index) {
+    if (index < 0 || index >= guestMappingLen) {
+        return false;
+    }
+    const guest_file_mapping &mapping = guestMappings[index];
+    if (mapping.name == NULL || mapping.start == 0 ||
+        (mapping.debuggerPathResolved && access(mapping.name, R_OK) != 0)) {
+        return false;
+    }
+    for (int previous = 0; previous < index; ++previous) {
+        const guest_file_mapping &candidate = guestMappings[previous];
+        if (candidate.start == mapping.start && candidate.name != NULL &&
+            (!candidate.debuggerPathResolved ||
+             access(candidate.name, R_OK) == 0)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static const guest_file_mapping *FindDebuggerMapping(u32 loadAddress) {
+    for (int i = 0; i < guestMappingLen; ++i) {
+        if (IsDebuggerMappingUsable(i) &&
+            guestMappings[i].start == loadAddress) {
+            return &guestMappings[i];
+        }
+    }
+    return NULL;
+}
+
+static bool AppendDebuggerImageJSON(
+    std::string &output, const guest_file_mapping &mapping) {
+    DebuggerMachOImage image;
+    if (!ReadDebuggerMachOImage(mapping.start, &image)) {
+        return false;
+    }
+
+    char uuid[37] = {};
+    if (image.hasUUID) {
+        FormatDebuggerUUID(image.uuid, uuid);
+    }
+
+    output += "{\"load_address\":";
+    output += std::to_string(mapping.start);
+    output += ",\"pathname\":";
+    AppendDebuggerJSONString(output, mapping.name, strlen(mapping.name));
+    output += ",\"uuid\":";
+    AppendDebuggerJSONString(output, uuid, strlen(uuid));
+    output += ",\"mach_header\":{\"magic\":";
+    output += std::to_string(static_cast<uint32_t>(image.header.magic));
+    output += ",\"cputype\":";
+    output += std::to_string(static_cast<uint32_t>(image.header.cputype));
+    output += ",\"cpusubtype\":";
+    output += std::to_string(static_cast<uint32_t>(image.header.cpusubtype));
+    output += ",\"filetype\":";
+    output += std::to_string(static_cast<uint32_t>(image.header.filetype));
+    output += "},\"segments\":[";
+
+    for (size_t i = 0; i < image.segments.size(); ++i) {
+        const segment_command &segment = image.segments[i];
+        if (i != 0) {
+            output.push_back(',');
+        }
+        output += "{\"name\":";
+        AppendDebuggerJSONString(
+            output, segment.segname,
+            strnlen(segment.segname, sizeof(segment.segname)));
+        output += ",\"vmaddr\":";
+        output += std::to_string(segment.vmaddr);
+        output += ",\"vmsize\":";
+        output += std::to_string(segment.vmsize);
+        output += ",\"fileoff\":";
+        output += std::to_string(segment.fileoff);
+        output += ",\"filesize\":";
+        output += std::to_string(segment.filesize);
+        output += ",\"maxprot\":";
+        output += std::to_string(segment.maxprot);
+        output.push_back('}');
+    }
+    output += "]}";
+    return true;
+}
+
+static const char *emu_get_loaded_libraries_json(
+    void *args __attribute__((unused)), const char *request) {
+    static std::string response;
+    if (strstr(request, "\"solib_addresses\"") != NULL) {
+        RegisterDebuggerImagesFromDyldNotification();
+    }
+    response = "{\"images\":[";
+    bool first = true;
+
+    const char *addressList = strstr(request, "\"solib_addresses\"");
+    if (addressList != NULL) {
+        addressList = strchr(addressList, '[');
+        const char *listEnd =
+            addressList != NULL ? strchr(addressList, ']') : NULL;
+        if (addressList != NULL && listEnd != NULL) {
+            ++addressList;
+            while (addressList < listEnd) {
+                while (addressList < listEnd &&
+                       (isspace(static_cast<unsigned char>(*addressList)) ||
+                        *addressList == ',')) {
+                    ++addressList;
+                }
+                if (addressList == listEnd) {
+                    break;
+                }
+
+                char *numberEnd = NULL;
+                errno = 0;
+                const unsigned long long address =
+                    strtoull(addressList, &numberEnd, 10);
+                if (errno != 0 || numberEnd == addressList ||
+                    numberEnd > listEnd || address > UINT32_MAX) {
+                    break;
+                }
+                addressList = numberEnd;
+
+                const guest_file_mapping *mapping =
+                    FindDebuggerMapping(static_cast<u32>(address));
+                if (mapping == NULL) {
+                    continue;
+                }
+                const size_t oldSize = response.size();
+                if (!first) {
+                    response.push_back(',');
+                }
+                if (!AppendDebuggerImageJSON(response, *mapping)) {
+                    response.resize(oldSize);
+                    continue;
+                }
+                first = false;
+            }
+        }
+    } else {
+        const bool addressOnly =
+            strstr(request, "\"address-only\"") != NULL ||
+            strstr(request, "\"report_load_commands\":false") != NULL;
+        for (int i = 0; i < guestMappingLen; ++i) {
+            if (!IsDebuggerMappingUsable(i)) {
+                continue;
+            }
+
+            // Validate now so every address advertised here can be returned
+            // in LLDB's subsequent full-information request.
+            DebuggerMachOImage image;
+            if (!ReadDebuggerMachOImage(guestMappings[i].start, &image)) {
+                continue;
+            }
+            if (addressOnly) {
+                if (!first) {
+                    response.push_back(',');
+                }
+                response += "{\"load_address\":";
+                response += std::to_string(guestMappings[i].start);
+                response.push_back('}');
+            } else {
+                const size_t oldSize = response.size();
+                if (!first) {
+                    response.push_back(',');
+                }
+                if (!AppendDebuggerImageJSON(response, guestMappings[i])) {
+                    response.resize(oldSize);
+                    continue;
+                }
+            }
+            first = false;
+        }
+    }
+
+    response += "]}";
+    return response.c_str();
+}
+static void emu_set_cpu(void *args __attribute__((unused)), int cpuid) {
+    // mini-gdbstub exposes its one CPU as remote thread ID 1.
+    (void)cpuid;
+}
+static int emu_get_cpu(void *args __attribute__((unused))) {
+    return 1;
+}
+struct target_ops emu_ops = {
+    .get_reg_bytes = emu_get_reg_bytes,
+    .read_reg = emu_read_reg,
+    .write_reg = emu_write_reg,
+    .read_mem = emu_read_mem,
+    .write_mem = emu_write_mem,
+    .cont = emu_cont,
+    .stepi = emu_stepi,
+    .set_bp = emu_set_bp,
+    .del_bp = emu_del_bp,
+    .on_interrupt = emu_on_interrupt,
+    .get_libraries_xml = emu_get_libraries_xml,
+    .get_offsets = emu_get_offsets,
+    .set_cpu = emu_set_cpu,
+    .get_cpu = emu_get_cpu,
+    .get_stop_signal = emu_get_stop_signal,
+    .set_resume_signal = emu_set_resume_signal,
+    .get_libraries_generation = emu_get_libraries_generation,
+    .get_os_version = emu_get_os_version,
+    .get_os_build = emu_get_os_build,
+    .get_shlib_info_addr = emu_get_shlib_info_addr,
+    .get_loaded_libraries_json = emu_get_loaded_libraries_json,
+};
+
+int setupGDBStub(void) {
+    extern const char *TARGET_ARMV7;
+    const char *gdbListenAddress = getenv("GDB_LISTEN_ADDRESS");
+    if (gdbListenAddress == NULL || gdbListenAddress[0] == '\0') {
+        gdbListenAddress = "127.0.0.1:1234";
+    }
+    arch_info_t info = {
+        .smp = 1,
+        .reg_num = GDB_ARM_REG_COUNT,
+        .target_desc = (char *)TARGET_ARMV7,
+    };
+    if (!gdbstub_init(&sharedHandle.gdbstub, &emu_ops, info,
+                      const_cast<char *>(gdbListenAddress))) {
+        fprintf(stderr, "Fail to create socket.\n");
+        return -1;
+    }
+    return 0;
+}
 
 u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
     int fd = open(path, O_RDONLY);
@@ -45,7 +741,10 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
     // Map mach_header first
     //u32 addr = Dynarmic_direct_mmap(target, 0x1000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, map, 0);
     
-    guestMappings[guestMappingLen].name = strdup(basename((char *)path));
+    // qXfer:libraries:read needs the complete host path so LLDB can load the
+    // matching Mach-O and apply its symbols at the reported guest base.
+    guestMappings[guestMappingLen].name = strdup(path);
+    guestMappings[guestMappingLen].debuggerPathResolved = true;
     
     // FIXME: may leak other unused slices
     if(*(uint32_t *)map == FAT_CIGAM) {
@@ -76,6 +775,7 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
     uintptr_t cur = (uintptr_t)header + sizeof(mach_header);
     load_command *lc;
     int firstIndex = 0;
+    u32 firstSegmentVMAddr = 0;
     for (uint i = 0; i < header->ncmds; i++, cur += lc->cmdsize) {
         lc = (load_command *)cur;
         if (lc->cmd == LC_SEGMENT) {
@@ -108,6 +808,7 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
             if (i == firstIndex) {
                 guestMappings[guestMappingLen].start = mappedAddr;
                 guestMappings[guestMappingLen].end = mappedAddr + seg->vmsize;
+                firstSegmentVMAddr = seg->vmaddr;
             }
         } else if (lc->cmd == LC_UNIXTHREAD) {
             thread_command *tc = (thread_command *)lc;
@@ -124,14 +825,24 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
     }
     
     if(isDyld) {
-        u32 dyldInfoSize;
-        sharedHandle.dyld_info_section = (dyld_all_image_infos_32 *)((uintptr_t)getsectdatafromheader(header, SEG_DATA, "__all_image_info", &dyldInfoSize) + map);
+        const struct section *dyldInfoSection =
+            getsectbynamefromheader(header, SEG_DATA, "__all_image_info");
+        assert(dyldInfoSection != NULL);
+        sharedHandle.dyld_info_section =
+            (dyld_all_image_infos_32 *)(map + dyldInfoSection->offset);
+        const u32 imageSlide =
+            guestMappings[guestMappingLen].start - firstSegmentVMAddr;
+        sharedHandle.dyld_info_guest_address =
+            imageSlide + dyldInfoSection->addr;
+        sharedHandle.dyld_load_address =
+            guestMappings[guestMappingLen].start;
         // register a fake Mach port which is used to notify us about loading/unloading Mach-O libraries
         sharedHandle.dyld_info_section->notifyMachPorts[0] = -1;
     }
     
     u32 addr = guestMappings[guestMappingLen].start;
     guestMappingLen++;
+    ++guestMappingGeneration;
     return addr;
 }
 
@@ -154,6 +865,108 @@ void setupPathEnvs(char* argv0) {
     snprintf(path, sizeof(path), "%s/RootFS", dirname(argv0));
     setenv("ROOT_PATH", path, 0);
     const char *rootPath = getenv("ROOT_PATH");
+
+    // Tell LLDB which DeviceSupport SDK matches the emulated root.  In
+    // qHostInfo, os_version is plain text and os_build is hex encoded by the
+    // gdbstub.  PlatformRemoteiOS uses these fields to select the matching
+    // Symbols tree.
+    snprintf(path, sizeof(path),
+             "%s/System/Library/CoreServices/SystemVersion.plist", rootPath);
+    FILE *systemVersionFile = fopen(path, "r");
+    if (systemVersionFile != NULL) {
+        std::string contents;
+        char chunk[1024];
+        size_t bytesRead;
+        while ((bytesRead = fread(chunk, 1, sizeof(chunk), systemVersionFile)) !=
+               0) {
+            contents.append(chunk, bytesRead);
+        }
+        fclose(systemVersionFile);
+
+        const auto readPlistString = [&contents](const char *key) {
+            const std::string keyTag = std::string("<key>") + key + "</key>";
+            size_t valueStart = contents.find(keyTag);
+            if (valueStart == std::string::npos) {
+                return std::string();
+            }
+            valueStart = contents.find("<string>", valueStart + keyTag.size());
+            if (valueStart == std::string::npos) {
+                return std::string();
+            }
+            valueStart += strlen("<string>");
+            const size_t valueEnd = contents.find("</string>", valueStart);
+            return valueEnd == std::string::npos
+                       ? std::string()
+                       : contents.substr(valueStart, valueEnd - valueStart);
+        };
+
+        guestOSVersion = readPlistString("ProductVersion");
+        guestOSBuild = readPlistString("ProductBuildVersion");
+        if (!guestOSVersion.empty() || !guestOSBuild.empty()) {
+            printf("LC32: guest OS %s (%s)\n", guestOSVersion.c_str(),
+                   guestOSBuild.c_str());
+        }
+    }
+
+    // Prefer exact extracted cache images when the debugger runs on this same
+    // Mac.  LLDB_SYMBOL_ROOT may name either a DeviceSupport directory or its
+    // Symbols subdirectory.  Otherwise discover Xcode's matching version/build
+    // directory, including model-prefixed names such as
+    // "iPhone5,1 10.3.3 (14G60)".
+    const auto useSymbolsRoot = [](const std::string &candidate) {
+        if (candidate.empty()) {
+            return false;
+        }
+        const std::string nested = candidate + "/Symbols";
+        if (access(nested.c_str(), R_OK | X_OK) == 0) {
+            debuggerSymbolsRoot = nested;
+            return true;
+        }
+        if (access(candidate.c_str(), R_OK | X_OK) == 0) {
+            debuggerSymbolsRoot = candidate;
+            return true;
+        }
+        return false;
+    };
+
+    const char *configuredSymbolsRoot = getenv("LLDB_SYMBOL_ROOT");
+    if (configuredSymbolsRoot != NULL) {
+        useSymbolsRoot(configuredSymbolsRoot);
+    }
+    if (debuggerSymbolsRoot.empty() && !guestOSVersion.empty() &&
+        !guestOSBuild.empty()) {
+        const char *home = getenv("HOME");
+        if (home != NULL) {
+            const std::string deviceSupport =
+                std::string(home) +
+                "/Library/Developer/Xcode/iOS DeviceSupport";
+            DIR *directory = opendir(deviceSupport.c_str());
+            if (directory != NULL) {
+                const std::string suffix =
+                    " " + guestOSVersion + " (" + guestOSBuild + ")";
+                const std::string exact =
+                    guestOSVersion + " (" + guestOSBuild + ")";
+                while (dirent *entry = readdir(directory)) {
+                    const std::string name = entry->d_name;
+                    const bool matches =
+                        name == exact ||
+                        (name.size() >= suffix.size() &&
+                         name.compare(name.size() - suffix.size(),
+                                      suffix.size(), suffix) == 0);
+                    if (matches &&
+                        useSymbolsRoot(deviceSupport + "/" + name)) {
+                        break;
+                    }
+                }
+                closedir(directory);
+            }
+        }
+    }
+    if (!debuggerSymbolsRoot.empty()) {
+        printf("LC32: debugger symbols root %s\n",
+               debuggerSymbolsRoot.c_str());
+    }
+
     if (getuid() == 0) {
         chroot(rootPath);
         chdir("/");
@@ -283,8 +1096,17 @@ int main(int argc, char* argv[], char* envp[]) {
     
     printf("LC32: stack ptr now 0x%x\n", dyldStackPtr);
     
+    if (setupGDBStub() != 0) {
+        return -1;
+    }
+    
     // Go!
     Dynarmic_reg_1write(13, dyldStackPtr);
-    Dynarmic_emu_1start(threadHandle.jit->Regs()[15]);
+    
+    const bool gdbstubRan = gdbstub_run(&sharedHandle.gdbstub, (void *)&sharedHandle);
+    gdbstub_close(&sharedHandle.gdbstub);
+    if (!gdbstubRan) {
+        fprintf(stderr, "Fail to run in debug mode.\n");
+        return -1;
+    }
 }
-

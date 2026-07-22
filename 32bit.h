@@ -80,6 +80,11 @@ struct timespec_32 {
 	int tv_nsec;
 };
 
+struct timeval_32 {
+	int32_t tv_sec;
+	int32_t tv_usec;
+};
+
 struct __attribute__((__packed__)) stat_32 {
 	dev_t		st_dev;                 /* [XSI] ID of device containing file */
 	mode_t		st_mode;                /* [XSI] Mode of file (see below) */
