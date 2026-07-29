@@ -6,6 +6,7 @@
 #include <deque>
 #include <exception>
 #include <iostream>
+#include <memory>
 #include <vector>
 
 #include <assert.h>
@@ -53,6 +54,7 @@
 #define TRACE_RW 0
 #define TRACE_BRANCH 0
 #define TRACE_SVC 0
+#define TRACE_THREADS 0
 #define TRACE_WORKQUEUE 0
 //#define TRACE_ALLOC 0
 //#define fprintf(...)
@@ -62,6 +64,12 @@
 #define WORKQUEUE_TRACE(...) fprintf(stderr, __VA_ARGS__)
 #else
 #define WORKQUEUE_TRACE(...) do {} while (0)
+#endif
+
+#if TRACE_THREADS
+#define THREAD_TRACE(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define THREAD_TRACE(...) do {} while (0)
 #endif
 
 #define CS_OPS_STATUS 0
@@ -89,6 +97,29 @@ static std::atomic<mach_port_t> debuggerMachCallThread{MACH_PORT_NULL};
 static bool PumpGuestWorkqueue();
 static bool HandleGuestWorkqueueTransition();
 static bool GuestWorkqueueTransitionPending();
+static bool HandleGuestThreadTransition();
+static bool GuestThreadTransitionPending();
+static bool HandleGuestContextTransition();
+static bool GuestContextTransitionPending();
+static bool GuestThreadCanYieldBeforeBlocking();
+static bool GuestThreadYieldBeforeBlocking();
+static void GuestThreadRequestRotation();
+static u32 GuestBsdthreadCreate(
+    u32 function, u32 argument, u32 stack, u32 pthread, u32 flags);
+static u32 GuestBsdthreadTerminate(
+    u32 freeAddress, u32 freeSize, mach_port_t threadPort,
+    mach_port_t joinSemaphore);
+static u64 GuestCurrentThreadSelfId();
+static mach_port_t GuestCurrentSyntheticThreadPort();
+static int GuestThreadSigmask(int how, u32 guestSet, u32 guestOldSet);
+static u32 GuestPsynchMutexWait(u32 mutex, u32 generation);
+static u32 GuestPsynchMutexDrop(u32 mutex);
+static u32 GuestPsynchConditionWait(u32 condition, u32 mutex);
+static u32 GuestPsynchConditionSignal(
+    u32 condition, mach_port_t targetThread, bool broadcast);
+static u32 GuestPsynchRwWait(u32 rwlock);
+static u32 GuestPsynchRwUnlock(u32 rwlock);
+static bool guestSingleStepping;
 
 struct DebuggerSoftwareBreakpoint {
     u32 address;
@@ -338,6 +369,17 @@ union MachMessage_##function { \
     __Reply__##function##_t Out; \
 } *name = (MachMessage_##function *)host_header
 
+static void *ResolveHostIOKitSymbol(const char *name) {
+    void *symbol = dlsym(RTLD_DEFAULT, name);
+    if (symbol != nullptr) {
+        return symbol;
+    }
+    static void *const handle = dlopen(
+        "/System/Library/Frameworks/IOKit.framework/IOKit",
+        RTLD_LAZY | RTLD_LOCAL);
+    return handle != nullptr ? dlsym(handle, name) : nullptr;
+}
+
 static mach_msg_return_t debugger_aware_mach_msg(
         mach_msg_header_t *msg,
         mach_msg_option_t option,
@@ -435,6 +477,42 @@ guest_mach_msg_trap(u32 guest_msg,
             free(host_msg);
             return MACH_RCV_INTERRUPTED;
         }
+        /*
+         * Probe the receive right before yielding.  Otherwise two guest
+         * pthreads blocked in mach_msg can keep returning MACH_RCV_INTERRUPTED
+         * to one another without either one ever consuming a queued message.
+         * A zero-timeout probe preserves cooperative scheduling while still
+         * allowing an asynchronously delivered reply to make progress.
+         */
+        if (GuestThreadCanYieldBeforeBlocking()) {
+            const mach_msg_return_t probeResult = debugger_aware_mach_msg(
+                host_header, option | MACH_RCV_TIMEOUT, 0, rcv_size,
+                rcv_name, 0, notify);
+            if (probeResult != MACH_RCV_TIMED_OUT) {
+                if (rcv_size != 0 &&
+                        probeResult != MACH_RCV_INTERRUPTED &&
+                        probeResult != MACH_SEND_INTERRUPTED) {
+                    Dynarmic_mem_1write(
+                        guest_msg, rcv_size, host_msg);
+                }
+                free(host_msg);
+                return probeResult;
+            }
+            if ((option & MACH_RCV_TIMEOUT) != 0 && timeout == 0) {
+                free(host_msg);
+                return MACH_RCV_TIMED_OUT;
+            }
+        }
+        /*
+         * A kernel pthread could run while this thread sleeps. LC32's
+         * explicit guest pthreads share one JIT, so make an empty receive
+         * interruptible at the guest ABI and let libsystem retry it after a
+         * cooperative context switch.
+         */
+        if (GuestThreadYieldBeforeBlocking()) {
+            free(host_msg);
+            return MACH_RCV_INTERRUPTED;
+        }
         result = debugger_aware_mach_msg(host_header, option, 0, rcv_size,
             rcv_name, timeout, notify);
         if (rcv_size != 0 && result != MACH_RCV_INTERRUPTED &&
@@ -478,6 +556,22 @@ guest_mach_msg_trap(u32 guest_msg,
                 printf("LC32: Unhandled flavor %d\n", Mess->In.flavor);
                 sharedHandle.ucb->ExceptionRaised(0xDEADDEAD, Dynarmic::A32::Exception::Yield);
             }
+            break;
+        }
+        case 205: {
+            /*
+             * iOS 10 calls this host_get_io_master; the current SDK renamed
+             * the same MIG slot and returned right to host_get_io_main.
+             */
+            MACH_MSG_UNION(host_get_io_main, Mess);
+            host_header->msgh_bits |= MACH_MSGH_BITS_COMPLEX;
+            host_header->msgh_size = sizeof(Mess->Out);
+            result = host_get_io_main(
+                Mess->In.Head.msgh_request_port,
+                &Mess->Out.io_main.name);
+            Mess->Out.io_main.type = MACH_MSG_PORT_DESCRIPTOR;
+            Mess->Out.io_main.disposition = MACH_MSG_TYPE_MOVE_SEND;
+            Mess->Out.msgh_body.msgh_descriptor_count = 1;
             break;
         }
         case 206: {
@@ -633,6 +727,41 @@ guest_mach_msg_trap(u32 guest_msg,
             Mess->Out.previous.type = MACH_MSG_PORT_DESCRIPTOR;
             break;
         }
+        case 3217: {
+            MACH_MSG_UNION(mach_port_get_attributes, Mess);
+            /*
+             * The iOS 10 and host MIG routines share message ID 3217, but
+             * forwarding the guest request would couple us to the host wire
+             * layout.  Invoke the host API and construct the variable-sized
+             * reply expected by the 32-bit client instead.
+             */
+            Mess->Out.NDR = NDR_record;
+            mach_msg_type_number_t count = Mess->In.port_info_outCnt;
+            constexpr mach_msg_type_number_t MaxPortInfoCount =
+                sizeof(Mess->Out.port_info_out) /
+                sizeof(Mess->Out.port_info_out[0]);
+            if (count > MaxPortInfoCount) {
+                Mess->Out.RetCode = MIG_ARRAY_TOO_LARGE;
+                host_header->msgh_size = sizeof(mig_reply_error_t);
+            } else {
+                Mess->Out.RetCode = mach_port_get_attributes(
+                    Mess->In.Head.msgh_request_port,
+                    Mess->In.name,
+                    Mess->In.flavor,
+                    Mess->Out.port_info_out,
+                    &count);
+                if (Mess->Out.RetCode == KERN_SUCCESS) {
+                    Mess->Out.port_info_outCnt = count;
+                    host_header->msgh_size =
+                        sizeof(Mess->Out) -
+                        sizeof(Mess->Out.port_info_out) +
+                        sizeof(Mess->Out.port_info_out[0]) * count;
+                } else {
+                    host_header->msgh_size = sizeof(mig_reply_error_t);
+                }
+            }
+            break;
+        }
         case 3218: {
             MACH_MSG_UNION(mach_port_set_attributes, Mess);
             host_header->msgh_size = sizeof(Mess->Out);
@@ -688,6 +817,19 @@ guest_mach_msg_trap(u32 guest_msg,
             Mess->Out.RetCode = KERN_SUCCESS;
             break;
         }
+        case 3616: { // thread_policy
+            MACH_MSG_UNION(thread_policy, Mess);
+            /*
+             * Explicit guest pthreads have synthetic Mach ports and are
+             * cooperatively scheduled on one host thread. Applying their
+             * policy to the emulator thread would incorrectly affect every
+             * guest context, so acknowledge the per-thread policy locally.
+             */
+            host_header->msgh_size = sizeof(Mess->Out);
+            Mess->Out.NDR = NDR_record;
+            Mess->Out.RetCode = KERN_SUCCESS;
+            break;
+        }
         case 78945670: {
             MACH_MSG_UNION(_notify_server_register_check, Mess);
             /*
@@ -734,18 +876,91 @@ guest_mach_msg_trap(u32 guest_msg,
             free(host_msg);
             return MACH_MSG_SUCCESS;
         }
+        case 2877: { // iOS 10 io_server_version
+            struct __attribute__((packed, aligned(4))) IoServerVersionReply {
+                mach_msg_header_t Head;
+                NDR_record_t NDR;
+                kern_return_t RetCode;
+                uint64_t version;
+            };
+            using IoServerVersion = kern_return_t (*)(
+                mach_port_t, uint64_t *);
+            static const IoServerVersion ioServerVersion =
+                reinterpret_cast<IoServerVersion>(
+                    ResolveHostIOKitSymbol("io_server_version"));
+
+            auto *reply =
+                reinterpret_cast<IoServerVersionReply *>(host_header);
+            uint64_t version = 0;
+            const kern_return_t kr = ioServerVersion != nullptr
+                ? ioServerVersion(
+                    host_header->msgh_request_port, &version)
+                : KERN_NOT_SUPPORTED;
+            reply->NDR = NDR_record;
+            reply->RetCode = kr;
+            reply->version = version;
+            host_header->msgh_size = kr == KERN_SUCCESS
+                ? sizeof(*reply)
+                : sizeof(mig_reply_error_t);
+            break;
+        }
+        case 2804: { // io_service_get_matching_services
+            struct __attribute__((packed, aligned(4)))
+                    IoMatchingServicesReply {
+                mach_msg_header_t Head;
+                mach_msg_body_t Body;
+                mach_msg_port_descriptor_t existing;
+            };
+            using IoServiceGetMatchingServices = kern_return_t (*)(
+                mach_port_t, const char *, mach_port_t *);
+            static const IoServiceGetMatchingServices getMatchingServices =
+                reinterpret_cast<IoServiceGetMatchingServices>(
+                    ResolveHostIOKitSymbol(
+                        "io_service_get_matching_services"));
+
+            constexpr size_t MatchingOffset = 40;
+            const char *matching = host_msg + MatchingOffset;
+            const bool validRequest =
+                send_size > MatchingOffset &&
+                memchr(matching, '\0', send_size - MatchingOffset) != nullptr;
+            mach_port_t existing = MACH_PORT_NULL;
+            const kern_return_t kr =
+                validRequest && getMatchingServices != nullptr
+                ? getMatchingServices(
+                    host_header->msgh_request_port,
+                    matching, &existing)
+                : MIG_BAD_ARGUMENTS;
+            if (kr != KERN_SUCCESS) {
+                auto *error =
+                    reinterpret_cast<mig_reply_error_t *>(host_header);
+                host_header->msgh_size = sizeof(*error);
+                error->NDR = NDR_record;
+                error->RetCode = kr;
+                break;
+            }
+
+            auto *reply =
+                reinterpret_cast<IoMatchingServicesReply *>(host_header);
+            host_header->msgh_bits |= MACH_MSGH_BITS_COMPLEX;
+            host_header->msgh_size = sizeof(*reply);
+            reply->Body.msgh_descriptor_count = 1;
+            reply->existing = {};
+            reply->existing.name = existing;
+            reply->existing.disposition = MACH_MSG_TYPE_MOVE_SEND;
+            reply->existing.type = MACH_MSG_PORT_DESCRIPTOR;
+            break;
+        }
         case 78: // libdispatch_internal_protocol.wakeup_runloop_thread
         case 79: // libdispatch_internal_protocol.consume_send_once_right
         case 0x77303074:
         case 0x10000000:
         case 0x20000000: {
             /*
-             * libdispatch's internal control messages, libxpc's 'w00t'
-             * connection check-in, and XPC request/reply serializers are
-             * transport messages rather than MIG requests. They may transfer
-             * port rights and use both send-only and combined send/receive
-             * calls, so preserve the request dispositions and forward the
-             * complete operation.
+             * These are libdispatch control messages, libxpc's 'w00t'
+             * connection check-in, and XPC request/reply serializers.
+             * Preserve their request dispositions and forward the complete
+             * operation because they may transfer port rights and use both
+             * send-only and combined send/receive calls.
              */
             host_header->msgh_bits = request_bits;
             result = debugger_aware_mach_msg(host_header, option, send_size,
@@ -1058,6 +1273,20 @@ int guest_workq_open() {
 
 int guest_bsdthread_ctl(u32 command, u32 arg1, u32 arg2, u32 arg3) {
     switch (command) {
+        case BSDTHREAD_CTL_QOS_OVERRIDE_START:
+        case BSDTHREAD_CTL_QOS_OVERRIDE_END:
+        case BSDTHREAD_CTL_QOS_OVERRIDE_DISPATCH:
+        case BSDTHREAD_CTL_QOS_DISPATCH_ASYNC_ADD:
+        case BSDTHREAD_CTL_QOS_DISPATCH_ASYNC_RESET:
+            /*
+             * QoS overrides affect scheduler state for another guest
+             * pthread. All explicit and workqueue guest contexts share one
+             * emulator host thread, so applying an override to the host
+             * would leak it across every guest. Guest libpthread keeps the
+             * bookkeeping needed to balance these calls; acknowledge the
+             * kernel half without changing host scheduling policy.
+             */
+            return return_with_carry_direct(0, false);
         case BSDTHREAD_CTL_SET_SELF:
             WORKQUEUE_TRACE(
                 "LC32: bsdthread_ctl SET_SELF priority=0x%x "
@@ -1361,14 +1590,7 @@ int guest_ioctl(int fildes, u32 request, u32 guest_r2) {
 }
 
 int guest_pthread_sigmask(int how, u32 guest_set, u32 guest_oldset) {
-    sigset_t host_set = guest_set ? sharedHandle.ucb->MemoryRead32(guest_set) : 0;
-    sigset_t host_oldset = 0;
-    int result = pthread_sigmask(how, guest_set ? &host_set : NULL, &host_oldset);
-    if (guest_oldset) {
-        sharedHandle.ucb->MemoryWrite32(guest_oldset, host_oldset);
-    }
-    // FIXME: does it need carry bit upon error?
-    return result;
+    return GuestThreadSigmask(how, guest_set, guest_oldset);
 }
 
 ssize_t guest_readlink(u32 guest_pathname, u32 guest_buf, size_t bufsiz) {
@@ -2230,7 +2452,6 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             case -91: // mk_timer_create
             case -29: // host_self_trap
             case -28: // task_self_trap
-            case -27: // thread_self_trap
             case -26: // mach_reply_port
             case -21: // _kernelrpc_mach_port_insert_right_trap
             case -19: // _kernelrpc_mach_port_mod_refs_trap
@@ -2251,8 +2472,7 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 break;
             // direct calls with 0-2 arguments, returns 64bit value
             case -18: // _kernelrpc_mach_port_deallocate_trap
-            case -3: // mach_absolute_time
-            case 372: { // thread_selfid
+            case -3: { // mach_absolute_time
                 u64 result = syscallRetCarry((long)NR, cpu->Regs()[0], cpu->Regs()[1]);
                 cpu->Regs()[0] = (u32)result;
                 cpu->Regs()[1] = (u32)(result >> 32);
@@ -2266,6 +2486,29 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 cpu->Regs()[0] = mach_port_destroy(
                     cpu->Regs()[0], cpu->Regs()[1]);
                 break;
+            case -20:
+                cpu->Regs()[0] =
+                    _kernelrpc_mach_port_move_member_trap(
+                        cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                break;
+            case -27: { // thread_self_trap
+                const mach_port_t syntheticPort =
+                    GuestCurrentSyntheticThreadPort();
+                if (MACH_PORT_VALID(syntheticPort)) {
+                    const kern_return_t result = mach_port_mod_refs(
+                        mach_task_self(), syntheticPort,
+                        MACH_PORT_RIGHT_SEND, 1);
+                    cpu->Regs()[0] = result == KERN_SUCCESS
+                        ? syntheticPort
+                        : MACH_PORT_NULL;
+                } else {
+                    cpu->Regs()[0] = syscallRetCarry(
+                        NR, cpu->Regs()[0], cpu->Regs()[1],
+                        cpu->Regs()[2], cpu->Regs()[3]);
+                    cpsr->setCarry(false);
+                }
+                break;
+            }
             case -22:
                 cpu->Regs()[0] =
                     _kernelrpc_mach_port_insert_member_trap(
@@ -2307,8 +2550,12 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                     cpu->Regs()[2]);
                 break;
             case -61:
-                cpu->Regs()[0] = thread_switch(
-                    cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                /*
+                 * The host emulator thread is not the logical guest thread.
+                 * Treat thread_switch as a cooperative scheduling point.
+                 */
+                cpu->Regs()[0] = KERN_SUCCESS;
+                GuestThreadRequestRotation();
                 break;
             case -89:
                 cpu->Regs()[0] = guest_mach_timebase_info(cpu->Regs()[0]);
@@ -2473,20 +2720,43 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             case 294: // __shared_region_check_np
                 cpu->Regs()[0] = return_with_carry_direct(EINVAL, true);
                 break;
-#if 0
-            case 301:
-                backend.reg_write(ArmConst.UC_ARM_REG_R0, psynch_mutexwait(emulator));
+            case 300: // psynch_rw_upgrade
+            case 306: // psynch_rw_rdlock
+            case 307: // psynch_rw_wrlock
+                cpu->Regs()[0] =
+                    GuestPsynchRwWait(cpu->Regs()[0]);
                 break;
-            case 302:
-                    backend.reg_write(ArmConst.UC_ARM_REG_R0, psynch_mutexdrop(emulator));
-                    break;
-                case 303:
-                    backend.reg_write(ArmConst.UC_ARM_REG_R0, psynch_cvbroad(emulator));
-                    break;
-                case 305:
-                    backend.reg_write(ArmConst.UC_ARM_REG_R0, psynch_cvwait(emulator));
-                    break;
-#endif
+            case 301: // psynch_mutexwait
+                cpu->Regs()[0] = GuestPsynchMutexWait(
+                    cpu->Regs()[0], cpu->Regs()[1]);
+                break;
+            case 302: // psynch_mutexdrop
+                cpu->Regs()[0] =
+                    GuestPsynchMutexDrop(cpu->Regs()[0]);
+                break;
+            case 303: // psynch_cvbroad
+                cpu->Regs()[0] = GuestPsynchConditionSignal(
+                    cpu->Regs()[0], MACH_PORT_NULL, true);
+                break;
+            case 304: // psynch_cvsignal
+                cpu->Regs()[0] = GuestPsynchConditionSignal(
+                    cpu->Regs()[0],
+                    static_cast<mach_port_t>(cpu->Regs()[4]),
+                    false);
+                break;
+            case 305: // psynch_cvwait
+                cpu->Regs()[0] = GuestPsynchConditionWait(
+                    cpu->Regs()[0], cpu->Regs()[4]);
+                break;
+            case 308: // psynch_rw_unlock
+            case 309: // psynch_rw_unlock2
+                cpu->Regs()[0] =
+                    GuestPsynchRwUnlock(cpu->Regs()[0]);
+                break;
+            case 312: // psynch_cvclrprepost
+                cpu->Regs()[0] =
+                    return_with_carry_direct(0, false);
+                break;
             case 328:
                 printf("pthread_kill called with signal %u\n", cpu->Regs()[1]);
                 if (cpu->Regs()[1] == 0) {
@@ -2535,6 +2805,17 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             case 346:
                 cpu->Regs()[0] = guest_fstatfs64(cpu->Regs()[0], cpu->Regs()[1]);
                 break;
+            case 360: // bsdthread_create
+                cpu->Regs()[0] = GuestBsdthreadCreate(
+                    cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2],
+                    cpu->Regs()[3], cpu->Regs()[4]);
+                break;
+            case 361: // bsdthread_terminate
+                cpu->Regs()[0] = GuestBsdthreadTerminate(
+                    cpu->Regs()[0], cpu->Regs()[1],
+                    static_cast<mach_port_t>(cpu->Regs()[2]),
+                    static_cast<mach_port_t>(cpu->Regs()[3]));
+                break;
             case 366:
                 cpu->Regs()[0] = guest_bsdthread_register(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5] | ((u64)cpu->Regs()[6] << 32));
                 break;
@@ -2559,6 +2840,13 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 }
             }
                 break;
+            case 372: { // thread_selfid
+                const u64 result = GuestCurrentThreadSelfId();
+                cpu->Regs()[0] = static_cast<u32>(result);
+                cpu->Regs()[1] = static_cast<u32>(result >> 32);
+                cpsr->setCarry(false);
+                break;
+            }
             case 374: { // kevent_qos
                 /*
                  * libsystem_kernel's ARM wrapper loads arguments 5-7 into
@@ -2678,13 +2966,24 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
         printf("CallSVC returned 0x%08x, carry %d\n", cpu->Regs()[0], cpsr->hasCarry());
 #endif
         /*
+         * There is no host timer preempting the one shared JIT.  Rotate
+         * explicit guest pthreads at completed Darwin syscall boundaries.
+         * Fatal stops and LC32's private callback syscalls must retain their
+         * current context.
+         */
+        if (NR < 1000 && NR != SYS_exit &&
+                pendingGuestFatalSignal.load(
+                    std::memory_order_relaxed) == 0) {
+            GuestThreadRequestRotation();
+        }
+        /*
          * Ordinary SVC callbacks execute inline inside Dynarmic::Run().
          * Context replacement is only legal after Run() has unwound, so use
          * a private halt reason to transfer control to the outer loop without
          * replaying this already-completed syscall.
          */
         if (cpu->IsExecuting() &&
-                GuestWorkqueueTransitionPending()) {
+                GuestContextTransitionPending()) {
             cpu->HaltExecution(LC32HaltReasonWorkqueue);
         }
     }
@@ -2727,6 +3026,47 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
 
 namespace {
 
+enum class GuestThreadWaitKind : uint8_t {
+    None,
+    Mutex,
+    Condition,
+    Rwlock,
+};
+
+struct GuestThreadContext {
+    gdb_thread_id_t debuggerId = 0;
+    u64 threadSelfId = 0;
+    u32 pthreadAddress = 0;
+    mach_port_t threadPort = MACH_PORT_NULL;
+    u32 allocationAddress = 0;
+    u32 allocationSize = 0;
+    context32 saved = {};
+    u32 signalMask = 0;
+    GuestThreadWaitKind waitKind = GuestThreadWaitKind::None;
+    u32 waitAddress = 0;
+    u32 wakeResult = 0;
+    u64 waitSequence = 0;
+    bool savedValid = false;
+    bool alive = false;
+    bool runnable = false;
+};
+
+std::vector<GuestThreadContext> guestThreads;
+gdb_thread_id_t guestCurrentThreadId = 1;
+gdb_thread_id_t guestNextDebuggerThreadId = 3;
+u64 guestNextThreadSelfId;
+bool guestThreadRegistryInitialized;
+bool guestThreadRotationRequested;
+bool guestThreadCurrentRetiring;
+u64 guestNextWaitSequence = 1;
+
+struct GuestPsynchPrepost {
+    GuestThreadWaitKind kind;
+    u32 address;
+    size_t count;
+};
+std::vector<GuestPsynchPrepost> guestPsynchPreposts;
+
 constexpr u32 GuestWorkqueueGuardSize = DYN_PAGE_SIZE;
 constexpr u32 GuestWorkqueueStackSize = 0x80000;
 constexpr size_t GuestWorkqueueEventCapacity = 16;
@@ -2756,6 +3096,230 @@ struct GuestWorkqueuePendingUpcall {
 GuestWorkqueuePendingUpcall guestWorkqueuePendingUpcall;
 context32 guestWorkqueueWaitingContext;
 bool guestWorkqueueWaitingContextValid;
+gdb_thread_id_t guestWorkqueueWaitingThreadId;
+u64 guestWorkqueueThreadSelfId;
+u32 guestWorkqueueSignalMask;
+
+void SaveGuestContext(context32 &context) {
+    Dynarmic::A32::Jit *jit = threadHandle.jit;
+    DynarmicCallbacks32 *callbacks = sharedHandle.cb;
+    context.regs = jit->Regs();
+    context.extRegs = jit->ExtRegs();
+    context.cpsr = jit->Cpsr();
+    context.fpscr = jit->Fpscr();
+    context.uro = callbacks->cp15->uro;
+}
+
+void LoadGuestContext(const context32 &context) {
+    Dynarmic::A32::Jit *jit = threadHandle.jit;
+    DynarmicCallbacks32 *callbacks = sharedHandle.cb;
+    jit->Regs() = context.regs;
+    jit->ExtRegs() = context.extRegs;
+    jit->SetCpsr(context.cpsr);
+    jit->SetFpscr(context.fpscr);
+    callbacks->cp15->uro = context.uro;
+    jit->ClearExclusiveState();
+}
+
+void EnsureGuestThreadRegistry() {
+    if (guestThreadRegistryInitialized) {
+        return;
+    }
+
+    sigset_t hostMask = 0;
+    (void)pthread_sigmask(SIG_SETMASK, nullptr, &hostMask);
+    u32 guestMask = 0;
+    memcpy(&guestMask, &hostMask,
+        std::min(sizeof(guestMask), sizeof(hostMask)));
+
+    const u64 mainThreadSelfId = __thread_selfid();
+    guestThreads.push_back({
+        .debuggerId = 1,
+        .threadSelfId = mainThreadSelfId,
+        .signalMask = guestMask,
+        .savedValid = false,
+        .alive = true,
+        .runnable = true,
+    });
+    guestNextThreadSelfId = mainThreadSelfId + 1;
+    if (guestNextThreadSelfId == 0) {
+        guestNextThreadSelfId = 1;
+    }
+    guestThreadRegistryInitialized = true;
+}
+
+GuestThreadContext *FindGuestThread(
+        gdb_thread_id_t debuggerId, bool requireAlive = false) {
+    EnsureGuestThreadRegistry();
+    for (GuestThreadContext &thread : guestThreads) {
+        if (thread.debuggerId == debuggerId &&
+                (!requireAlive || thread.alive)) {
+            return &thread;
+        }
+    }
+    return nullptr;
+}
+
+size_t LiveGuestThreadCount() {
+    EnsureGuestThreadRegistry();
+    return static_cast<size_t>(std::count_if(
+        guestThreads.begin(), guestThreads.end(),
+        [](const GuestThreadContext &thread) {
+            return thread.alive;
+        }));
+}
+
+u64 AllocateGuestThreadSelfId() {
+    EnsureGuestThreadRegistry();
+    return guestNextThreadSelfId++;
+}
+
+GuestThreadContext *NextGuestThread() {
+    EnsureGuestThreadRegistry();
+    if (guestThreads.empty()) {
+        return nullptr;
+    }
+
+    size_t currentIndex = 0;
+    for (; currentIndex < guestThreads.size(); ++currentIndex) {
+        if (guestThreads[currentIndex].debuggerId ==
+                guestCurrentThreadId) {
+            break;
+        }
+    }
+    if (currentIndex == guestThreads.size()) {
+        return nullptr;
+    }
+    for (size_t offset = 1; offset <= guestThreads.size(); ++offset) {
+        GuestThreadContext &candidate =
+            guestThreads[(currentIndex + offset) % guestThreads.size()];
+        if (candidate.alive && candidate.runnable &&
+                candidate.debuggerId != guestCurrentThreadId) {
+            return &candidate;
+        }
+    }
+    return nullptr;
+}
+
+mach_port_t AllocateGuestThreadPort() {
+    mach_port_t port = MACH_PORT_NULL;
+    kern_return_t result = mach_port_allocate(
+        mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+    if (result == KERN_SUCCESS) {
+        result = mach_port_insert_right(
+            mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND);
+    }
+    if (result != KERN_SUCCESS) {
+        if (MACH_PORT_VALID(port)) {
+            mach_port_destroy(mach_task_self(), port);
+        }
+        return MACH_PORT_NULL;
+    }
+    return port;
+}
+
+bool ParkCurrentGuestThread(
+        GuestThreadWaitKind kind, u32 address, u32 wakeResult) {
+    EnsureGuestThreadRegistry();
+    if (guestWorkqueueUpcallActive) {
+        return false;
+    }
+    GuestThreadContext *current =
+        FindGuestThread(guestCurrentThreadId, true);
+    if (current == nullptr || !current->runnable) {
+        return false;
+    }
+
+    current->runnable = false;
+    current->waitKind = kind;
+    current->waitAddress = address;
+    current->wakeResult = wakeResult;
+    current->waitSequence = guestNextWaitSequence++;
+    if (NextGuestThread() == nullptr) {
+        current->runnable = true;
+        current->waitKind = GuestThreadWaitKind::None;
+        current->waitAddress = 0;
+        current->wakeResult = 0;
+        current->waitSequence = 0;
+        return false;
+    }
+    guestThreadRotationRequested = true;
+    return true;
+}
+
+size_t WakeGuestThreads(
+        GuestThreadWaitKind kind, u32 address, bool wakeAll,
+        mach_port_t targetThread = MACH_PORT_NULL) {
+    EnsureGuestThreadRegistry();
+    size_t count = 0;
+    for (;;) {
+        GuestThreadContext *selected = nullptr;
+        for (GuestThreadContext &thread : guestThreads) {
+            if (!thread.alive || thread.runnable ||
+                    thread.waitKind != kind ||
+                    thread.waitAddress != address ||
+                    (MACH_PORT_VALID(targetThread) &&
+                     thread.threadPort != targetThread)) {
+                continue;
+            }
+            if (selected == nullptr ||
+                    thread.waitSequence < selected->waitSequence) {
+                selected = &thread;
+            }
+        }
+        if (selected == nullptr) {
+            break;
+        }
+
+        selected->runnable = true;
+        selected->waitKind = GuestThreadWaitKind::None;
+        selected->waitAddress = 0;
+        selected->waitSequence = 0;
+        if (selected->savedValid) {
+            selected->saved.regs[Reg::R0] =
+                selected->wakeResult;
+            selected->saved.cpsr &=
+                ~(static_cast<u32>(1) << CARRY_BIT);
+        }
+        selected->wakeResult = 0;
+        ++count;
+        if (!wakeAll || MACH_PORT_VALID(targetThread)) {
+            break;
+        }
+    }
+    return count;
+}
+
+void RecordGuestPsynchPrepost(
+        GuestThreadWaitKind kind, u32 address) {
+    for (GuestPsynchPrepost &prepost : guestPsynchPreposts) {
+        if (prepost.kind == kind &&
+                prepost.address == address) {
+            ++prepost.count;
+            return;
+        }
+    }
+    guestPsynchPreposts.push_back({
+        .kind = kind,
+        .address = address,
+        .count = 1,
+    });
+}
+
+bool ConsumeGuestPsynchPrepost(
+        GuestThreadWaitKind kind, u32 address) {
+    for (auto it = guestPsynchPreposts.begin();
+            it != guestPsynchPreposts.end(); ++it) {
+        if (it->kind != kind || it->address != address) {
+            continue;
+        }
+        if (--it->count == 0) {
+            guestPsynchPreposts.erase(it);
+        }
+        return true;
+    }
+    return false;
+}
 
 bool EnsureGuestWorkqueueWorker() {
     if (guestWorkqueueAllocation != 0) {
@@ -2812,6 +3376,9 @@ bool EnsureGuestWorkqueueWorker() {
         guestWorkqueueStackBottom = 0;
         guestWorkqueuePthread = 0;
         return false;
+    }
+    if (guestWorkqueueThreadSelfId == 0) {
+        guestWorkqueueThreadSelfId = AllocateGuestThreadSelfId();
     }
     return true;
 }
@@ -3019,6 +3586,421 @@ bool NextGuestWorkqueueEvent(GuestWorkqueueDelivery &delivery) {
 
 } // anonymous namespace
 
+static u32 GuestBsdthreadCreate(
+        u32 function, u32 argument, u32 stack, u32 pthread,
+        u32 flags) {
+    EnsureGuestThreadRegistry();
+    if (guest_bsdthread_thread_start == 0 ||
+            guest_bsdthread_pthread_size <= 0 ||
+            function == 0 || stack == 0) {
+        return return_with_carry_direct(EINVAL, true);
+    }
+
+    const bool custom = (flags & PTHREAD_START_CUSTOM) != 0;
+    u32 allocationAddress = 0;
+    u32 allocationSize = 0;
+    u32 stackTop = stack;
+    u32 pthreadAddress = pthread;
+
+    if (!custom) {
+        const u64 pthreadSize =
+            (static_cast<u64>(guest_bsdthread_pthread_size) +
+             DYN_PAGE_MASK) & ~static_cast<u64>(DYN_PAGE_MASK);
+        const u64 requiredSize =
+            static_cast<u64>(DYN_PAGE_SIZE) + stack + pthreadSize;
+        const u64 roundedSize =
+            (requiredSize + DYN_PAGE_MASK) &
+            ~static_cast<u64>(DYN_PAGE_MASK);
+        if (pthreadSize == 0 || roundedSize > UINT32_MAX ||
+                roundedSize < requiredSize) {
+            return return_with_carry_direct(EINVAL, true);
+        }
+
+        allocationSize = static_cast<u32>(roundedSize);
+        allocationAddress = Dynarmic_mmap(
+            0, allocationSize, PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (allocationAddress == UINT32_MAX) {
+            return return_with_carry_direct(ENOMEM, true);
+        }
+        if (Dynarmic_mprotect(
+                allocationAddress, DYN_PAGE_SIZE, PROT_NONE) != 0) {
+            (void)Dynarmic_munmap(
+                allocationAddress, allocationSize);
+            return return_with_carry_direct(ENOMEM, true);
+        }
+        const u64 pthread64 =
+            static_cast<u64>(allocationAddress) +
+            DYN_PAGE_SIZE + stack;
+        if (pthread64 > UINT32_MAX) {
+            (void)Dynarmic_munmap(
+                allocationAddress, allocationSize);
+            return return_with_carry_direct(ENOMEM, true);
+        }
+        pthreadAddress = static_cast<u32>(pthread64);
+        stackTop = pthreadAddress;
+    } else if (pthreadAddress == 0) {
+        return return_with_carry_direct(EINVAL, true);
+    }
+
+    if (stackTop < 16) {
+        if (allocationAddress != 0) {
+            (void)Dynarmic_munmap(
+                allocationAddress, allocationSize);
+        }
+        return return_with_carry_direct(EINVAL, true);
+    }
+
+    const mach_port_t threadPort = AllocateGuestThreadPort();
+    if (!MACH_PORT_VALID(threadPort)) {
+        if (allocationAddress != 0) {
+            (void)Dynarmic_munmap(
+                allocationAddress, allocationSize);
+        }
+        return return_with_carry_direct(EAGAIN, true);
+    }
+
+    GuestThreadContext thread = {};
+    thread.debuggerId = guestNextDebuggerThreadId++;
+    thread.threadSelfId = AllocateGuestThreadSelfId();
+    thread.pthreadAddress = pthreadAddress;
+    thread.threadPort = threadPort;
+    thread.allocationAddress = allocationAddress;
+    thread.allocationSize = allocationSize;
+    thread.alive = true;
+    thread.runnable = true;
+    thread.savedValid = true;
+    if (GuestThreadContext *parent =
+            FindGuestThread(guestCurrentThreadId, true)) {
+        thread.signalMask = parent->signalMask;
+    }
+
+    u32 childFlags = flags;
+    if (guest_bsdthread_tsd_offset != 0 &&
+            guest_bsdthread_tsd_offset <
+                static_cast<u32>(guest_bsdthread_pthread_size) &&
+            pthreadAddress <=
+                UINT32_MAX - guest_bsdthread_tsd_offset) {
+        thread.saved.uro =
+            pthreadAddress + guest_bsdthread_tsd_offset;
+        childFlags |= PTHREAD_START_TSD_BASE_SET;
+    }
+    thread.saved.cpsr =
+        (guest_bsdthread_thread_start & 1) != 0
+        ? 0x00000030
+        : 0x000001d0;
+    thread.saved.regs[Reg::R0] = pthreadAddress;
+    thread.saved.regs[Reg::R1] = threadPort;
+    thread.saved.regs[Reg::R2] = function;
+    thread.saved.regs[Reg::R3] = argument;
+    thread.saved.regs[Reg::R4] = stack;
+    thread.saved.regs[Reg::R5] = childFlags;
+    thread.saved.regs[Reg::R7] = 0;
+    thread.saved.regs[Reg::SP] = stackTop - 16;
+    thread.saved.regs[Reg::LR] = 0;
+    thread.saved.regs[Reg::PC] =
+        guest_bsdthread_thread_start & ~1u;
+
+    fprintf(stderr,
+        "LC32: bsdthread_create guest-thread=%llu self=0x%llx "
+        "pthread=0x%x port=0x%x pc=0x%x sp=0x%x flags=0x%x\n",
+        thread.debuggerId, thread.threadSelfId,
+        thread.pthreadAddress, thread.threadPort,
+        thread.saved.regs[Reg::PC], thread.saved.regs[Reg::SP],
+        childFlags);
+    guestThreads.push_back(std::move(thread));
+    return return_with_carry_direct(
+        static_cast<int>(pthreadAddress), false);
+}
+
+static u32 GuestBsdthreadTerminate(
+        u32 freeAddress, u32 freeSize, mach_port_t threadPort,
+        mach_port_t joinSemaphore) {
+    EnsureGuestThreadRegistry();
+    if (guestWorkqueueUpcallActive) {
+        return return_with_carry_direct(EINVAL, true);
+    }
+
+    GuestThreadContext *current =
+        FindGuestThread(guestCurrentThreadId, true);
+    if (current == nullptr || current->debuggerId == 1) {
+        return return_with_carry_direct(EINVAL, true);
+    }
+
+    if (freeAddress != 0 && freeSize != 0 &&
+            Dynarmic_munmap(freeAddress, freeSize) != 0) {
+        return return_with_carry_direct(EINVAL, true);
+    }
+
+    if (MACH_PORT_VALID(joinSemaphore)) {
+        const kern_return_t result =
+            semaphore_signal_trap(joinSemaphore);
+        if (result != KERN_SUCCESS) {
+            fprintf(stderr,
+                "LC32: bsdthread_terminate join semaphore 0x%x "
+                "failed: 0x%x\n",
+                joinSemaphore, result);
+        }
+    }
+    if (MACH_PORT_VALID(threadPort) &&
+            threadPort != current->threadPort) {
+        fprintf(stderr,
+            "LC32: bsdthread_terminate port mismatch "
+            "argument=0x%x current=0x%x\n",
+            threadPort, current->threadPort);
+    }
+    if (MACH_PORT_VALID(current->threadPort)) {
+        (void)mach_port_destroy(
+            mach_task_self(), current->threadPort);
+        current->threadPort = MACH_PORT_NULL;
+    }
+
+    fprintf(stderr,
+        "LC32: bsdthread_terminate guest-thread=%llu "
+        "free=0x%x+0x%x\n",
+        current->debuggerId, freeAddress, freeSize);
+    current->alive = false;
+    current->runnable = false;
+    current->savedValid = false;
+    guestThreadCurrentRetiring = true;
+    guestThreadRotationRequested = true;
+    if (LiveGuestThreadCount() == 0) {
+        guestThreadCurrentRetiring = false;
+        guestThreadRotationRequested = false;
+        if (threadHandle.jit->IsExecuting()) {
+            threadHandle.jit->HaltExecution(
+                LC32HaltReasonExit);
+        }
+    }
+    return return_with_carry_direct(0, false);
+}
+
+static void GuestThreadRequestRotation() {
+    EnsureGuestThreadRegistry();
+    if (guestThreadCurrentRetiring || guestSingleStepping ||
+            guestWorkqueueUpcallActive ||
+            GuestWorkqueueTransitionPending() ||
+            LiveGuestThreadCount() <= 1) {
+        return;
+    }
+    guestThreadRotationRequested = NextGuestThread() != nullptr;
+}
+
+static bool GuestThreadCanYieldBeforeBlocking() {
+    EnsureGuestThreadRegistry();
+    return !guestWorkqueueUpcallActive &&
+        NextGuestThread() != nullptr;
+}
+
+static bool GuestThreadYieldBeforeBlocking() {
+    if (!GuestThreadCanYieldBeforeBlocking()) {
+        return false;
+    }
+    if (!guestSingleStepping) {
+        guestThreadRotationRequested = true;
+    }
+    return true;
+}
+
+static bool GuestThreadTransitionPending() {
+    return guestThreadRotationRequested;
+}
+
+static bool HandleGuestThreadTransition() {
+    if (!guestThreadRotationRequested ||
+            guestWorkqueueUpcallActive ||
+            threadHandle.jit == nullptr ||
+            sharedHandle.cb == nullptr) {
+        return false;
+    }
+
+    GuestThreadContext *current =
+        FindGuestThread(guestCurrentThreadId, false);
+    GuestThreadContext *next = NextGuestThread();
+    if (current == nullptr || next == nullptr ||
+            !next->savedValid) {
+        guestThreadRotationRequested = false;
+        guestThreadCurrentRetiring = false;
+        return false;
+    }
+
+    if (!guestThreadCurrentRetiring) {
+        SaveGuestContext(current->saved);
+        current->savedValid = true;
+    }
+    LoadGuestContext(next->saved);
+    THREAD_TRACE(
+        "LC32: switched guest-thread %llu -> %llu pc=0x%x\n",
+        guestCurrentThreadId, next->debuggerId,
+        threadHandle.jit->Regs()[Reg::PC]);
+    guestCurrentThreadId = next->debuggerId;
+    guestThreadRotationRequested = false;
+    guestThreadCurrentRetiring = false;
+    return true;
+}
+
+static u64 GuestCurrentThreadSelfId() {
+    EnsureGuestThreadRegistry();
+    if (guestWorkqueueUpcallActive) {
+        return guestWorkqueueThreadSelfId;
+    }
+    GuestThreadContext *current =
+        FindGuestThread(guestCurrentThreadId, true);
+    return current != nullptr
+        ? current->threadSelfId
+        : __thread_selfid();
+}
+
+static mach_port_t GuestCurrentSyntheticThreadPort() {
+    EnsureGuestThreadRegistry();
+    if (guestWorkqueueUpcallActive) {
+        return guestWorkqueueThreadPort;
+    }
+    GuestThreadContext *current =
+        FindGuestThread(guestCurrentThreadId, true);
+    return current != nullptr ? current->threadPort : MACH_PORT_NULL;
+}
+
+static int GuestThreadSigmask(
+        int how, u32 guestSet, u32 guestOldSet) {
+    EnsureGuestThreadRegistry();
+    u32 *mask = nullptr;
+    if (guestWorkqueueUpcallActive) {
+        mask = &guestWorkqueueSignalMask;
+    } else if (GuestThreadContext *current =
+            FindGuestThread(guestCurrentThreadId, true)) {
+        mask = &current->signalMask;
+    }
+    if (mask == nullptr) {
+        return EINVAL;
+    }
+
+    const u32 oldMask = *mask;
+    if (guestOldSet != 0 &&
+            Dynarmic_mem_1write(
+                guestOldSet, sizeof(oldMask),
+                reinterpret_cast<char *>(
+                    const_cast<u32 *>(&oldMask))) != 0) {
+        return EFAULT;
+    }
+    if (guestSet == 0) {
+        return 0;
+    }
+
+    u32 set = 0;
+    if (Dynarmic_mem_1read(
+            guestSet, sizeof(set),
+            reinterpret_cast<char *>(&set)) != 0) {
+        return EFAULT;
+    }
+    switch (how) {
+        case SIG_BLOCK:
+            *mask |= set;
+            break;
+        case SIG_UNBLOCK:
+            *mask &= ~set;
+            break;
+        case SIG_SETMASK:
+            *mask = set;
+            break;
+        default:
+            return EINVAL;
+    }
+    return 0;
+}
+
+static u32 GuestPsynchMutexWait(
+        u32 mutex, u32 generation) {
+    const u32 wakeResult =
+        (generation & ~0xffu) | 0x03u;
+    if (ConsumeGuestPsynchPrepost(
+            GuestThreadWaitKind::Mutex, mutex)) {
+        return return_with_carry_direct(
+            static_cast<int>(wakeResult), false);
+    }
+    if (ParkCurrentGuestThread(
+            GuestThreadWaitKind::Mutex, mutex, wakeResult)) {
+        return return_with_carry_direct(0, false);
+    }
+    return return_with_carry_direct(EINTR, true);
+}
+
+static u32 GuestPsynchMutexDrop(u32 mutex) {
+    const size_t woken = WakeGuestThreads(
+        GuestThreadWaitKind::Mutex, mutex, false);
+    if (woken == 0) {
+        RecordGuestPsynchPrepost(
+            GuestThreadWaitKind::Mutex, mutex);
+    }
+    return return_with_carry_direct(0, false);
+}
+
+static u32 GuestPsynchConditionWait(
+        u32 condition, u32 mutex) {
+    if (mutex != 0) {
+        (void)WakeGuestThreads(
+            GuestThreadWaitKind::Mutex, mutex, false);
+    }
+    if (ConsumeGuestPsynchPrepost(
+            GuestThreadWaitKind::Condition, condition)) {
+        return return_with_carry_direct(0x100, false);
+    }
+    if (ParkCurrentGuestThread(
+            GuestThreadWaitKind::Condition, condition, 0)) {
+        return return_with_carry_direct(0, false);
+    }
+    return return_with_carry_direct(EINTR, true);
+}
+
+static u32 GuestPsynchConditionSignal(
+        u32 condition, mach_port_t targetThread,
+        bool broadcast) {
+    const size_t woken = WakeGuestThreads(
+        GuestThreadWaitKind::Condition, condition,
+        broadcast, targetThread);
+    if (MACH_PORT_VALID(targetThread) && woken == 0) {
+        return return_with_carry_direct(ESRCH, true);
+    }
+    if (woken == 0 && !MACH_PORT_VALID(targetThread)) {
+        RecordGuestPsynchPrepost(
+            GuestThreadWaitKind::Condition, condition);
+    }
+    const u64 update =
+        static_cast<u64>(woken) * 0x100u;
+    const u32 updateBits =
+        static_cast<u32>(std::min<u64>(
+            update, UINT32_MAX)) |
+        (woken != 0 ? 0x01u : 0u);
+    return return_with_carry_direct(
+        static_cast<int>(updateBits), false);
+}
+
+static u32 GuestPsynchRwWait(u32 rwlock) {
+    if (ParkCurrentGuestThread(
+            GuestThreadWaitKind::Rwlock, rwlock, 0)) {
+        return return_with_carry_direct(0, false);
+    }
+    return return_with_carry_direct(EINTR, true);
+}
+
+static u32 GuestPsynchRwUnlock(u32 rwlock) {
+    (void)WakeGuestThreads(
+        GuestThreadWaitKind::Rwlock, rwlock, true);
+    return return_with_carry_direct(0, false);
+}
+
+static bool GuestContextTransitionPending() {
+    return GuestWorkqueueTransitionPending() ||
+        GuestThreadTransitionPending();
+}
+
+static bool HandleGuestContextTransition() {
+    if (GuestWorkqueueTransitionPending()) {
+        return HandleGuestWorkqueueTransition();
+    }
+    return HandleGuestThreadTransition();
+}
+
 static bool PumpGuestWorkqueue() {
     if (guestWorkqueueUpcallActive || !guest_workqueue_opened) {
         return false;
@@ -3088,12 +4070,9 @@ static bool HandleGuestWorkqueueTransition() {
                 !guestWorkqueueWaitingContextValid) {
             return false;
         }
-        jit->Regs() = guestWorkqueueWaitingContext.regs;
-        jit->ExtRegs() = guestWorkqueueWaitingContext.extRegs;
-        jit->SetCpsr(guestWorkqueueWaitingContext.cpsr);
-        jit->SetFpscr(guestWorkqueueWaitingContext.fpscr);
-        callbacks->cp15->uro = guestWorkqueueWaitingContext.uro;
+        LoadGuestContext(guestWorkqueueWaitingContext);
         guestWorkqueueWaitingContextValid = false;
+        guestWorkqueueWaitingThreadId = 0;
         guestWorkqueueUpcallActive = false;
         WORKQUEUE_TRACE(
             "LC32: restored waiting context pc=0x%x\n",
@@ -3106,12 +4085,13 @@ static bool HandleGuestWorkqueueTransition() {
         return false;
     }
 
-    guestWorkqueueWaitingContext.regs = jit->Regs();
-    guestWorkqueueWaitingContext.extRegs = jit->ExtRegs();
-    guestWorkqueueWaitingContext.cpsr = jit->Cpsr();
-    guestWorkqueueWaitingContext.fpscr = jit->Fpscr();
-    guestWorkqueueWaitingContext.uro = callbacks->cp15->uro;
+    SaveGuestContext(guestWorkqueueWaitingContext);
     guestWorkqueueWaitingContextValid = true;
+    guestWorkqueueWaitingThreadId = guestCurrentThreadId;
+    if (GuestThreadContext *thread =
+            FindGuestThread(guestCurrentThreadId, true)) {
+        guestWorkqueueSignalMask = thread->signalMask;
+    }
 
     const GuestWorkqueuePendingUpcall upcall =
         guestWorkqueuePendingUpcall;
@@ -3858,36 +4838,47 @@ size_t Dynarmic_debugger_thread_ids(
     if (threadHandle.jit == nullptr) {
         return 0;
     }
+    EnsureGuestThreadRegistry();
 
     size_t count = 0;
-    if (ids != nullptr && count < capacity) {
-        ids[count] = 1;
-    }
-    ++count;
-    if (guestWorkqueueUpcallActive &&
-            guestWorkqueueWaitingContextValid) {
+    const auto append = [&](gdb_thread_id_t id) {
         if (ids != nullptr && count < capacity) {
-            ids[count] = 2;
+            ids[count] = id;
         }
         ++count;
+    };
+    if (GuestThreadContext *main = FindGuestThread(1, true)) {
+        append(main->debuggerId);
+    }
+    if (guestWorkqueueUpcallActive &&
+            guestWorkqueueWaitingContextValid) {
+        append(2);
+    }
+    for (const GuestThreadContext &thread : guestThreads) {
+        if (thread.alive && thread.debuggerId >= 3) {
+            append(thread.debuggerId);
+        }
     }
     return count;
 }
 
 gdb_thread_id_t Dynarmic_debugger_current_thread() {
-    return guestWorkqueueUpcallActive ? 2 : 1;
+    EnsureGuestThreadRegistry();
+    return guestWorkqueueUpcallActive
+        ? 2
+        : guestCurrentThreadId;
 }
 
 bool Dynarmic_debugger_thread_alive(gdb_thread_id_t thread_id) {
     if (threadHandle.jit == nullptr) {
         return false;
     }
-    if (thread_id == 1) {
-        return true;
+    EnsureGuestThreadRegistry();
+    if (thread_id == 2) {
+        return guestWorkqueueUpcallActive &&
+            guestWorkqueueWaitingContextValid;
     }
-    return thread_id == 2 &&
-        guestWorkqueueUpcallActive &&
-        guestWorkqueueWaitingContextValid;
+    return FindGuestThread(thread_id, true) != nullptr;
 }
 
 bool Dynarmic_debugger_thread_read_reg(
@@ -3904,10 +4895,20 @@ bool Dynarmic_debugger_thread_read_reg(
         return true;
     }
 
-    if (thread_id == 1 && guestWorkqueueWaitingContextValid) {
+    if (guestWorkqueueUpcallActive &&
+            guestWorkqueueWaitingContextValid &&
+            thread_id == guestWorkqueueWaitingThreadId) {
         *value = regno == 16
             ? guestWorkqueueWaitingContext.cpsr
             : guestWorkqueueWaitingContext.regs[regno];
+        return true;
+    }
+    GuestThreadContext *thread =
+        FindGuestThread(thread_id, true);
+    if (thread != nullptr && thread->savedValid) {
+        *value = regno == 16
+            ? thread->saved.cpsr
+            : thread->saved.regs[regno];
         return true;
     }
     return false;
@@ -3929,11 +4930,23 @@ bool Dynarmic_debugger_thread_write_reg(
         return true;
     }
 
-    if (thread_id == 1 && guestWorkqueueWaitingContextValid) {
+    if (guestWorkqueueUpcallActive &&
+            guestWorkqueueWaitingContextValid &&
+            thread_id == guestWorkqueueWaitingThreadId) {
         if (regno == 16) {
             guestWorkqueueWaitingContext.cpsr = value;
         } else {
             guestWorkqueueWaitingContext.regs[regno] = value;
+        }
+        return true;
+    }
+    GuestThreadContext *thread =
+        FindGuestThread(thread_id, true);
+    if (thread != nullptr && thread->savedValid) {
+        if (regno == 16) {
+            thread->saved.cpsr = value;
+        } else {
+            thread->saved.regs[regno] = value;
         }
         return true;
     }
@@ -4039,7 +5052,7 @@ Dynarmic::HaltReason Dynarmic_emu_1start(u32 pc) {
       for (;;) {
         reason = cpu->Run();
         if (Dynarmic::Has(reason, LC32HaltReasonWorkqueue)) {
-          if (!HandleGuestWorkqueueTransition()) {
+          if (!HandleGuestContextTransition()) {
             reason = LC32HaltReasonTrap;
             break;
           }
@@ -4055,7 +5068,7 @@ Dynarmic::HaltReason Dynarmic_emu_1start(u32 pc) {
           break;
         }
         sharedHandle.ucb->CallSVC(0x80);
-        HandleGuestWorkqueueTransition();
+        HandleGuestContextTransition();
       }
     } else {
       return LC32HaltReasonTrap;
@@ -4077,7 +5090,7 @@ Dynarmic::HaltReason Dynarmic_emu_1resume() {
     for (;;) {
         reason = jit->Run();
         if (Dynarmic::Has(reason, LC32HaltReasonWorkqueue)) {
-            if (!HandleGuestWorkqueueTransition()) {
+            if (!HandleGuestContextTransition()) {
                 reason = LC32HaltReasonTrap;
                 break;
             }
@@ -4093,7 +5106,7 @@ Dynarmic::HaltReason Dynarmic_emu_1resume() {
             break;
         }
         sharedHandle.ucb->CallSVC(0x80);
-        HandleGuestWorkqueueTransition();
+        HandleGuestContextTransition();
     }
     UpdateGuestStopSignalForHalt(reason);
     return reason;
@@ -4110,11 +5123,14 @@ Dynarmic::HaltReason Dynarmic_emu_1step() {
 
     Dynarmic::HaltReason reason;
     bool drainInternalWorker = false;
+    guestSingleStepping = true;
     for (;;) {
         reason = drainInternalWorker ? jit->Run() : jit->Step();
         if (Dynarmic::Has(reason, LC32HaltReasonWorkqueue)) {
             const bool wasWorkerActive = guestWorkqueueUpcallActive;
-            if (!HandleGuestWorkqueueTransition()) {
+            const bool hadGuestThreadTransition =
+                GuestThreadTransitionPending();
+            if (!HandleGuestContextTransition()) {
                 reason = LC32HaltReasonTrap;
                 break;
             }
@@ -4123,6 +5139,12 @@ Dynarmic::HaltReason Dynarmic_emu_1step() {
                            Dynarmic::HaltReason::Step);
             if (!!remaining) {
                 reason = remaining;
+                break;
+            }
+            if (hadGuestThreadTransition &&
+                    !wasWorkerActive &&
+                    !guestWorkqueueUpcallActive) {
+                reason = Dynarmic::HaltReason::Step;
                 break;
             }
             if (!wasWorkerActive && guestWorkqueueUpcallActive) {
@@ -4145,8 +5167,9 @@ Dynarmic::HaltReason Dynarmic_emu_1step() {
             break;
         }
         sharedHandle.ucb->CallSVC(0x80);
-        HandleGuestWorkqueueTransition();
+        HandleGuestContextTransition();
     }
+    guestSingleStepping = false;
     UpdateGuestStopSignalForHalt(reason);
     return reason;
 }

@@ -19,9 +19,21 @@ __BEGIN_DECLS
 #define PTHREAD_FEATURE_WORKLOOP          0x80		/* supports workloops */
 #define PTHREAD_FEATURE_QOS_DEFAULT		0x40000000	/* the kernel supports QOS_CLASS_DEFAULT */
 
+/* Flags passed through bsdthread_create to libpthread's thread_start. */
+#define PTHREAD_START_CUSTOM                     0x01000000
+#define PTHREAD_START_SETSCHED                   0x02000000
+#define PTHREAD_START_DETACHED                   0x04000000
+#define PTHREAD_START_QOSCLASS                   0x08000000
+#define PTHREAD_START_TSD_BASE_SET               0x10000000
+
 /* iOS 10.3 bsdthread_ctl commands and SET_SELF flags. */
+#define BSDTHREAD_CTL_QOS_OVERRIDE_START           0x040
+#define BSDTHREAD_CTL_QOS_OVERRIDE_END             0x080
 #define BSDTHREAD_CTL_SET_SELF                    0x100
 #define BSDTHREAD_CTL_QOS_OVERRIDE_RESET          0x200
+#define BSDTHREAD_CTL_QOS_OVERRIDE_DISPATCH       0x400
+#define BSDTHREAD_CTL_QOS_DISPATCH_ASYNC_ADD      0x401
+#define BSDTHREAD_CTL_QOS_DISPATCH_ASYNC_RESET    0x402
 #define PTHREAD_SET_SELF_QOS_FLAG                 0x01
 #define PTHREAD_SET_SELF_VOUCHER_FLAG             0x02
 #define PTHREAD_SET_SELF_FIXEDPRIORITY_FLAG       0x04
