@@ -10,9 +10,11 @@
 #include <signal.h>
 #include <libgen.h>
 
+#include <copyfile.h>
 #include <dlfcn.h>
 #include <dirent.h>
 #include <sys/mman.h>
+#include <sys/clonefile.h>
 #include <mach-o/fat.h>
 #include <mach-o/getsect.h>
 #include <mach-o/loader.h>
@@ -26,6 +28,8 @@
 #include <ctype.h>
 #include <algorithm>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include "dynarmic.h"
 #include "arm_dynarmic_cp15.h"
@@ -35,22 +39,505 @@
 static std::string guestOSVersion;
 static std::string guestOSBuild;
 static std::string debuggerSymbolsRoot;
+static std::string debuggerImageCacheRoot;
+static std::vector<std::string> debuggerImageCacheFiles;
+static std::vector<std::string> debuggerImageCacheDirectories;
+static std::unordered_map<std::string, std::string> debuggerImagePathCache;
+
+static bool DebuggerWasRequested() {
+    const char *listenAddress = getenv("GDB_LISTEN_ADDRESS");
+    return listenAddress != NULL && listenAddress[0] != '\0';
+}
+
+static bool RangeIsInside(size_t containerSize,
+                          size_t offset,
+                          size_t size) {
+    return offset <= containerSize && size <= containerSize - offset;
+}
+
+static bool ReadULEB128(const uint8_t *data,
+                        size_t size,
+                        size_t *offset,
+                        uint64_t *value) {
+    if (data == NULL || offset == NULL || value == NULL) {
+        return false;
+    }
+
+    uint64_t result = 0;
+    unsigned shift = 0;
+    for (;;) {
+        if (*offset >= size || shift >= 64) {
+            return false;
+        }
+        const uint8_t byte = data[(*offset)++];
+        const uint64_t payload = byte & 0x7f;
+        if (payload > (UINT64_MAX >> shift)) {
+            return false;
+        }
+        result |= payload << shift;
+        if ((byte & 0x80) == 0) {
+            *value = result;
+            return true;
+        }
+        shift += 7;
+    }
+}
+
+static void AppendULEB128(std::vector<uint8_t> *output, uint64_t value) {
+    do {
+        uint8_t byte = value & 0x7f;
+        value >>= 7;
+        if (value != 0) {
+            byte |= 0x80;
+        }
+        output->push_back(byte);
+    } while (value != 0);
+}
+
+/*
+ * Apple ld64's ARM LC_FUNCTION_STARTS stream accumulates deltas between
+ * addresses whose low bit records Thumb state.  LLDB clears that bit from
+ * the running accumulator, so every ARM/Thumb transition shifts all later
+ * synthetic function boundaries.  The resulting boundaries can land in the
+ * middle of an instruction and make assembly-based unwinding miss a prologue.
+ *
+ * Rewrite debugger-only copies to preserve the initial ARM run and then keep
+ * the encoded state Thumb after the first Thumb function.  Every later delta
+ * is therefore between addresses with the same low bit, so the affected LLDB
+ * cannot shift a boundary.  Any later ARM function must have an nlist symbol
+ * that supplies its real instruction-set state; otherwise the debugger copy
+ * disables LC_FUNCTION_STARTS rather than risk decoding ARM as Thumb.  The
+ * guest image and extracted symbol file are never modified.
+ */
+static bool NormalizeARMFunctionStartsInSlice(uint8_t *fileData,
+                                               size_t fileSize,
+                                               size_t sliceOffset,
+                                               size_t sliceSize,
+                                               bool *changed) {
+    if (!RangeIsInside(fileSize, sliceOffset, sliceSize) ||
+        sliceSize < sizeof(mach_header)) {
+        return false;
+    }
+
+    mach_header header;
+    memcpy(&header, fileData + sliceOffset, sizeof(header));
+    if (header.magic != MH_MAGIC) {
+        return false;
+    }
+    if (header.cputype != CPU_TYPE_ARM) {
+        return true;
+    }
+    if (!RangeIsInside(sliceSize, sizeof(header), header.sizeofcmds)) {
+        return false;
+    }
+
+    uint32_t textVMAddress = 0;
+    uint32_t textVMSize = 0;
+    bool foundText = false;
+    uint32_t linkeditFileOffset = 0;
+    uint32_t linkeditFileSize = 0;
+    bool foundLinkedit = false;
+    size_t functionStartsCommandOffset = 0;
+    linkedit_data_command functionStarts = {};
+    symtab_command symbolTable = {};
+    bool foundSymbolTable = false;
+    std::vector<bool> instructionSections(1, false);
+
+    size_t commandOffset = sliceOffset + sizeof(header);
+    const size_t commandsEnd = commandOffset + header.sizeofcmds;
+    for (uint32_t i = 0; i < header.ncmds; ++i) {
+        if (!RangeIsInside(commandsEnd, commandOffset,
+                           sizeof(load_command))) {
+            return false;
+        }
+        load_command command;
+        memcpy(&command, fileData + commandOffset, sizeof(command));
+        if (command.cmdsize < sizeof(command) ||
+            !RangeIsInside(commandsEnd, commandOffset, command.cmdsize)) {
+            return false;
+        }
+
+        if (command.cmd == LC_SEGMENT &&
+            command.cmdsize >= sizeof(segment_command)) {
+            segment_command segment;
+            memcpy(&segment, fileData + commandOffset, sizeof(segment));
+            if (segment.nsects >
+                (command.cmdsize - sizeof(segment)) / sizeof(section)) {
+                return false;
+            }
+            if (strncmp(segment.segname, SEG_TEXT,
+                        sizeof(segment.segname)) == 0) {
+                textVMAddress = segment.vmaddr;
+                textVMSize = segment.vmsize;
+                foundText = true;
+            } else if (strncmp(segment.segname, SEG_LINKEDIT,
+                               sizeof(segment.segname)) == 0) {
+                linkeditFileOffset = segment.fileoff;
+                linkeditFileSize = segment.filesize;
+                foundLinkedit = true;
+            }
+
+            const uint8_t *sectionData =
+                fileData + commandOffset + sizeof(segment);
+            for (uint32_t sectionIndex = 0;
+                 sectionIndex < segment.nsects; ++sectionIndex) {
+                section currentSection;
+                memcpy(&currentSection,
+                       sectionData + sectionIndex * sizeof(currentSection),
+                       sizeof(currentSection));
+                instructionSections.push_back(
+                    (currentSection.flags &
+                     (S_ATTR_PURE_INSTRUCTIONS |
+                      S_ATTR_SOME_INSTRUCTIONS)) != 0);
+            }
+        } else if (command.cmd == LC_FUNCTION_STARTS &&
+                   command.cmdsize >= sizeof(linkedit_data_command)) {
+            memcpy(&functionStarts, fileData + commandOffset,
+                   sizeof(functionStarts));
+            functionStartsCommandOffset = commandOffset;
+        } else if (command.cmd == LC_SYMTAB &&
+                   command.cmdsize >= sizeof(symtab_command)) {
+            memcpy(&symbolTable, fileData + commandOffset,
+                   sizeof(symbolTable));
+            foundSymbolTable = true;
+        }
+        commandOffset += command.cmdsize;
+    }
+
+    if (!foundText || textVMSize == 0 ||
+        textVMSize > UINT32_MAX - textVMAddress ||
+        !foundLinkedit || functionStartsCommandOffset == 0 ||
+        functionStarts.datasize == 0) {
+        return true;
+    }
+    if (!RangeIsInside(sliceSize, functionStarts.dataoff,
+                       functionStarts.datasize) ||
+        functionStarts.dataoff < linkeditFileOffset ||
+        !RangeIsInside(linkeditFileSize,
+                       functionStarts.dataoff - linkeditFileOffset,
+                       functionStarts.datasize)) {
+        return false;
+    }
+
+    uint8_t *functionData =
+        fileData + sliceOffset + functionStarts.dataoff;
+    std::unordered_set<uint32_t> namedARMFunctions;
+    if (foundSymbolTable) {
+        if (symbolTable.nsyms > sliceSize / sizeof(struct nlist) ||
+            !RangeIsInside(sliceSize, symbolTable.symoff,
+                           symbolTable.nsyms * sizeof(struct nlist)) ||
+            !RangeIsInside(sliceSize, symbolTable.stroff,
+                           symbolTable.strsize)) {
+            return false;
+        }
+
+        const uint8_t *symbolData =
+            fileData + sliceOffset + symbolTable.symoff;
+        const char *stringData = reinterpret_cast<const char *>(
+            fileData + sliceOffset + symbolTable.stroff);
+        for (uint32_t i = 0; i < symbolTable.nsyms; ++i) {
+            struct nlist symbol;
+            memcpy(&symbol, symbolData + i * sizeof(symbol),
+                   sizeof(symbol));
+            const uint32_t stringOffset = symbol.n_un.n_strx;
+            if ((symbol.n_type & N_STAB) != 0 ||
+                (symbol.n_type & N_TYPE) != N_SECT ||
+                symbol.n_sect == 0 ||
+                symbol.n_sect >= instructionSections.size() ||
+                !instructionSections[symbol.n_sect] ||
+                (symbol.n_desc & N_ARM_THUMB_DEF) != 0 ||
+                stringOffset == 0 ||
+                stringOffset >= symbolTable.strsize) {
+                continue;
+            }
+            const char *name = stringData + stringOffset;
+            const size_t maximumNameSize =
+                symbolTable.strsize - stringOffset;
+            if (name[0] == '\0' ||
+                memchr(name, '\0', maximumNameSize) == NULL) {
+                continue;
+            }
+            namedARMFunctions.insert(symbol.n_value);
+        }
+    }
+
+    size_t inputOffset = 0;
+    uint64_t taggedAddress = textVMAddress;
+    uint64_t previousNormalizedAddress = textVMAddress;
+    bool emittedThumbState = false;
+    bool unsafeARMFunction = false;
+    bool first = true;
+    bool foundTerminator = false;
+    std::vector<uint8_t> normalized;
+    normalized.reserve(functionStarts.datasize);
+
+    while (inputOffset < functionStarts.datasize) {
+        uint64_t delta = 0;
+        if (!ReadULEB128(functionData, functionStarts.datasize,
+                         &inputOffset, &delta)) {
+            return false;
+        }
+        if (delta == 0) {
+            foundTerminator = true;
+            break;
+        }
+        if (delta > UINT32_MAX - taggedAddress) {
+            return false;
+        }
+        taggedAddress += delta;
+        const uint64_t codeAddress = taggedAddress & ~UINT64_C(1);
+        if (codeAddress < textVMAddress ||
+            codeAddress >=
+                static_cast<uint64_t>(textVMAddress) + textVMSize ||
+            codeAddress <=
+            (previousNormalizedAddress & ~UINT64_C(1))) {
+            return false;
+        }
+
+        const bool isThumb = (taggedAddress & 1) != 0;
+        if (isThumb) {
+            emittedThumbState = true;
+        } else if (emittedThumbState &&
+                   namedARMFunctions.count(
+                       static_cast<uint32_t>(codeAddress)) == 0) {
+            unsafeARMFunction = true;
+        }
+        const uint64_t normalizedAddress =
+            codeAddress + (emittedThumbState ? 1 : 0);
+        const uint64_t normalizedDelta =
+            normalizedAddress - previousNormalizedAddress;
+        AppendULEB128(&normalized, normalizedDelta);
+        previousNormalizedAddress = normalizedAddress;
+        first = false;
+    }
+    if (!foundTerminator || first) {
+        return false;
+    }
+    normalized.push_back(0);
+
+    if (unsafeARMFunction ||
+        normalized.size() > functionStarts.datasize) {
+        /*
+         * A poisoned function-start table is worse than no table.  This
+         * fallback keeps nlist symbols and frame-pointer unwinding usable.
+         */
+        const uint32_t noFunctionStarts = 0;
+        memcpy(fileData + functionStartsCommandOffset +
+                   offsetof(linkedit_data_command, datasize),
+               &noFunctionStarts, sizeof(noFunctionStarts));
+        *changed = true;
+        return true;
+    }
+
+    if (normalized.size() != functionStarts.datasize ||
+        memcmp(functionData, normalized.data(), normalized.size()) != 0) {
+        memset(functionData, 0, functionStarts.datasize);
+        memcpy(functionData, normalized.data(), normalized.size());
+        *changed = true;
+    }
+    return true;
+}
+
+static bool NormalizeDebuggerMachO(const char *path, bool *changed) {
+    *changed = false;
+    int fd = open(path, O_RDWR);
+    if (fd < 0) {
+        return false;
+    }
+
+    struct stat info;
+    if (fstat(fd, &info) != 0 ||
+        info.st_size < static_cast<off_t>(sizeof(uint32_t))) {
+        close(fd);
+        return false;
+    }
+    const size_t fileSize = static_cast<size_t>(info.st_size);
+    void *mapping =
+        mmap(NULL, fileSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (mapping == MAP_FAILED) {
+        close(fd);
+        return false;
+    }
+
+    uint8_t *fileData = static_cast<uint8_t *>(mapping);
+    uint32_t magic;
+    memcpy(&magic, fileData, sizeof(magic));
+    bool valid = true;
+    if (magic == MH_MAGIC) {
+        valid = NormalizeARMFunctionStartsInSlice(
+            fileData, fileSize, 0, fileSize, changed);
+    } else if (magic == FAT_CIGAM || magic == FAT_MAGIC) {
+        fat_header fatHeader;
+        if (!RangeIsInside(fileSize, 0, sizeof(fatHeader))) {
+            valid = false;
+        } else {
+            memcpy(&fatHeader, fileData, sizeof(fatHeader));
+            const bool swap = magic == FAT_CIGAM;
+            const uint32_t architectureCount =
+                swap ? OSSwapInt32(fatHeader.nfat_arch)
+                     : fatHeader.nfat_arch;
+            if (architectureCount > 64 ||
+                !RangeIsInside(fileSize, sizeof(fatHeader),
+                               architectureCount * sizeof(fat_arch))) {
+                valid = false;
+            }
+            for (uint32_t i = 0; valid && i < architectureCount; ++i) {
+                fat_arch architecture;
+                memcpy(&architecture,
+                       fileData + sizeof(fatHeader) +
+                           i * sizeof(architecture),
+                       sizeof(architecture));
+                const uint32_t sliceOffset =
+                    swap ? OSSwapInt32(architecture.offset)
+                         : architecture.offset;
+                const uint32_t sliceSize =
+                    swap ? OSSwapInt32(architecture.size)
+                         : architecture.size;
+                const cpu_type_t cpuType =
+                    swap ? OSSwapInt32(architecture.cputype)
+                         : architecture.cputype;
+                if (cpuType != CPU_TYPE_ARM) {
+                    continue;
+                }
+                valid = NormalizeARMFunctionStartsInSlice(
+                    fileData, fileSize, sliceOffset, sliceSize, changed);
+            }
+        }
+    }
+
+    if (*changed) {
+        (void)msync(mapping, fileSize, MS_SYNC);
+    }
+    munmap(mapping, fileSize);
+    close(fd);
+    return valid;
+}
+
+static void CleanupDebuggerImageCache() {
+    for (const std::string &path : debuggerImageCacheFiles) {
+        unlink(path.c_str());
+    }
+    for (auto i = debuggerImageCacheDirectories.rbegin();
+         i != debuggerImageCacheDirectories.rend(); ++i) {
+        rmdir(i->c_str());
+    }
+    if (!debuggerImageCacheRoot.empty()) {
+        rmdir(debuggerImageCacheRoot.c_str());
+    }
+}
+
+static bool EnsureDebuggerImageCache() {
+    if (!debuggerImageCacheRoot.empty()) {
+        return true;
+    }
+    const char *temporaryRoot = getenv("TMPDIR");
+    if (temporaryRoot == NULL || temporaryRoot[0] == '\0') {
+        temporaryRoot = "/tmp";
+    }
+
+    char path[PATH_MAX];
+    const int length = snprintf(path, sizeof(path),
+                                "%s%sLiveExec32-lldb.XXXXXX",
+                                temporaryRoot,
+                                temporaryRoot[strlen(temporaryRoot) - 1] == '/'
+                                    ? "" : "/");
+    if (length <= 0 || length >= sizeof(path) || mkdtemp(path) == NULL) {
+        return false;
+    }
+    debuggerImageCacheRoot = path;
+    atexit(CleanupDebuggerImageCache);
+    return true;
+}
+
+static bool PrepareDebuggerImagePath(const char *sourcePath,
+                                     char outputPath[PATH_MAX]) {
+    if (sourcePath == NULL || outputPath == NULL) {
+        return false;
+    }
+    const auto cached = debuggerImagePathCache.find(sourcePath);
+    if (cached != debuggerImagePathCache.end()) {
+        if (cached->second.size() >= PATH_MAX) {
+            return false;
+        }
+        memcpy(outputPath, cached->second.c_str(),
+               cached->second.size() + 1);
+        return true;
+    }
+
+    std::string selectedPath = sourcePath;
+    const char *disabled = getenv("GDB_DISABLE_ARM_FUNCTION_STARTS_FIX");
+    if ((disabled == NULL || strcmp(disabled, "1") != 0) &&
+        EnsureDebuggerImageCache()) {
+        char directory[PATH_MAX];
+        const int directoryLength = snprintf(
+            directory, sizeof(directory), "%s/image.XXXXXX",
+            debuggerImageCacheRoot.c_str());
+        const char *basename = strrchr(sourcePath, '/');
+        basename = basename != NULL ? basename + 1 : sourcePath;
+        if (directoryLength > 0 && directoryLength < sizeof(directory) &&
+            basename[0] != '\0' && mkdtemp(directory) != NULL) {
+            debuggerImageCacheDirectories.emplace_back(directory);
+            char shadowPath[PATH_MAX];
+            const int shadowLength =
+                snprintf(shadowPath, sizeof(shadowPath), "%s/%s",
+                         directory, basename);
+            if (shadowLength > 0 && shadowLength < sizeof(shadowPath)) {
+                bool copied = clonefile(sourcePath, shadowPath, 0) == 0;
+                if (!copied) {
+                    unlink(shadowPath);
+                    copied = copyfile(sourcePath, shadowPath, NULL,
+                                      COPYFILE_DATA) == 0;
+                }
+                if (copied) {
+                    bool changed = false;
+                    if (NormalizeDebuggerMachO(shadowPath, &changed) &&
+                        changed) {
+                        selectedPath = shadowPath;
+                        debuggerImageCacheFiles.emplace_back(shadowPath);
+                    } else {
+                        unlink(shadowPath);
+                    }
+                } else {
+                    unlink(shadowPath);
+                }
+            }
+        }
+    }
+
+    debuggerImagePathCache.emplace(sourcePath, selectedPath);
+    if (selectedPath.size() >= PATH_MAX) {
+        return false;
+    }
+    memcpy(outputPath, selectedPath.c_str(), selectedPath.size() + 1);
+    return true;
+}
 
 bool ResolveDebuggerImagePath(const char *guestPath, char *hostPath) {
     if (guestPath == NULL || hostPath == NULL || guestPath[0] != '/') {
         return false;
     }
-    if (sharedHandle.fs->pathGuestToHost(guestPath, hostPath) &&
-        access(hostPath, R_OK) == 0) {
-        return true;
+    char resolvedPath[PATH_MAX];
+    if (sharedHandle.fs->pathGuestToHost(guestPath, resolvedPath) &&
+        access(resolvedPath, R_OK) == 0) {
+        if (DebuggerWasRequested()) {
+            return PrepareDebuggerImagePath(resolvedPath, hostPath);
+        }
+        return strlcpy(hostPath, resolvedPath, PATH_MAX) < PATH_MAX;
     }
     if (debuggerSymbolsRoot.empty()) {
         return false;
     }
 
-    const int length = snprintf(hostPath, PATH_MAX, "%s%s",
+    const int length = snprintf(resolvedPath, PATH_MAX, "%s%s",
                                 debuggerSymbolsRoot.c_str(), guestPath);
-    return length > 0 && length < PATH_MAX && access(hostPath, R_OK) == 0;
+    if (length <= 0 || length >= PATH_MAX ||
+        access(resolvedPath, R_OK) != 0) {
+        return false;
+    }
+    if (DebuggerWasRequested()) {
+        return PrepareDebuggerImagePath(resolvedPath, hostPath);
+    }
+    return strlcpy(hostPath, resolvedPath, PATH_MAX) < PATH_MAX;
 }
 
 enum {
