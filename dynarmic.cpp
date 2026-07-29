@@ -8,9 +8,11 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdlib.h>
 #include <unistd.h>
 
+#include <mach/thread_act.h>
 #include <mach-o/getsect.h>
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
@@ -57,6 +59,17 @@ static std::atomic<int> guestStopSignal{SIGTRAP};
 static std::atomic<int> pendingGuestFatalSignal{0};
 static std::atomic<bool> reemitPendingGuestStop{false};
 static std::atomic<bool> guestDebuggerEnabled{false};
+static std::atomic<bool> debuggerInterruptRequested{false};
+
+enum class DebuggerMachCallPhase : uint8_t {
+    Idle,
+    Arming,
+    InCall,
+    Completing,
+};
+static std::atomic<DebuggerMachCallPhase> debuggerMachCallPhase{
+    DebuggerMachCallPhase::Idle};
+static std::atomic<mach_port_t> debuggerMachCallThread{MACH_PORT_NULL};
 
 struct DebuggerSoftwareBreakpoint {
     u32 address;
@@ -94,6 +107,7 @@ static bool ConsumePendingGuestStop() {
 
 static void UpdateGuestStopSignalForHalt(Dynarmic::HaltReason reason) {
     if (Dynarmic::Has(reason, LC32HaltReasonInterrupt)) {
+        debuggerInterruptRequested.store(false, std::memory_order_release);
         SetGuestStopSignal(SIGINT, false);
     } else if (Dynarmic::Has(reason, Dynarmic::HaltReason::MemoryAbort)) {
         SetGuestStopSignal(SIGSEGV, true);
@@ -284,6 +298,72 @@ union MachMessage_##function { \
     __Reply__##function##_t Out; \
 } *name = (MachMessage_##function *)host_header
 
+static mach_msg_return_t debugger_aware_mach_msg(
+        mach_msg_header_t *msg,
+        mach_msg_option_t option,
+        mach_msg_size_t send_size,
+        mach_msg_size_t rcv_size,
+        mach_port_t rcv_name,
+        mach_msg_timeout_t timeout,
+        mach_port_t notify) {
+    if ((option & (MACH_SEND_MSG | MACH_RCV_MSG)) == 0 ||
+            !guestDebuggerEnabled.load(std::memory_order_relaxed)) {
+        return mach_msg(msg, option, send_size, rcv_size, rcv_name,
+            timeout, notify);
+    }
+
+    /*
+     * The gdbstub socket reader runs on another host thread.  A Dynarmic halt
+     * request cannot wake this thread while it is blocked in the kernel.
+     * Publish the host thread and make only the host operation interruptible;
+     * the guest retains its original options and libsystem retry policy.
+     */
+    debuggerMachCallThread.store(
+        pthread_mach_thread_np(pthread_self()), std::memory_order_relaxed);
+    debuggerMachCallPhase.store(
+        DebuggerMachCallPhase::Arming, std::memory_order_release);
+
+    const auto finishCall = [] {
+        debuggerMachCallPhase.store(
+            DebuggerMachCallPhase::Completing, std::memory_order_release);
+        debuggerMachCallThread.store(
+            MACH_PORT_NULL, std::memory_order_release);
+        debuggerMachCallPhase.store(
+            DebuggerMachCallPhase::Idle, std::memory_order_release);
+    };
+    const auto interruptedBeforeCall = [option] {
+        return (option & MACH_SEND_MSG) != 0
+            ? MACH_SEND_INTERRUPTED
+            : MACH_RCV_INTERRUPTED;
+    };
+
+    if (debuggerInterruptRequested.load(std::memory_order_acquire)) {
+        finishCall();
+        return interruptedBeforeCall();
+    }
+
+    debuggerMachCallPhase.store(
+        DebuggerMachCallPhase::InCall, std::memory_order_release);
+    if (debuggerInterruptRequested.load(std::memory_order_acquire)) {
+        finishCall();
+        return interruptedBeforeCall();
+    }
+
+    mach_msg_option_t hostOption = option;
+    if ((hostOption & MACH_SEND_MSG) != 0) {
+        hostOption |= MACH_SEND_INTERRUPT;
+    }
+    if ((hostOption & MACH_RCV_MSG) != 0) {
+        hostOption |= MACH_RCV_INTERRUPT;
+    }
+
+    const mach_msg_return_t result =
+        mach_msg(msg, hostOption, send_size, rcv_size, rcv_name, timeout,
+            notify);
+    finishCall();
+    return result;
+}
+
 // FIXME: cannot call mach_msg(2)_trap directly
 mach_msg_return_t
 guest_mach_msg_trap(u32 guest_msg,
@@ -309,9 +389,10 @@ guest_mach_msg_trap(u32 guest_msg,
      * Pass the receive through to the host Mach port.
      */
     if (send_size == 0 && (option & MACH_RCV_MSG) != 0) {
-        result = mach_msg(host_header, option, 0, rcv_size, rcv_name,
-            timeout, notify);
-        if (rcv_size != 0) {
+        result = debugger_aware_mach_msg(host_header, option, 0, rcv_size,
+            rcv_name, timeout, notify);
+        if (rcv_size != 0 && result != MACH_RCV_INTERRUPTED &&
+                result != MACH_SEND_INTERRUPTED) {
             Dynarmic_mem_1write(guest_msg, rcv_size, host_msg);
         }
         free(host_msg);
@@ -512,9 +593,11 @@ guest_mach_msg_trap(u32 guest_msg,
              * forward the complete operation.
              */
             host_header->msgh_bits = request_bits;
-            result = mach_msg(host_header, option, send_size, rcv_size,
-                rcv_name, timeout, notify);
-            if ((option & MACH_RCV_MSG) != 0 && rcv_size != 0) {
+            result = debugger_aware_mach_msg(host_header, option, send_size,
+                rcv_size, rcv_name, timeout, notify);
+            if ((option & MACH_RCV_MSG) != 0 && rcv_size != 0 &&
+                    result != MACH_RCV_INTERRUPTED &&
+                    result != MACH_SEND_INTERRUPTED) {
                 Dynarmic_mem_1write(guest_msg, rcv_size, host_msg);
             }
             free(host_msg);
@@ -2808,6 +2891,9 @@ Dynarmic::HaltReason Dynarmic_emu_1step() {
 
 void Dynarmic_emu_1set_1debugger_1enabled(bool enabled) {
     guestDebuggerEnabled.store(enabled, std::memory_order_relaxed);
+    if (!enabled) {
+        debuggerInterruptRequested.store(false, std::memory_order_release);
+    }
 }
 
 int Dynarmic_emu_1get_1stop_1signal() {
@@ -2841,7 +2927,24 @@ int Dynarmic_emu_1stop() {
     DynarmicCallbacks32 *callbacks = sharedHandle.cb;
     Dynarmic::A32::Jit *jit = callbacks ? callbacks->cpu : NULL;
     if(jit) {
+      debuggerInterruptRequested.store(true, std::memory_order_release);
       jit->HaltExecution(LC32HaltReasonInterrupt);
+      for (;;) {
+        const DebuggerMachCallPhase phase =
+            debuggerMachCallPhase.load(std::memory_order_acquire);
+        if (phase == DebuggerMachCallPhase::Idle ||
+                phase == DebuggerMachCallPhase::Completing) {
+            break;
+        }
+        if (phase == DebuggerMachCallPhase::InCall) {
+            const mach_port_t thread =
+                debuggerMachCallThread.load(std::memory_order_acquire);
+            if (MACH_PORT_VALID(thread)) {
+                (void)thread_abort_safely(thread);
+            }
+        }
+        sched_yield();
+      }
     } else {
       return 1;
     }
