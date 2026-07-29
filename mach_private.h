@@ -19,6 +19,15 @@ __BEGIN_DECLS
 #define PTHREAD_FEATURE_WORKLOOP          0x80		/* supports workloops */
 #define PTHREAD_FEATURE_QOS_DEFAULT		0x40000000	/* the kernel supports QOS_CLASS_DEFAULT */
 
+/* iOS 10.3 bsdthread_ctl commands and SET_SELF flags. */
+#define BSDTHREAD_CTL_SET_SELF                    0x100
+#define BSDTHREAD_CTL_QOS_OVERRIDE_RESET          0x200
+#define PTHREAD_SET_SELF_QOS_FLAG                 0x01
+#define PTHREAD_SET_SELF_VOUCHER_FLAG             0x02
+#define PTHREAD_SET_SELF_FIXEDPRIORITY_FLAG       0x04
+#define PTHREAD_SET_SELF_TIMESHARE_FLAG           0x08
+#define PTHREAD_SET_SELF_WQ_KEVENT_UNBIND_FLAG    0x10
+
 /* iOS 10.3 libpthread workq_kernreturn operations. */
 #define WQOPS_THREAD_RETURN                 0x04
 #define WQOPS_QUEUE_NEWSPISUPP              0x10
@@ -413,6 +422,15 @@ extern kern_return_t semaphore_timedwait_signal_trap(
 	mach_port_name_t signal_name,
 	unsigned int sec,
 	clock_res_t nsec);
+
+extern mach_port_name_t mk_timer_create(void);
+extern kern_return_t mk_timer_destroy(mach_port_name_t name);
+extern kern_return_t mk_timer_arm(
+	mach_port_name_t name,
+	uint64_t expire_time);
+extern kern_return_t mk_timer_cancel(
+	mach_port_name_t name,
+	uint64_t *result_time);
 
 // XPC private
 extern kern_return_t _xpc_send_serializer(mach_port_t port, const char *payload);

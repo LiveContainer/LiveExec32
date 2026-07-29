@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 #include <mach/thread_act.h>
+#include <mach/mig_errors.h>
 #include <mach/vm_map.h>
 #include <mach/vm_page_size.h>
 #include <mach/vm_region.h>
@@ -205,6 +206,27 @@ int guest_csops(pid_t pid, unsigned int ops, u32 guest_useraddr, size_t usersize
     }
     Dynarmic_mem_1write(guest_useraddr, usersize, host_useraddr);
     free(host_useraddr);
+    return result;
+}
+
+int guest_csops_audittoken(pid_t pid, unsigned int ops,
+        u32 guest_useraddr, size_t usersize, u32 guest_audit_token) {
+    audit_token_t audit_token = {};
+    if (Dynarmic_mem_1read(
+            guest_audit_token, sizeof(audit_token),
+            reinterpret_cast<char *>(&audit_token)) != 0) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+
+    std::vector<char> host_useraddr(usersize);
+    int result = syscallRetCarry(
+        SYS_csops_audittoken, pid, ops, host_useraddr.data(), usersize,
+        &audit_token, 0, 0);
+    if (usersize != 0 &&
+            Dynarmic_mem_1write(
+                guest_useraddr, usersize, host_useraddr.data()) != 0) {
+        return return_with_carry_direct(EFAULT, true);
+    }
     return result;
 }
 
@@ -423,6 +445,19 @@ guest_mach_msg_trap(u32 guest_msg,
         return result;
     }
 
+    /*
+     * A failed service lookup leaves a null destination. The kernel rejects
+     * that send before MIG examines the request ID; doing the same here lets
+     * callers take their ordinary unavailable-service path. For a combined
+     * send/receive operation, a send failure also suppresses the receive.
+     */
+    if ((option & MACH_SEND_MSG) != 0 &&
+            send_size >= sizeof(mach_msg_header_t) &&
+            !MACH_PORT_VALID(host_header->msgh_remote_port)) {
+        free(host_msg);
+        return MACH_SEND_INVALID_DEST;
+    }
+
     printf("LC32: mach_msg_trap id %d\n", host_header->msgh_id);
 
     // pre-process reply header
@@ -453,6 +488,16 @@ guest_mach_msg_trap(u32 guest_msg,
             Mess->Out.clock_serv.type = MACH_MSG_PORT_DESCRIPTOR;
             Mess->Out.clock_serv.disposition = 17;
             Mess->Out.msgh_body.msgh_descriptor_count = 1;
+            break;
+        }
+        case 217: {
+            MACH_MSG_UNION(host_request_notification, Mess);
+            host_header->msgh_size = sizeof(Mess->Out);
+            Mess->Out.NDR = NDR_record;
+            Mess->Out.RetCode = host_request_notification(
+                Mess->In.Head.msgh_request_port,
+                Mess->In.notify_type,
+                Mess->In.notify_port.name);
             break;
         }
         case 412: {
@@ -541,6 +586,19 @@ guest_mach_msg_trap(u32 guest_msg,
             host_header->msgh_size        = sizeof(*host_header);
             break;
         }
+        case 3201: {
+            MACH_MSG_UNION(mach_port_type, Mess);
+            Mess->Out.NDR = NDR_record;
+            Mess->Out.RetCode = mach_port_type(
+                Mess->In.Head.msgh_request_port,
+                Mess->In.name,
+                &Mess->Out.ptype);
+            host_header->msgh_size =
+                Mess->Out.RetCode == KERN_SUCCESS
+                    ? sizeof(Mess->Out)
+                    : sizeof(mig_reply_error_t);
+            break;
+        }
         case 3213: {
             MACH_MSG_UNION(mach_port_request_notification, Mess);
             /*
@@ -573,6 +631,24 @@ guest_mach_msg_trap(u32 guest_msg,
             Mess->Out.previous.name = previous;
             Mess->Out.previous.disposition = MACH_MSG_TYPE_MOVE_SEND_ONCE;
             Mess->Out.previous.type = MACH_MSG_PORT_DESCRIPTOR;
+            break;
+        }
+        case 3218: {
+            MACH_MSG_UNION(mach_port_set_attributes, Mess);
+            host_header->msgh_size = sizeof(Mess->Out);
+            Mess->Out.NDR = NDR_record;
+            if (Mess->In.port_infoCnt >
+                    sizeof(Mess->In.port_info) /
+                        sizeof(Mess->In.port_info[0])) {
+                Mess->Out.RetCode = MIG_ARRAY_TOO_LARGE;
+            } else {
+                Mess->Out.RetCode = mach_port_set_attributes(
+                    Mess->In.Head.msgh_request_port,
+                    Mess->In.name,
+                    Mess->In.flavor,
+                    Mess->In.port_info,
+                    Mess->In.port_infoCnt);
+            }
             break;
         }
         case 3409: {
@@ -658,14 +734,18 @@ guest_mach_msg_trap(u32 guest_msg,
             free(host_msg);
             return MACH_MSG_SUCCESS;
         }
+        case 78: // libdispatch_internal_protocol.wakeup_runloop_thread
+        case 79: // libdispatch_internal_protocol.consume_send_once_right
         case 0x77303074:
-        case 0x10000000: {
+        case 0x10000000:
+        case 0x20000000: {
             /*
-             * libxpc's 'w00t' connection check-in and
-             * _xpc_send_serializer messages are transport messages rather
-             * than MIG requests. They may transfer port rights and use both
-             * send-only and combined send/receive calls, so preserve the
-             * request dispositions and forward the complete operation.
+             * libdispatch's internal control messages, libxpc's 'w00t'
+             * connection check-in, and XPC request/reply serializers are
+             * transport messages rather than MIG requests. They may transfer
+             * port rights and use both send-only and combined send/receive
+             * calls, so preserve the request dispositions and forward the
+             * complete operation.
              */
             host_header->msgh_bits = request_bits;
             result = debugger_aware_mach_msg(host_header, option, send_size,
@@ -974,6 +1054,43 @@ int guest_workq_open() {
     }
     guest_workqueue_opened = true;
     return return_with_carry_direct(0, false);
+}
+
+int guest_bsdthread_ctl(u32 command, u32 arg1, u32 arg2, u32 arg3) {
+    switch (command) {
+        case BSDTHREAD_CTL_SET_SELF:
+            WORKQUEUE_TRACE(
+                "LC32: bsdthread_ctl SET_SELF priority=0x%x "
+                "voucher=0x%x flags=0x%x\n",
+                arg1, arg2, arg3);
+            /*
+             * QoS, current voucher, and kevent binding are kernel properties
+             * of a thread. LC32's guest contexts cooperatively share one host
+             * emulator thread, so forwarding SET_SELF would leak a worker's
+             * state into the saved main context and into emulator-internal
+             * Mach calls. Guest libpthread maintains its QoS and voucher state
+             * in guest TSD, while direct-kevent delivery is already disabled
+             * when an EV_DISPATCH event is selected. There is therefore no
+             * host-side state to change here.
+             */
+            return return_with_carry_direct(0, false);
+        case BSDTHREAD_CTL_QOS_OVERRIDE_RESET:
+            /*
+             * Dispatch uses this to clear scheduler overrides from the
+             * current workqueue thread. LC32 does not model host scheduling
+             * overrides, so its empty guest-side override set is already in
+             * the requested state.
+             */
+            if (arg1 != 0 || arg2 != 0 || arg3 != 0) {
+                return return_with_carry_direct(EINVAL, true);
+            }
+            return return_with_carry_direct(0, false);
+        default:
+            fprintf(stderr,
+                "LC32: Unhandled bsdthread_ctl command 0x%x\n",
+                command);
+            return return_with_carry_direct(EINVAL, true);
+    }
 }
 
 int guest_workq_kernreturn(int options, u32 item, int arg2, int arg3) {
@@ -1369,6 +1486,87 @@ kern_return_t guest_host_create_mach_voucher_trap(mach_port_name_t host, u32 gue
     mach_port_name_t host_voucher;
     kern_return_t result = host_create_mach_voucher_trap(host, host_recipes, recipes_size, &host_voucher);
     sharedHandle.ucb->MemoryWrite32(guest_voucher, host_voucher);
+    return result;
+}
+
+kern_return_t guest_mach_voucher_extract_attr_recipe_trap(
+        mach_port_name_t voucher,
+        mach_voucher_attr_key_t key,
+        u32 guest_recipe,
+        u32 guest_recipe_size) {
+    mach_msg_type_number_t recipe_capacity = 0;
+    if (Dynarmic_mem_1read(
+            guest_recipe_size, sizeof(recipe_capacity),
+            reinterpret_cast<char *>(&recipe_capacity)) != 0) {
+        return KERN_MEMORY_ERROR;
+    }
+
+    if (recipe_capacity >
+            MACH_VOUCHER_ATTR_MAX_RAW_RECIPE_ARRAY_SIZE) {
+        return MIG_ARRAY_TOO_LARGE;
+    }
+
+    std::vector<uint8_t> recipe(std::max<size_t>(recipe_capacity, 1));
+    if (recipe_capacity != 0 &&
+            Dynarmic_mem_1read(
+                guest_recipe, recipe_capacity,
+                reinterpret_cast<char *>(recipe.data())) != 0) {
+        return KERN_MEMORY_ERROR;
+    }
+
+    mach_msg_type_number_t recipe_size = recipe_capacity;
+    kern_return_t result = mach_voucher_extract_attr_recipe_trap(
+        voucher, key, recipe.data(), &recipe_size);
+    if (result != KERN_SUCCESS) {
+        return result;
+    }
+    if (recipe_size > recipe_capacity) {
+        return MIG_ARRAY_TOO_LARGE;
+    }
+    if (recipe_size != 0 &&
+            Dynarmic_mem_1write(
+                guest_recipe, recipe_size,
+                reinterpret_cast<char *>(recipe.data())) != 0) {
+        return KERN_MEMORY_ERROR;
+    }
+    if (Dynarmic_mem_1write(
+            guest_recipe_size, sizeof(recipe_size),
+            reinterpret_cast<char *>(&recipe_size)) != 0) {
+        return KERN_MEMORY_ERROR;
+    }
+    return result;
+}
+
+kern_return_t guest_mach_generate_activity_id(
+        mach_port_name_t target, int count, u32 guest_activity_ids) {
+    if (count < 0 || count > MACH_ACTIVITY_ID_COUNT_MAX) {
+        return KERN_INVALID_ARGUMENT;
+    }
+
+    std::array<uint64_t, MACH_ACTIVITY_ID_COUNT_MAX> activity_ids = {};
+    kern_return_t result = mach_generate_activity_id(
+        target, count, count == 0 ? nullptr : activity_ids.data());
+    if (result == KERN_SUCCESS && count != 0 &&
+            Dynarmic_mem_1write(
+                guest_activity_ids,
+                static_cast<size_t>(count) * sizeof(activity_ids[0]),
+                reinterpret_cast<char *>(activity_ids.data())) != 0) {
+        return KERN_MEMORY_ERROR;
+    }
+    return result;
+}
+
+kern_return_t guest_mk_timer_cancel(
+        mach_port_name_t timer, u32 guest_result_time) {
+    uint64_t result_time = 0;
+    kern_return_t result = mk_timer_cancel(
+        timer, guest_result_time == 0 ? nullptr : &result_time);
+    if (result == KERN_SUCCESS && guest_result_time != 0 &&
+            Dynarmic_mem_1write(
+                guest_result_time, sizeof(result_time),
+                reinterpret_cast<char *>(&result_time)) != 0) {
+        return KERN_FAILURE;
+    }
     return result;
 }
 
@@ -2064,11 +2262,78 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 cpu->Regs()[0] = syscallRetCarry(NR, cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4] | ((u64)cpu->Regs()[5] << 32), cpu->Regs()[6]);
                 break;
             // the rest are indirect calls
+            case -17:
+                cpu->Regs()[0] = mach_port_destroy(
+                    cpu->Regs()[0], cpu->Regs()[1]);
+                break;
+            case -22:
+                cpu->Regs()[0] =
+                    _kernelrpc_mach_port_insert_member_trap(
+                        cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                break;
+            case -23:
+                cpu->Regs()[0] =
+                    _kernelrpc_mach_port_extract_member_trap(
+                        cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                break;
+            case -25:
+                cpu->Regs()[0] = _kernelrpc_mach_port_destruct_trap(
+                    cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2],
+                    cpu->Regs()[3] | (static_cast<uint64_t>(
+                        cpu->Regs()[4]) << 32));
+                break;
+            case -33:
+                cpu->Regs()[0] =
+                    semaphore_signal_trap(cpu->Regs()[0]);
+                break;
+            case -36:
+                cpu->Regs()[0] =
+                    semaphore_wait_trap(cpu->Regs()[0]);
+                break;
+            case -38:
+                cpu->Regs()[0] = semaphore_timedwait_trap(
+                    cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                break;
+            case -41:
+                cpu->Regs()[0] = _kernelrpc_mach_port_guard_trap(
+                    cpu->Regs()[0], cpu->Regs()[1],
+                    cpu->Regs()[2] | (static_cast<uint64_t>(
+                        cpu->Regs()[3]) << 32),
+                    cpu->Regs()[4]);
+                break;
+            case -43:
+                cpu->Regs()[0] = guest_mach_generate_activity_id(
+                    cpu->Regs()[0], static_cast<int>(cpu->Regs()[1]),
+                    cpu->Regs()[2]);
+                break;
+            case -61:
+                cpu->Regs()[0] = thread_switch(
+                    cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                break;
             case -89:
                 cpu->Regs()[0] = guest_mach_timebase_info(cpu->Regs()[0]);
                 break;
+            case -92:
+                cpu->Regs()[0] = mk_timer_destroy(cpu->Regs()[0]);
+                break;
+            case -93:
+                cpu->Regs()[0] = mk_timer_arm(
+                    cpu->Regs()[0],
+                    cpu->Regs()[1] | (static_cast<uint64_t>(
+                        cpu->Regs()[2]) << 32));
+                break;
+            case -94:
+                cpu->Regs()[0] = guest_mk_timer_cancel(
+                    cpu->Regs()[0], cpu->Regs()[1]);
+                break;
             case -70:
                 cpu->Regs()[0] = guest_host_create_mach_voucher_trap(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3]);
+                break;
+            case -72:
+                cpu->Regs()[0] =
+                    guest_mach_voucher_extract_attr_recipe_trap(
+                        cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2],
+                        cpu->Regs()[3]);
                 break;
             case -31:
                 cpu->Regs()[0] = guest_mach_msg_trap(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5], cpu->Regs()[6]);
@@ -2178,6 +2443,11 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 break;
             case 169:
                 cpu->Regs()[0] = guest_csops(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3]);
+                break;
+            case 170:
+                cpu->Regs()[0] = guest_csops_audittoken(
+                    cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2],
+                    cpu->Regs()[3], cpu->Regs()[4]);
                 break;
             case 194:
                 cpu->Regs()[0] = guest_getrlimit(cpu->Regs()[0], cpu->Regs()[1]);
@@ -2303,6 +2573,11 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                     cpu->Regs()[6], flags);
                 break;
             }
+            case 478: // bsdthread_ctl
+                cpu->Regs()[0] = guest_bsdthread_ctl(
+                    cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2],
+                    cpu->Regs()[3]);
+                break;
             case 381:
                 cpu->Regs()[0] = guest_sandbox_ms(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
                 break;
@@ -3027,10 +3302,11 @@ u64 Dynarmic_mem_reserve(u64 address, u64 size, bool fixed, u64 mask) {
     address = (address + mask) &~ mask;
     khash_t(memory) *memory = sharedHandle.memory;
     int ret;
-    for(u64 vaddr = address; vaddr < address + size; vaddr += DYN_PAGE_SIZE) {
-        khiter_t k;
-        if((k = kh_get(memory, memory, vaddr)) != kh_end(memory)) {
-            if (fixed) {
+    if (fixed) {
+        for(u64 vaddr = address; vaddr < address + size;
+                vaddr += DYN_PAGE_SIZE) {
+            khiter_t k;
+            if((k = kh_get(memory, memory, vaddr)) != kh_end(memory)) {
 #if 0
                 pthread_mutex_unlock(&mutex);
                 printf("Dynarmic_mem_reserve: cannot reserve fixed address 0x%llx. It is bound to 0x%llx\n", address, kh_value(memory, k)->addr);
@@ -3040,8 +3316,30 @@ u64 Dynarmic_mem_reserve(u64 address, u64 size, bool fixed, u64 mask) {
                 // FIXME: what should I really do here? Unmap will cause subsequent 3 pages (remember we're running 4k binaries on 16k) to be unmapped aswell
                 //Dynarmic_munmap(vaddr, DYN_PAGE_SIZE);
 #endif
-            } else {
-                address = vaddr + mask + 1;
+            }
+        }
+    } else {
+        /*
+         * A Mach VM alignment mask constrains every candidate, not just the
+         * initial hint. Restart the complete range scan after a collision:
+         * advancing from a 4K page by mask + 1 alone can produce a result
+         * that is not aligned to mask + 1 (for example ...9000 for a 16K
+         * request), which breaks clients such as libobjc autorelease pages.
+         */
+        for (;;) {
+            bool collision = false;
+            for(u64 vaddr = address; vaddr < address + size;
+                    vaddr += DYN_PAGE_SIZE) {
+                if(kh_get(memory, memory, vaddr) == kh_end(memory)) {
+                    continue;
+                }
+                address =
+                    (vaddr + DYN_PAGE_SIZE + mask) & ~mask;
+                collision = true;
+                break;
+            }
+            if(!collision) {
+                break;
             }
         }
     }
@@ -3095,7 +3393,7 @@ u32 Dynarmic_mmap(u32 address, u32 size, int protection, int flags, int fildes, 
         errno = EINVAL;
         return -1;
     }
-    if(size == 0 || (size & mask)) {
+    if(size == 0 || (size & DYN_PAGE_MASK)) {
         errno = EINVAL;
         return -1;
     }
