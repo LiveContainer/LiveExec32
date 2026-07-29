@@ -10,6 +10,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 #include <assert.h>
@@ -50,6 +51,7 @@
 #include "mach_private.h"
 #include "codesign.h"
 #include "dynarmic.h"
+#include "debugger_server.h"
 #include "32bit.h"
 
 
@@ -86,7 +88,178 @@ static std::atomic<int> pendingGuestFatalSignal{0};
 static std::atomic<bool> reemitPendingGuestStop{false};
 static std::atomic<bool> guestDebuggerEnabled{false};
 static std::atomic<bool> debuggerInterruptRequested{false};
+static std::atomic<bool> debuggerAllStopRequested{false};
+static std::atomic<bool> nativeShutdownRequested{false};
+static std::atomic<bool> guestProcessExitRequested{false};
+static std::atomic<int> guestProcessExitCode{0};
 static std::recursive_mutex guestVmMutex;
+
+enum class NativeLifecycleState : uint8_t {
+    Uninitialized,
+    Running,
+    ShuttingDown,
+    Destroyed,
+};
+
+static std::mutex nativeLifecycleMutex;
+static std::condition_variable nativeLifecycleCondition;
+static NativeLifecycleState nativeLifecycleState =
+    NativeLifecycleState::Uninitialized;
+
+struct GuestVmEpochParticipant {
+    uint64_t epoch = 0;
+    size_t activeDepth = 0;
+    bool registered = false;
+};
+
+struct RetiredMemoryBacking {
+    t_memory_backing backing = nullptr;
+    uint64_t retirementEpoch = 0;
+};
+
+static std::mutex guestVmEpochMutex;
+static uint64_t guestVmEpoch = 1;
+static GuestVmEpochParticipant mainGuestVmParticipant;
+static std::vector<GuestVmEpochParticipant *>
+    guestVmEpochParticipants;
+static std::vector<RetiredMemoryBacking>
+    retiredMemoryBackings;
+
+static void ReclaimRetiredMemoryBackingsLocked() {
+    for (auto iterator = retiredMemoryBackings.begin();
+            iterator != retiredMemoryBackings.end();) {
+        bool safe = true;
+        for (const GuestVmEpochParticipant *participant :
+                guestVmEpochParticipants) {
+            if (participant != nullptr &&
+                    participant->activeDepth != 0 &&
+                    participant->epoch <
+                        iterator->retirementEpoch) {
+                safe = false;
+                break;
+            }
+        }
+        if (!safe) {
+            ++iterator;
+            continue;
+        }
+        t_memory_backing backing =
+            iterator->backing;
+        if (backing != nullptr &&
+                munmap(backing->addr,
+                    backing->size) != 0) {
+            fprintf(stderr,
+                "munmap retired backing failed: "
+                "addr=%p, size=0x%zx, errno=%d\n",
+                backing->addr, backing->size,
+                errno);
+        }
+        free(backing);
+        iterator =
+            retiredMemoryBackings.erase(iterator);
+    }
+}
+
+static void RegisterGuestVmEpochParticipant(
+        GuestVmEpochParticipant *participant) {
+    if (participant == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(
+        guestVmEpochMutex);
+    if (participant->registered) {
+        return;
+    }
+    participant->registered = true;
+    participant->epoch = guestVmEpoch;
+    participant->activeDepth = 0;
+    guestVmEpochParticipants.push_back(
+        participant);
+}
+
+static void UnregisterGuestVmEpochParticipant(
+        GuestVmEpochParticipant *participant) {
+    if (participant == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(
+        guestVmEpochMutex);
+    if (!participant->registered) {
+        return;
+    }
+    assert(participant->activeDepth == 0);
+    guestVmEpochParticipants.erase(std::remove(
+        guestVmEpochParticipants.begin(),
+        guestVmEpochParticipants.end(),
+        participant), guestVmEpochParticipants.end());
+    participant->registered = false;
+    ReclaimRetiredMemoryBackingsLocked();
+}
+
+static void RetireMemoryBacking(
+        t_memory_backing backing) {
+    if (backing == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(
+        guestVmEpochMutex);
+    retiredMemoryBackings.push_back({
+        .backing = backing,
+        .retirementEpoch = ++guestVmEpoch,
+    });
+    ReclaimRetiredMemoryBackingsLocked();
+}
+
+class GuestVmEpochGuard {
+public:
+    explicit GuestVmEpochGuard(
+            GuestVmEpochParticipant *participant)
+        : participant(participant) {
+        if (participant == nullptr) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(
+            guestVmEpochMutex);
+        assert(participant->registered);
+        if (participant->activeDepth++ == 0) {
+            participant->epoch = guestVmEpoch;
+        }
+    }
+
+    ~GuestVmEpochGuard() {
+        if (participant == nullptr) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(
+            guestVmEpochMutex);
+        assert(participant->activeDepth != 0);
+        if (--participant->activeDepth == 0) {
+            ReclaimRetiredMemoryBackingsLocked();
+        }
+    }
+
+    GuestVmEpochGuard(
+        const GuestVmEpochGuard &) = delete;
+    GuestVmEpochGuard &operator=(
+        const GuestVmEpochGuard &) = delete;
+
+private:
+    GuestVmEpochParticipant *participant;
+};
+
+struct GuestStopRequest {
+    int signal = SIGTRAP;
+    bool pending = false;
+    bool valid = false;
+};
+
+/*
+ * A native guest thread must not publish process-wide signal state until it
+ * wins the all-stop coordinator. Otherwise two simultaneous faults can make
+ * LLDB report one thread with another thread's signal (and a losing SIGTRAP
+ * can incorrectly clear a winning fatal signal's replay state).
+ */
+static thread_local GuestStopRequest currentGuestStopRequest;
 
 static bool NativeGuestThreadsRequested() {
     static const bool requested = [] {
@@ -98,8 +271,7 @@ static bool NativeGuestThreadsRequested() {
 }
 
 static bool NativeGuestThreadsEnabled() {
-    return NativeGuestThreadsRequested() &&
-        !guestDebuggerEnabled.load(std::memory_order_relaxed);
+    return NativeGuestThreadsRequested();
 }
 
 static Dynarmic::A32::UserCallbacks *CurrentUserCallbacks();
@@ -110,9 +282,23 @@ enum class DebuggerMachCallPhase : uint8_t {
     InCall,
     Completing,
 };
-static std::atomic<DebuggerMachCallPhase> debuggerMachCallPhase{
-    DebuggerMachCallPhase::Idle};
-static std::atomic<mach_port_t> debuggerMachCallThread{MACH_PORT_NULL};
+
+struct DebuggerMachCall {
+    std::atomic<DebuggerMachCallPhase> phase{
+        DebuggerMachCallPhase::Idle};
+    std::atomic<bool> interruptRequested{false};
+    mach_port_t thread = MACH_PORT_NULL;
+    /*
+     * thread_abort_safely is sufficient for Mach traps, but Darwin may leave
+     * a raw BSD syscall such as read(2) asleep even after reporting success.
+     * Generic wrappers are installed only around known syscall boundaries,
+     * where thread_abort can safely force an EINTR return.
+     */
+    bool forceAbort = false;
+};
+
+static std::mutex debuggerMachCallsMutex;
+static std::vector<DebuggerMachCall *> debuggerMachCalls;
 
 static bool PumpGuestWorkqueue();
 static bool HandleGuestWorkqueueTransition();
@@ -128,6 +314,12 @@ static bool NativeGuestThreadIsCurrent();
 static bool GuestWorkqueueActiveForCurrentThread();
 static void InvalidateAllGuestJits(u32 address, size_t size);
 static void HaltAllGuestJits(Dynarmic::HaltReason reason);
+static void InterruptDebuggerMachCalls();
+namespace {
+bool NativeDebuggerPauseHostWaitIfNeeded();
+void NotifyNativeDebuggerWaiters();
+void NotifyNativeDebuggerCoordinator();
+}
 static u32 GuestBsdthreadCreate(
     u32 function, u32 argument, u32 stack, u32 pthread, u32 flags);
 static u32 GuestBsdthreadTerminate(
@@ -147,7 +339,8 @@ static u32 GuestUlockWait(
     u32 operation, u32 address, u64 value, u32 timeout);
 static u32 GuestUlockWake(
     u32 operation, u32 address, u64 wakeValue);
-static bool guestSingleStepping;
+static thread_local bool guestSingleStepping;
+static thread_local bool guestDeferredSVC;
 
 struct DebuggerSoftwareBreakpoint {
     u32 address;
@@ -157,10 +350,15 @@ struct DebuggerSoftwareBreakpoint {
 };
 static std::vector<DebuggerSoftwareBreakpoint> debuggerSoftwareBreakpoints;
 
-static void SetGuestStopSignal(int signal, bool pending) {
+static int NormalizeGuestStopSignal(int signal) {
     if (signal <= 0 || signal >= NSIG) {
-        signal = SIGABRT;
+        return SIGABRT;
     }
+    return signal;
+}
+
+static void CommitGuestStopSignal(int signal, bool pending) {
+    signal = NormalizeGuestStopSignal(signal);
     guestStopSignal.store(signal, std::memory_order_relaxed);
     if (!pending) {
         pendingGuestFatalSignal.store(0, std::memory_order_relaxed);
@@ -168,6 +366,48 @@ static void SetGuestStopSignal(int signal, bool pending) {
     } else {
         pendingGuestFatalSignal.store(signal, std::memory_order_relaxed);
     }
+}
+
+static void RecordGuestStopSignal(int signal, bool pending) {
+    signal = NormalizeGuestStopSignal(signal);
+    if (NativeGuestThreadsEnabled() &&
+            guestDebuggerEnabled.load(std::memory_order_acquire)) {
+        currentGuestStopRequest = {
+            .signal = signal,
+            .pending = pending,
+            .valid = true,
+        };
+        return;
+    }
+    CommitGuestStopSignal(signal, pending);
+}
+
+static void ClearCurrentGuestStopRequest() {
+    currentGuestStopRequest = {};
+}
+
+static GuestStopRequest CurrentGuestStopRequestForReason(
+        Dynarmic::HaltReason reason) {
+    GuestStopRequest request = currentGuestStopRequest;
+    if (request.valid) {
+        return request;
+    }
+
+    const Dynarmic::HaltReason visibleReason =
+        reason & ~LC32HaltReasonDebuggerPause;
+    request.valid = true;
+    if (Dynarmic::Has(
+            visibleReason, LC32HaltReasonInterrupt)) {
+        request.signal = SIGINT;
+    } else if (Dynarmic::Has(
+            visibleReason,
+            Dynarmic::HaltReason::MemoryAbort)) {
+        request.signal = SIGSEGV;
+        request.pending = true;
+    } else {
+        request.signal = SIGTRAP;
+    }
+    return request;
 }
 
 static bool ConsumePendingGuestStop() {
@@ -184,15 +424,24 @@ static bool ConsumePendingGuestStop() {
 }
 
 static void UpdateGuestStopSignalForHalt(Dynarmic::HaltReason reason) {
-    if (Dynarmic::Has(reason, LC32HaltReasonInterrupt)) {
+    const Dynarmic::HaltReason visibleReason =
+        reason & ~LC32HaltReasonDebuggerPause;
+    if (!visibleReason) {
+        return;
+    }
+    if (Dynarmic::Has(
+            visibleReason, LC32HaltReasonInterrupt)) {
         debuggerInterruptRequested.store(false, std::memory_order_release);
-        SetGuestStopSignal(SIGINT, false);
-    } else if (Dynarmic::Has(reason, Dynarmic::HaltReason::MemoryAbort)) {
-        SetGuestStopSignal(SIGSEGV, true);
-    } else if (!Dynarmic::Has(reason, LC32HaltReasonTrap)) {
+        RecordGuestStopSignal(SIGINT, false);
+    } else if (Dynarmic::Has(
+            visibleReason,
+            Dynarmic::HaltReason::MemoryAbort)) {
+        RecordGuestStopSignal(SIGSEGV, true);
+    } else if (!Dynarmic::Has(
+            visibleReason, LC32HaltReasonTrap)) {
         // A normal single-step or any non-fault emulator stop must not retain
         // the signal from an earlier fatal stop.
-        SetGuestStopSignal(SIGTRAP, false);
+        RecordGuestStopSignal(SIGTRAP, false);
     }
 }
 
@@ -419,28 +668,37 @@ static mach_msg_return_t debugger_aware_mach_msg(
         mach_msg_timeout_t timeout,
         mach_port_t notify) {
     if ((option & (MACH_SEND_MSG | MACH_RCV_MSG)) == 0 ||
-            !guestDebuggerEnabled.load(std::memory_order_relaxed)) {
+            (!guestDebuggerEnabled.load(std::memory_order_relaxed) &&
+             !NativeGuestThreadsEnabled())) {
         return mach_msg(msg, option, send_size, rcv_size, rcv_name,
             timeout, notify);
     }
 
     /*
-     * The gdbstub socket reader runs on another host thread.  A Dynarmic halt
-     * request cannot wake this thread while it is blocked in the kernel.
-     * Publish the host thread and make only the host operation interruptible;
-     * the guest retains its original options and libsystem retry policy.
+     * Every native guest pthread may block in Mach independently. Publish a
+     * stack record for this call so an all-stop request can interrupt every
+     * host thread, rather than whichever thread most recently overwrote a
+     * process-global slot.
      */
-    debuggerMachCallThread.store(
-        pthread_mach_thread_np(pthread_self()), std::memory_order_relaxed);
-    debuggerMachCallPhase.store(
+    DebuggerMachCall call;
+    call.thread = pthread_mach_thread_np(pthread_self());
+    call.phase.store(
         DebuggerMachCallPhase::Arming, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(debuggerMachCallsMutex);
+        debuggerMachCalls.push_back(&call);
+    }
 
-    const auto finishCall = [] {
-        debuggerMachCallPhase.store(
+    const auto finishCall = [&call] {
+        call.phase.store(
             DebuggerMachCallPhase::Completing, std::memory_order_release);
-        debuggerMachCallThread.store(
-            MACH_PORT_NULL, std::memory_order_release);
-        debuggerMachCallPhase.store(
+        {
+            std::lock_guard<std::mutex> lock(debuggerMachCallsMutex);
+            debuggerMachCalls.erase(std::remove(
+                debuggerMachCalls.begin(), debuggerMachCalls.end(),
+                &call), debuggerMachCalls.end());
+        }
+        call.phase.store(
             DebuggerMachCallPhase::Idle, std::memory_order_release);
     };
     const auto interruptedBeforeCall = [option] {
@@ -448,16 +706,26 @@ static mach_msg_return_t debugger_aware_mach_msg(
             ? MACH_SEND_INTERRUPTED
             : MACH_RCV_INTERRUPTED;
     };
+    const auto stopRequested = [&call] {
+        return call.interruptRequested.load(
+                   std::memory_order_acquire) ||
+            debuggerInterruptRequested.load(std::memory_order_acquire) ||
+            debuggerAllStopRequested.load(std::memory_order_acquire) ||
+            nativeShutdownRequested.load(std::memory_order_acquire) ||
+            guestProcessExitRequested.load(std::memory_order_acquire);
+    };
 
-    if (debuggerInterruptRequested.load(std::memory_order_acquire)) {
+    if (stopRequested()) {
         finishCall();
+        (void)NativeDebuggerPauseHostWaitIfNeeded();
         return interruptedBeforeCall();
     }
 
-    debuggerMachCallPhase.store(
+    call.phase.store(
         DebuggerMachCallPhase::InCall, std::memory_order_release);
-    if (debuggerInterruptRequested.load(std::memory_order_acquire)) {
+    if (stopRequested()) {
         finishCall();
+        (void)NativeDebuggerPauseHostWaitIfNeeded();
         return interruptedBeforeCall();
     }
 
@@ -473,6 +741,219 @@ static mach_msg_return_t debugger_aware_mach_msg(
         mach_msg(msg, hostOption, send_size, rcv_size, rcv_name, timeout,
             notify);
     finishCall();
+    if (stopRequested()) {
+        (void)NativeDebuggerPauseHostWaitIfNeeded();
+    }
+    return result;
+}
+
+static void InterruptDebuggerMachCalls() {
+    constexpr unsigned retryCount = 100;
+    constexpr useconds_t retryDelayMicroseconds = 1000;
+
+    const auto interruptionStillRequested = [] {
+        return debuggerInterruptRequested.load(
+                   std::memory_order_acquire) ||
+            debuggerAllStopRequested.load(
+                   std::memory_order_acquire) ||
+            nativeShutdownRequested.load(
+                   std::memory_order_acquire) ||
+            guestProcessExitRequested.load(
+                   std::memory_order_acquire);
+    };
+
+    /*
+     * Publishing InCall necessarily precedes the actual user-to-kernel
+     * transition. A one-shot thread_abort can therefore arrive in that tiny
+     * window and be lost before mach_msg/read enters the kernel. Persist the
+     * request in each stack record and retry for a bounded interval.
+     */
+    for (unsigned attempt = 0;
+            attempt < retryCount &&
+            interruptionStillRequested();
+            ++attempt) {
+        std::vector<std::pair<mach_port_t, bool>> threads;
+        size_t activeCalls = 0;
+        {
+            std::lock_guard<std::mutex> lock(
+                debuggerMachCallsMutex);
+            for (DebuggerMachCall *call :
+                    debuggerMachCalls) {
+                if (call == nullptr ||
+                        !MACH_PORT_VALID(call->thread)) {
+                    continue;
+                }
+                const DebuggerMachCallPhase phase =
+                    call->phase.load(
+                        std::memory_order_acquire);
+                if (phase ==
+                        DebuggerMachCallPhase::Arming ||
+                        phase ==
+                        DebuggerMachCallPhase::InCall) {
+                    ++activeCalls;
+                    call->interruptRequested.store(
+                        true, std::memory_order_release);
+                }
+                /*
+                 * Arming records have not committed to the host call and will
+                 * observe interruptRequested themselves. Only abort a thread
+                 * after it has published InCall.
+                 */
+                if (phase ==
+                        DebuggerMachCallPhase::InCall) {
+                    threads.push_back({
+                        call->thread, call->forceAbort});
+                }
+            }
+
+            std::sort(threads.begin(), threads.end());
+            size_t output = 0;
+            for (size_t index = 0;
+                    index < threads.size();) {
+                const mach_port_t thread =
+                    threads[index].first;
+                bool forceAbort = false;
+                size_t next = index;
+                while (next < threads.size() &&
+                        threads[next].first ==
+                            thread) {
+                    forceAbort |= threads[next].second;
+                    ++next;
+                }
+                /*
+                 * The stack record may disappear once this mutex is released.
+                 * Retain the send right so a terminating pthread cannot make
+                 * this copied port name stale or reusable during the abort.
+                 */
+                if (mach_port_mod_refs(
+                        mach_task_self(), thread,
+                        MACH_PORT_RIGHT_SEND, 1) ==
+                        KERN_SUCCESS) {
+                    threads[output++] = {
+                        thread, forceAbort};
+                }
+                index = next;
+            }
+            threads.resize(output);
+        }
+
+        for (const auto &entry : threads) {
+            if (entry.second) {
+                (void)thread_abort(entry.first);
+            } else {
+                (void)thread_abort_safely(entry.first);
+            }
+            (void)mach_port_deallocate(
+                mach_task_self(), entry.first);
+        }
+
+        if (activeCalls == 0 ||
+                attempt + 1 == retryCount) {
+            break;
+        }
+        usleep(retryDelayMicroseconds);
+    }
+}
+
+static void DrainDebuggerMachCalls() {
+    for (;;) {
+        InterruptDebuggerMachCalls();
+        bool active = false;
+        {
+            std::lock_guard<std::mutex> lock(
+                debuggerMachCallsMutex);
+            for (const DebuggerMachCall *call :
+                    debuggerMachCalls) {
+                if (call == nullptr) {
+                    continue;
+                }
+                const DebuggerMachCallPhase phase =
+                    call->phase.load(
+                        std::memory_order_acquire);
+                if (phase ==
+                        DebuggerMachCallPhase::Arming ||
+                        phase ==
+                        DebuggerMachCallPhase::InCall) {
+                    active = true;
+                    break;
+                }
+            }
+        }
+        if (!active) {
+            return;
+        }
+    }
+}
+
+template <typename Result, typename Function>
+static Result debugger_aware_host_wait(
+        Function &&function, Result interruptedResult) {
+    if (!guestDebuggerEnabled.load(
+            std::memory_order_acquire) &&
+            !NativeGuestThreadsEnabled()) {
+        return function();
+    }
+
+    DebuggerMachCall call;
+    call.thread = pthread_mach_thread_np(
+        pthread_self());
+    call.forceAbort = true;
+    call.phase.store(
+        DebuggerMachCallPhase::Arming,
+        std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(
+            debuggerMachCallsMutex);
+        debuggerMachCalls.push_back(&call);
+    }
+    const auto finishCall = [&call] {
+        call.phase.store(
+            DebuggerMachCallPhase::Completing,
+            std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(
+                debuggerMachCallsMutex);
+            debuggerMachCalls.erase(std::remove(
+                debuggerMachCalls.begin(),
+                debuggerMachCalls.end(), &call),
+                debuggerMachCalls.end());
+        }
+        call.phase.store(
+            DebuggerMachCallPhase::Idle,
+            std::memory_order_release);
+    };
+    const auto stopRequested = [&call] {
+        return call.interruptRequested.load(
+                   std::memory_order_acquire) ||
+            debuggerInterruptRequested.load(
+                   std::memory_order_acquire) ||
+            debuggerAllStopRequested.load(
+                   std::memory_order_acquire) ||
+            nativeShutdownRequested.load(
+                   std::memory_order_acquire) ||
+            guestProcessExitRequested.load(
+                   std::memory_order_acquire);
+    };
+
+    if (stopRequested()) {
+        finishCall();
+        (void)NativeDebuggerPauseHostWaitIfNeeded();
+        return interruptedResult;
+    }
+    call.phase.store(
+        DebuggerMachCallPhase::InCall,
+        std::memory_order_release);
+    if (stopRequested()) {
+        finishCall();
+        (void)NativeDebuggerPauseHostWaitIfNeeded();
+        return interruptedResult;
+    }
+
+    Result result = function();
+    finishCall();
+    if (stopRequested()) {
+        (void)NativeDebuggerPauseHostWaitIfNeeded();
+    }
     return result;
 }
 
@@ -1494,7 +1975,15 @@ int guest_connect(int socket, u32 guest_address, socklen_t address_len) {
         address_len = SUN_LEN(sock);
     }
 
-    return syscallRetCarry(SYS_connect, socket, (const sockaddr *)host_address, address_len, 0,0,0,0);
+    return debugger_aware_host_wait(
+        [&] {
+            return syscallRetCarry(
+                SYS_connect, socket,
+                reinterpret_cast<const sockaddr *>(
+                    host_address),
+                address_len, 0, 0, 0, 0);
+        },
+        return_with_carry_direct(EINTR, true));
 }
 
 int guest_gettimeofday(u32 guest_tp, u32 guest_tzp) {
@@ -1529,7 +2018,16 @@ ssize_t guest_sendto(int socket, const u32 guest_buffer, size_t length, int flag
     char *host_dest_addr = (char *)malloc(dest_len);
     Dynarmic_mem_1read(guest_buffer, length, host_buffer);
     Dynarmic_mem_1read(guest_dest_addr, dest_len, host_dest_addr);
-    int result = syscallRetCarry(SYS_sendto, socket, host_buffer, length, flags, (const sockaddr *)host_dest_addr, dest_len, 0);
+    int result = debugger_aware_host_wait(
+        [&] {
+            return syscallRetCarry(
+                SYS_sendto, socket, host_buffer, length,
+                flags,
+                reinterpret_cast<const sockaddr *>(
+                    host_dest_addr),
+                dest_len, 0);
+        },
+        return_with_carry_direct(EINTR, true));
     free(host_buffer);
     free(host_dest_addr);
     return result;
@@ -1537,16 +2035,42 @@ ssize_t guest_sendto(int socket, const u32 guest_buffer, size_t length, int flag
 
 ssize_t guest_pread(int NR, int fildes, u32 guest_buf, size_t nbyte, off_t offset) {
     char *host_buf = (char *)malloc(nbyte);
-    ssize_t result = syscallRetCarry(NR, fildes, host_buf, nbyte, offset, 0,0,0);
-    Dynarmic_mem_1write(guest_buf, nbyte, host_buf);
+    ssize_t result = debugger_aware_host_wait(
+        [&] {
+            return static_cast<ssize_t>(
+                syscallRetCarry(
+                    NR, fildes, host_buf, nbyte,
+                    offset, 0, 0, 0));
+        },
+        static_cast<ssize_t>(
+            return_with_carry_direct(EINTR, true)));
+    if (!threadHandle.cpsr->hasCarry() && result > 0) {
+        Dynarmic_mem_1write(
+            guest_buf,
+            std::min(static_cast<size_t>(result), nbyte),
+            host_buf);
+    }
     free(host_buf);
     return result;
 }
 
 ssize_t guest_read(int NR, int fildes, u32 guest_buf, size_t nbyte) {
     char *host_buf = (char *)malloc(nbyte);
-    ssize_t result = syscallRetCarry(NR, fildes, host_buf, nbyte, 0,0,0,0);
-    Dynarmic_mem_1write(guest_buf, nbyte, host_buf);
+    ssize_t result = debugger_aware_host_wait(
+        [&] {
+            return static_cast<ssize_t>(
+                syscallRetCarry(
+                    NR, fildes, host_buf, nbyte,
+                    0, 0, 0, 0));
+        },
+        static_cast<ssize_t>(
+            return_with_carry_direct(EINTR, true)));
+    if (!threadHandle.cpsr->hasCarry() && result > 0) {
+        Dynarmic_mem_1write(
+            guest_buf,
+            std::min(static_cast<size_t>(result), nbyte),
+            host_buf);
+    }
     free(host_buf);
     return result;
 }
@@ -1554,7 +2078,15 @@ ssize_t guest_read(int NR, int fildes, u32 guest_buf, size_t nbyte) {
 ssize_t guest_write(int NR, int fildes, u32 guest_buf, size_t nbyte) {
     char *host_buf = (char *)malloc(nbyte);
     Dynarmic_mem_1read(guest_buf, nbyte, host_buf);
-    ssize_t result = syscallRetCarry(NR, fildes, host_buf, nbyte, 0,0,0,0);
+    ssize_t result = debugger_aware_host_wait(
+        [&] {
+            return static_cast<ssize_t>(
+                syscallRetCarry(
+                    NR, fildes, host_buf, nbyte,
+                    0, 0, 0, 0));
+        },
+        static_cast<ssize_t>(
+            return_with_carry_direct(EINTR, true)));
     free(host_buf);
     return result;
 }
@@ -1574,7 +2106,13 @@ ssize_t guest_writev(int NR, int fildes, u32 guest_iov, int iovcnt) {
 int guest_open(int NR, u32 guest_path, int oflag, int mode) {
     char host_path[PATH_MAX];
     sharedHandle.fs->pathGuestToHost(guest_path, host_path);
-    int result = syscallRetCarry(NR, host_path, oflag, mode, 0,0,0,0);
+    int result = debugger_aware_host_wait(
+        [&] {
+            return syscallRetCarry(
+                NR, host_path, oflag, mode,
+                0, 0, 0, 0);
+        },
+        return_with_carry_direct(EINTR, true));
     return result;
 }
 
@@ -1704,8 +2242,15 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
         case F_SETOWN:
         case F_RDAHEAD:
         case F_NOCACHE:
-        case F_FULLFSYNC:
             return syscallRetCarry(SYS_fcntl, fildes, cmd, guest_r2, 0,0,0,0);
+        case F_FULLFSYNC:
+            return debugger_aware_host_wait(
+                [&] {
+                    return syscallRetCarry(
+                        SYS_fcntl, fildes, cmd,
+                        guest_r2, 0, 0, 0, 0);
+                },
+                return_with_carry_direct(EINTR, true));
         case F_ADDFILESIGS_RETURN:
             // fsig->fs_file_start = 0xFFFFFFFF;
             CurrentUserCallbacks()->MemoryWrite32(
@@ -1723,12 +2268,24 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
         case F_PREALLOCATE: {
             fstore_t host_r2;
             Dynarmic_mem_1read(guest_r2, sizeof(fstore_t), (char *)&host_r2);
-            return syscallRetCarry(SYS_fcntl, fildes, cmd, &host_r2, 0,0,0,0);
+            return debugger_aware_host_wait(
+                [&] {
+                    return syscallRetCarry(
+                        SYS_fcntl, fildes, cmd,
+                        &host_r2, 0, 0, 0, 0);
+                },
+                return_with_carry_direct(EINTR, true));
         }
         case F_SETSIZE: {
             off_t host_r2 =
                 CurrentUserCallbacks()->MemoryRead64(guest_r2);
-            return syscallRetCarry(SYS_fcntl, fildes, cmd, &host_r2);
+            return debugger_aware_host_wait(
+                [&] {
+                    return syscallRetCarry(
+                        SYS_fcntl, fildes, cmd,
+                        &host_r2, 0, 0, 0, 0);
+                },
+                return_with_carry_direct(EINTR, true));
         }
         case F_RDADVISE: {
             struct radvisory host_r2;
@@ -2066,8 +2623,12 @@ char *get_memory_page(u64 vaddr) {
     khash_t(memory) *memory = sharedHandle.memory;
     u64 idx = vaddr >> DYN_PAGE_BITS;
     if(page_table && idx < num_page_table_entries) {
-      return static_cast<char *>(__atomic_load_n(
-          &page_table[idx], __ATOMIC_ACQUIRE));
+      char *fastPage = static_cast<char *>(
+          __atomic_load_n(
+              &page_table[idx], __ATOMIC_ACQUIRE));
+      if (fastPage != nullptr) {
+        return fastPage;
+      }
     }
     std::lock_guard<std::recursive_mutex> lock(guestVmMutex);
     u64 base = vaddr & ~DYN_PAGE_MASK;
@@ -2084,6 +2645,274 @@ inline void *get_memory(u64 vaddr) {
     return page ? &page[vaddr & DYN_PAGE_MASK] : NULL;
 }
 
+static int HostProtectionForGuestPermissions(
+        int permissions) {
+    int hostProtection =
+        permissions & (PROT_READ | PROT_WRITE);
+    /*
+     * Guest execute permission is implemented by MemoryReadCode rather than
+     * host execution, but translating execute-only pages still needs to read
+     * their instruction bytes.
+     */
+    if ((permissions & PROT_EXEC) != 0) {
+        hostProtection |= PROT_READ;
+    }
+    return hostProtection;
+}
+
+static void *GuestPageTablePointer(
+        const t_memory_page page) {
+    if (page == nullptr || page->addr == nullptr) {
+        return nullptr;
+    }
+    if (page->enforceDataPermissions &&
+            (page->perms &
+                (PROT_READ | PROT_WRITE)) !=
+                (PROT_READ | PROT_WRITE)) {
+        return nullptr;
+    }
+    return page->addr;
+}
+
+static char *get_memory_page_with_permissions(
+        u64 vaddr, int requiredPermissions) {
+    std::lock_guard<std::recursive_mutex> lock(
+        guestVmMutex);
+    khash_t(memory) *memory = sharedHandle.memory;
+    if (memory == nullptr) {
+        return nullptr;
+    }
+    const u64 base = vaddr & ~DYN_PAGE_MASK;
+    const khiter_t iterator =
+        kh_get(memory, memory, base);
+    if (iterator == kh_end(memory)) {
+        return nullptr;
+    }
+    const t_memory_page page =
+        kh_value(memory, iterator);
+    if (page == nullptr ||
+            (page->perms & requiredPermissions) !=
+                requiredPermissions) {
+        return nullptr;
+    }
+    return static_cast<char *>(page->addr);
+}
+
+static bool GuestAddressRangeIsValid32(
+        u64 address, u64 size) {
+    constexpr u64 addressSpaceSize =
+        UINT64_C(1) << 32;
+    return address < addressSpaceSize &&
+        size <= addressSpaceSize - address;
+}
+
+static bool GuestProtectionIsValid(int protection) {
+    constexpr int supportedProtection =
+        PROT_READ | PROT_WRITE | PROT_EXEC;
+    return (protection & ~supportedProtection) == 0;
+}
+
+static bool read_guest_memory_with_permissions(
+        u64 address, void *destination, size_t size,
+        int requiredPermissions) {
+    if (!GuestAddressRangeIsValid32(
+            address, size)) {
+        return false;
+    }
+    std::lock_guard<std::recursive_mutex> lock(
+        guestVmMutex);
+    u64 validationAddress = address;
+    size_t validationSize = size;
+    while (validationSize != 0) {
+        if (get_memory_page_with_permissions(
+                validationAddress,
+                requiredPermissions) == nullptr) {
+            return false;
+        }
+        const size_t pageOffset =
+            validationAddress & DYN_PAGE_MASK;
+        const size_t chunk = std::min(
+            validationSize,
+            static_cast<size_t>(
+                DYN_PAGE_SIZE - pageOffset));
+        validationAddress += chunk;
+        validationSize -= chunk;
+    }
+
+    auto *output = static_cast<uint8_t *>(
+        destination);
+    while (size != 0) {
+        char *page =
+            get_memory_page_with_permissions(
+                address, requiredPermissions);
+        if (page == nullptr) {
+            return false;
+        }
+        const size_t pageOffset =
+            address & DYN_PAGE_MASK;
+        const size_t chunk = std::min(
+            size,
+            static_cast<size_t>(
+                DYN_PAGE_SIZE - pageOffset));
+        memcpy(output, page + pageOffset, chunk);
+        output += chunk;
+        address += chunk;
+        size -= chunk;
+    }
+    return true;
+}
+
+static bool write_guest_memory_with_permissions(
+        u64 address, const void *source, size_t size,
+        int requiredPermissions) {
+    if (!GuestAddressRangeIsValid32(
+            address, size)) {
+        return false;
+    }
+    std::lock_guard<std::recursive_mutex> lock(
+        guestVmMutex);
+    /*
+     * Validate the complete range before modifying it. An unaligned scalar
+     * store may span two guest pages; discovering a protected second page
+     * after writing the first would make a faulting instruction partially
+     * visible even though it has not retired.
+     */
+    u64 validationAddress = address;
+    size_t validationSize = size;
+    while (validationSize != 0) {
+        if (get_memory_page_with_permissions(
+                validationAddress,
+                requiredPermissions) == nullptr) {
+            return false;
+        }
+        const size_t pageOffset =
+            validationAddress & DYN_PAGE_MASK;
+        const size_t chunk = std::min(
+            validationSize,
+            static_cast<size_t>(
+                DYN_PAGE_SIZE - pageOffset));
+        validationAddress += chunk;
+        validationSize -= chunk;
+    }
+
+    const auto *input =
+        static_cast<const uint8_t *>(source);
+    while (size != 0) {
+        char *page =
+            get_memory_page_with_permissions(
+                address, requiredPermissions);
+        if (page == nullptr) {
+            return false;
+        }
+        const size_t pageOffset =
+            address & DYN_PAGE_MASK;
+        const size_t chunk = std::min(
+            size,
+            static_cast<size_t>(
+                DYN_PAGE_SIZE - pageOffset));
+        memcpy(page + pageOffset, input, chunk);
+        input += chunk;
+        address += chunk;
+        size -= chunk;
+    }
+    return true;
+}
+
+enum class ExclusiveGuestWriteResult {
+    Committed,
+    ComparisonFailed,
+    Fault,
+};
+
+template<typename T>
+static ExclusiveGuestWriteResult
+compare_exchange_guest_memory_with_permissions(
+        u64 address, T value, T expected) {
+    if (!GuestAddressRangeIsValid32(
+            address, sizeof(T))) {
+        return ExclusiveGuestWriteResult::Fault;
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(
+        guestVmMutex);
+
+    /*
+     * An exclusive write is one memory transaction: first validate the full
+     * write range, then compare and commit without dropping guestVmMutex.
+     * In particular, an unaligned value spanning two guest pages must neither
+     * report success nor modify its first page if the second page is not
+     * writable.
+     *
+     * Reading the comparison value is an implementation detail of the
+     * exclusive monitor, so only guest write permission is required here.
+     */
+    u64 validationAddress = address;
+    size_t validationSize = sizeof(T);
+    while (validationSize != 0) {
+        if (get_memory_page_with_permissions(
+                validationAddress,
+                PROT_WRITE) == nullptr) {
+            return ExclusiveGuestWriteResult::Fault;
+        }
+        const size_t pageOffset =
+            validationAddress & DYN_PAGE_MASK;
+        const size_t chunk = std::min(
+            validationSize,
+            static_cast<size_t>(
+                DYN_PAGE_SIZE - pageOffset));
+        validationAddress += chunk;
+        validationSize -= chunk;
+    }
+
+    T current{};
+    auto *currentBytes =
+        reinterpret_cast<uint8_t *>(&current);
+    u64 readAddress = address;
+    size_t remaining = sizeof(T);
+    while (remaining != 0) {
+        char *page =
+            get_memory_page_with_permissions(
+                readAddress, PROT_WRITE);
+        const size_t pageOffset =
+            readAddress & DYN_PAGE_MASK;
+        const size_t chunk = std::min(
+            remaining,
+            static_cast<size_t>(
+                DYN_PAGE_SIZE - pageOffset));
+        memcpy(currentBytes, page + pageOffset, chunk);
+        currentBytes += chunk;
+        readAddress += chunk;
+        remaining -= chunk;
+    }
+
+    if (memcmp(
+            &current, &expected, sizeof(T)) != 0) {
+        return ExclusiveGuestWriteResult::
+            ComparisonFailed;
+    }
+
+    const auto *valueBytes =
+        reinterpret_cast<const uint8_t *>(&value);
+    u64 writeAddress = address;
+    remaining = sizeof(T);
+    while (remaining != 0) {
+        char *page =
+            get_memory_page_with_permissions(
+                writeAddress, PROT_WRITE);
+        const size_t pageOffset =
+            writeAddress & DYN_PAGE_MASK;
+        const size_t chunk = std::min(
+            remaining,
+            static_cast<size_t>(
+                DYN_PAGE_SIZE - pageOffset));
+        memcpy(page + pageOffset, valueBytes, chunk);
+        valueBytes += chunk;
+        writeAddress += chunk;
+        remaining -= chunk;
+    }
+    return ExclusiveGuestWriteResult::Committed;
+}
+
 class DynarmicCallbacks32 final : public Dynarmic::A32::UserCallbacks {
 private:
     bool dumpingBacktrace = false;
@@ -2098,9 +2927,14 @@ public:
     DynarmicCallbacks32(khash_t(memory) *memory)
         : memory{memory}, cp15(std::make_shared<DynarmicCP15>()) {}
 
-    bool IsReadOnlyMemory(u32 vaddr) override {
-//        u32 idx;
-//        return mem_map && (idx = vaddr >> DYN_PAGE_BITS) < num_page_table_entries && mem_map[idx] & PAGE_EXISTS_BIT && (mem_map[idx] & UC_PROT_WRITE) == 0;
+    bool IsReadOnlyMemory(
+            u32 vaddr __attribute__((unused)))
+            override {
+        /*
+         * Debugger writes and later mprotect calls can still change a
+         * read-only page. Keep this conservative so Dynarmic never embeds a
+         * value as permanently immutable.
+         */
         return false;
     }
 
@@ -2112,15 +2946,21 @@ public:
             DumpBacktrace(false);
         }
 #endif
-        if (vaddr > UINT32_MAX - (sizeof(uint32_t) - 1) ||
-            get_memory(vaddr) == nullptr ||
-            get_memory(vaddr + sizeof(uint32_t) - 1) == nullptr) {
+        uint32_t result = 0;
+        if (!read_guest_memory_with_permissions(
+                vaddr, &result, sizeof(result),
+                PROT_EXEC)) {
             return std::nullopt;
         }
-        return MemoryRead32(vaddr, false);
+        return result;
     }
     u16 MemoryReadThumbCode(u32 vaddr) {
-        u16 code = MemoryRead16(vaddr, false);
+        u16 code = 0;
+        if (!read_guest_memory_with_permissions(
+                vaddr, &code, sizeof(code),
+                PROT_EXEC)) {
+            return 0;
+        }
 //        printf("MemoryReadThumbCode[%s->%s:%d]: vaddr=0x%x, code=0x%04x\n", __FILE__, __func__, __LINE__, vaddr, code);
         return code;
     }
@@ -2131,7 +2971,7 @@ public:
      * gdbstub gets a chance to report the original stop.
      */
     void StopForDebugger(int signal, bool pendingSignal) {
-        SetGuestStopSignal(signal, pendingSignal);
+        RecordGuestStopSignal(signal, pendingSignal);
         cpu->HaltExecution(LC32HaltReasonTrap);
     }
 
@@ -2151,12 +2991,14 @@ public:
     }
 
     u8 MemoryRead8(u32 vaddr) override {
-        u8 *dest = (u8 *) get_memory(vaddr);
-        if(dest) {
+        u8 value = 0;
+        if (read_guest_memory_with_permissions(
+                vaddr, &value, sizeof(value),
+                PROT_READ)) {
 #if TRACE_RW
-            printf("Trace: read08(0x%04x) = 0x%01x\n", vaddr, dest[0]);
+            printf("Trace: read08(0x%04x) = 0x%01x\n", vaddr, value);
 #endif
-            return dest[0];
+            return value;
         } else {
             fprintf(stderr, "MemoryRead8[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
             HandleBadMemoryAccess();
@@ -2164,18 +3006,15 @@ public:
         }
     }
     u16 MemoryRead16(u32 vaddr, bool trace) {
-        if(vaddr & 1) {
-            const u8 a{MemoryRead8(vaddr)};
-            const u8 b{MemoryRead8(vaddr + sizeof(u8))};
-            return (static_cast<u16>(b) << 8) | a;
-        }
-        u16 *dest = (u16 *) get_memory(vaddr);
-        if(dest) {
+        u16 value = 0;
+        if (read_guest_memory_with_permissions(
+                vaddr, &value, sizeof(value),
+                PROT_READ)) {
 #if TRACE_RW
             if (trace)
-            printf("Trace: read16(0x%04x) = 0x%02x\n", vaddr, dest[0]);
+            printf("Trace: read16(0x%04x) = 0x%02x\n", vaddr, value);
 #endif
-            return dest[0];
+            return value;
         } else {
             fprintf(stderr, "MemoryRead16[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
             // trace = tolerance bad mem access, else crash
@@ -2191,19 +3030,16 @@ public:
         return MemoryRead16(vaddr, true);
     }
     u32 MemoryRead32(u32 vaddr, bool trace) {
-        if(vaddr & 3) {
-            const u16 a{MemoryRead16(vaddr)};
-            const u16 b{MemoryRead16(vaddr + sizeof(u16))};
-            return (static_cast<u32>(b) << 16) | a;
-        }
-        u32 *dest = (u32 *) get_memory(vaddr);
-        if(dest) {
+        u32 value = 0;
+        if (read_guest_memory_with_permissions(
+                vaddr, &value, sizeof(value),
+                PROT_READ)) {
             //printf("MemoryRead32[%s->%s:%d]: vaddr=0x%x, value=0x%x\n", __FILE__, __func__, __LINE__, vaddr, dest[0]);
 #if TRACE_RW
             if (trace)
-            printf("Trace: read32(0x%04x) = 0x%04x\n", vaddr, dest[0]);
+            printf("Trace: read32(0x%04x) = 0x%04x\n", vaddr, value);
 #endif
-            return dest[0];
+            return value;
         } else {
             fprintf(stderr, "MemoryRead32[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
             // trace = tolerance bad mem access, else crash
@@ -2219,17 +3055,14 @@ public:
         return MemoryRead32(vaddr, true);
     }
     u64 MemoryRead64(u32 vaddr) override {
-        if(vaddr & 7) {
-            const u32 a{MemoryRead32(vaddr)};
-            const u32 b{MemoryRead32(vaddr + sizeof(u32))};
-            return (static_cast<u64>(b) << 32) | a;
-        }
-        u64 *dest = (u64 *) get_memory(vaddr);
-        if(dest) {
+        u64 value = 0;
+        if (read_guest_memory_with_permissions(
+                vaddr, &value, sizeof(value),
+                PROT_READ)) {
 #if TRACE_RW
-            printf("Trace: read64(0x%04x) = 0x%08llx\n", vaddr, dest[0]);
+            printf("Trace: read64(0x%04x) = 0x%08llx\n", vaddr, value);
 #endif
-            return dest[0];
+            return value;
         } else {
             fprintf(stderr, "MemoryRead64[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
             HandleBadMemoryAccess();
@@ -2238,63 +3071,48 @@ public:
     }
 
     void MemoryWrite8(u32 vaddr, u8 value) override {
-        u8 *dest = (u8 *) get_memory(vaddr);
-        if(dest) {
+        if (write_guest_memory_with_permissions(
+                vaddr, &value, sizeof(value),
+                PROT_WRITE)) {
 #if TRACE_RW
             printf("Trace: write08(0x%04x) = 0x%01x\n", vaddr, value);
 #endif
-            dest[0] = value;
         } else {
             fprintf(stderr, "MemoryWrite8[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
             HandleBadMemoryAccess();
         }
     }
     void MemoryWrite16(u32 vaddr, u16 value) override {
-        if(vaddr & 1) {
-            MemoryWrite8(vaddr, static_cast<u8>(value));
-            MemoryWrite8(vaddr + sizeof(u8), static_cast<u8>(value >> 8));
-            return;
-        }
-        u16 *dest = (u16 *) get_memory(vaddr);
-        if(dest) {
+        if (write_guest_memory_with_permissions(
+                vaddr, &value, sizeof(value),
+                PROT_WRITE)) {
 #if TRACE_RW
             printf("Trace: write16(0x%04x) = 0x%02x\n", vaddr, value);
 #endif
-            dest[0] = value;
         } else {
             fprintf(stderr, "MemoryWrite16[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
             HandleBadMemoryAccess();
         }
     }
     void MemoryWrite32(u32 vaddr, u32 value) override {
-        if(vaddr & 3) {
-            MemoryWrite16(vaddr, static_cast<u16>(value));
-            MemoryWrite16(vaddr + sizeof(u16), static_cast<u16>(value >> 16));
-            return;
-        }
-        u32 *dest = (u32 *) get_memory(vaddr);
-        if(dest) {
+        if (write_guest_memory_with_permissions(
+                vaddr, &value, sizeof(value),
+                PROT_WRITE)) {
 #if TRACE_RW
             printf("Trace: write32(0x%04x) = 0x%04x\n", vaddr, value);
 #endif
-            dest[0] = value;
         } else {
             fprintf(stderr, "MemoryWrite32[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
             HandleBadMemoryAccess();
         }
     }
     void MemoryWrite64(u32 vaddr, u64 value) override {
-        if(vaddr & 7) {
-            MemoryWrite32(vaddr, static_cast<u32>(value));
-            MemoryWrite32(vaddr + sizeof(u32), static_cast<u32>(value >> 32));
-            return;
-        }
-        u64 *dest = (u64 *) get_memory(vaddr);
-        if(dest) {
+        if (write_guest_memory_with_permissions(
+                vaddr, &value, sizeof(value),
+                PROT_WRITE)) {
 #if TRACE_RW
             printf("Trace: write64(0x%04x) = 0x%08llx\n", vaddr, value);
 #endif
-            dest[0] = value;
         } else {
             fprintf(stderr, "MemoryWrite64[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
             HandleBadMemoryAccess();
@@ -2302,32 +3120,48 @@ public:
     }
 
     bool MemoryWriteExclusive8(u32 vaddr, u8 value, u8 expected) override {
-        bool write = MemoryRead8(vaddr) == expected;
-        if(write) {
-            MemoryWrite8(vaddr, value);
+        const ExclusiveGuestWriteResult result =
+            compare_exchange_guest_memory_with_permissions(
+                vaddr, value, expected);
+        if (result == ExclusiveGuestWriteResult::Fault) {
+            fprintf(stderr, "MemoryWriteExclusive8[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
+            HandleBadMemoryAccess();
         }
-        return write;
+        return result ==
+            ExclusiveGuestWriteResult::Committed;
     }
     bool MemoryWriteExclusive16(u32 vaddr, u16 value, u16 expected) override {
-        bool write = MemoryRead16(vaddr) == expected;
-        if(write) {
-            MemoryWrite16(vaddr, value);
+        const ExclusiveGuestWriteResult result =
+            compare_exchange_guest_memory_with_permissions(
+                vaddr, value, expected);
+        if (result == ExclusiveGuestWriteResult::Fault) {
+            fprintf(stderr, "MemoryWriteExclusive16[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
+            HandleBadMemoryAccess();
         }
-        return write;
+        return result ==
+            ExclusiveGuestWriteResult::Committed;
     }
     bool MemoryWriteExclusive32(u32 vaddr, u32 value, u32 expected) override {
-        bool write = MemoryRead32(vaddr) == expected;
-        if(write) {
-            MemoryWrite32(vaddr, value);
+        const ExclusiveGuestWriteResult result =
+            compare_exchange_guest_memory_with_permissions(
+                vaddr, value, expected);
+        if (result == ExclusiveGuestWriteResult::Fault) {
+            fprintf(stderr, "MemoryWriteExclusive32[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
+            HandleBadMemoryAccess();
         }
-        return write;
+        return result ==
+            ExclusiveGuestWriteResult::Committed;
     }
     bool MemoryWriteExclusive64(u32 vaddr, u64 value, u64 expected) override {
-        bool write = MemoryRead64(vaddr) == expected;
-        if(write) {
-            MemoryWrite64(vaddr, value);
+        const ExclusiveGuestWriteResult result =
+            compare_exchange_guest_memory_with_permissions(
+                vaddr, value, expected);
+        if (result == ExclusiveGuestWriteResult::Fault) {
+            fprintf(stderr, "MemoryWriteExclusive64[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
+            HandleBadMemoryAccess();
         }
-        return write;
+        return result ==
+            ExclusiveGuestWriteResult::Committed;
     }
 
     void InterpreterFallback(u32 pc, std::size_t num_instructions) override {
@@ -2418,6 +3252,10 @@ public:
     }
 
     void DumpCrashReport(int signal = SIGABRT, bool pendingSignal = true) {
+        if (guestDebuggerEnabled.load(std::memory_order_acquire)) {
+            StopForDebugger(signal, pendingSignal);
+            return;
+        }
         DumpBacktrace(true, signal, pendingSignal);
     }
     
@@ -2432,7 +3270,7 @@ public:
             return;
         }
         if (crash) {
-            SetGuestStopSignal(signal, pendingSignal);
+            CommitGuestStopSignal(signal, pendingSignal);
         }
         dumpingBacktrace = true;
 
@@ -2560,7 +3398,6 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             case SYS_getppid: // 39
             case SYS_getegid: // 43
             case SYS_getgid: // 47
-            case SYS_fsync: // 95
             case SYS_socket: // 97
             case SYS_issetugid: // 327
             case SYS_close_nocancel: // 399
@@ -2577,7 +3414,26 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             // direct call with custom args
             case 334: // semwait_signal
             case 423: // semwait_signal_nocancel
-                cpu->Regs()[0] = syscallRetCarry(NR, cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4] | ((u64)cpu->Regs()[5] << 32), cpu->Regs()[6]);
+                cpu->Regs()[0] = debugger_aware_host_wait(
+                    [&] {
+                        return syscallRetCarry(
+                            NR, cpu->Regs()[0], cpu->Regs()[1],
+                            cpu->Regs()[2], cpu->Regs()[3],
+                            cpu->Regs()[4] |
+                                (static_cast<u64>(
+                                    cpu->Regs()[5]) << 32),
+                            cpu->Regs()[6]);
+                    },
+                    return_with_carry_direct(EINTR, true));
+                break;
+            case SYS_fsync: // 95
+                cpu->Regs()[0] = debugger_aware_host_wait(
+                    [&] {
+                        return syscallRetCarry(
+                            NR, cpu->Regs()[0],
+                            0, 0, 0, 0, 0, 0);
+                    },
+                    return_with_carry_direct(EINTR, true));
                 break;
             // the rest are indirect calls
             case -17:
@@ -2628,12 +3484,21 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                     semaphore_signal_trap(cpu->Regs()[0]);
                 break;
             case -36:
-                cpu->Regs()[0] =
-                    semaphore_wait_trap(cpu->Regs()[0]);
+                cpu->Regs()[0] = debugger_aware_host_wait(
+                    [&] {
+                        return semaphore_wait_trap(
+                            cpu->Regs()[0]);
+                    },
+                    static_cast<kern_return_t>(KERN_ABORTED));
                 break;
             case -38:
-                cpu->Regs()[0] = semaphore_timedwait_trap(
-                    cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                cpu->Regs()[0] = debugger_aware_host_wait(
+                    [&] {
+                        return semaphore_timedwait_trap(
+                            cpu->Regs()[0], cpu->Regs()[1],
+                            cpu->Regs()[2]);
+                    },
+                    static_cast<kern_return_t>(KERN_ABORTED));
                 break;
             case -41:
                 cpu->Regs()[0] = _kernelrpc_mach_port_guard_trap(
@@ -2718,9 +3583,16 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             }
             case SYS_exit: // 1
                 printf("Guest exited with code %d\n", cpu->Regs()[0]);
-                if(cpu->IsExecuting()) {
-                    cpu->HaltExecution(LC32HaltReasonExit);
-                }
+                guestProcessExitCode.store(
+                    static_cast<int>(
+                        cpu->Regs()[0] & 0xff),
+                    std::memory_order_release);
+                guestProcessExitRequested.store(
+                    true, std::memory_order_release);
+                HaltAllGuestJits(LC32HaltReasonExit);
+                InterruptDebuggerMachCalls();
+                NotifyNativeDebuggerWaiters();
+                NotifyNativeDebuggerCoordinator();
                 break;
             case SYS_fork: // 2
                 printf("fork() not supported\n");
@@ -2728,17 +3600,36 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 break;
             case SYS_read: // 3
             case SYS_read_nocancel: // 396
-                // Note: we don't use the cancel version cause unidbg also doesn't and it hangs
-                cpu->Regs()[0] = guest_read(SYS_read_nocancel, cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                /*
+                 * Native guest pthreads need an interruptible host call so
+                 * debugger all-stop and process teardown can abort a blocked
+                 * read. Cooperative mode retains the historical nocancel
+                 * behavior.
+                 */
+                cpu->Regs()[0] = guest_read(
+                    NativeGuestThreadsEnabled()
+                        ? SYS_read
+                        : SYS_read_nocancel,
+                    cpu->Regs()[0], cpu->Regs()[1],
+                    cpu->Regs()[2]);
                 break;
             case SYS_write: // 4
             case SYS_write_nocancel:
-                cpu->Regs()[0] = guest_write(NR, cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                cpu->Regs()[0] = guest_write(
+                    NativeGuestThreadsEnabled()
+                        ? SYS_write
+                        : NR,
+                    cpu->Regs()[0], cpu->Regs()[1],
+                    cpu->Regs()[2]);
                 break;
             case SYS_open: // 5
             case SYS_open_nocancel:
-                // Note: we don't use the cancel version cause unidbg also doesn't and it hangs
-                cpu->Regs()[0] = guest_open(SYS_open_nocancel, cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                cpu->Regs()[0] = guest_open(
+                    NativeGuestThreadsEnabled()
+                        ? SYS_open
+                        : SYS_open_nocancel,
+                    cpu->Regs()[0], cpu->Regs()[1],
+                    cpu->Regs()[2]);
                 break;
             case SYS_unlink: // 10
                 cpu->Regs()[0] = guest_unlink(cpu->Regs()[0]);
@@ -2785,7 +3676,12 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 break;
             case 121:
             case SYS_writev_nocancel:
-                cpu->Regs()[0] = guest_writev(NR, cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                cpu->Regs()[0] = guest_writev(
+                    NativeGuestThreadsEnabled()
+                        ? SYS_writev
+                        : NR,
+                    cpu->Regs()[0], cpu->Regs()[1],
+                    cpu->Regs()[2]);
                 break;
             case 128:
                 cpu->Regs()[0] = guest_rename(cpu->Regs()[0], cpu->Regs()[1]);
@@ -2795,7 +3691,15 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 break;
             case 153:
             case SYS_pread_nocancel:
-                cpu->Regs()[0] = guest_pread(NR, cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3] | ((u64)cpu->Regs()[4] << 32));
+                cpu->Regs()[0] = guest_pread(
+                    NativeGuestThreadsEnabled()
+                        ? SYS_pread
+                        : NR,
+                    cpu->Regs()[0], cpu->Regs()[1],
+                    cpu->Regs()[2],
+                    cpu->Regs()[3] |
+                        (static_cast<u64>(
+                            cpu->Regs()[4]) << 32));
                 break;
             case 169:
                 cpu->Regs()[0] = guest_csops(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3]);
@@ -3183,12 +4087,19 @@ struct NativeGuestJit {
     Dynarmic::A32::Jit *jit = nullptr;
     DynarmicCpsr *cpsr = nullptr;
     DynarmicCallbacks32 *callbacks = nullptr;
+    GuestVmEpochParticipant vmEpochParticipant;
+    gdb_thread_id_t debuggerId = 0;
     size_t processorId = 0;
     pthread_t hostThread = {};
     mach_port_t hostMachThread = MACH_PORT_NULL;
     std::mutex startMutex;
     std::condition_variable startCondition;
     bool startAllowed = false;
+    bool debuggerExecuting = false;
+    bool debuggerHostWaitPaused = false;
+    bool hostThreadCreated = false;
+    bool exited = false;
+    mach_port_t joinSemaphore = MACH_PORT_NULL;
 };
 
 struct GuestThreadContext {
@@ -3222,9 +4133,57 @@ std::atomic<u64> guestNextWaitSequence{1};
 uint64_t guestProcessorIdsInUse = 1;
 thread_local gdb_thread_id_t nativeGuestThreadId;
 thread_local bool nativeGuestThreadRetiring;
+thread_local NativeGuestJit *nativeGuestRuntime;
+thread_local bool nativeDebuggerHostWaitStep;
+thread_local uint64_t nativeDebuggerHostWaitStepGeneration;
+thread_local gdb_thread_id_t
+    cooperativeDebuggerResumeThread =
+        GDB_THREAD_ID_ALL;
 
 std::mutex nativeGuestJitMutex;
+std::condition_variable nativeGuestJitCondition;
 std::vector<NativeGuestJit *> nativeGuestJits;
+
+enum class NativeDebuggerRunState : uint8_t {
+    Disabled,
+    Stopped,
+    Running,
+    Stopping,
+    ShuttingDown,
+};
+
+enum class NativeDebuggerResumeMode : uint8_t {
+    ContinueAll,
+    ContinueOne,
+    StepOne,
+    StepOneContinueOthers,
+};
+
+struct NativeDebuggerCoordinator {
+    std::mutex mutex;
+    std::condition_variable condition;
+    NativeDebuggerRunState state =
+        NativeDebuggerRunState::Disabled;
+    NativeDebuggerResumeMode resumeMode =
+        NativeDebuggerResumeMode::ContinueAll;
+    gdb_thread_id_t stopOwner = 1;
+    gdb_thread_id_t stepThread = 1;
+    Dynarmic::HaltReason stopReason =
+        LC32HaltReasonTrap;
+    int stopSignal = SIGTRAP;
+    uint64_t generation = 0;
+    size_t executingWorkers = 0;
+    bool mainExecuting = false;
+    /*
+     * The socket reader can receive ^C after async I/O is enabled but before
+     * the target thread has changed Stopped to Running. Preserve that request
+     * across the resume handoff instead of clearing it as stale state.
+     */
+    bool resumeStarting = false;
+    bool pendingInterrupt = false;
+};
+
+NativeDebuggerCoordinator nativeDebugger;
 
 struct GuestPsynchPrepost {
     GuestThreadWaitKind kind;
@@ -3247,6 +4206,144 @@ struct NativeGuestWaiter {
 
 std::mutex nativeGuestWaitMutex;
 std::vector<std::shared_ptr<NativeGuestWaiter>> nativeGuestWaiters;
+
+static bool NativeDebuggerActive() {
+    return NativeGuestThreadsEnabled() &&
+        guestDebuggerEnabled.load(std::memory_order_acquire);
+}
+
+static void NativeDebuggerSetWorkerExecutingLocked(
+        NativeGuestJit *runtime, bool executing) {
+    if (runtime == nullptr ||
+            runtime->debuggerExecuting == executing) {
+        return;
+    }
+    runtime->debuggerExecuting = executing;
+    if (executing) {
+        ++nativeDebugger.executingWorkers;
+    } else {
+        assert(nativeDebugger.executingWorkers != 0);
+        --nativeDebugger.executingWorkers;
+    }
+}
+
+static bool NativeDebuggerRunsThreadLocked(
+        gdb_thread_id_t threadId) {
+    switch (nativeDebugger.resumeMode) {
+    case NativeDebuggerResumeMode::ContinueAll:
+    case NativeDebuggerResumeMode::StepOneContinueOthers:
+        return true;
+    case NativeDebuggerResumeMode::ContinueOne:
+    case NativeDebuggerResumeMode::StepOne:
+        return nativeDebugger.stepThread ==
+            threadId;
+    }
+}
+
+static bool NativeDebuggerStepsThreadLocked(
+        gdb_thread_id_t threadId) {
+    return (nativeDebugger.resumeMode ==
+                NativeDebuggerResumeMode::StepOne ||
+            nativeDebugger.resumeMode ==
+                NativeDebuggerResumeMode::StepOneContinueOthers) &&
+        nativeDebugger.stepThread == threadId;
+}
+
+/*
+ * A native pthread may be inside a host wait when another guest thread stops.
+ * Such a worker acknowledges the all-stop epoch here and remains inside the
+ * emulated syscall until ContinueAll opens the next epoch. The main emulator
+ * thread cannot park here because it is also the gdbstub target thread; it
+ * instead unwinds the host wait and returns to Dynarmic so the target callback
+ * can report the stop.
+ */
+bool NativeDebuggerPauseHostWaitIfNeeded() {
+    if (nativeShutdownRequested.load(std::memory_order_acquire) ||
+            guestProcessExitRequested.load(
+                std::memory_order_acquire)) {
+        return true;
+    }
+    if (!NativeDebuggerActive() ||
+            !debuggerAllStopRequested.load(std::memory_order_acquire)) {
+        return false;
+    }
+    if (nativeGuestRuntime == nullptr ||
+            nativeGuestThreadId <= 1) {
+        return true;
+    }
+
+    std::unique_lock<std::mutex> lock(nativeDebugger.mutex);
+    if (nativeDebugger.state == NativeDebuggerRunState::Running) {
+        return false;
+    }
+    nativeGuestRuntime->debuggerHostWaitPaused = true;
+    NativeDebuggerSetWorkerExecutingLocked(
+        nativeGuestRuntime, false);
+    nativeDebugger.condition.notify_all();
+    nativeDebugger.condition.wait(lock, [] {
+        return !NativeDebuggerActive() ||
+            nativeGuestThreadRetiring ||
+            nativeDebugger.state ==
+                NativeDebuggerRunState::ShuttingDown ||
+            (nativeDebugger.state ==
+                NativeDebuggerRunState::Running &&
+             NativeDebuggerRunsThreadLocked(
+                 nativeGuestRuntime->debuggerId));
+    });
+    if (!NativeDebuggerActive() ||
+            nativeGuestThreadRetiring ||
+            nativeDebugger.state ==
+                NativeDebuggerRunState::ShuttingDown) {
+        nativeGuestRuntime->debuggerHostWaitPaused = false;
+        nativeDebuggerHostWaitStep = false;
+        nativeDebuggerHostWaitStepGeneration = 0;
+        return true;
+    }
+    nativeDebuggerHostWaitStep =
+        NativeDebuggerStepsThreadLocked(
+            nativeGuestRuntime->debuggerId);
+    nativeDebuggerHostWaitStepGeneration =
+        nativeDebuggerHostWaitStep
+        ? nativeDebugger.generation
+        : 0;
+    if (nativeDebuggerHostWaitStep &&
+            nativeGuestRuntime->jit != nullptr) {
+        /*
+         * The host wait lives inside an existing Jit::Run callback. Re-arm the
+         * internal pause so that old Run unwinds after syscall copyout; the
+         * worker loop can then issue a real Jit::Step for the selected thread.
+         */
+        nativeGuestRuntime->jit->HaltExecution(
+            LC32HaltReasonDebuggerPause);
+    } else {
+        nativeGuestRuntime->debuggerHostWaitPaused = false;
+    }
+    NativeDebuggerSetWorkerExecutingLocked(
+        nativeGuestRuntime, true);
+    return true;
+}
+
+static bool ConsumeNativeDebuggerHostWaitStep(
+        uint64_t commandGeneration) {
+    const bool step =
+        nativeDebuggerHostWaitStep &&
+        nativeDebuggerHostWaitStepGeneration ==
+            commandGeneration;
+    nativeDebuggerHostWaitStep = false;
+    nativeDebuggerHostWaitStepGeneration = 0;
+    return step;
+}
+
+void NotifyNativeDebuggerWaiters() {
+    std::lock_guard<std::mutex> lock(nativeGuestWaitMutex);
+    for (const auto &waiter : nativeGuestWaiters) {
+        waiter->condition.notify_all();
+    }
+}
+
+void NotifyNativeDebuggerCoordinator() {
+    nativeDebugger.condition.notify_all();
+}
 
 constexpr u32 GuestWorkqueueGuardSize = DYN_PAGE_SIZE;
 constexpr u32 GuestWorkqueueStackSize = 0x80000;
@@ -3280,6 +4377,52 @@ bool guestWorkqueueWaitingContextValid;
 gdb_thread_id_t guestWorkqueueWaitingThreadId;
 u64 guestWorkqueueThreadSelfId;
 u32 guestWorkqueueSignalMask;
+
+static gdb_thread_id_t ActiveMainDebuggerThread() {
+    std::lock_guard<std::recursive_mutex> lock(
+        guestWorkqueueMutex);
+    return guestWorkqueueUpcallActive &&
+        guestWorkqueueWaitingContextValid
+        ? 2
+        : 1;
+}
+
+static bool NativeDebuggerMainContextMayRun() {
+    if (nativeGuestRuntime != nullptr) {
+        return true;
+    }
+    if (!NativeDebuggerActive()) {
+        if (!guestDebuggerEnabled.load(
+                std::memory_order_acquire)) {
+            return true;
+        }
+        /*
+         * Cooperative pthreads and the workqueue pseudo-thread all overlay
+         * the one JIT. Stop at a context-switch boundary if an exact-thread
+         * resume selected a different logical context.
+         */
+        const gdb_thread_id_t activeThread =
+            Dynarmic_debugger_current_thread();
+        return cooperativeDebuggerResumeThread ==
+                GDB_THREAD_ID_ANY ||
+            cooperativeDebuggerResumeThread ==
+                GDB_THREAD_ID_ALL ||
+            cooperativeDebuggerResumeThread ==
+                activeThread;
+    }
+    /*
+     * Snapshot the overlay without holding guestWorkqueueMutex while taking
+     * the coordinator. Register access takes those locks in the opposite
+     * order while stopped.
+     */
+    const gdb_thread_id_t activeThread =
+        ActiveMainDebuggerThread();
+    std::lock_guard<std::mutex> lock(
+        nativeDebugger.mutex);
+    return nativeDebugger.state ==
+            NativeDebuggerRunState::Running &&
+        NativeDebuggerRunsThreadLocked(activeThread);
+}
 
 void SaveGuestContext(context32 &context) {
     Dynarmic::A32::Jit *jit = threadHandle.jit;
@@ -3344,8 +4487,7 @@ void EnsureGuestThreadRegistry() {
     if (NativeGuestThreadsEnabled()) {
         nativeGuestThreadId = 1;
         fprintf(stderr,
-            "LC32: native guest pthread experiment enabled "
-            "(debugger support disabled)\n");
+            "LC32: native guest pthread experiment enabled\n");
     }
 }
 
@@ -3847,6 +4989,249 @@ static void HaltAllGuestJits(
     }
 }
 
+static void ClearAllGuestJitHalts(
+        Dynarmic::HaltReason reason) {
+    Dynarmic::A32::Jit *mainJit =
+        sharedHandle.cb != nullptr
+        ? sharedHandle.cb->cpu
+        : nullptr;
+    if (mainJit != nullptr) {
+        mainJit->ClearHalt(reason);
+    }
+    std::lock_guard<std::mutex> lock(
+        nativeGuestJitMutex);
+    for (NativeGuestJit *runtime : nativeGuestJits) {
+        if (runtime != nullptr &&
+                runtime->jit != nullptr &&
+                runtime->jit != mainJit) {
+            runtime->jit->ClearHalt(reason);
+        }
+    }
+}
+
+static Dynarmic::HaltReason NativeDebuggerVisibleReason(
+        Dynarmic::HaltReason reason) {
+    return reason & ~LC32HaltReasonDebuggerPause;
+}
+
+static bool NativeDebuggerStopOwnerAlive(
+        gdb_thread_id_t owner) {
+    if (owner == 1) {
+        return sharedHandle.cb != nullptr &&
+            sharedHandle.cb->cpu != nullptr;
+    }
+    if (owner == 2) {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestWorkqueueMutex);
+        return guestWorkqueueUpcallActive &&
+            guestWorkqueueWaitingContextValid;
+    }
+    std::lock_guard<std::recursive_mutex> lock(
+        guestThreadMutex);
+    for (const GuestThreadContext &thread :
+            guestThreads) {
+        if (thread.debuggerId == owner) {
+            return thread.alive;
+        }
+    }
+    return false;
+}
+
+/*
+ * Called with nativeDebugger.mutex held. The registry locks are acquired in
+ * the same coordinator-first order used by stopped register access. A thread
+ * A context transition or retiring thread transfers an already committed
+ * owner only after dropping its registry lock, closing both sides of the
+ * validation/commit race.
+ */
+static gdb_thread_id_t NativeDebuggerNormalizeStopOwnerLocked(
+        gdb_thread_id_t owner) {
+    /*
+     * Thread 2 owns the main JIT while the workqueue overlay is active.
+     * Thread 1 remains alive only as a saved register context and must not be
+     * exposed as the owner of a stop taken by that JIT.
+     */
+    if (owner == 1 &&
+            NativeDebuggerStopOwnerAlive(2)) {
+        return 2;
+    }
+    if (NativeDebuggerStopOwnerAlive(owner)) {
+        return owner;
+    }
+    if (NativeDebuggerStopOwnerAlive(2)) {
+        return 2;
+    }
+    return 1;
+}
+
+static void NativeDebuggerTransferStopOwner(
+        gdb_thread_id_t previousOwner,
+        gdb_thread_id_t replacementOwner) {
+    if (!NativeDebuggerActive()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(
+        nativeDebugger.mutex);
+    if ((nativeDebugger.state ==
+                NativeDebuggerRunState::Stopping ||
+            nativeDebugger.state ==
+                NativeDebuggerRunState::Stopped) &&
+            nativeDebugger.stopOwner ==
+                previousOwner) {
+        nativeDebugger.stopOwner =
+            NativeDebuggerNormalizeStopOwnerLocked(
+                replacementOwner);
+    }
+}
+
+static bool NativeDebuggerRequestStop(
+        gdb_thread_id_t owner,
+        Dynarmic::HaltReason reason,
+        int forcedSignal = 0,
+        bool forcedPendingSignal = false,
+        bool queueWhileStopped = false) {
+    const Dynarmic::HaltReason visibleReason =
+        NativeDebuggerVisibleReason(reason);
+    GuestStopRequest request =
+        CurrentGuestStopRequestForReason(
+            visibleReason);
+    if (forcedSignal > 0) {
+        request.signal =
+            NormalizeGuestStopSignal(forcedSignal);
+        request.pending = forcedPendingSignal;
+        request.valid = true;
+    }
+    bool firstStop = false;
+    {
+        std::lock_guard<std::mutex> lock(nativeDebugger.mutex);
+        if (nativeDebugger.state ==
+                NativeDebuggerRunState::Running) {
+            nativeDebugger.state =
+                NativeDebuggerRunState::Stopping;
+            nativeDebugger.stopOwner =
+                NativeDebuggerNormalizeStopOwnerLocked(
+                    owner);
+            nativeDebugger.stopReason = !!visibleReason
+                ? visibleReason
+                : LC32HaltReasonTrap;
+            nativeDebugger.stopSignal =
+                NormalizeGuestStopSignal(request.signal);
+            CommitGuestStopSignal(
+                nativeDebugger.stopSignal,
+                request.pending);
+            debuggerAllStopRequested.store(
+                true, std::memory_order_release);
+            firstStop = true;
+        } else if (queueWhileStopped &&
+                nativeDebugger.state ==
+                    NativeDebuggerRunState::Stopped) {
+            nativeDebugger.pendingInterrupt = true;
+        }
+    }
+    if (!firstStop) {
+        return false;
+    }
+    ClearCurrentGuestStopRequest();
+
+    /*
+     * Never hold the coordinator while touching the JIT registry or aborting
+     * host waits. Workers acknowledge this stop after Run()/Step() returns.
+     */
+    HaltAllGuestJits(LC32HaltReasonDebuggerPause);
+    InterruptDebuggerMachCalls();
+    NotifyNativeDebuggerWaiters();
+    nativeDebugger.condition.notify_all();
+    return true;
+}
+
+/*
+ * A thread can lose first-stop-wins after completing a fatal SVC while a peer
+ * reports another stop. Unlike a synchronous instruction fault, that SVC will
+ * not naturally replay. Preserve its TLS request and publish it as soon as
+ * this logical thread is next resumed.
+ */
+static bool NativeDebuggerRepublishPendingStop(
+        gdb_thread_id_t owner) {
+    if (!currentGuestStopRequest.valid ||
+            !currentGuestStopRequest.pending) {
+        ClearCurrentGuestStopRequest();
+        return false;
+    }
+    (void)NativeDebuggerRequestStop(
+        owner, LC32HaltReasonTrap);
+    return true;
+}
+
+static bool NativeDebuggerWaitForWorkerCommand(
+        NativeGuestJit *runtime, bool &singleStep,
+        uint64_t &commandGeneration) {
+    commandGeneration = 0;
+    if (runtime == nullptr) {
+        return false;
+    }
+    if (nativeShutdownRequested.load(std::memory_order_acquire) ||
+            guestProcessExitRequested.load(
+                std::memory_order_acquire)) {
+        return false;
+    }
+    if (!NativeDebuggerActive()) {
+        singleStep = false;
+        return true;
+    }
+
+    std::unique_lock<std::mutex> lock(nativeDebugger.mutex);
+    nativeDebugger.condition.wait(lock, [runtime] {
+        return nativeShutdownRequested.load(
+                   std::memory_order_acquire) ||
+            guestProcessExitRequested.load(
+                   std::memory_order_acquire) ||
+            !NativeDebuggerActive() ||
+            nativeGuestThreadRetiring ||
+            nativeDebugger.state ==
+                NativeDebuggerRunState::ShuttingDown ||
+            (nativeDebugger.state ==
+                NativeDebuggerRunState::Running &&
+             NativeDebuggerRunsThreadLocked(
+                 runtime->debuggerId));
+    });
+    if (nativeShutdownRequested.load(std::memory_order_acquire) ||
+            guestProcessExitRequested.load(
+                std::memory_order_acquire) ||
+            nativeGuestThreadRetiring ||
+            nativeDebugger.state ==
+                NativeDebuggerRunState::ShuttingDown) {
+        return false;
+    }
+    if (!NativeDebuggerActive()) {
+        singleStep = false;
+        return true;
+    }
+
+    singleStep =
+        NativeDebuggerStepsThreadLocked(
+            runtime->debuggerId);
+    commandGeneration = nativeDebugger.generation;
+    NativeDebuggerSetWorkerExecutingLocked(runtime, true);
+    return true;
+}
+
+static void NativeDebuggerWorkerStopped(
+        NativeGuestJit *runtime,
+        Dynarmic::HaltReason reason) {
+    const Dynarmic::HaltReason visibleReason =
+        NativeDebuggerVisibleReason(reason);
+    if (!!visibleReason && !nativeGuestThreadRetiring) {
+        (void)NativeDebuggerRequestStop(
+            runtime->debuggerId, visibleReason);
+    }
+    {
+        std::lock_guard<std::mutex> lock(nativeDebugger.mutex);
+        NativeDebuggerSetWorkerExecutingLocked(
+            runtime, false);
+    }
+    nativeDebugger.condition.notify_all();
+}
+
 struct NativeGuestThreadStart {
     gdb_thread_id_t debuggerId;
     NativeGuestJit *runtime;
@@ -3942,6 +5327,8 @@ static NativeGuestJit *CreateNativeGuestJit(
     runtime->jit->SetFpscr(initial.fpscr);
     runtime->callbacks->cp15->uro = initial.uro;
     runtime->jit->ClearExclusiveState();
+    RegisterGuestVmEpochParticipant(
+        &runtime->vmEpochParticipant);
 
     {
         std::lock_guard<std::mutex> lock(
@@ -3975,10 +5362,58 @@ static void DestroyNativeGuestJit(
         guestProcessorIdsInUse &=
             ~(uint64_t{1} << runtime->processorId);
     }
+    UnregisterGuestVmEpochParticipant(
+        &runtime->vmEpochParticipant);
     delete runtime->cpsr;
     delete runtime->jit;
     runtime->callbacks->destroy();
     delete runtime;
+}
+
+static void JoinNativeGuestJit(
+        NativeGuestJit *runtime) {
+    if (runtime == nullptr ||
+            !runtime->hostThreadCreated) {
+        return;
+    }
+    const int result =
+        pthread_join(runtime->hostThread, nullptr);
+    if (result != 0) {
+        /*
+         * Continuing would free a JIT and callbacks that the host thread may
+         * still own. Treat this as an internal lifecycle invariant failure
+         * instead of turning a rare join error into a use-after-free.
+         */
+        fprintf(stderr,
+            "LC32: pthread_join guest-thread=%llu "
+            "failed: %d (%s)\n",
+            runtime->debuggerId, result,
+            strerror(result));
+        abort();
+    }
+    runtime->hostThreadCreated = false;
+}
+
+static void ReapExitedNativeGuestJits() {
+    std::vector<NativeGuestJit *> exited;
+    {
+        std::lock_guard<std::mutex> lock(
+            nativeGuestJitMutex);
+        for (auto iterator = nativeGuestJits.begin();
+                iterator != nativeGuestJits.end();) {
+            NativeGuestJit *runtime = *iterator;
+            if (runtime != nullptr && runtime->exited) {
+                exited.push_back(runtime);
+                iterator = nativeGuestJits.erase(iterator);
+            } else {
+                ++iterator;
+            }
+        }
+    }
+    for (NativeGuestJit *runtime : exited) {
+        JoinNativeGuestJit(runtime);
+        DestroyNativeGuestJit(runtime);
+    }
 }
 
 static void *RunNativeGuestThread(void *opaque) {
@@ -3998,6 +5433,7 @@ static void *RunNativeGuestThread(void *opaque) {
     threadHandle.cb = runtime->callbacks;
     nativeGuestThreadId = start->debuggerId;
     nativeGuestThreadRetiring = false;
+    nativeGuestRuntime = runtime;
     runtime->hostMachThread =
         pthread_mach_thread_np(pthread_self());
 
@@ -4015,32 +5451,140 @@ static void *RunNativeGuestThread(void *opaque) {
          * Drain it before clearing TLS or destroying the per-thread runtime.
          */
         NativeGuestAutoreleasePool autoreleasePool;
-        const Dynarmic::HaltReason reason =
-            Dynarmic_emu_1resume();
-        if (!nativeGuestThreadRetiring) {
-            fprintf(stderr,
-                "LC32: native guest-thread=%llu stopped "
-                "without bsdthread_terminate (reason=0x%llx)\n",
-                start->debuggerId,
-                static_cast<unsigned long long>(reason));
+        for (;;) {
+            bool singleStep = false;
+            uint64_t commandGeneration = 0;
+            if (!NativeDebuggerWaitForWorkerCommand(
+                    runtime, singleStep,
+                    commandGeneration)) {
+                break;
+            }
+
+            if (NativeDebuggerRepublishPendingStop(
+                    runtime->debuggerId)) {
+                (void)ConsumeNativeDebuggerHostWaitStep(
+                    commandGeneration);
+                NativeDebuggerWorkerStopped(
+                    runtime,
+                    LC32HaltReasonDebuggerPause);
+                continue;
+            }
+            if (ConsumeNativeDebuggerHostWaitStep(
+                    commandGeneration) &&
+                    singleStep) {
+                runtime->jit->ClearHalt(
+                    LC32HaltReasonDebuggerPause);
+            }
+            const Dynarmic::HaltReason reason = singleStep
+                ? Dynarmic_emu_1step()
+                : Dynarmic_emu_1resume();
+            if (nativeDebuggerHostWaitStep) {
+                /*
+                 * The interrupted callback has now copied out its result and
+                 * the old Run() has unwound. Registers are stable even if a
+                 * peer wins before this worker reaches its follow-up step.
+                 */
+                std::lock_guard<std::mutex> lock(
+                    nativeDebugger.mutex);
+                runtime->debuggerHostWaitPaused = false;
+            }
+
+            bool retiringSelectedThread = false;
+            if (nativeGuestThreadRetiring &&
+                    NativeDebuggerActive()) {
+                std::lock_guard<std::mutex> lock(
+                    nativeDebugger.mutex);
+                retiringSelectedThread =
+                    nativeDebugger.stepThread ==
+                        runtime->debuggerId &&
+                    (singleStep ||
+                     nativeDebugger.resumeMode ==
+                         NativeDebuggerResumeMode::ContinueOne);
+            }
+            if (retiringSelectedThread) {
+                (void)NativeDebuggerRequestStop(
+                    ActiveMainDebuggerThread(),
+                    Dynarmic::HaltReason::Step,
+                    SIGTRAP, false);
+            }
+            NativeDebuggerWorkerStopped(
+                runtime, reason);
+
+            if (nativeGuestThreadRetiring) {
+                break;
+            }
+            if (NativeDebuggerActive()) {
+                /*
+                 * A debugger halt parks this host pthread with its JIT and
+                 * register file intact. The next loop iteration waits for a
+                 * ContinueAll or a step command selecting this guest thread.
+                 */
+                continue;
+            }
+
+            if (!nativeShutdownRequested.load(
+                    std::memory_order_acquire) &&
+                    !guestProcessExitRequested.load(
+                        std::memory_order_acquire) &&
+                    !!NativeDebuggerVisibleReason(
+                        reason)) {
+                fprintf(stderr,
+                    "LC32: native guest-thread=%llu stopped "
+                    "without bsdthread_terminate "
+                    "(reason=0x%llx)\n",
+                    start->debuggerId,
+                    static_cast<unsigned long long>(
+                        reason));
+            }
+            break;
         }
 
+        mach_port_t leftoverPort = MACH_PORT_NULL;
         {
             std::lock_guard<std::recursive_mutex> lock(
                 guestThreadMutex);
             if (GuestThreadContext *thread =
                     FindGuestThread(start->debuggerId, false)) {
+                leftoverPort = thread->threadPort;
+                thread->threadPort = MACH_PORT_NULL;
                 thread->alive = false;
                 thread->runnable = false;
                 thread->savedValid = false;
                 thread->nativeJit = nullptr;
             }
         }
+        NativeDebuggerTransferStopOwner(
+            start->debuggerId, 1);
+        if (MACH_PORT_VALID(leftoverPort)) {
+            (void)mach_port_destroy(
+                mach_task_self(), leftoverPort);
+        }
     }
 
     threadHandle = {};
     nativeGuestThreadId = 0;
-    DestroyNativeGuestJit(runtime);
+    nativeGuestThreadRetiring = false;
+    nativeGuestRuntime = nullptr;
+    runtime->hostMachThread = MACH_PORT_NULL;
+    {
+        std::lock_guard<std::mutex> lock(
+            nativeGuestJitMutex);
+        runtime->exited = true;
+    }
+    nativeGuestJitCondition.notify_all();
+    if (MACH_PORT_VALID(runtime->joinSemaphore)) {
+        const kern_return_t result =
+            semaphore_signal_trap(
+                runtime->joinSemaphore);
+        if (result != KERN_SUCCESS) {
+            fprintf(stderr,
+                "LC32: native guest-thread=%llu join "
+                "semaphore 0x%x failed: 0x%x\n",
+                runtime->debuggerId,
+                runtime->joinSemaphore, result);
+        }
+        runtime->joinSemaphore = MACH_PORT_NULL;
+    }
     return nullptr;
 }
 
@@ -4052,6 +5596,21 @@ static u32 GuestBsdthreadCreate(
             guest_bsdthread_pthread_size <= 0 ||
             function == 0 || stack == 0) {
         return return_with_carry_direct(EINVAL, true);
+    }
+
+    std::unique_lock<std::mutex> nativeCreateLock;
+    if (NativeGuestThreadsEnabled()) {
+        nativeCreateLock =
+            std::unique_lock<std::mutex>(
+                nativeLifecycleMutex);
+        if (nativeLifecycleState !=
+                NativeLifecycleState::Running ||
+                nativeShutdownRequested.load(
+                    std::memory_order_acquire)) {
+            return return_with_carry_direct(
+                EAGAIN, true);
+        }
+        ReapExitedNativeGuestJits();
     }
 
     const bool custom = (flags & PTHREAD_START_CUSTOM) != 0;
@@ -4223,6 +5782,7 @@ static u32 GuestBsdthreadCreate(
         thread.nativeJit = runtime;
         const gdb_thread_id_t debuggerId =
             thread.debuggerId;
+        runtime->debuggerId = debuggerId;
         {
             std::lock_guard<std::recursive_mutex> lock(
                 guestThreadMutex);
@@ -4260,7 +5820,7 @@ static u32 GuestBsdthreadCreate(
                 createResult, true);
         }
         runtime->hostThread = hostThread;
-        (void)pthread_detach(hostThread);
+        runtime->hostThreadCreated = true;
         {
             std::lock_guard<std::mutex> lock(
                 runtime->startMutex);
@@ -4301,7 +5861,10 @@ static u32 GuestBsdthreadTerminate(
         return return_with_carry_direct(EINVAL, true);
     }
 
-    if (MACH_PORT_VALID(joinSemaphore)) {
+    const bool nativeThread =
+        NativeGuestThreadIsCurrent();
+    if (MACH_PORT_VALID(joinSemaphore) &&
+            !nativeThread) {
         const kern_return_t result =
             semaphore_signal_trap(joinSemaphore);
         if (result != KERN_SUCCESS) {
@@ -4329,6 +5892,8 @@ static u32 GuestBsdthreadTerminate(
         current->runnable = false;
         current->savedValid = false;
     }
+    NativeDebuggerTransferStopOwner(
+        debuggerId, 1);
 
     if (MACH_PORT_VALID(threadPort) &&
             threadPort != currentPort) {
@@ -4346,7 +5911,17 @@ static u32 GuestBsdthreadTerminate(
         "LC32: bsdthread_terminate guest-thread=%llu "
         "free=0x%x+0x%x\n",
         debuggerId, freeAddress, freeSize);
-    if (NativeGuestThreadIsCurrent()) {
+    if (nativeThread) {
+        if (nativeGuestRuntime != nullptr) {
+            /*
+             * pthread_join must not return while the host worker still owns
+             * its JIT. Signal from RunNativeGuestThread after it has published
+             * the exited state. The reaper keeps the processor slot reserved
+             * until the host pthread is joined and its JIT is destroyed.
+             */
+            nativeGuestRuntime->joinSemaphore =
+                joinSemaphore;
+        }
         nativeGuestThreadRetiring = true;
         if (threadHandle.jit->IsExecuting()) {
             threadHandle.jit->HaltExecution(
@@ -4560,9 +6135,37 @@ static u32 WaitNativeGuestThread(
     waiter->sequence = guestNextWaitSequence.fetch_add(
         1, std::memory_order_relaxed);
     nativeGuestWaiters.push_back(waiter);
-    waiter->condition.wait(lock, [&] {
-        return waiter->signaled;
-    });
+    while (!waiter->signaled) {
+        waiter->condition.wait(lock, [&] {
+            return waiter->signaled ||
+                debuggerAllStopRequested.load(
+                    std::memory_order_acquire) ||
+                nativeShutdownRequested.load(
+                    std::memory_order_acquire) ||
+                guestProcessExitRequested.load(
+                    std::memory_order_acquire);
+        });
+        if (waiter->signaled) {
+            break;
+        }
+        lock.unlock();
+        const bool paused =
+            NativeDebuggerPauseHostWaitIfNeeded();
+        lock.lock();
+        if (paused &&
+                (nativeGuestRuntime == nullptr ||
+                 nativeDebuggerHostWaitStep ||
+                 nativeShutdownRequested.load(
+                     std::memory_order_acquire) ||
+                 guestProcessExitRequested.load(
+                     std::memory_order_acquire))) {
+            nativeGuestWaiters.erase(std::remove(
+                nativeGuestWaiters.begin(),
+                nativeGuestWaiters.end(),
+                waiter), nativeGuestWaiters.end());
+            return return_with_carry_direct(EINTR, true);
+        }
+    }
     nativeGuestWaiters.erase(std::remove(
         nativeGuestWaiters.begin(), nativeGuestWaiters.end(),
         waiter), nativeGuestWaiters.end());
@@ -4881,15 +6484,61 @@ static u32 GuestUlockWait(
             1, std::memory_order_relaxed);
         nativeGuestWaiters.push_back(waiter);
         bool woke = true;
-        if (timeout == 0) {
-            waiter->condition.wait(lock, [&] {
-                return waiter->signaled;
-            });
-        } else {
-            woke = waiter->condition.wait_for(
-                lock, std::chrono::microseconds(timeout), [&] {
-                    return waiter->signaled;
+        auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::microseconds(timeout);
+        while (!waiter->signaled) {
+            if (timeout == 0) {
+                waiter->condition.wait(lock, [&] {
+                    return waiter->signaled ||
+                        debuggerAllStopRequested.load(
+                            std::memory_order_acquire) ||
+                        nativeShutdownRequested.load(
+                            std::memory_order_acquire) ||
+                        guestProcessExitRequested.load(
+                            std::memory_order_acquire);
                 });
+            } else {
+                woke = waiter->condition.wait_until(
+                    lock, deadline, [&] {
+                        return waiter->signaled ||
+                            debuggerAllStopRequested.load(
+                                std::memory_order_acquire) ||
+                            nativeShutdownRequested.load(
+                                std::memory_order_acquire) ||
+                            guestProcessExitRequested.load(
+                                std::memory_order_acquire);
+                    });
+                if (!woke) {
+                    break;
+                }
+            }
+            if (waiter->signaled) {
+                break;
+            }
+
+            const auto pauseStart =
+                std::chrono::steady_clock::now();
+            lock.unlock();
+            const bool paused =
+                NativeDebuggerPauseHostWaitIfNeeded();
+            lock.lock();
+            if (paused &&
+                    (nativeGuestRuntime == nullptr ||
+                     nativeDebuggerHostWaitStep ||
+                     nativeShutdownRequested.load(
+                         std::memory_order_acquire) ||
+                     guestProcessExitRequested.load(
+                         std::memory_order_acquire))) {
+                nativeGuestWaiters.erase(std::remove(
+                    nativeGuestWaiters.begin(),
+                    nativeGuestWaiters.end(),
+                    waiter), nativeGuestWaiters.end());
+                return GuestUlockReturn(EINTR, flags);
+            }
+            if (timeout != 0) {
+                deadline += std::chrono::steady_clock::now() -
+                    pauseStart;
+            }
         }
 
         nativeGuestWaiters.erase(std::remove(
@@ -5081,7 +6730,7 @@ static bool HandleGuestWorkqueueTransition() {
             CurrentGuestThreadId() != 1) {
         return false;
     }
-    std::lock_guard<std::recursive_mutex> lock(
+    std::unique_lock<std::recursive_mutex> lock(
         guestWorkqueueMutex);
     Dynarmic::A32::Jit *jit = threadHandle.jit;
     DynarmicCallbacks32 *callbacks = threadHandle.cb;
@@ -5112,6 +6761,9 @@ static bool HandleGuestWorkqueueTransition() {
         WORKQUEUE_TRACE(
             "LC32: restored waiting context pc=0x%x\n",
             jit->Regs()[Reg::PC]);
+        lock.unlock();
+        NativeDebuggerTransferStopOwner(
+            2, 1);
         return true;
     }
 
@@ -5161,6 +6813,8 @@ static bool HandleGuestWorkqueueTransition() {
         "tsd=0x%x flags=0x%x\n",
         jit->Regs()[Reg::PC], guestWorkqueuePthread,
         callbacks->cp15->uro, upcall.flags);
+    lock.unlock();
+    NativeDebuggerTransferStopOwner(1, 2);
     return true;
 }
 
@@ -5179,12 +6833,65 @@ static bool GuestWorkqueueTransitionPending() {
 extern "C" {
 #endif
 
+static GuestVmEpochParticipant *
+CurrentGuestVmEpochParticipant() {
+    return nativeGuestRuntime != nullptr
+        ? &nativeGuestRuntime->vmEpochParticipant
+        : &mainGuestVmParticipant;
+}
+
+static Dynarmic::HaltReason RunGuestJit(
+        Dynarmic::A32::Jit *jit) {
+    GuestVmEpochGuard guard(
+        CurrentGuestVmEpochParticipant());
+    return jit->Run();
+}
+
+static Dynarmic::HaltReason StepGuestJit(
+        Dynarmic::A32::Jit *jit) {
+    GuestVmEpochGuard guard(
+        CurrentGuestVmEpochParticipant());
+    return jit->Step();
+}
+
+static void ServiceGuestSVC() {
+    GuestVmEpochGuard guard(
+        CurrentGuestVmEpochParticipant());
+    threadHandle.cb->CallSVC(0x80);
+    HandleGuestContextTransition();
+}
+
 /*
  * Class:     com_github_unidbg_arm_backend_dynarmic_Dynarmic
  * Method:    nativeInitialize
  * Signature: (Z)J
  */
 bool Dynarmic_nativeInitialize() {
+    std::unique_lock<std::mutex> lifecycleLock(
+        nativeLifecycleMutex);
+    if (nativeLifecycleState ==
+            NativeLifecycleState::Running) {
+        return true;
+    }
+    if (nativeLifecycleState ==
+            NativeLifecycleState::ShuttingDown) {
+        nativeLifecycleCondition.wait(
+            lifecycleLock, [] {
+                return nativeLifecycleState !=
+                    NativeLifecycleState::ShuttingDown;
+            });
+    }
+    if (nativeLifecycleState ==
+            NativeLifecycleState::Destroyed) {
+        return false;
+    }
+    nativeShutdownRequested.store(
+        false, std::memory_order_release);
+    guestProcessExitRequested.store(
+        false, std::memory_order_release);
+    guestProcessExitCode.store(
+        0, std::memory_order_release);
+
     sharedHandle.memory = kh_init(memory);
     if(sharedHandle.memory == NULL) {
         fprintf(stderr, "kh_init memory failed\n");
@@ -5244,61 +6951,235 @@ bool Dynarmic_nativeInitialize() {
         sharedHandle.fs = new LC32Filesystem();
         callbacks->cpu = threadHandle.jit;
         callbacks->cpsr = threadHandle.cpsr;
+        RegisterGuestVmEpochParticipant(
+            &mainGuestVmParticipant);
     }
+    nativeLifecycleState =
+        NativeLifecycleState::Running;
+    lifecycleLock.unlock();
+    nativeLifecycleCondition.notify_all();
     return true;
 }
 
-static void ReleaseMemoryPageBacking(t_memory_page page) {
-    if (page == nullptr || page->backing == nullptr) {
+static void ReleaseMemoryBackingReference(
+        t_memory_backing backing) {
+    if (backing == nullptr) {
         return;
     }
-    t_memory_backing backing = page->backing;
-    page->backing = nullptr;
     assert(backing->references != 0);
     if (--backing->references != 0) {
         return;
     }
-    if (munmap(backing->addr, backing->size) != 0) {
-        fprintf(stderr,
-            "munmap backing failed[%s->%s:%d]: "
-            "addr=%p, size=0x%zx, errno=%d\n",
-            __FILE__, __func__, __LINE__,
-            backing->addr, backing->size, errno);
+    RetireMemoryBacking(backing);
+}
+
+static void ReleaseMemoryPageBacking(
+        t_memory_page page) {
+    if (page == nullptr) {
+        return;
     }
-    free(backing);
+    t_memory_backing backing = page->backing;
+    page->backing = nullptr;
+    ReleaseMemoryBackingReference(backing);
 }
 
 void Dynarmic_nativeDestroy() {
-    khash_t(memory) *memory = sharedHandle.memory;
-    for (khiter_t k = kh_begin(memory); k < kh_end(memory); k++) {
-        if(kh_exist(memory, k)) {
-            t_memory_page page = kh_value(memory, k);
-            ReleaseMemoryPageBacking(page);
-            free(page);
-        }
+    if (nativeGuestRuntime != nullptr &&
+            nativeGuestThreadId > 1) {
+        /*
+         * A worker cannot join itself. Ask the main host thread to perform the
+         * serialized teardown when control returns from guest execution.
+         */
+        nativeShutdownRequested.store(
+            true, std::memory_order_release);
+        HaltAllGuestJits(LC32HaltReasonExit);
+        InterruptDebuggerMachCalls();
+        NotifyNativeDebuggerWaiters();
+        NotifyNativeDebuggerCoordinator();
+        return;
     }
-    kh_destroy(memory, memory);
+
+    {
+        std::unique_lock<std::mutex> lock(
+            nativeLifecycleMutex);
+        if (nativeLifecycleState ==
+                NativeLifecycleState::Uninitialized ||
+                nativeLifecycleState ==
+                    NativeLifecycleState::Destroyed) {
+            return;
+        }
+        if (nativeLifecycleState ==
+                NativeLifecycleState::ShuttingDown) {
+            nativeLifecycleCondition.wait(lock, [] {
+                return nativeLifecycleState ==
+                    NativeLifecycleState::Destroyed;
+            });
+            return;
+        }
+        nativeLifecycleState =
+            NativeLifecycleState::ShuttingDown;
+        nativeShutdownRequested.store(
+            true, std::memory_order_release);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(
+            nativeDebugger.mutex);
+        nativeDebugger.state =
+            NativeDebuggerRunState::ShuttingDown;
+        debuggerAllStopRequested.store(
+            true, std::memory_order_release);
+    }
+    HaltAllGuestJits(LC32HaltReasonExit);
+    DrainDebuggerMachCalls();
+    NotifyNativeDebuggerWaiters();
+    NotifyNativeDebuggerCoordinator();
+
+    std::vector<NativeGuestJit *> runtimes;
+    {
+        std::lock_guard<std::mutex> lock(
+            nativeGuestJitMutex);
+        runtimes = nativeGuestJits;
+    }
+    for (NativeGuestJit *runtime : runtimes) {
+        JoinNativeGuestJit(runtime);
+    }
+    for (NativeGuestJit *runtime : runtimes) {
+        DestroyNativeGuestJit(runtime);
+    }
+
     Dynarmic::A32::Jit *jit = threadHandle.jit;
-    if(jit) {
+    DynarmicCallbacks32 *cb = sharedHandle.cb;
+    DynarmicCpsr *cpsr = threadHandle.cpsr;
+    threadHandle = {};
+    sharedHandle.cb = nullptr;
+    UnregisterGuestVmEpochParticipant(
+        &mainGuestVmParticipant);
+    if (jit != nullptr) {
         jit->ClearCache();
         jit->Reset();
-        delete jit;
     }
-    DynarmicCallbacks32 *cb = sharedHandle.cb;
-    if(cb) {
+    delete cpsr;
+    delete jit;
+    if (cb != nullptr) {
         cb->destroy();
     }
-    if(sharedHandle.page_table) {
-        int ret = munmap(sharedHandle.page_table, sharedHandle.num_page_table_entries * sizeof(void*));
-        if(ret != 0) {
-            fprintf(stderr, "munmap failed[%s->%s:%d]: page_table=%p, ret=%d\n", __FILE__, __func__, __LINE__, sharedHandle.page_table, ret);
+    delete sharedHandle.fs;
+    sharedHandle.fs = nullptr;
+
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestVmMutex);
+        khash_t(memory) *memory = sharedHandle.memory;
+        if (memory != nullptr) {
+            for (khiter_t k = kh_begin(memory);
+                    k < kh_end(memory); ++k) {
+                if (kh_exist(memory, k)) {
+                    t_memory_page page =
+                        kh_value(memory, k);
+                    ReleaseMemoryPageBacking(page);
+                    free(page);
+                }
+            }
+            kh_destroy(memory, memory);
+            sharedHandle.memory = nullptr;
         }
     }
+    if (sharedHandle.page_table != nullptr) {
+        const size_t tableSize =
+            sharedHandle.num_page_table_entries *
+            sizeof(void *);
+        const int result = munmap(
+            sharedHandle.page_table, tableSize);
+        if (result != 0) {
+            fprintf(stderr,
+                "munmap failed[%s->%s:%d]: "
+                "page_table=%p, ret=%d\n",
+                __FILE__, __func__, __LINE__,
+                sharedHandle.page_table, result);
+        }
+        sharedHandle.page_table = nullptr;
+        sharedHandle.num_page_table_entries = 0;
+    }
     delete sharedHandle.monitor;
+    sharedHandle.monitor = nullptr;
+
+    std::vector<mach_port_t> threadPorts;
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestThreadMutex);
+        for (const GuestThreadContext &thread :
+                guestThreads) {
+            if (MACH_PORT_VALID(thread.threadPort)) {
+                threadPorts.push_back(
+                    thread.threadPort);
+            }
+        }
+        guestThreads.clear();
+        guestThreadRegistryInitialized = false;
+        guestCurrentThreadId = 1;
+        guestNextDebuggerThreadId = 3;
+        guestProcessorIdsInUse = 1;
+    }
+    if (MACH_PORT_VALID(guestWorkqueueThreadPort)) {
+        threadPorts.push_back(
+            guestWorkqueueThreadPort);
+        guestWorkqueueThreadPort =
+            MACH_PORT_NULL;
+    }
+    std::sort(threadPorts.begin(), threadPorts.end());
+    threadPorts.erase(std::unique(
+        threadPorts.begin(), threadPorts.end()),
+        threadPorts.end());
+    for (mach_port_t port : threadPorts) {
+        (void)mach_port_destroy(
+            mach_task_self(), port);
+    }
+    {
+        std::lock_guard<std::mutex> lock(
+            nativeGuestWaitMutex);
+        nativeGuestWaiters.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(
+            guestPsynchPrepostMutex);
+        guestPsynchPreposts.clear();
+    }
+
+    guestDebuggerEnabled.store(
+        false, std::memory_order_release);
+    debuggerInterruptRequested.store(
+        false, std::memory_order_release);
+    debuggerAllStopRequested.store(
+        false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(
+            nativeDebugger.mutex);
+        nativeDebugger.state =
+            NativeDebuggerRunState::Disabled;
+        nativeDebugger.executingWorkers = 0;
+        nativeDebugger.mainExecuting = false;
+    }
+    nativeGuestThreadId = 0;
+    nativeShutdownRequested.store(
+        false, std::memory_order_release);
+    guestProcessExitRequested.store(
+        false, std::memory_order_release);
+    guestProcessExitCode.store(
+        0, std::memory_order_release);
+
+    {
+        std::lock_guard<std::mutex> lock(
+            nativeLifecycleMutex);
+        nativeLifecycleState =
+            NativeLifecycleState::Destroyed;
+    }
+    nativeLifecycleCondition.notify_all();
 }
 
 int Dynarmic_munmap(u64 address, u64 size) {
-    std::lock_guard<std::recursive_mutex> lock(guestVmMutex);
+    std::unique_lock<std::recursive_mutex> lock(
+        guestVmMutex);
     if(address & DYN_PAGE_MASK) {
         errno = EINVAL;
         return -1;
@@ -5307,15 +7188,36 @@ int Dynarmic_munmap(u64 address, u64 size) {
         errno = EINVAL;
         return -1;
     }
+    if (!GuestAddressRangeIsValid32(
+            address, size)) {
+        errno = EINVAL;
+        return -1;
+    }
     khash_t(memory) *memory = sharedHandle.memory;
-    for(u64 vaddr = address; vaddr < address + size; vaddr += DYN_PAGE_SIZE) {
-        u64 idx = vaddr >> DYN_PAGE_BITS;
-        khiter_t k = kh_get(memory, memory, vaddr);
-        if(k == kh_end(memory)) {
-            fprintf(stderr, "mem_unmap failed[%s->%s:%d]: vaddr=%p\n", __FILE__, __func__, __LINE__, (void*)vaddr);
+    const u64 end = address + size;
+
+    /*
+     * Validate the complete range first. munmap has no fallible operation
+     * after this point, so a hole must not leave the preceding pages already
+     * removed.
+     */
+    for (u64 vaddr = address; vaddr < end;
+            vaddr += DYN_PAGE_SIZE) {
+        if (kh_get(memory, memory, vaddr) ==
+                kh_end(memory)) {
+            fprintf(stderr,
+                "mem_unmap failed[%s->%s:%d]: vaddr=%p\n",
+                __FILE__, __func__, __LINE__,
+                reinterpret_cast<void *>(vaddr));
             errno = ENOMEM;
             return -1;
         }
+    }
+
+    for(u64 vaddr = address; vaddr < end;
+            vaddr += DYN_PAGE_SIZE) {
+        u64 idx = vaddr >> DYN_PAGE_BITS;
+        khiter_t k = kh_get(memory, memory, vaddr);
         if(sharedHandle.page_table && idx < sharedHandle.num_page_table_entries) {
             __atomic_store_n(
                 &sharedHandle.page_table[idx], nullptr,
@@ -5333,27 +7235,96 @@ int Dynarmic_munmap(u64 address, u64 size) {
         free(page);
         kh_del(memory, memory, k);
     }
+    lock.unlock();
+    InvalidateAllGuestJits(
+        static_cast<u32>(address),
+        static_cast<size_t>(size));
     return 0;
 }
 
-u64 Dynarmic_mem_reserve(u64 address, u64 size, bool fixed, u64 mask) {
-    std::lock_guard<std::recursive_mutex> lock(guestVmMutex);
+struct GuestPageReservation {
+    u64 address;
+    t_memory_page page;
+};
+
+static void RollbackGuestPageReservations(
+        khash_t(memory) *memory,
+        std::vector<GuestPageReservation>
+            *reservations) {
+    if (reservations == nullptr) {
+        return;
+    }
+    for (auto iterator = reservations->rbegin();
+            iterator != reservations->rend();
+            ++iterator) {
+        const khiter_t entry = kh_get(
+            memory, memory, iterator->address);
+        if (entry != kh_end(memory) &&
+                kh_value(memory, entry) ==
+                    iterator->page) {
+            kh_del(memory, memory, entry);
+        }
+        free(iterator->page);
+    }
+    reservations->clear();
+}
+
+static bool AlignGuestAddress(
+        u64 address, u64 mask, u64 *alignedAddress) {
+    constexpr u64 addressSpaceSize =
+        UINT64_C(1) << 32;
+    const u64 adjustment =
+        (mask + 1 - (address & mask)) & mask;
+    if (address >= addressSpaceSize ||
+            adjustment >
+                addressSpaceSize - address) {
+        return false;
+    }
+    *alignedAddress = address + adjustment;
+    return *alignedAddress < addressSpaceSize;
+}
+
+static u64 Dynarmic_mem_reserve(
+        u64 address, u64 size, bool fixed, u64 mask,
+        std::vector<GuestPageReservation>
+            *reservations) {
+    std::lock_guard<std::recursive_mutex> lock(
+        guestVmMutex);
+
+    if (reservations == nullptr ||
+            size == 0 ||
+            (size & DYN_PAGE_MASK) != 0 ||
+            mask < DYN_PAGE_MASK ||
+            mask > UINT32_MAX ||
+            (mask & (mask + 1)) != 0) {
+        errno = EINVAL;
+        return UINT64_MAX;
+    }
+    reservations->clear();
     
     // Don't allocate anything below 16MB region to better catch bad accesses
     if (address < 0x10000000) { // DYN_PAGE_SIZE
         if (fixed) {
             printf("Dynarmic_mem_reserve: refusing to reserve below 16MB range\n");
-            return -1;
+            errno = ENOMEM;
+            return UINT64_MAX;
         } else {
             address += 0x10000000;
         }
     }
-    
-    address = (address + mask) &~ mask;
+
+    if (!AlignGuestAddress(
+            address, mask, &address) ||
+            !GuestAddressRangeIsValid32(
+                address, size)) {
+        errno = fixed ? EINVAL : ENOMEM;
+        return UINT64_MAX;
+    }
+
     khash_t(memory) *memory = sharedHandle.memory;
-    int ret;
+    const u64 end = address + size;
     if (fixed) {
-        for(u64 vaddr = address; vaddr < address + size;
+        for(u64 vaddr = address; vaddr < end;
                 vaddr += DYN_PAGE_SIZE) {
             khiter_t k;
             if((k = kh_get(memory, memory, vaddr)) != kh_end(memory)) {
@@ -5378,13 +7349,23 @@ u64 Dynarmic_mem_reserve(u64 address, u64 size, bool fixed, u64 mask) {
          */
         for (;;) {
             bool collision = false;
-            for(u64 vaddr = address; vaddr < address + size;
+            const u64 candidateEnd =
+                address + size;
+            for(u64 vaddr = address;
+                    vaddr < candidateEnd;
                     vaddr += DYN_PAGE_SIZE) {
                 if(kh_get(memory, memory, vaddr) == kh_end(memory)) {
                     continue;
                 }
-                address =
-                    (vaddr + DYN_PAGE_SIZE + mask) & ~mask;
+                const u64 next =
+                    vaddr + DYN_PAGE_SIZE;
+                if (!AlignGuestAddress(
+                        next, mask, &address) ||
+                        !GuestAddressRangeIsValid32(
+                            address, size)) {
+                    errno = ENOMEM;
+                    return UINT64_MAX;
+                }
                 collision = true;
                 break;
             }
@@ -5393,10 +7374,58 @@ u64 Dynarmic_mem_reserve(u64 address, u64 size, bool fixed, u64 mask) {
             }
         }
     }
-    
-    for(u64 vaddr = address; vaddr < address + size; vaddr += DYN_PAGE_SIZE) {
-        khiter_t k = kh_put(memory, memory, vaddr, &ret);
-        t_memory_page page = (t_memory_page) calloc(1, sizeof(struct memory_page));
+
+    try {
+        reservations->reserve(
+            static_cast<size_t>(
+                size / DYN_PAGE_SIZE));
+    } catch (const std::exception &) {
+        errno = ENOMEM;
+        return UINT64_MAX;
+    }
+
+    const u64 reservationEnd = address + size;
+    for(u64 vaddr = address; vaddr < reservationEnd;
+            vaddr += DYN_PAGE_SIZE) {
+        khiter_t k = kh_get(
+            memory, memory, vaddr);
+        if (k != kh_end(memory)) {
+            assert(fixed);
+            continue;
+        }
+        t_memory_page page = static_cast<t_memory_page>(
+            calloc(1, sizeof(struct memory_page)));
+        if (page == nullptr) {
+            RollbackGuestPageReservations(
+                memory, reservations);
+            errno = ENOMEM;
+            return UINT64_MAX;
+        }
+        try {
+            reservations->push_back({
+                vaddr, page,
+            });
+        } catch (const std::exception &) {
+            free(page);
+            RollbackGuestPageReservations(
+                memory, reservations);
+            errno = ENOMEM;
+            return UINT64_MAX;
+        }
+        int ret = 0;
+        k = kh_put(memory, memory, vaddr, &ret);
+        if (ret < 0 || k == kh_end(memory)) {
+            RollbackGuestPageReservations(
+                memory, reservations);
+            errno = ENOMEM;
+            return UINT64_MAX;
+        }
+        if (ret == 0) {
+            RollbackGuestPageReservations(
+                memory, reservations);
+            errno = EEXIST;
+            return UINT64_MAX;
+        }
         kh_value(memory, k) = page;
     }
     
@@ -5404,8 +7433,11 @@ u64 Dynarmic_mem_reserve(u64 address, u64 size, bool fixed, u64 mask) {
     return address;
 }
 
-u32 Dynarmic_direct_mmap(u32 address, u32 size, int protection, int flags, void *src, u64 off) {
-    std::lock_guard<std::recursive_mutex> lock(guestVmMutex);
+u32 Dynarmic_direct_mmap(
+        u32 address, u64 size, int protection,
+        int flags, void *src, u64 off) {
+    std::unique_lock<std::recursive_mutex> lock(
+        guestVmMutex);
     if(address & DYN_PAGE_MASK) {
         errno = EINVAL;
         return -1;
@@ -5414,36 +7446,65 @@ u32 Dynarmic_direct_mmap(u32 address, u32 size, int protection, int flags, void 
         errno = EINVAL;
         return -1;
     }
-    
-    khash_t(memory) *memory = sharedHandle.memory;
-    address = Dynarmic_mem_reserve(address, size, flags & MAP_FIXED, DYN_PAGE_MASK);
-    if(address == -1) {
-        fprintf(stderr, "reserve failed[%s->%s:%d]: addr=0x%x\n", __FILE__, __func__, __LINE__, address);
-        return -1;
+    if (!GuestProtectionIsValid(protection) ||
+            !GuestAddressRangeIsValid32(
+                address, size)) {
+        errno = EINVAL;
+        return UINT32_MAX;
     }
     
-    for(u32 vaddr = address; vaddr < address + size; vaddr += DYN_PAGE_SIZE) {
+    khash_t(memory) *memory = sharedHandle.memory;
+    std::vector<GuestPageReservation>
+        reservations;
+    const u64 reservedAddress =
+        Dynarmic_mem_reserve(
+            address, size, flags & MAP_FIXED,
+            DYN_PAGE_MASK, &reservations);
+    if(reservedAddress == UINT64_MAX) {
+        fprintf(stderr, "reserve failed[%s->%s:%d]: addr=0x%x\n", __FILE__, __func__, __LINE__, address);
+        return UINT32_MAX;
+    }
+    address = static_cast<u32>(reservedAddress);
+    
+    const u64 end = reservedAddress + size;
+    for(u64 vaddr = reservedAddress; vaddr < end;
+            vaddr += DYN_PAGE_SIZE) {
         u64 idx = vaddr >> DYN_PAGE_BITS;
         
-        void *addr = (void *)((u64)src + off + vaddr - address);
+        void *addr = reinterpret_cast<void *>(
+            reinterpret_cast<u64>(src) + off +
+                vaddr - reservedAddress);
         t_memory_page page = kh_value(memory, kh_get(memory, memory, vaddr));
-        ReleaseMemoryPageBacking(page);
+        t_memory_backing oldBacking =
+            page->backing;
         page->addr = addr;
         page->perms = protection;
+        page->enforceDataPermissions =
+            (protection & PROT_READ) == 0;
         page->backing = nullptr;
         if(sharedHandle.page_table && idx < sharedHandle.num_page_table_entries) {
             __atomic_store_n(
-                &sharedHandle.page_table[idx], addr,
+                &sharedHandle.page_table[idx],
+                GuestPageTablePointer(page),
                 __ATOMIC_RELEASE);
         } else {
             // 0xffffff80001f0000ULL: 0x10000
         }
+        ReleaseMemoryBackingReference(
+            oldBacking);
     }
+    reservations.clear();
+    lock.unlock();
+    InvalidateAllGuestJits(
+        address, static_cast<size_t>(size));
     return address;
 }
 
-u32 Dynarmic_mmap(u32 address, u32 size, int protection, int flags, int fildes, u64 off, u64 mask) {
-    std::lock_guard<std::recursive_mutex> lock(guestVmMutex);
+u32 Dynarmic_mmap(
+        u32 address, u64 size, int protection,
+        int flags, int fildes, u64 off, u64 mask) {
+    std::unique_lock<std::recursive_mutex> lock(
+        guestVmMutex);
     if(address & DYN_PAGE_MASK) {
         errno = EINVAL;
         return -1;
@@ -5452,69 +7513,125 @@ u32 Dynarmic_mmap(u32 address, u32 size, int protection, int flags, int fildes, 
         errno = EINVAL;
         return -1;
     }
-    khash_t(memory) *memory = sharedHandle.memory;
-    address = Dynarmic_mem_reserve(address, size, flags & MAP_FIXED, mask);
-    if(address == -1) {
-        fprintf(stderr, "reserve failed[%s->%s:%d]: addr=0x%x\n", __FILE__, __func__, __LINE__, address);
-        return -1;
+    if (!GuestProtectionIsValid(protection) ||
+            !GuestAddressRangeIsValid32(
+                address, size)) {
+        errno = EINVAL;
+        return UINT32_MAX;
     }
+    khash_t(memory) *memory = sharedHandle.memory;
+    std::vector<GuestPageReservation>
+        reservations;
+    const u64 reservedAddress =
+        Dynarmic_mem_reserve(
+            address, size, flags & MAP_FIXED,
+            mask, &reservations);
+    if(reservedAddress == UINT64_MAX) {
+        fprintf(stderr, "reserve failed[%s->%s:%d]: addr=0x%x\n", __FILE__, __func__, __LINE__, address);
+        return UINT32_MAX;
+    }
+    address = static_cast<u32>(reservedAddress);
     
-    if ((protection & PROT_EXEC) != 0 && fildes != -1 && size > 0x1000 && off == 0) {
-        // write for Debug
-        protection |= PROT_WRITE;
+    const int guestProtection = protection;
+    const bool debuggerWritableExecutableFile =
+        (guestProtection & PROT_EXEC) != 0 &&
+        fildes != -1 && size > 0x1000 && off == 0;
+    if (debuggerWritableExecutableFile) {
         flags |= MAP_PRIVATE;
         flags &= ~MAP_SHARED;
     }
     
     off_t aligned_off = off & ~(PAGE_SIZE-1);
     const size_t mappingSize = size + (off - aligned_off);
+    int hostProtection =
+        HostProtectionForGuestPermissions(
+            guestProtection);
+    /*
+     * Keep owned anonymous storage readable/writable so debugger and syscall
+     * copyin/copyout helpers never take a host protection fault. Initial
+     * read-bearing mappings intentionally retain the historical page-table
+     * fast path for dyld/shared-cache performance, so their data permissions
+     * are compatibility-mode rather than strict. PROT_NONE/write-only
+     * mappings and every explicit mprotect transition use callbacks for
+     * strict guest data permissions. Executable file mappings are made
+     * private and writable solely so software breakpoints can patch them.
+     */
+    if ((flags & MAP_ANONYMOUS) != 0) {
+        hostProtection |= PROT_READ | PROT_WRITE;
+    }
+    if (debuggerWritableExecutableFile) {
+        hostProtection |= PROT_READ | PROT_WRITE;
+    }
     void *mappingAddress = mmap(
-        NULL, mappingSize, protection & ~PROT_EXEC,
+        NULL, mappingSize, hostProtection,
         flags & ~MAP_FIXED, fildes, aligned_off);
     if(mappingAddress == MAP_FAILED) {
         fprintf(stderr, "mmap failed[%s->%s:%d]: addr=%p\n", __FILE__, __func__, __LINE__, mappingAddress);
-        return -1;
+        RollbackGuestPageReservations(
+            memory, &reservations);
+        return UINT32_MAX;
     }
     t_memory_backing backing =
         static_cast<t_memory_backing>(
             calloc(1, sizeof(struct memory_backing)));
     if (backing == nullptr) {
         (void)munmap(mappingAddress, mappingSize);
+        RollbackGuestPageReservations(
+            memory, &reservations);
         errno = ENOMEM;
-        return -1;
+        return UINT32_MAX;
     }
     backing->addr = mappingAddress;
     backing->size = mappingSize;
     backing->references = size / DYN_PAGE_SIZE;
+    backing->hostProtection = hostProtection;
     u64 addr = reinterpret_cast<u64>(mappingAddress) +
         (off - aligned_off);
     
     printf("DBG: mmaping host 0x%llx to 0x%x\n", addr, address);
     
-    for(u64 vaddr = address; vaddr < address + size; vaddr += DYN_PAGE_SIZE) {
+    const u64 end = reservedAddress + size;
+    for(u64 vaddr = reservedAddress; vaddr < end;
+            vaddr += DYN_PAGE_SIZE) {
         u64 idx = vaddr >> DYN_PAGE_BITS;
         
         t_memory_page page = kh_value(memory, kh_get(memory, memory, vaddr));
-        ReleaseMemoryPageBacking(page);
+        t_memory_backing oldBacking =
+            page->backing;
         page->addr = (void *)addr;
-        page->perms = protection;
+        page->perms = guestProtection;
+        /*
+         * Read-only shared-cache ranges are performance-critical and were
+         * historically direct-mapped. Keep that initial compatibility path;
+         * PROT_NONE/write-only pages and every explicit mprotect transition
+         * use callbacks for strict per-4K data permissions.
+         */
+        page->enforceDataPermissions =
+            (guestProtection & PROT_READ) == 0;
         page->backing = backing;
         if(sharedHandle.page_table && idx < sharedHandle.num_page_table_entries) {
             __atomic_store_n(
                 &sharedHandle.page_table[idx],
-                reinterpret_cast<void *>(addr),
+                GuestPageTablePointer(page),
                 __ATOMIC_RELEASE);
         } else {
             // 0xffffff80001f0000ULL: 0x10000
         }
+        ReleaseMemoryBackingReference(
+            oldBacking);
         
         addr += DYN_PAGE_SIZE;
     }
+    reservations.clear();
+    lock.unlock();
+    InvalidateAllGuestJits(
+        address, static_cast<size_t>(size));
     return address;
 }
 
 int Dynarmic_mprotect(u64 address, u64 size, int perms) {
-    std::lock_guard<std::recursive_mutex> lock(guestVmMutex);
+    std::unique_lock<std::recursive_mutex> lock(
+        guestVmMutex);
     if(address & DYN_PAGE_MASK) {
         errno = EINVAL;
         return -1;
@@ -5523,17 +7640,160 @@ int Dynarmic_mprotect(u64 address, u64 size, int perms) {
         errno = EINVAL;
         return -1;
     }
+    if (!GuestProtectionIsValid(perms)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (size > UINT64_MAX - address) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (!GuestAddressRangeIsValid32(
+            address, size)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    struct ProtectedPage {
+        u64 address;
+        t_memory_page page;
+    };
+    struct BackingProtectionUpdate {
+        t_memory_backing backing;
+        int requiredHostProtection;
+    };
+
     khash_t(memory) *memory = sharedHandle.memory;
-    for(u64 vaddr = address; vaddr < address + size; vaddr += DYN_PAGE_SIZE) {
-        khiter_t k = kh_get(memory, memory, vaddr);
-        if(k == kh_end(memory)) {
-            fprintf(stderr, "mem_protect failed[%s->%s:%d]: vaddr=%p\n", __FILE__, __func__, __LINE__, (void*)vaddr);
-            errno = ENOMEM;
+    std::vector<ProtectedPage> pages;
+    std::vector<BackingProtectionUpdate>
+        backingUpdates;
+    std::unordered_map<t_memory_backing, size_t>
+        backingUpdateIndices;
+
+    try {
+        pages.reserve(
+            static_cast<size_t>(
+                size / DYN_PAGE_SIZE));
+        for(u64 vaddr = address;
+                vaddr < address + size;
+                vaddr += DYN_PAGE_SIZE) {
+            khiter_t k = kh_get(
+                memory, memory, vaddr);
+            if(k == kh_end(memory)) {
+                fprintf(stderr,
+                    "mem_protect failed[%s->%s:%d]: "
+                    "vaddr=%p\n",
+                    __FILE__, __func__, __LINE__,
+                    reinterpret_cast<void *>(vaddr));
+                errno = ENOMEM;
+                return -1;
+            }
+            t_memory_page page =
+                kh_value(memory, k);
+            pages.push_back({vaddr, page});
+            if (page->backing == nullptr) {
+                continue;
+            }
+            const auto insertion =
+                backingUpdateIndices.emplace(
+                    page->backing,
+                    backingUpdates.size());
+            if (insertion.second) {
+                backingUpdates.push_back({
+                    page->backing,
+                    page->backing->hostProtection |
+                        HostProtectionForGuestPermissions(
+                            perms),
+                });
+            }
+        }
+    } catch (const std::exception &) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    /*
+     * Remove fast-path pointers before changing permissions. Any new access
+     * then enters a callback and waits on guestVmMutex until the operation is
+     * committed or rolled back.
+     */
+    for (const ProtectedPage &protectedPage :
+            pages) {
+        const u64 index =
+            protectedPage.address >> DYN_PAGE_BITS;
+        if (sharedHandle.page_table != nullptr &&
+                index <
+                    sharedHandle.num_page_table_entries) {
+            __atomic_store_n(
+                &sharedHandle.page_table[index],
+                nullptr, __ATOMIC_RELEASE);
+        }
+    }
+
+    /*
+     * Host protections are widened when a guest page gains permissions, but
+     * are never narrowed. Per-page guest permissions are enforced by the
+     * page table/callback layer. This is intentional: one 16 KiB host page
+     * can contain four independently protected 4 KiB guest pages, and
+     * revoking the host page could crash another guest thread that already
+     * loaded its fast-path pointer.
+     */
+    for (const BackingProtectionUpdate &update :
+            backingUpdates) {
+        if (update.requiredHostProtection ==
+                update.backing->hostProtection) {
+            continue;
+        }
+        if (mprotect(
+                update.backing->addr,
+                update.backing->size,
+                update.requiredHostProtection) != 0) {
+            const int savedErrno = errno;
+            for (const ProtectedPage &protectedPage :
+                    pages) {
+                const u64 index =
+                    protectedPage.address >>
+                        DYN_PAGE_BITS;
+                if (sharedHandle.page_table != nullptr &&
+                        index <
+                            sharedHandle
+                                .num_page_table_entries) {
+                    __atomic_store_n(
+                        &sharedHandle
+                            .page_table[index],
+                        GuestPageTablePointer(
+                            protectedPage.page),
+                        __ATOMIC_RELEASE);
+                }
+            }
+            errno = savedErrno;
             return -1;
         }
-        t_memory_page page = kh_value(memory, k);
-        page->perms = perms;
+        update.backing->hostProtection =
+            update.requiredHostProtection;
     }
+
+    for (const ProtectedPage &protectedPage :
+            pages) {
+        protectedPage.page->perms = perms;
+        protectedPage.page->enforceDataPermissions =
+            true;
+        const u64 index =
+            protectedPage.address >> DYN_PAGE_BITS;
+        if (sharedHandle.page_table != nullptr &&
+                index <
+                    sharedHandle.num_page_table_entries) {
+            __atomic_store_n(
+                &sharedHandle.page_table[index],
+                GuestPageTablePointer(
+                    protectedPage.page),
+                __ATOMIC_RELEASE);
+        }
+    }
+    lock.unlock();
+    InvalidateAllGuestJits(
+        static_cast<u32>(address),
+        static_cast<size_t>(size));
     return 0;
 }
 
@@ -5543,6 +7803,14 @@ int Dynarmic_mprotect(u64 address, u64 size, int perms) {
  * Signature: (JJ[B)I
  */
 int Dynarmic_mem_1write(u64 address, u64 size, char* src) {
+    if (size == 0) {
+        return 0;
+    }
+    if (src == nullptr ||
+            !GuestAddressRangeIsValid32(
+                address, size)) {
+        return 1;
+    }
     std::lock_guard<std::recursive_mutex> lock(guestVmMutex);
     u64 vaddr_end = address + size;
     for(u64 vaddr = address & ~DYN_PAGE_MASK; vaddr < vaddr_end; vaddr += DYN_PAGE_SIZE) {
@@ -5568,6 +7836,14 @@ int Dynarmic_mem_1write(u64 address, u64 size, char* src) {
  * Signature: (JJI)[B
  */
 int Dynarmic_mem_1read(u64 address, u64 size, char* dest) {
+    if (size == 0) {
+        return 0;
+    }
+    if (dest == nullptr ||
+            !GuestAddressRangeIsValid32(
+                address, size)) {
+        return 1;
+    }
     std::lock_guard<std::recursive_mutex> lock(guestVmMutex);
     u64 vaddr_end = address + size;
     for(u64 vaddr = address & ~DYN_PAGE_MASK; vaddr < vaddr_end; vaddr += DYN_PAGE_SIZE) {
@@ -5940,16 +8216,25 @@ size_t Dynarmic_debugger_thread_ids(
         }
         ++count;
     };
-    if (GuestThreadContext *main = FindGuestThread(1, true)) {
-        append(main->debuggerId);
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestThreadMutex);
+        for (const GuestThreadContext &thread : guestThreads) {
+            if (!thread.alive) {
+                continue;
+            }
+            if (thread.debuggerId == 1 ||
+                    thread.debuggerId >= 3) {
+                append(thread.debuggerId);
+            }
+        }
     }
-    if (guestWorkqueueUpcallActive &&
-            guestWorkqueueWaitingContextValid) {
-        append(2);
-    }
-    for (const GuestThreadContext &thread : guestThreads) {
-        if (thread.alive && thread.debuggerId >= 3) {
-            append(thread.debuggerId);
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestWorkqueueMutex);
+        if (guestWorkqueueUpcallActive &&
+                guestWorkqueueWaitingContextValid) {
+            append(2);
         }
     }
     return count;
@@ -5957,91 +8242,312 @@ size_t Dynarmic_debugger_thread_ids(
 
 gdb_thread_id_t Dynarmic_debugger_current_thread() {
     EnsureGuestThreadRegistry();
+    if (NativeDebuggerActive()) {
+        std::lock_guard<std::mutex> lock(
+            nativeDebugger.mutex);
+        return nativeDebugger.stopOwner;
+    }
     return guestWorkqueueUpcallActive
         ? 2
         : guestCurrentThreadId;
 }
 
 bool Dynarmic_debugger_thread_alive(gdb_thread_id_t thread_id) {
-    if (threadHandle.jit == nullptr) {
+    if (sharedHandle.cb == nullptr ||
+            sharedHandle.cb->cpu == nullptr) {
         return false;
     }
     EnsureGuestThreadRegistry();
     if (thread_id == 2) {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestWorkqueueMutex);
         return guestWorkqueueUpcallActive &&
             guestWorkqueueWaitingContextValid;
     }
-    return FindGuestThread(thread_id, true) != nullptr;
+    std::lock_guard<std::recursive_mutex> lock(
+        guestThreadMutex);
+    for (const GuestThreadContext &thread : guestThreads) {
+        if (thread.debuggerId == thread_id) {
+            return thread.alive;
+        }
+    }
+    return false;
+}
+
+bool Dynarmic_debugger_thread_resumable(
+        gdb_thread_id_t thread_id) {
+    if (!Dynarmic_debugger_thread_alive(thread_id)) {
+        return false;
+    }
+    bool overlayAllowsThread;
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestWorkqueueMutex);
+        /*
+         * The workqueue pseudo-thread overlays the main JIT. Its interrupted
+         * context remains readable as thread 1, but cannot execute
+         * independently until thread 2 returns and restores it.
+         */
+        overlayAllowsThread =
+            !guestWorkqueueUpcallActive ||
+            !guestWorkqueueWaitingContextValid ||
+            thread_id != guestWorkqueueWaitingThreadId;
+    }
+    if (!overlayAllowsThread ||
+            NativeGuestThreadsEnabled() ||
+            thread_id == 2) {
+        return overlayAllowsThread;
+    }
+
+    /*
+     * A cooperative thread can be selected by LLDB only when its saved
+     * context is runnable. The target thread loads that context immediately
+     * before executing the resume request.
+     */
+    std::lock_guard<std::recursive_mutex> threadLock(
+        guestThreadMutex);
+    for (const GuestThreadContext &thread : guestThreads) {
+        if (thread.debuggerId == thread_id) {
+            return thread.alive && thread.runnable &&
+                (thread_id == guestCurrentThreadId ||
+                 thread.savedValid);
+        }
+    }
+    return false;
+}
+
+static bool SelectCooperativeDebuggerThread(
+        gdb_thread_id_t thread_id) {
+    if (NativeGuestThreadsEnabled()) {
+        return true;
+    }
+    EnsureGuestThreadRegistry();
+    {
+        std::lock_guard<std::recursive_mutex> workqueueLock(
+            guestWorkqueueMutex);
+        if (guestWorkqueueUpcallActive &&
+                guestWorkqueueWaitingContextValid) {
+            return thread_id == 2;
+        }
+        if (thread_id == 2) {
+            return false;
+        }
+    }
+
+    std::lock_guard<std::recursive_mutex> threadLock(
+        guestThreadMutex);
+    if (thread_id == guestCurrentThreadId) {
+        return true;
+    }
+    GuestThreadContext *current =
+        FindGuestThread(guestCurrentThreadId, true);
+    GuestThreadContext *selected =
+        FindGuestThread(thread_id, true);
+    if (current == nullptr || selected == nullptr ||
+            !selected->runnable ||
+            !selected->savedValid ||
+            threadHandle.jit == nullptr ||
+            threadHandle.cb == nullptr) {
+        return false;
+    }
+
+    SaveGuestContext(current->saved);
+    current->savedValid = true;
+    LoadGuestContext(selected->saved);
+    guestCurrentThreadId = thread_id;
+    guestThreadRotationRequested = false;
+    guestThreadCurrentRetiring = false;
+    return true;
 }
 
 bool Dynarmic_debugger_thread_read_reg(
         gdb_thread_id_t thread_id, int regno, u32 *value) {
-    if (value == nullptr || regno < 0 || regno > 16 ||
-            !Dynarmic_debugger_thread_alive(thread_id)) {
+    if (value == nullptr || regno < 0 || regno > 16) {
         return false;
     }
 
-    if (thread_id == Dynarmic_debugger_current_thread()) {
-        *value = regno == 16
-            ? static_cast<u32>(threadHandle.jit->Cpsr())
-            : threadHandle.jit->Regs()[regno];
-        return true;
+    std::unique_lock<std::mutex> debuggerLock;
+    if (NativeDebuggerActive()) {
+        debuggerLock = std::unique_lock<std::mutex>(
+            nativeDebugger.mutex);
+        if (nativeDebugger.state !=
+                NativeDebuggerRunState::Stopped ||
+                nativeDebugger.mainExecuting ||
+                nativeDebugger.executingWorkers != 0) {
+            return false;
+        }
     }
 
-    if (guestWorkqueueUpcallActive &&
-            guestWorkqueueWaitingContextValid &&
-            thread_id == guestWorkqueueWaitingThreadId) {
-        *value = regno == 16
-            ? guestWorkqueueWaitingContext.cpsr
-            : guestWorkqueueWaitingContext.regs[regno];
-        return true;
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestWorkqueueMutex);
+        if (guestWorkqueueUpcallActive &&
+                guestWorkqueueWaitingContextValid &&
+                thread_id == 2) {
+            Dynarmic::A32::Jit *jit =
+                sharedHandle.cb != nullptr
+                ? sharedHandle.cb->cpu
+                : nullptr;
+            if (jit == nullptr) {
+                return false;
+            }
+            *value = regno == 16
+                ? static_cast<u32>(jit->Cpsr())
+                : jit->Regs()[regno];
+            return true;
+        }
+        if (guestWorkqueueUpcallActive &&
+                guestWorkqueueWaitingContextValid &&
+                thread_id ==
+                    guestWorkqueueWaitingThreadId) {
+            *value = regno == 16
+                ? guestWorkqueueWaitingContext.cpsr
+                : guestWorkqueueWaitingContext.regs[regno];
+            return true;
+        }
+        if (thread_id == 2) {
+            return false;
+        }
     }
-    GuestThreadContext *thread =
-        FindGuestThread(thread_id, true);
-    if (thread != nullptr && thread->savedValid) {
-        *value = regno == 16
-            ? thread->saved.cpsr
-            : thread->saved.regs[regno];
-        return true;
+
+    std::lock_guard<std::recursive_mutex> lock(
+        guestThreadMutex);
+    for (GuestThreadContext &thread : guestThreads) {
+        if (thread.debuggerId != thread_id ||
+                !thread.alive) {
+            continue;
+        }
+        Dynarmic::A32::Jit *jit = nullptr;
+        if (NativeDebuggerActive()) {
+            jit = thread_id == 1
+                ? (sharedHandle.cb != nullptr
+                    ? sharedHandle.cb->cpu
+                    : nullptr)
+                : (thread.nativeJit != nullptr
+                    ? thread.nativeJit->jit
+                    : nullptr);
+        } else if (thread_id ==
+                Dynarmic_debugger_current_thread()) {
+            jit = threadHandle.jit;
+        }
+        if (jit != nullptr) {
+            *value = regno == 16
+                ? static_cast<u32>(jit->Cpsr())
+                : jit->Regs()[regno];
+            return true;
+        }
+        if (thread.savedValid) {
+            *value = regno == 16
+                ? thread.saved.cpsr
+                : thread.saved.regs[regno];
+            return true;
+        }
+        return false;
     }
     return false;
 }
 
 bool Dynarmic_debugger_thread_write_reg(
         gdb_thread_id_t thread_id, int regno, u32 value) {
-    if (regno < 0 || regno > 16 ||
-            !Dynarmic_debugger_thread_alive(thread_id)) {
+    if (regno < 0 || regno > 16) {
         return false;
     }
 
-    if (thread_id == Dynarmic_debugger_current_thread()) {
-        if (regno == 16) {
-            threadHandle.jit->SetCpsr(value);
-        } else {
-            threadHandle.jit->Regs()[regno] = value;
+    std::unique_lock<std::mutex> debuggerLock;
+    if (NativeDebuggerActive()) {
+        debuggerLock = std::unique_lock<std::mutex>(
+            nativeDebugger.mutex);
+        if (nativeDebugger.state !=
+                NativeDebuggerRunState::Stopped ||
+                nativeDebugger.mainExecuting ||
+                nativeDebugger.executingWorkers != 0) {
+            return false;
         }
-        return true;
     }
 
-    if (guestWorkqueueUpcallActive &&
-            guestWorkqueueWaitingContextValid &&
-            thread_id == guestWorkqueueWaitingThreadId) {
-        if (regno == 16) {
-            guestWorkqueueWaitingContext.cpsr = value;
-        } else {
-            guestWorkqueueWaitingContext.regs[regno] = value;
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestWorkqueueMutex);
+        if (guestWorkqueueUpcallActive &&
+                guestWorkqueueWaitingContextValid &&
+                thread_id == 2) {
+            Dynarmic::A32::Jit *jit =
+                sharedHandle.cb != nullptr
+                ? sharedHandle.cb->cpu
+                : nullptr;
+            if (jit == nullptr) {
+                return false;
+            }
+            if (regno == 16) {
+                jit->SetCpsr(value);
+            } else {
+                jit->Regs()[regno] = value;
+            }
+            return true;
         }
-        return true;
+        if (guestWorkqueueUpcallActive &&
+                guestWorkqueueWaitingContextValid &&
+                thread_id ==
+                    guestWorkqueueWaitingThreadId) {
+            if (regno == 16) {
+                guestWorkqueueWaitingContext.cpsr = value;
+            } else {
+                guestWorkqueueWaitingContext.regs[regno] =
+                    value;
+            }
+            return true;
+        }
+        if (thread_id == 2) {
+            return false;
+        }
     }
-    GuestThreadContext *thread =
-        FindGuestThread(thread_id, true);
-    if (thread != nullptr && thread->savedValid) {
-        if (regno == 16) {
-            thread->saved.cpsr = value;
-        } else {
-            thread->saved.regs[regno] = value;
+
+    std::lock_guard<std::recursive_mutex> lock(
+        guestThreadMutex);
+    for (GuestThreadContext &thread : guestThreads) {
+        if (thread.debuggerId != thread_id ||
+                !thread.alive) {
+            continue;
         }
-        return true;
+        Dynarmic::A32::Jit *jit = nullptr;
+        if (NativeDebuggerActive()) {
+            if (thread.nativeJit != nullptr &&
+                    thread.nativeJit->debuggerHostWaitPaused) {
+                /*
+                 * The stopped host callback has not copied its syscall result
+                 * back to the JIT register file yet. Reject writes instead of
+                 * reporting success and silently overwriting them on resume.
+                 */
+                return false;
+            }
+            jit = thread_id == 1
+                ? (sharedHandle.cb != nullptr
+                    ? sharedHandle.cb->cpu
+                    : nullptr)
+                : (thread.nativeJit != nullptr
+                    ? thread.nativeJit->jit
+                    : nullptr);
+        } else if (thread_id ==
+                Dynarmic_debugger_current_thread()) {
+            jit = threadHandle.jit;
+        }
+        if (jit != nullptr) {
+            if (regno == 16) {
+                jit->SetCpsr(value);
+            } else {
+                jit->Regs()[regno] = value;
+            }
+            return true;
+        }
+        if (thread.savedValid) {
+            if (regno == 16) {
+                thread.saved.cpsr = value;
+            } else {
+                thread.saved.regs[regno] = value;
+            }
+            return true;
+        }
+        return false;
     }
     return false;
 }
@@ -6143,7 +8649,7 @@ Dynarmic::HaltReason Dynarmic_emu_1start(u32 pc) {
       }
       cpu->Regs()[15] = (u32) (pc & ~1);
       for (;;) {
-        reason = cpu->Run();
+        reason = RunGuestJit(cpu);
         if (Dynarmic::Has(
                 reason, Dynarmic::HaltReason::CacheInvalidation)) {
           reason = reason &
@@ -6168,14 +8674,18 @@ Dynarmic::HaltReason Dynarmic_emu_1start(u32 pc) {
         if (!Dynarmic::Has(reason, LC32HaltReasonSVC)) {
           break;
         }
-        threadHandle.cb->CallSVC(0x80);
-        HandleGuestContextTransition();
+        ServiceGuestSVC();
       }
     } else {
       return LC32HaltReasonTrap;
     }
   UpdateGuestStopSignalForHalt(reason);
   return reason;
+}
+
+static void ServiceDeferredGuestSVC() {
+    guestDeferredSVC = false;
+    ServiceGuestSVC();
 }
 
 Dynarmic::HaltReason Dynarmic_emu_1resume() {
@@ -6188,8 +8698,16 @@ Dynarmic::HaltReason Dynarmic_emu_1resume() {
     }
 
     Dynarmic::HaltReason reason;
+    if (guestDeferredSVC) {
+        ServiceDeferredGuestSVC();
+        if (!NativeDebuggerMainContextMayRun()) {
+            reason = Dynarmic::HaltReason::Step;
+            UpdateGuestStopSignalForHalt(reason);
+            return reason;
+        }
+    }
     for (;;) {
-        reason = jit->Run();
+        reason = RunGuestJit(jit);
         if (Dynarmic::Has(
                 reason, Dynarmic::HaltReason::CacheInvalidation)) {
             reason = reason &
@@ -6209,13 +8727,27 @@ Dynarmic::HaltReason Dynarmic_emu_1resume() {
                 reason = remaining;
                 break;
             }
+            if (!NativeDebuggerMainContextMayRun()) {
+                reason = Dynarmic::HaltReason::Step;
+                break;
+            }
             continue;
         }
         if (!Dynarmic::Has(reason, LC32HaltReasonSVC)) {
             break;
         }
-        threadHandle.cb->CallSVC(0x80);
-        HandleGuestContextTransition();
+        const Dynarmic::HaltReason remaining =
+            reason & ~LC32HaltReasonSVC;
+        if (!!remaining) {
+            guestDeferredSVC = true;
+            reason = remaining;
+            break;
+        }
+        ServiceDeferredGuestSVC();
+        if (!NativeDebuggerMainContextMayRun()) {
+            reason = Dynarmic::HaltReason::Step;
+            break;
+        }
     }
     UpdateGuestStopSignalForHalt(reason);
     return reason;
@@ -6233,8 +8765,17 @@ Dynarmic::HaltReason Dynarmic_emu_1step() {
     Dynarmic::HaltReason reason;
     bool drainInternalWorker = false;
     guestSingleStepping = true;
+    if (guestDeferredSVC) {
+        ServiceDeferredGuestSVC();
+        reason = Dynarmic::HaltReason::Step;
+        guestSingleStepping = false;
+        UpdateGuestStopSignalForHalt(reason);
+        return reason;
+    }
     for (;;) {
-        reason = drainInternalWorker ? jit->Run() : jit->Step();
+        reason = drainInternalWorker
+            ? RunGuestJit(jit)
+            : StepGuestJit(jit);
         if (Dynarmic::Has(
                 reason, Dynarmic::HaltReason::CacheInvalidation)) {
             reason = reason &
@@ -6283,38 +8824,435 @@ Dynarmic::HaltReason Dynarmic_emu_1step() {
         if (!Dynarmic::Has(reason, LC32HaltReasonSVC)) {
             break;
         }
-        threadHandle.cb->CallSVC(0x80);
-        HandleGuestContextTransition();
+        const Dynarmic::HaltReason remaining =
+            reason & ~LC32HaltReasonSVC;
+        if (!!remaining) {
+            guestDeferredSVC = true;
+            reason = remaining;
+            break;
+        }
+        ServiceDeferredGuestSVC();
+        if (!NativeDebuggerMainContextMayRun()) {
+            reason = Dynarmic::HaltReason::Step;
+            break;
+        }
     }
     guestSingleStepping = false;
     UpdateGuestStopSignalForHalt(reason);
     return reason;
 }
 
-void Dynarmic_emu_1set_1debugger_1enabled(bool enabled) {
-    guestDebuggerEnabled.store(enabled, std::memory_order_relaxed);
-    if (!enabled) {
-        debuggerInterruptRequested.store(false, std::memory_order_release);
+static bool NativeDebuggerBeginExecution(
+        NativeDebuggerResumeMode mode,
+        gdb_thread_id_t stepThread,
+        bool mainExecuting) {
+    const auto requestedStopOwnerLocked =
+        [mode, stepThread] {
+            const gdb_thread_id_t candidate =
+                mode ==
+                    NativeDebuggerResumeMode::ContinueAll
+                ? 1
+                : stepThread;
+            return NativeDebuggerNormalizeStopOwnerLocked(
+                candidate != 0 ? candidate : 1);
+        };
+    {
+        std::lock_guard<std::mutex> lock(
+            nativeDebugger.mutex);
+        assert(nativeDebugger.executingWorkers == 0);
+        assert(nativeDebugger.state ==
+            NativeDebuggerRunState::Stopped);
+        /*
+         * Publish the incoming selection before clearing old JIT halts. The
+         * socket reader can queue ^C during this handoff and must attribute
+         * the resulting stop to this request, not the previous vCont mode.
+         */
+        nativeDebugger.resumeMode = mode;
+        nativeDebugger.stepThread = stepThread;
+        if (nativeDebugger.pendingInterrupt) {
+            nativeDebugger.stopOwner =
+                requestedStopOwnerLocked();
+            nativeDebugger.stopReason =
+                LC32HaltReasonInterrupt;
+            nativeDebugger.stopSignal = SIGINT;
+            nativeDebugger.pendingInterrupt = false;
+            nativeDebugger.resumeStarting = false;
+            nativeDebugger.mainExecuting = false;
+            CommitGuestStopSignal(SIGINT, false);
+            return false;
+        }
+        nativeDebugger.resumeStarting = true;
     }
+
+    /*
+     * HaltExecution is level-triggered. A JIT which was already parked when a
+     * peer published the previous stop never entered Run() to consume the
+     * debugger-pause bit. Keep the coordinator in Stopped/resumeStarting while
+     * clearing every acknowledged JIT. A concurrent ^C is queued under the
+     * same mutex and cannot be erased by the Stopped-to-Running handoff.
+     */
+    ClearAllGuestJitHalts(
+        LC32HaltReasonDebuggerPause);
+    {
+        std::lock_guard<std::mutex> lock(nativeDebugger.mutex);
+        if (nativeDebugger.pendingInterrupt) {
+            nativeDebugger.stopOwner =
+                requestedStopOwnerLocked();
+            nativeDebugger.stopReason =
+                LC32HaltReasonInterrupt;
+            nativeDebugger.stopSignal = SIGINT;
+            nativeDebugger.pendingInterrupt = false;
+            nativeDebugger.resumeStarting = false;
+            nativeDebugger.mainExecuting = false;
+            CommitGuestStopSignal(SIGINT, false);
+            return false;
+        }
+        nativeDebugger.state =
+            NativeDebuggerRunState::Running;
+        nativeDebugger.mainExecuting = mainExecuting;
+        nativeDebugger.resumeStarting = false;
+        ++nativeDebugger.generation;
+        debuggerInterruptRequested.store(
+            false, std::memory_order_release);
+        debuggerAllStopRequested.store(
+            false, std::memory_order_release);
+    }
+    nativeDebugger.condition.notify_all();
+    return true;
+}
+
+static Dynarmic::HaltReason NativeDebuggerCompleteStop() {
+    std::unique_lock<std::mutex> lock(nativeDebugger.mutex);
+    nativeDebugger.mainExecuting = false;
+    const auto allThreadsStopped = [] {
+        return !NativeDebuggerActive() ||
+            (nativeDebugger.state !=
+                 NativeDebuggerRunState::Running &&
+             nativeDebugger.executingWorkers == 0);
+    };
+    auto nextHostInterrupt =
+        std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(20);
+    while (!allThreadsStopped()) {
+        if (nativeDebugger.condition.wait_until(
+                lock, nextHostInterrupt) !=
+                std::cv_status::timeout) {
+            continue;
+        }
+        /*
+         * A waiter can be descheduled between publishing InCall and entering
+         * the kernel, longer than the bounded first interrupt burst. Keep
+         * retrying until every executing worker acknowledges this all-stop.
+         */
+        const bool retryHostInterrupt =
+            (nativeDebugger.state ==
+                 NativeDebuggerRunState::Stopping ||
+             nativeDebugger.state ==
+                 NativeDebuggerRunState::ShuttingDown) &&
+            nativeDebugger.executingWorkers != 0;
+        lock.unlock();
+        if (retryHostInterrupt) {
+            InterruptDebuggerMachCalls();
+        }
+        lock.lock();
+        nextHostInterrupt =
+            std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(20);
+    }
+    if (!NativeDebuggerActive()) {
+        return LC32HaltReasonTrap;
+    }
+    if (nativeDebugger.state ==
+            NativeDebuggerRunState::Stopping) {
+        nativeDebugger.state =
+            NativeDebuggerRunState::Stopped;
+    }
+    guestStopSignal.store(
+        nativeDebugger.stopSignal,
+        std::memory_order_relaxed);
+    const Dynarmic::HaltReason reason =
+        nativeDebugger.stopReason;
+    lock.unlock();
+    nativeDebugger.condition.notify_all();
+    return reason;
+}
+
+static Dynarmic::HaltReason NativeDebuggerReemitPendingStop() {
+    std::lock_guard<std::mutex> lock(nativeDebugger.mutex);
+    nativeDebugger.state =
+        NativeDebuggerRunState::Stopped;
+    nativeDebugger.stopSignal =
+        guestStopSignal.load(std::memory_order_relaxed);
+    return nativeDebugger.stopReason;
+}
+
+Dynarmic::HaltReason Dynarmic_debugger_continue(
+        gdb_thread_id_t thread_id) {
+    if (!NativeDebuggerActive()) {
+        if (ConsumePendingGuestStop()) {
+            return LC32HaltReasonTrap;
+        }
+        if (thread_id == GDB_THREAD_ID_ANY) {
+            thread_id =
+                Dynarmic_debugger_current_thread();
+        }
+        if (thread_id != GDB_THREAD_ID_ALL &&
+                !Dynarmic_debugger_thread_resumable(
+                    thread_id)) {
+            CommitGuestStopSignal(SIGTRAP, false);
+            return LC32HaltReasonTrap;
+        }
+        if (thread_id != GDB_THREAD_ID_ALL &&
+                !SelectCooperativeDebuggerThread(
+                    thread_id)) {
+            CommitGuestStopSignal(SIGTRAP, false);
+            return LC32HaltReasonTrap;
+        }
+        const gdb_thread_id_t previousThread =
+            cooperativeDebuggerResumeThread;
+        cooperativeDebuggerResumeThread = thread_id;
+        const Dynarmic::HaltReason reason =
+            Dynarmic_emu_1resume();
+        cooperativeDebuggerResumeThread =
+            previousThread;
+        return reason;
+    }
+    if (ConsumePendingGuestStop()) {
+        return NativeDebuggerReemitPendingStop();
+    }
+
+    if (thread_id == GDB_THREAD_ID_ANY) {
+        thread_id =
+            Dynarmic_debugger_current_thread();
+    }
+    const bool continueAll =
+        thread_id == GDB_THREAD_ID_ALL;
+    if (!continueAll &&
+            !Dynarmic_debugger_thread_resumable(
+                thread_id)) {
+        CommitGuestStopSignal(SIGTRAP, false);
+        return LC32HaltReasonTrap;
+    }
+    const bool runMain = continueAll ||
+        thread_id == 1 || thread_id == 2;
+    if (!NativeDebuggerBeginExecution(
+        continueAll
+            ? NativeDebuggerResumeMode::ContinueAll
+            : NativeDebuggerResumeMode::ContinueOne,
+        continueAll ? 0 : thread_id,
+        runMain)) {
+        return NativeDebuggerCompleteStop();
+    }
+    if (runMain) {
+        const gdb_thread_id_t mainOwner =
+            ActiveMainDebuggerThread();
+        if (NativeDebuggerRepublishPendingStop(
+                mainOwner)) {
+            return NativeDebuggerCompleteStop();
+        }
+        const Dynarmic::HaltReason reason =
+            Dynarmic_emu_1resume();
+        const Dynarmic::HaltReason visibleReason =
+            NativeDebuggerVisibleReason(reason);
+        if (!!visibleReason) {
+            const gdb_thread_id_t owner =
+                ActiveMainDebuggerThread();
+            (void)NativeDebuggerRequestStop(
+                owner, visibleReason);
+        } else {
+            bool stillRunning;
+            {
+                std::lock_guard<std::mutex> lock(
+                    nativeDebugger.mutex);
+                stillRunning =
+                    nativeDebugger.state ==
+                        NativeDebuggerRunState::Running;
+            }
+            if (stillRunning) {
+                (void)NativeDebuggerRequestStop(
+                    ActiveMainDebuggerThread(),
+                    LC32HaltReasonTrap,
+                    SIGTRAP, false);
+            }
+        }
+    }
+    return NativeDebuggerCompleteStop();
+}
+
+Dynarmic::HaltReason Dynarmic_debugger_step(
+        gdb_thread_id_t thread_id,
+        bool continue_other_threads) {
+    if (!NativeDebuggerActive()) {
+        if (ConsumePendingGuestStop()) {
+            return LC32HaltReasonTrap;
+        }
+        if (thread_id == GDB_THREAD_ID_ANY ||
+                thread_id == GDB_THREAD_ID_ALL) {
+            thread_id =
+                Dynarmic_debugger_current_thread();
+        }
+        if (!Dynarmic_debugger_thread_resumable(
+                thread_id)) {
+            CommitGuestStopSignal(SIGTRAP, false);
+            return LC32HaltReasonTrap;
+        }
+        if (!SelectCooperativeDebuggerThread(
+                thread_id)) {
+            CommitGuestStopSignal(SIGTRAP, false);
+            return LC32HaltReasonTrap;
+        }
+        const gdb_thread_id_t previousThread =
+            cooperativeDebuggerResumeThread;
+        cooperativeDebuggerResumeThread = thread_id;
+        const Dynarmic::HaltReason reason =
+            Dynarmic_emu_1step();
+        cooperativeDebuggerResumeThread =
+            previousThread;
+        return reason;
+    }
+    if (ConsumePendingGuestStop()) {
+        return NativeDebuggerReemitPendingStop();
+    }
+    if (thread_id == GDB_THREAD_ID_ANY ||
+            thread_id == GDB_THREAD_ID_ALL) {
+        thread_id =
+            Dynarmic_debugger_current_thread();
+    }
+    if (!Dynarmic_debugger_thread_resumable(
+            thread_id)) {
+        CommitGuestStopSignal(SIGTRAP, false);
+        return LC32HaltReasonTrap;
+    }
+
+    const bool stepMain =
+        thread_id == 1 || thread_id == 2;
+    const bool runMain =
+        stepMain || continue_other_threads;
+    if (!NativeDebuggerBeginExecution(
+        continue_other_threads
+            ? NativeDebuggerResumeMode::
+                StepOneContinueOthers
+            : NativeDebuggerResumeMode::StepOne,
+        thread_id, runMain)) {
+        return NativeDebuggerCompleteStop();
+    }
+    if (runMain) {
+        const gdb_thread_id_t mainOwner =
+            ActiveMainDebuggerThread();
+        if (NativeDebuggerRepublishPendingStop(
+                mainOwner)) {
+            return NativeDebuggerCompleteStop();
+        }
+        const Dynarmic::HaltReason reason =
+            stepMain
+            ? Dynarmic_emu_1step()
+            : Dynarmic_emu_1resume();
+        const Dynarmic::HaltReason visibleReason =
+            NativeDebuggerVisibleReason(reason);
+        if (!!visibleReason || stepMain) {
+            const gdb_thread_id_t owner =
+                ActiveMainDebuggerThread();
+            (void)NativeDebuggerRequestStop(
+                owner,
+                !!visibleReason
+                    ? visibleReason
+                    : Dynarmic::HaltReason::Step);
+        }
+    }
+    return NativeDebuggerCompleteStop();
+}
+
+void Dynarmic_emu_1set_1debugger_1enabled(bool enabled) {
+    if (enabled && NativeGuestThreadsEnabled()) {
+        {
+            std::lock_guard<std::mutex> lock(
+                nativeDebugger.mutex);
+            nativeDebugger.state =
+                NativeDebuggerRunState::Stopped;
+            nativeDebugger.resumeMode =
+                NativeDebuggerResumeMode::ContinueAll;
+            nativeDebugger.stopOwner = 1;
+            nativeDebugger.stepThread = 1;
+            nativeDebugger.stopReason =
+                LC32HaltReasonTrap;
+            nativeDebugger.stopSignal =
+                guestStopSignal.load(std::memory_order_relaxed);
+            nativeDebugger.executingWorkers = 0;
+            nativeDebugger.mainExecuting = false;
+            nativeDebugger.resumeStarting = false;
+            nativeDebugger.pendingInterrupt = false;
+            debuggerAllStopRequested.store(
+                true, std::memory_order_release);
+        }
+        guestDebuggerEnabled.store(
+            true, std::memory_order_release);
+        nativeDebugger.condition.notify_all();
+        return;
+    }
+    guestDebuggerEnabled.store(
+        enabled, std::memory_order_release);
+    if (enabled) {
+        return;
+    }
+
+    debuggerInterruptRequested.store(
+        false, std::memory_order_release);
+    debuggerAllStopRequested.store(
+        false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(
+            nativeDebugger.mutex);
+        if (nativeDebugger.state !=
+                NativeDebuggerRunState::ShuttingDown) {
+            nativeDebugger.state =
+                NativeDebuggerRunState::Disabled;
+        }
+        nativeDebugger.mainExecuting = false;
+    }
+    nativeDebugger.condition.notify_all();
+    NotifyNativeDebuggerWaiters();
 }
 
 int Dynarmic_emu_1get_1stop_1signal() {
+    if (NativeDebuggerActive()) {
+        std::lock_guard<std::mutex> lock(
+            nativeDebugger.mutex);
+        return nativeDebugger.stopSignal;
+    }
     return guestStopSignal.load(std::memory_order_relaxed);
+}
+
+int Dynarmic_emu_1get_1exit_1code() {
+    return guestProcessExitCode.load(
+        std::memory_order_acquire);
 }
 
 void Dynarmic_emu_1set_1resume_1signal(int signal) {
     const int pending =
         pendingGuestFatalSignal.load(std::memory_order_relaxed);
-    if (signal > 0 && signal == pending) {
+    if (pending > 0 &&
+            (signal == 0 || signal == pending)) {
+        /*
+         * A synchronous guest fault cannot be suppressed by lowercase c/s:
+         * Dynarmic memory callbacks do not carry an exact instruction PC, so
+         * executing here could step from a stale linked-block boundary. Keep
+         * reporting the unresolved fault until the debugger changes register
+         * or memory state.
+         */
         reemitPendingGuestStop.store(true, std::memory_order_relaxed);
         return;
     }
 
-    // Signal zero is the lowercase c/s suppression path.  A different signal
-    // also cannot faithfully deliver the pending guest fault, so let execution
-    // proceed instead of re-reporting stale state.
+    // A different signal cannot be faithfully delivered by this userland JIT.
     pendingGuestFatalSignal.store(0, std::memory_order_relaxed);
     reemitPendingGuestStop.store(false, std::memory_order_relaxed);
+}
+
+void Dynarmic_debugger_resolve_pending_stop() {
+    pendingGuestFatalSignal.store(
+        0, std::memory_order_relaxed);
+    reemitPendingGuestStop.store(
+        false, std::memory_order_relaxed);
 }
 
 /*
@@ -6323,6 +9261,39 @@ void Dynarmic_emu_1set_1resume_1signal(int signal) {
  * Signature: (J)I
  */
 int Dynarmic_emu_1stop() {
+    if (NativeDebuggerActive()) {
+        gdb_thread_id_t owner =
+            ActiveMainDebuggerThread();
+        {
+            std::lock_guard<std::mutex> lock(
+                nativeDebugger.mutex);
+            if (nativeDebugger.resumeMode !=
+                    NativeDebuggerResumeMode::ContinueAll &&
+                    nativeDebugger.stepThread != 0) {
+                owner = nativeDebugger.stepThread;
+            }
+        }
+        /*
+         * The selected worker can retire inside bsdthread_terminate before
+         * its host loop publishes the replacement stop. Never expose a stop
+         * owner that qfThreadInfo has already dropped.
+         */
+        if (!Dynarmic_debugger_thread_alive(owner) ||
+                !Dynarmic_debugger_thread_resumable(
+                    owner)) {
+            owner = ActiveMainDebuggerThread();
+        }
+        if (!Dynarmic_debugger_thread_alive(owner)) {
+            owner = 1;
+        }
+        debuggerInterruptRequested.store(
+            true, std::memory_order_release);
+        (void)NativeDebuggerRequestStop(
+            owner, LC32HaltReasonInterrupt,
+            SIGINT, false, true);
+        return 0;
+    }
+
     // on_interrupt is invoked by mini-gdbstub's socket-reader thread. That
     // thread has no thread-local dynarmic_thread, so use the JIT published by
     // the shared callbacks instead of threadHandle.jit.
@@ -6331,22 +9302,7 @@ int Dynarmic_emu_1stop() {
     if(jit) {
       debuggerInterruptRequested.store(true, std::memory_order_release);
       jit->HaltExecution(LC32HaltReasonInterrupt);
-      for (;;) {
-        const DebuggerMachCallPhase phase =
-            debuggerMachCallPhase.load(std::memory_order_acquire);
-        if (phase == DebuggerMachCallPhase::Idle ||
-                phase == DebuggerMachCallPhase::Completing) {
-            break;
-        }
-        if (phase == DebuggerMachCallPhase::InCall) {
-            const mach_port_t thread =
-                debuggerMachCallThread.load(std::memory_order_acquire);
-            if (MACH_PORT_VALID(thread)) {
-                (void)thread_abort_safely(thread);
-            }
-        }
-        sched_yield();
-      }
+      InterruptDebuggerMachCalls();
     } else {
       return 1;
     }

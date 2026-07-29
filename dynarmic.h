@@ -53,6 +53,7 @@ extern "C" {
 #define LC32HaltReasonTrap Dynarmic::HaltReason::UserDefined4
 #define LC32HaltReasonInterrupt Dynarmic::HaltReason::UserDefined5
 #define LC32HaltReasonWorkqueue Dynarmic::HaltReason::UserDefined6
+#define LC32HaltReasonDebuggerPause Dynarmic::HaltReason::UserDefined7
 
 class Reg {
 public:
@@ -101,11 +102,11 @@ struct guest_file_mapping {
 extern int guestMappingLen;
 extern guest_file_mapping guestMappings[1000];
 extern size_t guestMappingGeneration;
-bool ResolveDebuggerImagePath(const char *guestPath, char *hostPath);
 
 typedef struct memory_page {
     void *addr;
     int perms;
+    bool enforceDataPermissions;
     struct memory_backing *backing;
 } *t_memory_page;
 
@@ -113,6 +114,7 @@ typedef struct memory_backing {
     void *addr;
     size_t size;
     size_t references;
+    int hostProtection;
 } *t_memory_backing;
 
 KHASH_MAP_INIT_INT64(memory, t_memory_page)
@@ -253,8 +255,8 @@ Dynarmic::A32::UserCallbacks *Dynarmic_current_user_callbacks();
 bool Dynarmic_nativeInitialize();
 void Dynarmic_nativeDestroy();
 int Dynarmic_munmap(u64 address, u64 size);
-u32 Dynarmic_direct_mmap(u32 address, u32 size, int protection, int flags, void *src, u64 off);
-u32 Dynarmic_mmap(u32 address, u32 size, int protection, int flags, int fildes, u64 off, u64 mask = DYN_PAGE_MASK);
+u32 Dynarmic_direct_mmap(u32 address, u64 size, int protection, int flags, void *src, u64 off);
+u32 Dynarmic_mmap(u32 address, u64 size, int protection, int flags, int fildes, u64 off, u64 mask = DYN_PAGE_MASK);
 int Dynarmic_mprotect(u64 address, u64 size, int perms);
 int Dynarmic_mem_1write(u64 address, u64 size, char* src);
 int Dynarmic_mem_1read(u64 address, u64 size, char* dest);
@@ -267,6 +269,8 @@ size_t Dynarmic_debugger_thread_ids(
     gdb_thread_id_t *ids, size_t capacity);
 gdb_thread_id_t Dynarmic_debugger_current_thread();
 bool Dynarmic_debugger_thread_alive(gdb_thread_id_t thread_id);
+bool Dynarmic_debugger_thread_resumable(
+    gdb_thread_id_t thread_id);
 bool Dynarmic_debugger_thread_read_reg(
     gdb_thread_id_t thread_id, int regno, u32 *value);
 bool Dynarmic_debugger_thread_write_reg(
@@ -279,9 +283,16 @@ int Dynarmic_reg_1write_1c13_1c0_13(int value);
 Dynarmic::HaltReason Dynarmic_emu_1start(u32 pc);
 Dynarmic::HaltReason Dynarmic_emu_1resume();
 Dynarmic::HaltReason Dynarmic_emu_1step();
+Dynarmic::HaltReason Dynarmic_debugger_continue(
+    gdb_thread_id_t thread_id);
+Dynarmic::HaltReason Dynarmic_debugger_step(
+    gdb_thread_id_t thread_id,
+    bool continue_other_threads);
 void Dynarmic_emu_1set_1debugger_1enabled(bool enabled);
 int Dynarmic_emu_1get_1stop_1signal();
+int Dynarmic_emu_1get_1exit_1code();
 void Dynarmic_emu_1set_1resume_1signal(int signal);
+void Dynarmic_debugger_resolve_pending_stop();
 int Dynarmic_emu_1stop();
 void* Dynarmic_context_1alloc();
 void Dynarmic_context_1restore(t_context32 ctx);
