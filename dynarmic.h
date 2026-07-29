@@ -13,10 +13,13 @@
 
 #include <dynarmic/exclusive_monitor.h>
 #endif
-
 #include "khash.h"
 #include "filesystem.h"
 #include "32bit.h"
+
+extern "C" {
+#include <gdbstub.h>
+}
 
 #define PAGE_TABLE_ADDRESS_SPACE_BITS 36
 #define DYN_PAGE_BITS 12 // 4k
@@ -46,42 +49,47 @@
 
 #define LC32HaltReasonSVC Dynarmic::HaltReason::UserDefined1
 #define LC32HaltReasonRetFromGuest Dynarmic::HaltReason::UserDefined2
+#define LC32HaltReasonExit Dynarmic::HaltReason::UserDefined3
+#define LC32HaltReasonTrap Dynarmic::HaltReason::UserDefined4
+#define LC32HaltReasonInterrupt Dynarmic::HaltReason::UserDefined5
+#define LC32HaltReasonWorkqueue Dynarmic::HaltReason::UserDefined6
+#define LC32HaltReasonDebuggerPause Dynarmic::HaltReason::UserDefined7
 
 class Reg {
 public:
-  enum RegEnum {
-    R0,
-    R1,
-    R2,
-    R3,
-    R4,
-    R5,
-    R6,
-    R7,
-    R8,
-    R9,
-    R10,
-    R11,
-    R12,
-    R13,
-    R14,
-    R15,
-    SP = R13,
-    LR = R14,
-    PC = R15,
-    INVALID_REG = 99
-  };
+    enum RegEnum {
+        R0,
+        R1,
+        R2,
+        R3,
+        R4,
+        R5,
+        R6,
+        R7,
+        R8,
+        R9,
+        R10,
+        R11,
+        R12,
+        R13,
+        R14,
+        R15,
+        SP = R13,
+        LR = R14,
+        PC = R15,
+        INVALID_REG = 99
+    };
 };
 
 class ExtReg {
 public:
-  enum ExtRegEnum {
-    // clang-format off
-    S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31,
-    D0, D1, D2, D3, D4, D5, D6, D7, D8, D9, D10, D11, D12, D13, D14, D15, D16, D17, D18, D19, D20, D21, D22, D23, D24, D25, D26, D27, D28, D29, D30, D31,
-    Q0, Q1, Q2, Q3, Q4, Q5, Q6, Q7, Q8, Q9, Q10, Q11, Q12, Q13, Q14, Q15
-    // clang-format on
-  };
+    enum ExtRegEnum {
+        // clang-format off
+        S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31,
+        D0, D1, D2, D3, D4, D5, D6, D7, D8, D9, D10, D11, D12, D13, D14, D15, D16, D17, D18, D19, D20, D21, D22, D23, D24, D25, D26, D27, D28, D29, D30, D31,
+        Q0, Q1, Q2, Q3, Q4, Q5, Q6, Q7, Q8, Q9, Q10, Q11, Q12, Q13, Q14, Q15
+        // clang-format on
+    };
 };
 
 struct guest_file_mapping {
@@ -89,25 +97,36 @@ struct guest_file_mapping {
     uint64_t hostAddr;
     uint32_t start;
     uint32_t end;
+    bool debuggerPathResolved;
 };
 extern int guestMappingLen;
 extern guest_file_mapping guestMappings[1000];
+extern size_t guestMappingGeneration;
 
 typedef struct memory_page {
-  void *addr;
-  int perms;
+    void *addr;
+    int perms;
+    bool enforceDataPermissions;
+    struct memory_backing *backing;
 } *t_memory_page;
+
+typedef struct memory_backing {
+    void *addr;
+    size_t size;
+    size_t references;
+    int hostProtection;
+} *t_memory_backing;
 
 KHASH_MAP_INIT_INT64(memory, t_memory_page)
 
 using Vector = std::array<std::uint64_t, 2>;
 
 typedef struct context32 {
-  std::array<std::uint32_t, 16> regs;
-  std::array<std::uint32_t, 64> extRegs;
-  std::uint32_t cpsr;
-  std::uint32_t fpscr;
-  std::uint32_t uro;
+    std::array<std::uint32_t, 16> regs;
+    std::array<std::uint32_t, 64> extRegs;
+    std::uint32_t cpsr;
+    std::uint32_t fpscr;
+    std::uint32_t uro;
 } *t_context32;
 
 
@@ -203,22 +222,26 @@ __BEGIN_DECLS
 
 class DynarmicCallbacks32;
 typedef struct {
-  khash_t(memory) *memory;
-  size_t num_page_table_entries;
-  void **page_table;
-  union {
-    DynarmicCallbacks32 *cb;
-    Dynarmic::A32::UserCallbacks *ucb;
-  };
-  Dynarmic::ExclusiveMonitor *monitor;
-  LC32Filesystem *fs;
-  u32 guest_dlsym, guest_LC32InvokeGuestC;
-  dyld_all_image_infos_32 *dyld_info_section;
+    khash_t(memory) *memory;
+    size_t num_page_table_entries;
+    void **page_table;
+    union {
+        DynarmicCallbacks32 *cb;
+        Dynarmic::A32::UserCallbacks *ucb;
+    };
+    Dynarmic::ExclusiveMonitor *monitor;
+    LC32Filesystem *fs;
+    u32 guest_dlsym, guest_LC32InvokeGuestC;
+    dyld_all_image_infos_32 *dyld_info_section;
+    u32 dyld_info_guest_address;
+    u32 dyld_load_address;
+    gdbstub_t gdbstub;
 } dynarmic;
 
 typedef struct {
-  Dynarmic::A32::Jit *jit;
-  DynarmicCpsr *cpsr;
+    Dynarmic::A32::Jit *jit;
+    DynarmicCpsr *cpsr;
+    DynarmicCallbacks32 *cb;
 } dynarmic_thread;
 
 // Handles
@@ -227,21 +250,49 @@ extern __thread dynarmic_thread threadHandle;
 
 char *get_memory_page(u64 vaddr);
 void *get_memory(u64 vaddr);
+Dynarmic::A32::UserCallbacks *Dynarmic_current_user_callbacks();
 
 bool Dynarmic_nativeInitialize();
 void Dynarmic_nativeDestroy();
 int Dynarmic_munmap(u64 address, u64 size);
-u32 Dynarmic_direct_mmap(u32 address, u32 size, int protection, int flags, void *src, u64 off);
-u32 Dynarmic_mmap(u32 address, u32 size, int protection, int flags, int fildes, u64 off, u64 mask = DYN_PAGE_MASK);
+u32 Dynarmic_direct_mmap(u32 address, u64 size, int protection, int flags, void *src, u64 off);
+u32 Dynarmic_mmap(u32 address, u64 size, int protection, int flags, int fildes, u64 off, u64 mask = DYN_PAGE_MASK);
 int Dynarmic_mprotect(u64 address, u64 size, int perms);
 int Dynarmic_mem_1write(u64 address, u64 size, char* src);
 int Dynarmic_mem_1read(u64 address, u64 size, char* dest);
+int Dynarmic_debugger_mem_read(u64 address, u64 size, char* dest);
+int Dynarmic_debugger_mem_write(u64 address, u64 size, char* src);
+bool Dynarmic_debugger_set_breakpoint(u64 address, size_t kind);
+bool Dynarmic_debugger_delete_breakpoint(u64 address, size_t kind);
+bool Dynarmic_debugger_has_breakpoint(u32 address);
+size_t Dynarmic_debugger_thread_ids(
+    gdb_thread_id_t *ids, size_t capacity);
+gdb_thread_id_t Dynarmic_debugger_current_thread();
+bool Dynarmic_debugger_thread_alive(gdb_thread_id_t thread_id);
+bool Dynarmic_debugger_thread_resumable(
+    gdb_thread_id_t thread_id);
+bool Dynarmic_debugger_thread_read_reg(
+    gdb_thread_id_t thread_id, int regno, u32 *value);
+bool Dynarmic_debugger_thread_write_reg(
+    gdb_thread_id_t thread_id, int regno, u32 value);
 int Dynarmic_reg_1write(int index, u32 value);
 u32 Dynarmic_reg_1read(int index);
 int Dynarmic_reg_1read_1cpsr();
 int Dynarmic_reg_1write_1cpsr(int value);
 int Dynarmic_reg_1write_1c13_1c0_13(int value);
-int Dynarmic_emu_1start(u32 pc);
+Dynarmic::HaltReason Dynarmic_emu_1start(u32 pc);
+Dynarmic::HaltReason Dynarmic_emu_1resume();
+Dynarmic::HaltReason Dynarmic_emu_1step();
+Dynarmic::HaltReason Dynarmic_debugger_continue(
+    gdb_thread_id_t thread_id);
+Dynarmic::HaltReason Dynarmic_debugger_step(
+    gdb_thread_id_t thread_id,
+    bool continue_other_threads);
+void Dynarmic_emu_1set_1debugger_1enabled(bool enabled);
+int Dynarmic_emu_1get_1stop_1signal();
+int Dynarmic_emu_1get_1exit_1code();
+void Dynarmic_emu_1set_1resume_1signal(int signal);
+void Dynarmic_debugger_resolve_pending_stop();
 int Dynarmic_emu_1stop();
 void* Dynarmic_context_1alloc();
 void Dynarmic_context_1restore(t_context32 ctx);

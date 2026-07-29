@@ -10,8 +10,11 @@
 #include <signal.h>
 #include <libgen.h>
 
+#include <copyfile.h>
 #include <dlfcn.h>
+#include <dirent.h>
 #include <sys/mman.h>
+#include <sys/clonefile.h>
 #include <mach-o/fat.h>
 #include <mach-o/getsect.h>
 #include <mach-o/loader.h>
@@ -22,12 +25,11 @@
 #include <sys/syscall.h>
 
 #include <string.h>
+#include <ctype.h>
+#include <string>
 #include "dynarmic.h"
 #include "arm_dynarmic_cp15.h"
-
-#define SEG_DATA_CONST  "__DATA_CONST"
-
-// /var/mobile/Documents/TrollExperiments/CProjects/dynarmic
+#include "debugger_server.h"
 
 u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
     int fd = open(path, O_RDONLY);
@@ -45,7 +47,10 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
     // Map mach_header first
     //u32 addr = Dynarmic_direct_mmap(target, 0x1000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, map, 0);
     
-    guestMappings[guestMappingLen].name = strdup(basename((char *)path));
+    // qXfer:libraries:read needs the complete host path so LLDB can load the
+    // matching Mach-O and apply its symbols at the reported guest base.
+    guestMappings[guestMappingLen].name = strdup(path);
+    guestMappings[guestMappingLen].debuggerPathResolved = true;
     
     // FIXME: may leak other unused slices
     if(*(uint32_t *)map == FAT_CIGAM) {
@@ -76,6 +81,7 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
     uintptr_t cur = (uintptr_t)header + sizeof(mach_header);
     load_command *lc;
     int firstIndex = 0;
+    u32 firstSegmentVMAddr = 0;
     for (uint i = 0; i < header->ncmds; i++, cur += lc->cmdsize) {
         lc = (load_command *)cur;
         if (lc->cmd == LC_SEGMENT) {
@@ -94,13 +100,24 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
                 target = 0;
             }
             printf("Mapping 0x%lx-0x%lx to 0x%x\n", map + seg->fileoff, map + seg->fileoff + seg->vmsize, target + seg->vmaddr);
+            /*
+             * dyld rebases and patches these direct file mappings in place,
+             * and the debugger also needs to plant software breakpoints.
+             * Preserve the loader's historically writable view while adding
+             * execute permission only to Mach-O segments that requested it;
+             * data-only segments must remain non-executable now that
+             * instruction fetches enforce guest execute permission.
+             */
+            const int segmentProtection =
+                PROT_READ | PROT_WRITE |
+                (seg->initprot & PROT_EXEC);
             u32 mappedAddr = 0;
             if(filesize > 0) {
-                mappedAddr = Dynarmic_direct_mmap(target + seg->vmaddr, filesize, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, (void *)(map + seg->fileoff), 0);
+                mappedAddr = Dynarmic_direct_mmap(target + seg->vmaddr, filesize, segmentProtection, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, (void *)(map + seg->fileoff), 0);
                 assert(mappedAddr != -1);
             }
             
-            u32 vmMappedAddr = Dynarmic_mmap(target + seg->vmaddr + filesize, seg->vmsize - filesize, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            u32 vmMappedAddr = Dynarmic_mmap(target + seg->vmaddr + filesize, seg->vmsize - filesize, segmentProtection, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
             if(filesize == 0) {
                 mappedAddr = vmMappedAddr;
             }
@@ -108,6 +125,7 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
             if (i == firstIndex) {
                 guestMappings[guestMappingLen].start = mappedAddr;
                 guestMappings[guestMappingLen].end = mappedAddr + seg->vmsize;
+                firstSegmentVMAddr = seg->vmaddr;
             }
         } else if (lc->cmd == LC_UNIXTHREAD) {
             thread_command *tc = (thread_command *)lc;
@@ -124,14 +142,24 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
     }
     
     if(isDyld) {
-        u32 dyldInfoSize;
-        sharedHandle.dyld_info_section = (dyld_all_image_infos_32 *)((uintptr_t)getsectdatafromheader(header, SEG_DATA, "__all_image_info", &dyldInfoSize) + map);
+        const struct section *dyldInfoSection =
+            getsectbynamefromheader(header, SEG_DATA, "__all_image_info");
+        assert(dyldInfoSection != NULL);
+        sharedHandle.dyld_info_section =
+            (dyld_all_image_infos_32 *)(map + dyldInfoSection->offset);
+        const u32 imageSlide =
+            guestMappings[guestMappingLen].start - firstSegmentVMAddr;
+        sharedHandle.dyld_info_guest_address =
+            imageSlide + dyldInfoSection->addr;
+        sharedHandle.dyld_load_address =
+            guestMappings[guestMappingLen].start;
         // register a fake Mach port which is used to notify us about loading/unloading Mach-O libraries
         sharedHandle.dyld_info_section->notifyMachPorts[0] = -1;
     }
     
     u32 addr = guestMappings[guestMappingLen].start;
     guestMappingLen++;
+    ++guestMappingGeneration;
     return addr;
 }
 
@@ -154,6 +182,9 @@ void setupPathEnvs(char* argv0) {
     snprintf(path, sizeof(path), "%s/RootFS", dirname(argv0));
     setenv("ROOT_PATH", path, 0);
     const char *rootPath = getenv("ROOT_PATH");
+
+    DebuggerConfigureForGuestRoot(rootPath);
+
     if (getuid() == 0) {
         chroot(rootPath);
         chdir("/");
@@ -182,11 +213,34 @@ int main(int argc, char* argv[], char* envp[]) {
     }
     
     // initialize page table, callback, Jit objects, paths
-    Dynarmic_nativeInitialize();
+    if (!Dynarmic_nativeInitialize()) {
+        fprintf(stderr, "Failed to initialize Dynarmic.\n");
+        return 1;
+    }
+    struct DynarmicRuntimeCleanup {
+        ~DynarmicRuntimeCleanup() {
+            Dynarmic_nativeDestroy();
+        }
+    } dynarmicRuntimeCleanup;
     setupPathEnvs(argv[0]);
     
-    // map the main executable first
+    // Make the executable and its adjacent bundle resources visible at the
+    // path dyld publishes through _NSGetExecutablePath.  Without this mount,
+    // guest file syscalls prepend ROOT_PATH to an absolute host-side argv[1],
+    // causing CFBundleGetMainBundle() to return NULL.
+    char resolvedExecPath[PATH_MAX];
     const char *execPath = argv[1];
+    if (realpath(execPath, resolvedExecPath) != NULL) {
+        execPath = resolvedExecPath;
+        const char *lastSlash = strrchr(execPath, '/');
+        if (lastSlash != NULL && lastSlash != execPath) {
+            const std::string execDirectory(
+                execPath, static_cast<size_t>(lastSlash - execPath));
+            sharedHandle.fs->addMountpoint(execDirectory, execDirectory);
+        }
+    }
+
+    // map the main executable first
     u32 execAddr = Dynarmic_map_file(false, 0x11000000, execPath);
     
     // map dyld
@@ -285,6 +339,23 @@ int main(int argc, char* argv[], char* envp[]) {
     
     // Go!
     Dynarmic_reg_1write(13, dyldStackPtr);
-    Dynarmic_emu_1start(threadHandle.jit->Regs()[15]);
-}
 
+    const char *gdbListenAddress = getenv("GDB_LISTEN_ADDRESS");
+    if (gdbListenAddress != NULL && gdbListenAddress[0] != '\0') {
+        if (setupGDBStub(gdbListenAddress) != 0) {
+            return -1;
+        }
+
+        Dynarmic_emu_1set_1debugger_1enabled(true);
+        const bool gdbstubRan =
+            gdbstub_run(&sharedHandle.gdbstub, (void *)&sharedHandle);
+        Dynarmic_emu_1set_1debugger_1enabled(false);
+        gdbstub_close(&sharedHandle.gdbstub);
+        if (!gdbstubRan) {
+            fprintf(stderr, "Fail to run in debug mode.\n");
+            return -1;
+        }
+    } else {
+        Dynarmic_emu_1start(threadHandle.jit->Regs()[15]);
+    }
+}

@@ -19,6 +19,92 @@ __BEGIN_DECLS
 #define PTHREAD_FEATURE_WORKLOOP          0x80		/* supports workloops */
 #define PTHREAD_FEATURE_QOS_DEFAULT		0x40000000	/* the kernel supports QOS_CLASS_DEFAULT */
 
+/* Flags passed through bsdthread_create to libpthread's thread_start. */
+#define PTHREAD_START_CUSTOM                     0x01000000
+#define PTHREAD_START_SETSCHED                   0x02000000
+#define PTHREAD_START_DETACHED                   0x04000000
+#define PTHREAD_START_QOSCLASS                   0x08000000
+#define PTHREAD_START_TSD_BASE_SET               0x10000000
+
+/* iOS 10.3 bsdthread_ctl commands and SET_SELF flags. */
+#define BSDTHREAD_CTL_QOS_OVERRIDE_START           0x040
+#define BSDTHREAD_CTL_QOS_OVERRIDE_END             0x080
+#define BSDTHREAD_CTL_SET_SELF                    0x100
+#define BSDTHREAD_CTL_QOS_OVERRIDE_RESET          0x200
+#define BSDTHREAD_CTL_QOS_OVERRIDE_DISPATCH       0x400
+#define BSDTHREAD_CTL_QOS_DISPATCH_ASYNC_ADD      0x401
+#define BSDTHREAD_CTL_QOS_DISPATCH_ASYNC_RESET    0x402
+#define PTHREAD_SET_SELF_QOS_FLAG                 0x01
+#define PTHREAD_SET_SELF_VOUCHER_FLAG             0x02
+#define PTHREAD_SET_SELF_FIXEDPRIORITY_FLAG       0x04
+#define PTHREAD_SET_SELF_TIMESHARE_FLAG           0x08
+#define PTHREAD_SET_SELF_WQ_KEVENT_UNBIND_FLAG    0x10
+
+/* iOS 10.3 libpthread workq_kernreturn operations. */
+#define WQOPS_THREAD_RETURN                 0x04
+#define WQOPS_QUEUE_NEWSPISUPP              0x10
+#define WQOPS_QUEUE_REQTHREADS              0x20
+#define WQOPS_QUEUE_REQTHREADS2             0x30
+#define WQOPS_THREAD_KEVENT_RETURN          0x40
+#define WQOPS_SET_EVENT_MANAGER_PRIORITY    0x80
+
+#define WQ_FLAG_THREAD_PRIOMASK             0x0000ffff
+#define WQ_FLAG_THREAD_OVERCOMMIT           0x00010000
+#define WQ_FLAG_THREAD_REUSE                0x00020000
+#define WQ_FLAG_THREAD_NEWSPI               0x00040000
+#define WQ_FLAG_THREAD_KEVENT               0x00080000
+#define WQ_FLAG_THREAD_EVENT_MANAGER        0x00100000
+#define WQ_FLAG_THREAD_TSD_BASE_SET         0x00200000
+
+#define PTHREAD_PRIORITY_FLAGS_MASK         0xff000000
+#define PTHREAD_PRIORITY_QOS_CLASS_MASK     0x003fff00
+#define PTHREAD_PRIORITY_QOS_CLASS_SHIFT    8
+#define PTHREAD_PRIORITY_OVERCOMMIT_FLAG    0x80000000
+#define PTHREAD_PRIORITY_EVENT_MANAGER_FLAG 0x02000000
+
+#define PTHREAD_PRIORITY_CBIT_USER_INTERACTIVE 0x20
+#define PTHREAD_PRIORITY_CBIT_USER_INITIATED   0x10
+#define PTHREAD_PRIORITY_CBIT_DEFAULT          0x08
+#define PTHREAD_PRIORITY_CBIT_UTILITY          0x04
+#define PTHREAD_PRIORITY_CBIT_BACKGROUND       0x02
+#define PTHREAD_PRIORITY_CBIT_MAINTENANCE      0x01
+
+#define GUEST_QOS_CLASS_USER_INTERACTIVE    0x21
+#define GUEST_QOS_CLASS_USER_INITIATED      0x19
+#define GUEST_QOS_CLASS_DEFAULT             0x15
+#define GUEST_QOS_CLASS_UTILITY             0x11
+#define GUEST_QOS_CLASS_BACKGROUND          0x09
+#define GUEST_QOS_CLASS_MAINTENANCE         0x05
+
+#ifndef KEVENT_FLAG_IMMEDIATE
+#define KEVENT_FLAG_IMMEDIATE                0x001
+#endif
+#ifndef KEVENT_FLAG_ERROR_EVENTS
+#define KEVENT_FLAG_ERROR_EVENTS             0x002
+#endif
+#ifndef KEVENT_FLAG_WORKQ
+#define KEVENT_FLAG_WORKQ                    0x020
+#endif
+
+struct guest_kevent_qos_s {
+	uint64_t ident;
+	int16_t filter;
+	uint16_t flags;
+	int32_t qos;
+	uint64_t udata;
+	uint32_t fflags;
+	uint32_t xflags;
+	int64_t data;
+	uint64_t ext[4];
+};
+
+struct guest_pthread_registration_data {
+	uint64_t version;
+	uint64_t dispatch_queue_offset;
+	uint64_t main_qos;
+	uint32_t tsd_offset;
+} __attribute__((packed));
+
 // Others
 
 #define PROC_PIDT_SHORTBSDINFO		13
@@ -53,6 +139,7 @@ struct crashreporter_annotations_t {
 	uint64_t message2;		// char *
 	uint64_t thread;		// uint64_t
 	uint64_t dialog_mode;		// unsigned int
+	uint64_t abort_cause;		// uint64_t
 };
 
 // Mach private
@@ -88,6 +175,33 @@ typedef struct {
 	int token;
 	int status;
 } __Reply___notify_server_register_check_t __attribute__((unused));
+
+typedef struct {
+	mach_msg_header_t Head;
+	NDR_record_t NDR;
+	int token;
+} __Request___notify_server_cancel_t __attribute__((unused));
+
+typedef struct {
+	mach_msg_header_t Head;
+	NDR_record_t NDR;
+	kern_return_t RetCode;
+	int status;
+} __Reply___notify_server_cancel_t __attribute__((unused));
+
+typedef struct {
+	mach_msg_header_t Head;
+	NDR_record_t NDR;
+	int token;
+} __Request___notify_server_check_t __attribute__((unused));
+
+typedef struct {
+	mach_msg_header_t Head;
+	NDR_record_t NDR;
+	kern_return_t RetCode;
+	int check;
+	int status;
+} __Reply___notify_server_check_t __attribute__((unused));
 #ifdef  __MigPackStructs
 #pragma pack(pop)
 #endif
@@ -320,6 +434,15 @@ extern kern_return_t semaphore_timedwait_signal_trap(
 	mach_port_name_t signal_name,
 	unsigned int sec,
 	clock_res_t nsec);
+
+extern mach_port_name_t mk_timer_create(void);
+extern kern_return_t mk_timer_destroy(mach_port_name_t name);
+extern kern_return_t mk_timer_arm(
+	mach_port_name_t name,
+	uint64_t expire_time);
+extern kern_return_t mk_timer_cancel(
+	mach_port_name_t name,
+	uint64_t *result_time);
 
 // XPC private
 extern kern_return_t _xpc_send_serializer(mach_port_t port, const char *payload);
