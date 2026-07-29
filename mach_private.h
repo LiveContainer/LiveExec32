@@ -101,6 +101,20 @@ typedef struct {
 	int token;
 	int status;
 } __Reply___notify_server_register_check_t __attribute__((unused));
+
+typedef struct {
+	mach_msg_header_t Head;
+	NDR_record_t NDR;
+	int token;
+} __Request___notify_server_check_t __attribute__((unused));
+
+typedef struct {
+	mach_msg_header_t Head;
+	NDR_record_t NDR;
+	kern_return_t RetCode;
+	int check;
+	int status;
+} __Reply___notify_server_check_t __attribute__((unused));
 #ifdef  __MigPackStructs
 #pragma pack(pop)
 #endif

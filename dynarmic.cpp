@@ -295,13 +295,33 @@ guest_mach_msg_trap(u32 guest_msg,
          mach_port_t notify) {
     mach_msg_return_t result = MACH_MSG_SUCCESS;
 
-    char *host_msg = (char *)malloc(MAX(send_size, rcv_size));
-    Dynarmic_mem_1read(guest_msg, send_size, host_msg);
+    const mach_msg_size_t buffer_size = MAX(send_size, rcv_size);
+    char *host_msg = (char *)calloc(1, MAX(buffer_size,
+        (mach_msg_size_t)sizeof(mach_msg_header_t)));
+    if (send_size != 0) {
+        Dynarmic_mem_1read(guest_msg, send_size, host_msg);
+    }
 
     mach_msg_header_t *host_header = (mach_msg_header_t *)host_msg;
+
+    /*
+     * A receive-only trap has no request header or message ID to dispatch.
+     * Pass the receive through to the host Mach port.
+     */
+    if (send_size == 0 && (option & MACH_RCV_MSG) != 0) {
+        result = mach_msg(host_header, option, 0, rcv_size, rcv_name,
+            timeout, notify);
+        if (rcv_size != 0) {
+            Dynarmic_mem_1write(guest_msg, rcv_size, host_msg);
+        }
+        free(host_msg);
+        return result;
+    }
+
     printf("LC32: mach_msg_trap id %d\n", host_header->msgh_id);
 
     // pre-process reply header
+    const mach_msg_bits_t request_bits = host_header->msgh_bits;
     host_header->msgh_bits &= 0xff;
     switch(host_header->msgh_id) {
         case 0: {
@@ -455,19 +475,48 @@ guest_mach_msg_trap(u32 guest_msg,
         }
         case 78945670: {
             MACH_MSG_UNION(_notify_server_register_check, Mess);
-            // this Mach trap is missing on arm64
-             host_header->msgh_size = sizeof(Mess->Out);
-            Mess->Out.size = 0;
-            Mess->Out.slot = 0;
+            /*
+             * The guest cannot use the host's notify shared-memory table.
+             * The -1 values make libnotify fall back to plain registration.
+             */
+            host_header->msgh_size = sizeof(Mess->Out);
+            Mess->Out.size = -1;
+            Mess->Out.slot = -1;
             Mess->Out.token = 0;
             Mess->Out.status = 0;
             Mess->Out.RetCode = 0;
             break;
         }
+        case 78945680: {
+            MACH_MSG_UNION(_notify_server_check, Mess);
+            host_header->msgh_size = sizeof(Mess->Out);
+            Mess->Out.RetCode = KERN_SUCCESS;
+            Mess->Out.check = 0;
+            Mess->Out.status = 0;
+            break;
+        }
+        case 78945698: {
+            /*
+             * _notify_server_register_mach_port_2 is a MIG simpleroutine:
+             * the client only sends a registration and expects no reply.
+             * The guest's notify dispatch port is not currently driven by a
+             * workqueue event manager, so accept the registration locally.
+             */
+            free(host_msg);
+            return MACH_MSG_SUCCESS;
+        }
         case 0x10000000: {
-            // _xpc_send_serializer: we can pass directly
-            result = mach_msg_send(host_header);
-            // this function does not modify the message buffer, return directly
+            /*
+             * _xpc_send_serializer uses both send-only and combined
+             * send/receive calls. Preserve the request port dispositions and
+             * forward the complete operation.
+             */
+            host_header->msgh_bits = request_bits;
+            result = mach_msg(host_header, option, send_size, rcv_size,
+                rcv_name, timeout, notify);
+            if ((option & MACH_RCV_MSG) != 0 && rcv_size != 0) {
+                Dynarmic_mem_1write(guest_msg, rcv_size, host_msg);
+            }
             free(host_msg);
             return result;
         }
