@@ -254,6 +254,14 @@ int Dynarmic_debugger_mem_write(u64 address, u64 size, char* src);
 bool Dynarmic_debugger_set_breakpoint(u64 address, size_t kind);
 bool Dynarmic_debugger_delete_breakpoint(u64 address, size_t kind);
 bool Dynarmic_debugger_has_breakpoint(u32 address);
+size_t Dynarmic_debugger_thread_ids(
+    gdb_thread_id_t *ids, size_t capacity);
+gdb_thread_id_t Dynarmic_debugger_current_thread();
+bool Dynarmic_debugger_thread_alive(gdb_thread_id_t thread_id);
+bool Dynarmic_debugger_thread_read_reg(
+    gdb_thread_id_t thread_id, int regno, u32 *value);
+bool Dynarmic_debugger_thread_write_reg(
+    gdb_thread_id_t thread_id, int regno, u32 value);
 int Dynarmic_reg_1write(int index, u32 value);
 u32 Dynarmic_reg_1read(int index);
 int Dynarmic_reg_1read_1cpsr();

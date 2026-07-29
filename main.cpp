@@ -546,6 +546,15 @@ enum {
     GDB_ARM_CPSR_REGNO = 16,
 };
 
+static gdb_thread_id_t debuggerSelectedThread = 1;
+
+static gdb_thread_id_t emu_selected_thread() {
+    if (!Dynarmic_debugger_thread_alive(debuggerSelectedThread)) {
+        debuggerSelectedThread = Dynarmic_debugger_current_thread();
+    }
+    return debuggerSelectedThread;
+}
+
 static size_t emu_get_reg_bytes(int regno) {
     return regno >= 0 && regno < GDB_ARM_REG_COUNT ? sizeof(uint32_t) : 0;
 }
@@ -554,9 +563,11 @@ static int emu_read_reg(void *args __attribute__((unused)), int index, void *val
         return EINVAL;
     }
 
-    const uint32_t reg = index == GDB_ARM_CPSR_REGNO
-                             ? static_cast<uint32_t>(Dynarmic_reg_1read_1cpsr())
-                             : Dynarmic_reg_1read(index);
+    uint32_t reg;
+    if (!Dynarmic_debugger_thread_read_reg(
+            emu_selected_thread(), index, &reg)) {
+        return ESRCH;
+    }
     memcpy(value, &reg, sizeof(reg));
     return 0;
 }
@@ -567,8 +578,10 @@ static int emu_write_reg(void *args __attribute__((unused)), int index, void *va
 
     uint32_t reg;
     memcpy(&reg, value, sizeof(reg));
-    return index == GDB_ARM_CPSR_REGNO ? Dynarmic_reg_1write_1cpsr(reg)
-                                        : Dynarmic_reg_1write(index, reg);
+    return Dynarmic_debugger_thread_write_reg(
+               emu_selected_thread(), index, reg)
+               ? 0
+               : ESRCH;
 }
 static int emu_read_mem(void *args __attribute__((unused)), size_t addr, size_t len, void *val) {
     if (addr > UINT32_MAX || len > UINT32_MAX - addr || (len != 0 && val == NULL)) {
@@ -1220,11 +1233,37 @@ static const char *emu_get_loaded_libraries_json(
     return response.c_str();
 }
 static void emu_set_cpu(void *args __attribute__((unused)), int cpuid) {
-    // mini-gdbstub exposes its one CPU as remote thread ID 1.
-    (void)cpuid;
+    const gdb_thread_id_t requested = cpuid > 0
+        ? static_cast<gdb_thread_id_t>(cpuid)
+        : Dynarmic_debugger_current_thread();
+    if (Dynarmic_debugger_thread_alive(requested)) {
+        debuggerSelectedThread = requested;
+    }
 }
 static int emu_get_cpu(void *args __attribute__((unused))) {
-    return 1;
+    return static_cast<int>(Dynarmic_debugger_current_thread());
+}
+static size_t emu_get_thread_ids(
+        void *args __attribute__((unused)),
+        gdb_thread_id_t *ids,
+        size_t capacity) {
+    return Dynarmic_debugger_thread_ids(ids, capacity);
+}
+static gdb_thread_id_t emu_get_current_thread(
+        void *args __attribute__((unused))) {
+    return Dynarmic_debugger_current_thread();
+}
+static bool emu_is_thread_alive(
+        void *args __attribute__((unused)),
+        gdb_thread_id_t thread_id) {
+    return Dynarmic_debugger_thread_alive(thread_id);
+}
+static int emu_get_thread_stop_signal(
+        void *args __attribute__((unused)),
+        gdb_thread_id_t thread_id) {
+    return thread_id == Dynarmic_debugger_current_thread()
+        ? Dynarmic_emu_1get_1stop_1signal()
+        : 0;
 }
 struct target_ops emu_ops = {
     .get_reg_bytes = emu_get_reg_bytes,
@@ -1250,6 +1289,10 @@ struct target_ops emu_ops = {
     .get_os_build = emu_get_os_build,
     .get_shlib_info_addr = emu_get_shlib_info_addr,
     .get_loaded_libraries_json = emu_get_loaded_libraries_json,
+    .get_thread_ids = emu_get_thread_ids,
+    .get_current_thread = emu_get_current_thread,
+    .is_thread_alive = emu_is_thread_alive,
+    .get_thread_stop_signal = emu_get_thread_stop_signal,
 };
 
 int setupGDBStub(const char *gdbListenAddress) {

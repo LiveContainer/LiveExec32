@@ -3552,6 +3552,93 @@ bool Dynarmic_debugger_delete_breakpoint(u64 address, size_t kind) {
     return true;
 }
 
+size_t Dynarmic_debugger_thread_ids(
+        gdb_thread_id_t *ids, size_t capacity) {
+    if (threadHandle.jit == nullptr) {
+        return 0;
+    }
+
+    size_t count = 0;
+    if (ids != nullptr && count < capacity) {
+        ids[count] = 1;
+    }
+    ++count;
+    if (guestWorkqueueUpcallActive &&
+            guestWorkqueueWaitingContextValid) {
+        if (ids != nullptr && count < capacity) {
+            ids[count] = 2;
+        }
+        ++count;
+    }
+    return count;
+}
+
+gdb_thread_id_t Dynarmic_debugger_current_thread() {
+    return guestWorkqueueUpcallActive ? 2 : 1;
+}
+
+bool Dynarmic_debugger_thread_alive(gdb_thread_id_t thread_id) {
+    if (threadHandle.jit == nullptr) {
+        return false;
+    }
+    if (thread_id == 1) {
+        return true;
+    }
+    return thread_id == 2 &&
+        guestWorkqueueUpcallActive &&
+        guestWorkqueueWaitingContextValid;
+}
+
+bool Dynarmic_debugger_thread_read_reg(
+        gdb_thread_id_t thread_id, int regno, u32 *value) {
+    if (value == nullptr || regno < 0 || regno > 16 ||
+            !Dynarmic_debugger_thread_alive(thread_id)) {
+        return false;
+    }
+
+    if (thread_id == Dynarmic_debugger_current_thread()) {
+        *value = regno == 16
+            ? static_cast<u32>(threadHandle.jit->Cpsr())
+            : threadHandle.jit->Regs()[regno];
+        return true;
+    }
+
+    if (thread_id == 1 && guestWorkqueueWaitingContextValid) {
+        *value = regno == 16
+            ? guestWorkqueueWaitingContext.cpsr
+            : guestWorkqueueWaitingContext.regs[regno];
+        return true;
+    }
+    return false;
+}
+
+bool Dynarmic_debugger_thread_write_reg(
+        gdb_thread_id_t thread_id, int regno, u32 value) {
+    if (regno < 0 || regno > 16 ||
+            !Dynarmic_debugger_thread_alive(thread_id)) {
+        return false;
+    }
+
+    if (thread_id == Dynarmic_debugger_current_thread()) {
+        if (regno == 16) {
+            threadHandle.jit->SetCpsr(value);
+        } else {
+            threadHandle.jit->Regs()[regno] = value;
+        }
+        return true;
+    }
+
+    if (thread_id == 1 && guestWorkqueueWaitingContextValid) {
+        if (regno == 16) {
+            guestWorkqueueWaitingContext.cpsr = value;
+        } else {
+            guestWorkqueueWaitingContext.regs[regno] = value;
+        }
+        return true;
+    }
+    return false;
+}
+
 /*
  * Class:     com_github_unidbg_arm_backend_dynarmic_Dynarmic
  * Method:    reg_write
