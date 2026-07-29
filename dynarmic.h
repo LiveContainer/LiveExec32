@@ -106,7 +106,14 @@ bool ResolveDebuggerImagePath(const char *guestPath, char *hostPath);
 typedef struct memory_page {
     void *addr;
     int perms;
+    struct memory_backing *backing;
 } *t_memory_page;
+
+typedef struct memory_backing {
+    void *addr;
+    size_t size;
+    size_t references;
+} *t_memory_backing;
 
 KHASH_MAP_INIT_INT64(memory, t_memory_page)
 
@@ -232,6 +239,7 @@ typedef struct {
 typedef struct {
     Dynarmic::A32::Jit *jit;
     DynarmicCpsr *cpsr;
+    DynarmicCallbacks32 *cb;
 } dynarmic_thread;
 
 // Handles
@@ -240,6 +248,7 @@ extern __thread dynarmic_thread threadHandle;
 
 char *get_memory_page(u64 vaddr);
 void *get_memory(u64 vaddr);
+Dynarmic::A32::UserCallbacks *Dynarmic_current_user_callbacks();
 
 bool Dynarmic_nativeInitialize();
 void Dynarmic_nativeDestroy();

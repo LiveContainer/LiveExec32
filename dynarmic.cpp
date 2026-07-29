@@ -1,12 +1,15 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <deque>
 #include <exception>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include <assert.h>
@@ -83,6 +86,23 @@ static std::atomic<int> pendingGuestFatalSignal{0};
 static std::atomic<bool> reemitPendingGuestStop{false};
 static std::atomic<bool> guestDebuggerEnabled{false};
 static std::atomic<bool> debuggerInterruptRequested{false};
+static std::recursive_mutex guestVmMutex;
+
+static bool NativeGuestThreadsRequested() {
+    static const bool requested = [] {
+        const char *value = getenv("NATIVE_GUEST_THREADS");
+        return value != nullptr && value[0] != '\0' &&
+            strcmp(value, "0") != 0;
+    }();
+    return requested;
+}
+
+static bool NativeGuestThreadsEnabled() {
+    return NativeGuestThreadsRequested() &&
+        !guestDebuggerEnabled.load(std::memory_order_relaxed);
+}
+
+static Dynarmic::A32::UserCallbacks *CurrentUserCallbacks();
 
 enum class DebuggerMachCallPhase : uint8_t {
     Idle,
@@ -104,6 +124,10 @@ static bool GuestContextTransitionPending();
 static bool GuestThreadCanYieldBeforeBlocking();
 static bool GuestThreadYieldBeforeBlocking();
 static void GuestThreadRequestRotation();
+static bool NativeGuestThreadIsCurrent();
+static bool GuestWorkqueueActiveForCurrentThread();
+static void InvalidateAllGuestJits(u32 address, size_t size);
+static void HaltAllGuestJits(Dynarmic::HaltReason reason);
 static u32 GuestBsdthreadCreate(
     u32 function, u32 argument, u32 stack, u32 pthread, u32 flags);
 static u32 GuestBsdthreadTerminate(
@@ -119,6 +143,10 @@ static u32 GuestPsynchConditionSignal(
     u32 condition, mach_port_t targetThread, bool broadcast);
 static u32 GuestPsynchRwWait(u32 rwlock);
 static u32 GuestPsynchRwUnlock(u32 rwlock);
+static u32 GuestUlockWait(
+    u32 operation, u32 address, u64 value, u32 timeout);
+static u32 GuestUlockWake(
+    u32 operation, u32 address, u64 wakeValue);
 static bool guestSingleStepping;
 
 struct DebuggerSoftwareBreakpoint {
@@ -304,7 +332,8 @@ int guest___sysctl(u32 guest_name, u_int namelen, u32 guest_oldp, u32 guest_oldl
 
     if(guest_oldp) {
         Dynarmic_mem_1write(guest_oldp, host_oldlenp, host_oldp);
-        sharedHandle.ucb->MemoryWrite32(guest_oldlenp, host_oldlenp);
+        CurrentUserCallbacks()->MemoryWrite32(
+            guest_oldlenp, host_oldlenp);
     }
     return result;
 }
@@ -332,7 +361,8 @@ int guest___sysctlbyname(u32 guest_name, u_int namelen, u32 guest_oldp, u32 gues
 
     if(guest_oldp) {
         Dynarmic_mem_1write(guest_oldp, host_oldlenp, host_oldp);
-        sharedHandle.ucb->MemoryWrite32(guest_oldlenp, host_oldlenp);
+        CurrentUserCallbacks()->MemoryWrite32(
+            guest_oldlenp, host_oldlenp);
     }
     return result;
 }
@@ -358,8 +388,8 @@ int guest_shm_open(u32 guest_name, int oflag, int mode) {
 int     guest_pthread_getugid_np(u32 uid, u32 gid) {
     uid_t host_uid, host_gid;
     int result = pthread_getugid_np(&host_uid, &host_gid);
-    sharedHandle.ucb->MemoryWrite32(uid, host_uid);
-    sharedHandle.ucb->MemoryWrite32(gid, host_gid);
+    CurrentUserCallbacks()->MemoryWrite32(uid, host_uid);
+    CurrentUserCallbacks()->MemoryWrite32(gid, host_gid);
     return result;
 }
 
@@ -554,7 +584,8 @@ guest_mach_msg_trap(u32 guest_msg,
                 Mess->Out.RetCode = result;
             } else {
                 printf("LC32: Unhandled flavor %d\n", Mess->In.flavor);
-                sharedHandle.ucb->ExceptionRaised(0xDEADDEAD, Dynarmic::A32::Exception::Yield);
+                CurrentUserCallbacks()->ExceptionRaised(
+                    0xDEADDEAD, Dynarmic::A32::Exception::Yield);
             }
             break;
         }
@@ -805,6 +836,25 @@ guest_mach_msg_trap(u32 guest_msg,
             Mess->Out.msgh_body.msgh_descriptor_count = 1;
             break;
         }
+        case 3419: {
+            MACH_MSG_UNION(semaphore_destroy, Mess);
+            const task_t task =
+                Mess->In.Head.msgh_request_port;
+            const semaphore_t semaphore =
+                Mess->In.semaphore.name;
+            host_header->msgh_size = sizeof(Mess->Out);
+            Mess->Out.NDR = NDR_record;
+            const kern_return_t destroyResult =
+                semaphore_destroy(task, semaphore);
+            Mess->Out.RetCode = destroyResult;
+            if (destroyResult != KERN_SUCCESS) {
+                fprintf(stderr,
+                    "LC32: semaphore_destroy task=0x%x "
+                    "semaphore=0x%x failed: 0x%x\n",
+                    task, semaphore, destroyResult);
+            }
+            break;
+        }
         case 3444: {
             MACH_MSG_UNION(task_register_dyld_image_infos, Mess);
             host_header->msgh_size = sizeof(Mess->Out);
@@ -976,7 +1026,8 @@ guest_mach_msg_trap(u32 guest_msg,
         default:
             printf("LC32: Unhandled msgh_id %d\n",
                 host_header->msgh_id);
-            sharedHandle.ucb->ExceptionRaised(0xDEADDEAD, Dynarmic::A32::Exception::Yield);
+            CurrentUserCallbacks()->ExceptionRaised(
+                0xDEADDEAD, Dynarmic::A32::Exception::Yield);
             break;
     }
 
@@ -991,11 +1042,15 @@ guest_mach_msg_trap(u32 guest_msg,
 
 int guest_getdirentries64(int fd, u32 guest_buf, int nbytes, u32 guest_basep) {
     char *host_buf = (char *)malloc(nbytes);
-    __darwin_off_t host_basep = (__darwin_off_t)sharedHandle.ucb->MemoryRead32(guest_basep); // is reading needed?
+    __darwin_off_t host_basep =
+        static_cast<__darwin_off_t>(
+            CurrentUserCallbacks()->MemoryRead32(
+                guest_basep)); // is reading needed?
     // FIXME: is this correct?
     int result = syscallRetCarry(SYS_getdirentries64, fd, host_buf, nbytes, &host_basep, 0,0,0);
     Dynarmic_mem_1write(guest_buf, nbytes, host_buf);
-    sharedHandle.ucb->MemoryWrite64(guest_basep, host_basep);
+    CurrentUserCallbacks()->MemoryWrite64(
+        guest_basep, host_basep);
     free(host_buf);
     return result;
 }
@@ -1107,9 +1162,11 @@ struct GuestWorkqueueRequest {
 
 static std::vector<GuestWorkqueueKevent> guestWorkqueueKevents;
 static std::deque<GuestWorkqueueRequest> guestWorkqueueRequests;
+static std::recursive_mutex guestWorkqueueMutex;
 static u32 guestWorkqueueEventManagerPriority;
 static bool guestWorkqueueUpcallActive;
 static bool guestWorkqueueRestoreRequested;
+static thread_local bool guestWorkqueueOverlayCurrent;
 
 static_assert(sizeof(guest_kevent_qos_s) == 72,
     "iOS 10 kevent_qos_s ABI changed");
@@ -1163,6 +1220,8 @@ static int ApplyGuestKeventChanges(u32 changelist, int nchanges) {
         return EFAULT;
     }
 
+    std::lock_guard<std::recursive_mutex> lock(
+        guestWorkqueueMutex);
     for (const guest_kevent_qos_s &change : changes) {
         WORKQUEUE_TRACE(
             "LC32: workqueue change ident=0x%llx filter=%d "
@@ -1264,6 +1323,8 @@ int guest_bsdthread_register(u32 guest_func_thread_start, u32 guest_func_start_w
 }
 
 int guest_workq_open() {
+    std::lock_guard<std::recursive_mutex> lock(
+        guestWorkqueueMutex);
     if (guest_bsdthread_wqthread_start == 0) {
         return return_with_carry_direct(EINVAL, true);
     }
@@ -1323,6 +1384,8 @@ int guest_bsdthread_ctl(u32 command, u32 arg1, u32 arg2, u32 arg3) {
 }
 
 int guest_workq_kernreturn(int options, u32 item, int arg2, int arg3) {
+    std::lock_guard<std::recursive_mutex> lock(
+        guestWorkqueueMutex);
     WORKQUEUE_TRACE(
         "LC32: workq_kernreturn op=0x%x item=0x%x arg2=%d "
         "arg3=0x%x active=%d\n",
@@ -1368,6 +1431,8 @@ int guest_workq_kernreturn(int options, u32 item, int arg2, int arg3) {
 int guest_kevent_qos(int kq, u32 changelist, int nchanges,
         u32 eventlist, int nevents, u32 data_out, u32 data_available,
         unsigned int flags) {
+    std::lock_guard<std::recursive_mutex> lock(
+        guestWorkqueueMutex);
     WORKQUEUE_TRACE(
         "LC32: kevent_qos kq=%d changes=%d events=%d flags=0x%x\n",
         kq, nchanges, nevents, flags);
@@ -1551,11 +1616,14 @@ int guest_sigaction(int sig, u32 guest_act, u32 guest_oact) {
 }
 
 int guest_sigprocmask(int how, u32 guest_set, u32 guest_oldset) {
-    sigset_t host_set = guest_set ? sharedHandle.ucb->MemoryRead32(guest_set) : 0;
+    sigset_t host_set = guest_set
+        ? CurrentUserCallbacks()->MemoryRead32(guest_set)
+        : 0;
     sigset_t host_oldset = 0;
     int result = syscallRetCarry(SYS_sigprocmask, how, guest_set ? &host_set : NULL, &host_oldset, 0,0,0,0);
     if (guest_oldset) {
-        sharedHandle.ucb->MemoryWrite32(guest_oldset, host_oldset);
+        CurrentUserCallbacks()->MemoryWrite32(
+            guest_oldset, host_oldset);
     }
     return result;
 }
@@ -1575,7 +1643,8 @@ int guest_ioctl(int fildes, u32 request, u32 guest_r2) {
         case FIODTYPE: {
             int host_r2;
             int result = syscallRetCarry(SYS_ioctl, fildes, request, &host_r2, 0,0,0,0);
-            sharedHandle.ucb->MemoryWrite32(guest_r2, host_r2);
+            CurrentUserCallbacks()->MemoryWrite32(
+                guest_r2, host_r2);
             return result;
         }
         case DTRACEHIOC_ADD:
@@ -1585,7 +1654,8 @@ int guest_ioctl(int fildes, u32 request, u32 guest_r2) {
             return -1;
     }
     printf("Unhandled ioctl request: %d (0x%x)\n", request, request);
-    sharedHandle.ucb->ExceptionRaised(0xDEADDEAD, Dynarmic::A32::Exception::Yield);
+    CurrentUserCallbacks()->ExceptionRaised(
+        0xDEADDEAD, Dynarmic::A32::Exception::Yield);
     return -1;
 }
 
@@ -1638,7 +1708,8 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
             return syscallRetCarry(SYS_fcntl, fildes, cmd, guest_r2, 0,0,0,0);
         case F_ADDFILESIGS_RETURN:
             // fsig->fs_file_start = 0xFFFFFFFF;
-            sharedHandle.ucb->MemoryWrite32(guest_r2, 0xFFFFFFFF);
+            CurrentUserCallbacks()->MemoryWrite32(
+                guest_r2, 0xFFFFFFFF);
             return 0;
         case F_CHECK_LV:
             return 0;
@@ -1655,7 +1726,8 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
             return syscallRetCarry(SYS_fcntl, fildes, cmd, &host_r2, 0,0,0,0);
         }
         case F_SETSIZE: {
-            off_t host_r2 = sharedHandle.ucb->MemoryRead64(guest_r2);
+            off_t host_r2 =
+                CurrentUserCallbacks()->MemoryRead64(guest_r2);
             return syscallRetCarry(SYS_fcntl, fildes, cmd, &host_r2);
         }
         case F_RDADVISE: {
@@ -1675,7 +1747,8 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
         }
         default:
             printf("Unhandled fcntl command: %d\n", cmd);
-            sharedHandle.ucb->ExceptionRaised(0xDEADDEAD, Dynarmic::A32::Exception::Yield);
+            CurrentUserCallbacks()->ExceptionRaised(
+                0xDEADDEAD, Dynarmic::A32::Exception::Yield);
             return syscallRetCarry(SYS_fcntl, fildes, cmd, guest_r2, 0,0,0,0);
     }
 }
@@ -1707,7 +1780,8 @@ kern_return_t guest_host_create_mach_voucher_trap(mach_port_name_t host, u32 gue
     Dynarmic_mem_1read(guest_recipes, recipes_size, (char *)host_recipes);
     mach_port_name_t host_voucher;
     kern_return_t result = host_create_mach_voucher_trap(host, host_recipes, recipes_size, &host_voucher);
-    sharedHandle.ucb->MemoryWrite32(guest_voucher, host_voucher);
+    CurrentUserCallbacks()->MemoryWrite32(
+        guest_voucher, host_voucher);
     return result;
 }
 
@@ -1802,9 +1876,15 @@ kern_return_t guest__kernelrpc_mach_vm_allocate_trap(u32 target, u32 guest_addre
     bool anywhere = (flags & VM_FLAGS_ANYWHERE) != 0;
     if (anywhere) {
         // Sometimes the address pointer will contain garbage value, change it to 0
-        sharedHandle.ucb->MemoryWrite32(guest_address, 0);
+        CurrentUserCallbacks()->MemoryWrite32(
+            guest_address, 0);
     }
-    u32 result = Dynarmic_mmap(sharedHandle.ucb->MemoryRead32(guest_address), size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | (anywhere ? 0 : MAP_FIXED), -1, 0);
+    u32 result = Dynarmic_mmap(
+        CurrentUserCallbacks()->MemoryRead32(guest_address),
+        size, PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS |
+            (anywhere ? 0 : MAP_FIXED),
+        -1, 0);
     if (result == -1) {
 /*
         if (!anywhere && tag != VM_MEMORY_REALLOC) {
@@ -1814,7 +1894,8 @@ kern_return_t guest__kernelrpc_mach_vm_allocate_trap(u32 target, u32 guest_addre
 */
         return KERN_NO_SPACE;
     }
-    sharedHandle.ucb->MemoryWrite32(guest_address, result);
+    CurrentUserCallbacks()->MemoryWrite32(
+        guest_address, result);
     return KERN_SUCCESS;
 }
 
@@ -1823,14 +1904,16 @@ kern_return_t guest__kernelrpc_mach_port_construct_trap(mach_port_name_t target,
     mach_port_name_t host_name;
     Dynarmic_mem_1read(guest_options, sizeof(host_options), (char *)&host_options);
     kern_return_t result = _kernelrpc_mach_port_construct_trap(target, &host_options, context, &host_name);
-    sharedHandle.ucb->MemoryWrite32(guest_name, host_name);
+    CurrentUserCallbacks()->MemoryWrite32(
+        guest_name, host_name);
     return result;
 }
 
 kern_return_t guest__kernelrpc_mach_port_allocate_trap(mach_port_name_t target, mach_port_right_t right, u32 guest_name) {
     mach_port_name_t host_name;
     kern_return_t result = _kernelrpc_mach_port_allocate_trap(target, right, &host_name);
-    sharedHandle.ucb->MemoryWrite32(guest_name, host_name);
+    CurrentUserCallbacks()->MemoryWrite32(
+        guest_name, host_name);
     return result;
 }
 
@@ -1844,11 +1927,15 @@ kern_return_t guest__kernelrpc_mach_vm_map_trap(mach_port_name_t target, u32 gue
         printf("LC32: BackendException: _kernelrpc_mach_vm_map_trap fixed\n");
         return KERN_FAILURE;
     }
-    u32 result = Dynarmic_mmap(sharedHandle.ucb->MemoryRead32(guest_address), size, cur_protection, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0, mask ?: DYN_PAGE_MASK);
+    u32 result = Dynarmic_mmap(
+        CurrentUserCallbacks()->MemoryRead32(guest_address),
+        size, cur_protection, MAP_PRIVATE | MAP_ANONYMOUS,
+        -1, 0, mask ?: DYN_PAGE_MASK);
     if (result == -1) {
         return KERN_NO_SPACE;
     }
-    sharedHandle.ucb->MemoryWrite32(guest_address, result);
+    CurrentUserCallbacks()->MemoryWrite32(
+        guest_address, result);
     return KERN_SUCCESS;
 }
 
@@ -1930,9 +2017,17 @@ static void load_symbols_for_image(guest_file_mapping *mapping, void(^iterator)(
     }
     
     for(int i=0; i < symtab_cmd->nsyms; i++) {
-        u32 addr = strtab + sharedHandle.ucb->MemoryRead32((u32)(u64)&symtab[i].n_un.n_strx);
+        u32 addr = strtab +
+            CurrentUserCallbacks()->MemoryRead32(
+                static_cast<u32>(
+                    reinterpret_cast<uintptr_t>(
+                        &symtab[i].n_un.n_strx)));
         if(!get_memory(addr)) continue;
-        u64 symbolAddr = sharedHandle.ucb->MemoryRead32((u32)(u64)&symtab[i].n_value) + slide;
+        u64 symbolAddr =
+            CurrentUserCallbacks()->MemoryRead32(
+                static_cast<u32>(
+                    reinterpret_cast<uintptr_t>(
+                        &symtab[i].n_value))) + slide;
         DynarmicHostString host_sym(addr);
         if(*host_sym.hostPtr) {
             iterator(symbolAddr, (const char *)host_sym.hostPtr);
@@ -1971,8 +2066,10 @@ char *get_memory_page(u64 vaddr) {
     khash_t(memory) *memory = sharedHandle.memory;
     u64 idx = vaddr >> DYN_PAGE_BITS;
     if(page_table && idx < num_page_table_entries) {
-      return (char *)page_table[idx];
+      return static_cast<char *>(__atomic_load_n(
+          &page_table[idx], __ATOMIC_ACQUIRE));
     }
+    std::lock_guard<std::recursive_mutex> lock(guestVmMutex);
     u64 base = vaddr & ~DYN_PAGE_MASK;
     khiter_t k = kh_get(memory, memory, base);
     if(k == kh_end(memory)) {
@@ -2330,7 +2427,7 @@ public:
         if (dumpingBacktrace) {
             printf("Caught error while dumping call stack\n");
             if (crash) {
-                cpu->HaltExecution(LC32HaltReasonTrap);
+                HaltAllGuestJits(LC32HaltReasonTrap);
             }
             return;
         }
@@ -2382,7 +2479,7 @@ public:
 
         dumpingBacktrace = false;
         if (crash) {
-            cpu->HaltExecution(LC32HaltReasonTrap);
+            HaltAllGuestJits(LC32HaltReasonTrap);
         }
     }
 
@@ -2478,6 +2575,7 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 cpu->Regs()[1] = (u32)(result >> 32);
             } break;
             // direct call with custom args
+            case 334: // semwait_signal
             case 423: // semwait_signal_nocancel
                 cpu->Regs()[0] = syscallRetCarry(NR, cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4] | ((u64)cpu->Regs()[5] << 32), cpu->Regs()[6]);
                 break;
@@ -2548,6 +2646,17 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 cpu->Regs()[0] = guest_mach_generate_activity_id(
                     cpu->Regs()[0], static_cast<int>(cpu->Regs()[1]),
                     cpu->Regs()[2]);
+                break;
+            case -59: // swtch_pri
+            case -60: // swtch
+                /*
+                 * These are scheduler hints used by libpthread's spin paths.
+                 * Yield the real host pthread in native mode and retain the
+                 * same call as a cooperative rotation point otherwise.
+                 */
+                (void)sched_yield();
+                cpu->Regs()[0] = 0;
+                GuestThreadRequestRotation();
                 break;
             case -61:
                 /*
@@ -2773,15 +2882,20 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             case 329:
                 cpu->Regs()[0] = guest_pthread_sigmask(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
                 break;
+            case 331: // __disable_threadsignal
+                /*
+                 * XNU marks the terminating uthread as unable to receive
+                 * signals or cancellation. Guest signal delivery is already
+                 * virtualized here, and bsdthread_terminate immediately
+                 * retires the guest execution context, so no additional host
+                 * state is needed.
+                 */
+                cpu->Regs()[0] =
+                    return_with_carry_direct(0, false);
+                break;
 #if 0
                 case 330:
                     backend.reg_write(ArmConst.UC_ARM_REG_R0, sigwait(emulator));
-                    break;
-                case 331:
-                    backend.reg_write(ArmConst.UC_ARM_REG_R0, disable_threadsignal(emulator));
-                    break;
-                case 334:
-                    backend.reg_write(ArmConst.UC_ARM_REG_R0, semwait_signal(emulator));
                     break;
 #endif
             case 336:
@@ -2827,7 +2941,8 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 cpu->Regs()[0] = guest_workq_kernreturn(
                     operation, cpu->Regs()[1], cpu->Regs()[2],
                     cpu->Regs()[3]);
-                if (guestWorkqueueUpcallActive && cpu->Regs()[0] == 0 &&
+                if (GuestWorkqueueActiveForCurrentThread() &&
+                        cpu->Regs()[0] == 0 &&
                         (operation == WQOPS_THREAD_RETURN ||
                          operation == WQOPS_THREAD_KEVENT_RETURN)) {
                     /*
@@ -2836,6 +2951,8 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                      * execution loop restores the waiting guest context
                      * before it executes another worker instruction.
                      */
+                    std::lock_guard<std::recursive_mutex> lock(
+                        guestWorkqueueMutex);
                     guestWorkqueueRestoreRequested = true;
                 }
             }
@@ -2875,6 +2992,19 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 break;
             case 500:
                 cpu->Regs()[0] = guest_getentropy(cpu->Regs()[0], cpu->Regs()[1]);
+                break;
+            case 515: // ulock_wait
+                cpu->Regs()[0] = GuestUlockWait(
+                    cpu->Regs()[0], cpu->Regs()[1],
+                    cpu->Regs()[2] |
+                        (static_cast<u64>(cpu->Regs()[3]) << 32),
+                    cpu->Regs()[4]);
+                break;
+            case 516: // ulock_wake
+                cpu->Regs()[0] = GuestUlockWake(
+                    cpu->Regs()[0], cpu->Regs()[1],
+                    cpu->Regs()[2] |
+                        (static_cast<u64>(cpu->Regs()[3]) << 32));
                 break;
             case SYS_abort_with_payload:
                 cpu->Regs()[0] = guest_abort_with_payload(cpu->Regs()[0], cpu->Regs()[1] | ((u64)cpu->Regs()[2] << 32), cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5], cpu->Regs()[6] | ((u64)cpu->Regs()[8] << 32));
@@ -2992,7 +3122,9 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
         printf("handleMachineDependentSyscall(%d)\n", NR);
         switch (NR) {
             case 0:
-                //backend.reg_write(ArmConst.UC_ARM_REG_R0, sys_icache_invalidate(emulator));
+                InvalidateAllGuestJits(
+                    cpu->Regs()[0], cpu->Regs()[1]);
+                cpu->Regs()[0] = 0;
                 return true;
             case 1:
                 //backend.reg_write(ArmConst.UC_ARM_REG_R0, sys_dcache_flush(emulator));
@@ -3024,13 +3156,39 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
     std::shared_ptr<DynarmicCP15> cp15;
 };
 
+static Dynarmic::A32::UserCallbacks *CurrentUserCallbacks() {
+    return threadHandle.cb != nullptr
+        ? static_cast<Dynarmic::A32::UserCallbacks *>(
+            threadHandle.cb)
+        : sharedHandle.ucb;
+}
+
+Dynarmic::A32::UserCallbacks *Dynarmic_current_user_callbacks() {
+    return CurrentUserCallbacks();
+}
+
 namespace {
+
+constexpr size_t MaxNativeGuestProcessors = 64;
 
 enum class GuestThreadWaitKind : uint8_t {
     None,
     Mutex,
     Condition,
     Rwlock,
+    Ulock,
+};
+
+struct NativeGuestJit {
+    Dynarmic::A32::Jit *jit = nullptr;
+    DynarmicCpsr *cpsr = nullptr;
+    DynarmicCallbacks32 *callbacks = nullptr;
+    size_t processorId = 0;
+    pthread_t hostThread = {};
+    mach_port_t hostMachThread = MACH_PORT_NULL;
+    std::mutex startMutex;
+    std::condition_variable startCondition;
+    bool startAllowed = false;
 };
 
 struct GuestThreadContext {
@@ -3049,23 +3207,46 @@ struct GuestThreadContext {
     bool savedValid = false;
     bool alive = false;
     bool runnable = false;
+    NativeGuestJit *nativeJit = nullptr;
 };
 
-std::vector<GuestThreadContext> guestThreads;
+std::recursive_mutex guestThreadMutex;
+std::deque<GuestThreadContext> guestThreads;
 gdb_thread_id_t guestCurrentThreadId = 1;
 gdb_thread_id_t guestNextDebuggerThreadId = 3;
 u64 guestNextThreadSelfId;
 bool guestThreadRegistryInitialized;
 bool guestThreadRotationRequested;
 bool guestThreadCurrentRetiring;
-u64 guestNextWaitSequence = 1;
+std::atomic<u64> guestNextWaitSequence{1};
+uint64_t guestProcessorIdsInUse = 1;
+thread_local gdb_thread_id_t nativeGuestThreadId;
+thread_local bool nativeGuestThreadRetiring;
+
+std::mutex nativeGuestJitMutex;
+std::vector<NativeGuestJit *> nativeGuestJits;
 
 struct GuestPsynchPrepost {
     GuestThreadWaitKind kind;
     u32 address;
     size_t count;
 };
+std::mutex guestPsynchPrepostMutex;
 std::vector<GuestPsynchPrepost> guestPsynchPreposts;
+
+struct NativeGuestWaiter {
+    GuestThreadWaitKind kind = GuestThreadWaitKind::None;
+    u32 address = 0;
+    uint8_t ulockOpcode = 0;
+    mach_port_t threadPort = MACH_PORT_NULL;
+    u32 wakeResult = 0;
+    u64 sequence = 0;
+    bool signaled = false;
+    std::condition_variable condition;
+};
+
+std::mutex nativeGuestWaitMutex;
+std::vector<std::shared_ptr<NativeGuestWaiter>> nativeGuestWaiters;
 
 constexpr u32 GuestWorkqueueGuardSize = DYN_PAGE_SIZE;
 constexpr u32 GuestWorkqueueStackSize = 0x80000;
@@ -3102,7 +3283,7 @@ u32 guestWorkqueueSignalMask;
 
 void SaveGuestContext(context32 &context) {
     Dynarmic::A32::Jit *jit = threadHandle.jit;
-    DynarmicCallbacks32 *callbacks = sharedHandle.cb;
+    DynarmicCallbacks32 *callbacks = threadHandle.cb;
     context.regs = jit->Regs();
     context.extRegs = jit->ExtRegs();
     context.cpsr = jit->Cpsr();
@@ -3112,7 +3293,7 @@ void SaveGuestContext(context32 &context) {
 
 void LoadGuestContext(const context32 &context) {
     Dynarmic::A32::Jit *jit = threadHandle.jit;
-    DynarmicCallbacks32 *callbacks = sharedHandle.cb;
+    DynarmicCallbacks32 *callbacks = threadHandle.cb;
     jit->Regs() = context.regs;
     jit->ExtRegs() = context.extRegs;
     jit->SetCpsr(context.cpsr);
@@ -3121,8 +3302,19 @@ void LoadGuestContext(const context32 &context) {
     jit->ClearExclusiveState();
 }
 
+gdb_thread_id_t CurrentGuestThreadId() {
+    if (NativeGuestThreadsEnabled() && nativeGuestThreadId != 0) {
+        return nativeGuestThreadId;
+    }
+    return guestCurrentThreadId;
+}
+
 void EnsureGuestThreadRegistry() {
+    std::lock_guard<std::recursive_mutex> lock(guestThreadMutex);
     if (guestThreadRegistryInitialized) {
+        if (NativeGuestThreadsEnabled() && nativeGuestThreadId == 0) {
+            nativeGuestThreadId = 1;
+        }
         return;
     }
 
@@ -3136,6 +3328,9 @@ void EnsureGuestThreadRegistry() {
     guestThreads.push_back({
         .debuggerId = 1,
         .threadSelfId = mainThreadSelfId,
+        .threadPort = NativeGuestThreadsEnabled()
+            ? pthread_mach_thread_np(pthread_self())
+            : MACH_PORT_NULL,
         .signalMask = guestMask,
         .savedValid = false,
         .alive = true,
@@ -3146,11 +3341,18 @@ void EnsureGuestThreadRegistry() {
         guestNextThreadSelfId = 1;
     }
     guestThreadRegistryInitialized = true;
+    if (NativeGuestThreadsEnabled()) {
+        nativeGuestThreadId = 1;
+        fprintf(stderr,
+            "LC32: native guest pthread experiment enabled "
+            "(debugger support disabled)\n");
+    }
 }
 
 GuestThreadContext *FindGuestThread(
         gdb_thread_id_t debuggerId, bool requireAlive = false) {
     EnsureGuestThreadRegistry();
+    std::lock_guard<std::recursive_mutex> lock(guestThreadMutex);
     for (GuestThreadContext &thread : guestThreads) {
         if (thread.debuggerId == debuggerId &&
                 (!requireAlive || thread.alive)) {
@@ -3162,6 +3364,7 @@ GuestThreadContext *FindGuestThread(
 
 size_t LiveGuestThreadCount() {
     EnsureGuestThreadRegistry();
+    std::lock_guard<std::recursive_mutex> lock(guestThreadMutex);
     return static_cast<size_t>(std::count_if(
         guestThreads.begin(), guestThreads.end(),
         [](const GuestThreadContext &thread) {
@@ -3171,19 +3374,23 @@ size_t LiveGuestThreadCount() {
 
 u64 AllocateGuestThreadSelfId() {
     EnsureGuestThreadRegistry();
+    std::lock_guard<std::recursive_mutex> lock(guestThreadMutex);
     return guestNextThreadSelfId++;
 }
 
 GuestThreadContext *NextGuestThread() {
     EnsureGuestThreadRegistry();
+    std::lock_guard<std::recursive_mutex> lock(guestThreadMutex);
     if (guestThreads.empty()) {
         return nullptr;
     }
 
+    const gdb_thread_id_t currentThreadId =
+        CurrentGuestThreadId();
     size_t currentIndex = 0;
     for (; currentIndex < guestThreads.size(); ++currentIndex) {
         if (guestThreads[currentIndex].debuggerId ==
-                guestCurrentThreadId) {
+                currentThreadId) {
             break;
         }
     }
@@ -3194,7 +3401,7 @@ GuestThreadContext *NextGuestThread() {
         GuestThreadContext &candidate =
             guestThreads[(currentIndex + offset) % guestThreads.size()];
         if (candidate.alive && candidate.runnable &&
-                candidate.debuggerId != guestCurrentThreadId) {
+                candidate.debuggerId != currentThreadId) {
             return &candidate;
         }
     }
@@ -3221,11 +3428,13 @@ mach_port_t AllocateGuestThreadPort() {
 bool ParkCurrentGuestThread(
         GuestThreadWaitKind kind, u32 address, u32 wakeResult) {
     EnsureGuestThreadRegistry();
-    if (guestWorkqueueUpcallActive) {
+    if (GuestWorkqueueActiveForCurrentThread()) {
         return false;
     }
+    std::lock_guard<std::recursive_mutex> lock(
+        guestThreadMutex);
     GuestThreadContext *current =
-        FindGuestThread(guestCurrentThreadId, true);
+        FindGuestThread(CurrentGuestThreadId(), true);
     if (current == nullptr || !current->runnable) {
         return false;
     }
@@ -3234,7 +3443,8 @@ bool ParkCurrentGuestThread(
     current->waitKind = kind;
     current->waitAddress = address;
     current->wakeResult = wakeResult;
-    current->waitSequence = guestNextWaitSequence++;
+    current->waitSequence = guestNextWaitSequence.fetch_add(
+        1, std::memory_order_relaxed);
     if (NextGuestThread() == nullptr) {
         current->runnable = true;
         current->waitKind = GuestThreadWaitKind::None;
@@ -3251,6 +3461,8 @@ size_t WakeGuestThreads(
         GuestThreadWaitKind kind, u32 address, bool wakeAll,
         mach_port_t targetThread = MACH_PORT_NULL) {
     EnsureGuestThreadRegistry();
+    std::lock_guard<std::recursive_mutex> lock(
+        guestThreadMutex);
     size_t count = 0;
     for (;;) {
         GuestThreadContext *selected = nullptr;
@@ -3292,6 +3504,8 @@ size_t WakeGuestThreads(
 
 void RecordGuestPsynchPrepost(
         GuestThreadWaitKind kind, u32 address) {
+    std::lock_guard<std::mutex> lock(
+        guestPsynchPrepostMutex);
     for (GuestPsynchPrepost &prepost : guestPsynchPreposts) {
         if (prepost.kind == kind &&
                 prepost.address == address) {
@@ -3308,6 +3522,8 @@ void RecordGuestPsynchPrepost(
 
 bool ConsumeGuestPsynchPrepost(
         GuestThreadWaitKind kind, u32 address) {
+    std::lock_guard<std::mutex> lock(
+        guestPsynchPrepostMutex);
     for (auto it = guestPsynchPreposts.begin();
             it != guestPsynchPreposts.end(); ++it) {
         if (it->kind != kind || it->address != address) {
@@ -3586,6 +3802,248 @@ bool NextGuestWorkqueueEvent(GuestWorkqueueDelivery &delivery) {
 
 } // anonymous namespace
 
+static void InvalidateAllGuestJits(
+        u32 address, size_t size) {
+    if (size == 0) {
+        return;
+    }
+    Dynarmic::A32::Jit *mainJit =
+        sharedHandle.cb != nullptr
+        ? sharedHandle.cb->cpu
+        : nullptr;
+    if (mainJit != nullptr) {
+        mainJit->InvalidateCacheRange(
+            address, size);
+    }
+    std::lock_guard<std::mutex> lock(
+        nativeGuestJitMutex);
+    for (NativeGuestJit *runtime : nativeGuestJits) {
+        if (runtime != nullptr &&
+                runtime->jit != nullptr &&
+                runtime->jit != mainJit) {
+            runtime->jit->InvalidateCacheRange(
+                address, size);
+        }
+    }
+}
+
+static void HaltAllGuestJits(
+        Dynarmic::HaltReason reason) {
+    Dynarmic::A32::Jit *mainJit =
+        sharedHandle.cb != nullptr
+        ? sharedHandle.cb->cpu
+        : nullptr;
+    if (mainJit != nullptr) {
+        mainJit->HaltExecution(reason);
+    }
+    std::lock_guard<std::mutex> lock(
+        nativeGuestJitMutex);
+    for (NativeGuestJit *runtime : nativeGuestJits) {
+        if (runtime != nullptr &&
+                runtime->jit != nullptr &&
+                runtime->jit != mainJit) {
+            runtime->jit->HaltExecution(reason);
+        }
+    }
+}
+
+struct NativeGuestThreadStart {
+    gdb_thread_id_t debuggerId;
+    NativeGuestJit *runtime;
+};
+
+class NativeGuestAutoreleasePool {
+public:
+    NativeGuestAutoreleasePool() {
+        using Push = void *(*)();
+        static Push push = reinterpret_cast<Push>(
+            dlsym(RTLD_DEFAULT, "objc_autoreleasePoolPush"));
+        if (push != nullptr) {
+            token = push();
+        }
+    }
+
+    ~NativeGuestAutoreleasePool() {
+        using Pop = void (*)(void *);
+        static Pop pop = reinterpret_cast<Pop>(
+            dlsym(RTLD_DEFAULT, "objc_autoreleasePoolPop"));
+        if (token != nullptr && pop != nullptr) {
+            pop(token);
+        }
+    }
+
+    NativeGuestAutoreleasePool(
+        const NativeGuestAutoreleasePool &) = delete;
+    NativeGuestAutoreleasePool &operator=(
+        const NativeGuestAutoreleasePool &) = delete;
+
+private:
+    void *token = nullptr;
+};
+
+static NativeGuestJit *CreateNativeGuestJit(
+        const context32 &initial, size_t processorId) {
+    auto *runtime = new NativeGuestJit();
+    runtime->processorId = processorId;
+    runtime->callbacks =
+        new DynarmicCallbacks32(sharedHandle.memory);
+
+    Dynarmic::A32::UserConfig config;
+    config.callbacks = runtime->callbacks;
+    config.coprocessors[15] = runtime->callbacks->cp15;
+    config.processor_id = processorId;
+    config.global_monitor = sharedHandle.monitor;
+    config.always_little_endian = false;
+    config.wall_clock_cntpct = true;
+    config.check_halt_on_memory_access = true;
+    config.define_unpredictable_behaviour = true;
+    // A separate cache is required for every JIT. Keep the experiment's
+    // per-pthread footprint well below Dynarmic's 128 MiB default.
+    config.code_cache_size = 16 * 1024 * 1024;
+
+    runtime->callbacks->num_page_table_entries =
+        sharedHandle.num_page_table_entries;
+    runtime->callbacks->page_table =
+        sharedHandle.page_table;
+    if (sharedHandle.page_table != nullptr) {
+        config.page_table = reinterpret_cast<
+            std::array<std::uint8_t *,
+                Dynarmic::A32::UserConfig::NUM_PAGE_TABLE_ENTRIES> *>(
+                    sharedHandle.page_table);
+        config.absolute_offset_page_table = false;
+        config.detect_misaligned_access_via_page_table =
+            16 | 32 | 64 | 128;
+        config.only_detect_misalignment_via_page_table_on_page_boundary =
+            true;
+    }
+
+    try {
+        runtime->jit =
+            new Dynarmic::A32::Jit(config);
+        runtime->cpsr =
+            new DynarmicCpsr(runtime->jit);
+    } catch (const std::exception &exception) {
+        fprintf(stderr,
+            "LC32: native guest JIT creation failed: %s\n",
+            exception.what());
+        if (runtime->jit != nullptr) {
+            delete runtime->jit;
+        }
+        runtime->callbacks->destroy();
+        delete runtime;
+        return nullptr;
+    }
+
+    runtime->callbacks->cpu = runtime->jit;
+    runtime->callbacks->cpsr = runtime->cpsr;
+    runtime->jit->Regs() = initial.regs;
+    runtime->jit->ExtRegs() = initial.extRegs;
+    runtime->jit->SetCpsr(initial.cpsr);
+    runtime->jit->SetFpscr(initial.fpscr);
+    runtime->callbacks->cp15->uro = initial.uro;
+    runtime->jit->ClearExclusiveState();
+
+    {
+        std::lock_guard<std::mutex> lock(
+            nativeGuestJitMutex);
+        nativeGuestJits.push_back(runtime);
+    }
+    return runtime;
+}
+
+static void DestroyNativeGuestJit(
+        NativeGuestJit *runtime) {
+    if (runtime == nullptr) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(
+            nativeGuestJitMutex);
+        nativeGuestJits.erase(std::remove(
+            nativeGuestJits.begin(), nativeGuestJits.end(),
+            runtime), nativeGuestJits.end());
+    }
+    if (sharedHandle.monitor != nullptr &&
+            runtime->processorId <
+                MaxNativeGuestProcessors) {
+        sharedHandle.monitor->ClearProcessor(
+            runtime->processorId);
+    }
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestThreadMutex);
+        guestProcessorIdsInUse &=
+            ~(uint64_t{1} << runtime->processorId);
+    }
+    delete runtime->cpsr;
+    delete runtime->jit;
+    runtime->callbacks->destroy();
+    delete runtime;
+}
+
+static void *RunNativeGuestThread(void *opaque) {
+    std::unique_ptr<NativeGuestThreadStart> start(
+        static_cast<NativeGuestThreadStart *>(opaque));
+    NativeGuestJit *runtime = start->runtime;
+    {
+        std::unique_lock<std::mutex> lock(
+            runtime->startMutex);
+        runtime->startCondition.wait(lock, [&] {
+            return runtime->startAllowed;
+        });
+    }
+
+    threadHandle.jit = runtime->jit;
+    threadHandle.cpsr = runtime->cpsr;
+    threadHandle.cb = runtime->callbacks;
+    nativeGuestThreadId = start->debuggerId;
+    nativeGuestThreadRetiring = false;
+    runtime->hostMachThread =
+        pthread_mach_thread_np(pthread_self());
+
+    fprintf(stderr,
+        "LC32: native guest-thread=%llu running on "
+        "host-thread=0x%x processor=%zu\n",
+        start->debuggerId, runtime->hostMachThread,
+        runtime->processorId);
+
+    {
+        /*
+         * Unlike NSThread and libdispatch workers, a raw host pthread has no
+         * Objective-C autorelease pool. Guest code can enter the host bridge
+         * from this thread, so keep a pool alive while its JIT is running.
+         * Drain it before clearing TLS or destroying the per-thread runtime.
+         */
+        NativeGuestAutoreleasePool autoreleasePool;
+        const Dynarmic::HaltReason reason =
+            Dynarmic_emu_1resume();
+        if (!nativeGuestThreadRetiring) {
+            fprintf(stderr,
+                "LC32: native guest-thread=%llu stopped "
+                "without bsdthread_terminate (reason=0x%llx)\n",
+                start->debuggerId,
+                static_cast<unsigned long long>(reason));
+        }
+
+        {
+            std::lock_guard<std::recursive_mutex> lock(
+                guestThreadMutex);
+            if (GuestThreadContext *thread =
+                    FindGuestThread(start->debuggerId, false)) {
+                thread->alive = false;
+                thread->runnable = false;
+                thread->savedValid = false;
+                thread->nativeJit = nullptr;
+            }
+        }
+    }
+
+    threadHandle = {};
+    nativeGuestThreadId = 0;
+    DestroyNativeGuestJit(runtime);
+    return nullptr;
+}
+
 static u32 GuestBsdthreadCreate(
         u32 function, u32 argument, u32 stack, u32 pthread,
         u32 flags) {
@@ -3661,7 +4119,36 @@ static u32 GuestBsdthreadCreate(
     }
 
     GuestThreadContext thread = {};
-    thread.debuggerId = guestNextDebuggerThreadId++;
+    size_t processorId = 0;
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestThreadMutex);
+        thread.debuggerId =
+            guestNextDebuggerThreadId++;
+        if (NativeGuestThreadsEnabled()) {
+            for (size_t candidate = 1;
+                    candidate < MaxNativeGuestProcessors;
+                    ++candidate) {
+                const uint64_t bit =
+                    uint64_t{1} << candidate;
+                if ((guestProcessorIdsInUse & bit) == 0) {
+                    guestProcessorIdsInUse |= bit;
+                    processorId = candidate;
+                    break;
+                }
+            }
+            if (processorId == 0) {
+                (void)mach_port_destroy(
+                    mach_task_self(), threadPort);
+                if (allocationAddress != 0) {
+                    (void)Dynarmic_munmap(
+                        allocationAddress, allocationSize);
+                }
+                return return_with_carry_direct(
+                    EAGAIN, true);
+            }
+        }
+    }
     thread.threadSelfId = AllocateGuestThreadSelfId();
     thread.pthreadAddress = pthreadAddress;
     thread.threadPort = threadPort;
@@ -3670,9 +4157,13 @@ static u32 GuestBsdthreadCreate(
     thread.alive = true;
     thread.runnable = true;
     thread.savedValid = true;
-    if (GuestThreadContext *parent =
-            FindGuestThread(guestCurrentThreadId, true)) {
-        thread.signalMask = parent->signalMask;
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestThreadMutex);
+        if (GuestThreadContext *parent =
+                FindGuestThread(CurrentGuestThreadId(), true)) {
+            thread.signalMask = parent->signalMask;
+        }
     }
 
     u32 childFlags = flags;
@@ -3708,7 +4199,79 @@ static u32 GuestBsdthreadCreate(
         thread.pthreadAddress, thread.threadPort,
         thread.saved.regs[Reg::PC], thread.saved.regs[Reg::SP],
         childFlags);
-    guestThreads.push_back(std::move(thread));
+
+    if (NativeGuestThreadsEnabled()) {
+        NativeGuestJit *runtime =
+            CreateNativeGuestJit(
+                thread.saved, processorId);
+        if (runtime == nullptr) {
+            {
+                std::lock_guard<std::recursive_mutex> lock(
+                    guestThreadMutex);
+                guestProcessorIdsInUse &=
+                    ~(uint64_t{1} << processorId);
+            }
+            (void)mach_port_destroy(
+                mach_task_self(), threadPort);
+            if (allocationAddress != 0) {
+                (void)Dynarmic_munmap(
+                    allocationAddress, allocationSize);
+            }
+            return return_with_carry_direct(
+                EAGAIN, true);
+        }
+        thread.nativeJit = runtime;
+        const gdb_thread_id_t debuggerId =
+            thread.debuggerId;
+        {
+            std::lock_guard<std::recursive_mutex> lock(
+                guestThreadMutex);
+            guestThreads.push_back(
+                std::move(thread));
+        }
+
+        auto *start = new NativeGuestThreadStart{
+            .debuggerId = debuggerId,
+            .runtime = runtime,
+        };
+        pthread_t hostThread;
+        const int createResult = pthread_create(
+            &hostThread, nullptr,
+            RunNativeGuestThread, start);
+        if (createResult != 0) {
+            delete start;
+            {
+                std::lock_guard<std::recursive_mutex> lock(
+                    guestThreadMutex);
+                guestThreads.erase(std::remove_if(
+                    guestThreads.begin(), guestThreads.end(),
+                    [debuggerId](const GuestThreadContext &candidate) {
+                        return candidate.debuggerId == debuggerId;
+                    }), guestThreads.end());
+            }
+            DestroyNativeGuestJit(runtime);
+            (void)mach_port_destroy(
+                mach_task_self(), threadPort);
+            if (allocationAddress != 0) {
+                (void)Dynarmic_munmap(
+                    allocationAddress, allocationSize);
+            }
+            return return_with_carry_direct(
+                createResult, true);
+        }
+        runtime->hostThread = hostThread;
+        (void)pthread_detach(hostThread);
+        {
+            std::lock_guard<std::mutex> lock(
+                runtime->startMutex);
+            runtime->startAllowed = true;
+        }
+        runtime->startCondition.notify_one();
+    } else {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestThreadMutex);
+        guestThreads.push_back(std::move(thread));
+    }
     return return_with_carry_direct(
         static_cast<int>(pthreadAddress), false);
 }
@@ -3717,14 +4280,20 @@ static u32 GuestBsdthreadTerminate(
         u32 freeAddress, u32 freeSize, mach_port_t threadPort,
         mach_port_t joinSemaphore) {
     EnsureGuestThreadRegistry();
-    if (guestWorkqueueUpcallActive) {
+    if (GuestWorkqueueActiveForCurrentThread()) {
         return return_with_carry_direct(EINVAL, true);
     }
 
-    GuestThreadContext *current =
-        FindGuestThread(guestCurrentThreadId, true);
-    if (current == nullptr || current->debuggerId == 1) {
-        return return_with_carry_direct(EINVAL, true);
+    const gdb_thread_id_t currentThreadId =
+        CurrentGuestThreadId();
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestThreadMutex);
+        GuestThreadContext *current =
+            FindGuestThread(currentThreadId, true);
+        if (current == nullptr || current->debuggerId == 1) {
+            return return_with_carry_direct(EINVAL, true);
+        }
     }
 
     if (freeAddress != 0 && freeSize != 0 &&
@@ -3742,26 +4311,49 @@ static u32 GuestBsdthreadTerminate(
                 joinSemaphore, result);
         }
     }
+
+    mach_port_t currentPort = MACH_PORT_NULL;
+    gdb_thread_id_t debuggerId = 0;
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestThreadMutex);
+        GuestThreadContext *current =
+            FindGuestThread(currentThreadId, false);
+        if (current == nullptr) {
+            return return_with_carry_direct(EINVAL, true);
+        }
+        currentPort = current->threadPort;
+        debuggerId = current->debuggerId;
+        current->threadPort = MACH_PORT_NULL;
+        current->alive = false;
+        current->runnable = false;
+        current->savedValid = false;
+    }
+
     if (MACH_PORT_VALID(threadPort) &&
-            threadPort != current->threadPort) {
+            threadPort != currentPort) {
         fprintf(stderr,
             "LC32: bsdthread_terminate port mismatch "
             "argument=0x%x current=0x%x\n",
-            threadPort, current->threadPort);
+            threadPort, currentPort);
     }
-    if (MACH_PORT_VALID(current->threadPort)) {
+    if (MACH_PORT_VALID(currentPort)) {
         (void)mach_port_destroy(
-            mach_task_self(), current->threadPort);
-        current->threadPort = MACH_PORT_NULL;
+            mach_task_self(), currentPort);
     }
 
     fprintf(stderr,
         "LC32: bsdthread_terminate guest-thread=%llu "
         "free=0x%x+0x%x\n",
-        current->debuggerId, freeAddress, freeSize);
-    current->alive = false;
-    current->runnable = false;
-    current->savedValid = false;
+        debuggerId, freeAddress, freeSize);
+    if (NativeGuestThreadIsCurrent()) {
+        nativeGuestThreadRetiring = true;
+        if (threadHandle.jit->IsExecuting()) {
+            threadHandle.jit->HaltExecution(
+                LC32HaltReasonExit);
+        }
+        return return_with_carry_direct(0, false);
+    }
     guestThreadCurrentRetiring = true;
     guestThreadRotationRequested = true;
     if (LiveGuestThreadCount() == 0) {
@@ -3777,8 +4369,11 @@ static u32 GuestBsdthreadTerminate(
 
 static void GuestThreadRequestRotation() {
     EnsureGuestThreadRegistry();
+    if (NativeGuestThreadIsCurrent()) {
+        return;
+    }
     if (guestThreadCurrentRetiring || guestSingleStepping ||
-            guestWorkqueueUpcallActive ||
+            GuestWorkqueueActiveForCurrentThread() ||
             GuestWorkqueueTransitionPending() ||
             LiveGuestThreadCount() <= 1) {
         return;
@@ -3788,7 +4383,10 @@ static void GuestThreadRequestRotation() {
 
 static bool GuestThreadCanYieldBeforeBlocking() {
     EnsureGuestThreadRegistry();
-    return !guestWorkqueueUpcallActive &&
+    if (NativeGuestThreadIsCurrent()) {
+        return false;
+    }
+    return !GuestWorkqueueActiveForCurrentThread() &&
         NextGuestThread() != nullptr;
 }
 
@@ -3803,14 +4401,22 @@ static bool GuestThreadYieldBeforeBlocking() {
 }
 
 static bool GuestThreadTransitionPending() {
+    if (NativeGuestThreadIsCurrent()) {
+        return false;
+    }
     return guestThreadRotationRequested;
 }
 
 static bool HandleGuestThreadTransition() {
+    if (NativeGuestThreadIsCurrent()) {
+        return false;
+    }
+    std::lock_guard<std::recursive_mutex> lock(
+        guestThreadMutex);
     if (!guestThreadRotationRequested ||
-            guestWorkqueueUpcallActive ||
+            GuestWorkqueueActiveForCurrentThread() ||
             threadHandle.jit == nullptr ||
-            sharedHandle.cb == nullptr) {
+            threadHandle.cb == nullptr) {
         return false;
     }
 
@@ -3841,11 +4447,15 @@ static bool HandleGuestThreadTransition() {
 
 static u64 GuestCurrentThreadSelfId() {
     EnsureGuestThreadRegistry();
-    if (guestWorkqueueUpcallActive) {
+    if (GuestWorkqueueActiveForCurrentThread()) {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestWorkqueueMutex);
         return guestWorkqueueThreadSelfId;
     }
+    std::lock_guard<std::recursive_mutex> lock(
+        guestThreadMutex);
     GuestThreadContext *current =
-        FindGuestThread(guestCurrentThreadId, true);
+        FindGuestThread(CurrentGuestThreadId(), true);
     return current != nullptr
         ? current->threadSelfId
         : __thread_selfid();
@@ -3853,22 +4463,32 @@ static u64 GuestCurrentThreadSelfId() {
 
 static mach_port_t GuestCurrentSyntheticThreadPort() {
     EnsureGuestThreadRegistry();
-    if (guestWorkqueueUpcallActive) {
+    if (GuestWorkqueueActiveForCurrentThread()) {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestWorkqueueMutex);
         return guestWorkqueueThreadPort;
     }
+    std::lock_guard<std::recursive_mutex> lock(
+        guestThreadMutex);
     GuestThreadContext *current =
-        FindGuestThread(guestCurrentThreadId, true);
+        FindGuestThread(CurrentGuestThreadId(), true);
     return current != nullptr ? current->threadPort : MACH_PORT_NULL;
 }
 
 static int GuestThreadSigmask(
         int how, u32 guestSet, u32 guestOldSet) {
     EnsureGuestThreadRegistry();
+    const bool workqueue =
+        GuestWorkqueueActiveForCurrentThread();
+    std::recursive_mutex &mutex = workqueue
+        ? guestWorkqueueMutex
+        : guestThreadMutex;
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     u32 *mask = nullptr;
-    if (guestWorkqueueUpcallActive) {
+    if (workqueue) {
         mask = &guestWorkqueueSignalMask;
     } else if (GuestThreadContext *current =
-            FindGuestThread(guestCurrentThreadId, true)) {
+            FindGuestThread(CurrentGuestThreadId(), true)) {
         mask = &current->signalMask;
     }
     if (mask == nullptr) {
@@ -3909,10 +4529,95 @@ static int GuestThreadSigmask(
     return 0;
 }
 
+static bool NativeGuestThreadIsCurrent() {
+    return NativeGuestThreadsEnabled() &&
+        nativeGuestThreadId != 0;
+}
+
+static bool GuestWorkqueueActiveForCurrentThread() {
+    if (NativeGuestThreadIsCurrent()) {
+        return guestWorkqueueOverlayCurrent;
+    }
+    std::lock_guard<std::recursive_mutex> lock(
+        guestWorkqueueMutex);
+    return guestWorkqueueUpcallActive;
+}
+
+static u32 WaitNativeGuestThread(
+        GuestThreadWaitKind kind, u32 address,
+        u32 wakeResult) {
+    auto waiter = std::make_shared<NativeGuestWaiter>();
+    waiter->kind = kind;
+    waiter->address = address;
+    waiter->threadPort = GuestCurrentSyntheticThreadPort();
+    waiter->wakeResult = wakeResult;
+
+    std::unique_lock<std::mutex> lock(nativeGuestWaitMutex);
+    if (ConsumeGuestPsynchPrepost(kind, address)) {
+        return return_with_carry_direct(
+            static_cast<int>(wakeResult), false);
+    }
+    waiter->sequence = guestNextWaitSequence.fetch_add(
+        1, std::memory_order_relaxed);
+    nativeGuestWaiters.push_back(waiter);
+    waiter->condition.wait(lock, [&] {
+        return waiter->signaled;
+    });
+    nativeGuestWaiters.erase(std::remove(
+        nativeGuestWaiters.begin(), nativeGuestWaiters.end(),
+        waiter), nativeGuestWaiters.end());
+    return return_with_carry_direct(
+        static_cast<int>(waiter->wakeResult), false);
+}
+
+static size_t WakeNativeGuestThreadsLocked(
+        GuestThreadWaitKind kind, u32 address, bool wakeAll,
+        mach_port_t targetThread = MACH_PORT_NULL) {
+    size_t count = 0;
+    for (;;) {
+        std::shared_ptr<NativeGuestWaiter> selected;
+        for (const auto &waiter : nativeGuestWaiters) {
+            if (waiter->signaled || waiter->kind != kind ||
+                    waiter->address != address ||
+                    (MACH_PORT_VALID(targetThread) &&
+                     waiter->threadPort != targetThread)) {
+                continue;
+            }
+            if (!selected ||
+                    waiter->sequence < selected->sequence) {
+                selected = waiter;
+            }
+        }
+        if (!selected) {
+            break;
+        }
+        selected->signaled = true;
+        selected->condition.notify_one();
+        ++count;
+        if (!wakeAll || MACH_PORT_VALID(targetThread)) {
+            break;
+        }
+    }
+    return count;
+}
+
+static size_t WakeNativeGuestThreads(
+        GuestThreadWaitKind kind, u32 address, bool wakeAll,
+        mach_port_t targetThread = MACH_PORT_NULL) {
+    std::lock_guard<std::mutex> lock(nativeGuestWaitMutex);
+    return WakeNativeGuestThreadsLocked(
+        kind, address, wakeAll, targetThread);
+}
+
 static u32 GuestPsynchMutexWait(
         u32 mutex, u32 generation) {
     const u32 wakeResult =
         (generation & ~0xffu) | 0x03u;
+    if (NativeGuestThreadIsCurrent() &&
+            !GuestWorkqueueActiveForCurrentThread()) {
+        return WaitNativeGuestThread(
+            GuestThreadWaitKind::Mutex, mutex, wakeResult);
+    }
     if (ConsumeGuestPsynchPrepost(
             GuestThreadWaitKind::Mutex, mutex)) {
         return return_with_carry_direct(
@@ -3926,9 +4631,21 @@ static u32 GuestPsynchMutexWait(
 }
 
 static u32 GuestPsynchMutexDrop(u32 mutex) {
-    const size_t woken = WakeGuestThreads(
-        GuestThreadWaitKind::Mutex, mutex, false);
-    if (woken == 0) {
+    const bool native = NativeGuestThreadIsCurrent();
+    size_t woken;
+    if (native) {
+        std::lock_guard<std::mutex> lock(nativeGuestWaitMutex);
+        woken = WakeNativeGuestThreadsLocked(
+            GuestThreadWaitKind::Mutex, mutex, false);
+        if (woken == 0) {
+            RecordGuestPsynchPrepost(
+                GuestThreadWaitKind::Mutex, mutex);
+        }
+    } else {
+        woken = WakeGuestThreads(
+            GuestThreadWaitKind::Mutex, mutex, false);
+    }
+    if (!native && woken == 0) {
         RecordGuestPsynchPrepost(
             GuestThreadWaitKind::Mutex, mutex);
     }
@@ -3938,8 +4655,18 @@ static u32 GuestPsynchMutexDrop(u32 mutex) {
 static u32 GuestPsynchConditionWait(
         u32 condition, u32 mutex) {
     if (mutex != 0) {
-        (void)WakeGuestThreads(
-            GuestThreadWaitKind::Mutex, mutex, false);
+        if (NativeGuestThreadIsCurrent()) {
+            (void)WakeNativeGuestThreads(
+                GuestThreadWaitKind::Mutex, mutex, false);
+        } else {
+            (void)WakeGuestThreads(
+                GuestThreadWaitKind::Mutex, mutex, false);
+        }
+    }
+    if (NativeGuestThreadIsCurrent() &&
+            !GuestWorkqueueActiveForCurrentThread()) {
+        return WaitNativeGuestThread(
+            GuestThreadWaitKind::Condition, condition, 0x100);
     }
     if (ConsumeGuestPsynchPrepost(
             GuestThreadWaitKind::Condition, condition)) {
@@ -3955,13 +4682,27 @@ static u32 GuestPsynchConditionWait(
 static u32 GuestPsynchConditionSignal(
         u32 condition, mach_port_t targetThread,
         bool broadcast) {
-    const size_t woken = WakeGuestThreads(
-        GuestThreadWaitKind::Condition, condition,
-        broadcast, targetThread);
+    const bool native = NativeGuestThreadIsCurrent();
+    size_t woken;
+    if (native) {
+        std::lock_guard<std::mutex> lock(nativeGuestWaitMutex);
+        woken = WakeNativeGuestThreadsLocked(
+            GuestThreadWaitKind::Condition, condition,
+            broadcast, targetThread);
+        if (woken == 0 && !MACH_PORT_VALID(targetThread)) {
+            RecordGuestPsynchPrepost(
+                GuestThreadWaitKind::Condition, condition);
+        }
+    } else {
+        woken = WakeGuestThreads(
+            GuestThreadWaitKind::Condition, condition,
+            broadcast, targetThread);
+    }
     if (MACH_PORT_VALID(targetThread) && woken == 0) {
         return return_with_carry_direct(ESRCH, true);
     }
-    if (woken == 0 && !MACH_PORT_VALID(targetThread)) {
+    if (!native && woken == 0 &&
+            !MACH_PORT_VALID(targetThread)) {
         RecordGuestPsynchPrepost(
             GuestThreadWaitKind::Condition, condition);
     }
@@ -3976,6 +4717,11 @@ static u32 GuestPsynchConditionSignal(
 }
 
 static u32 GuestPsynchRwWait(u32 rwlock) {
+    if (NativeGuestThreadIsCurrent() &&
+            !GuestWorkqueueActiveForCurrentThread()) {
+        return WaitNativeGuestThread(
+            GuestThreadWaitKind::Rwlock, rwlock, 0);
+    }
     if (ParkCurrentGuestThread(
             GuestThreadWaitKind::Rwlock, rwlock, 0)) {
         return return_with_carry_direct(0, false);
@@ -3984,9 +4730,285 @@ static u32 GuestPsynchRwWait(u32 rwlock) {
 }
 
 static u32 GuestPsynchRwUnlock(u32 rwlock) {
-    (void)WakeGuestThreads(
-        GuestThreadWaitKind::Rwlock, rwlock, true);
+    if (NativeGuestThreadIsCurrent()) {
+        (void)WakeNativeGuestThreads(
+            GuestThreadWaitKind::Rwlock, rwlock, true);
+    } else {
+        (void)WakeGuestThreads(
+            GuestThreadWaitKind::Rwlock, rwlock, true);
+    }
     return return_with_carry_direct(0, false);
+}
+
+namespace {
+
+constexpr u32 GuestUlCompareAndWait = 1;
+constexpr u32 GuestUlUnfairLock = 2;
+constexpr u32 GuestUlOpcodeMask = 0x000000ff;
+constexpr u32 GuestUlfWakeAll = 0x00000100;
+constexpr u32 GuestUlfWakeThread = 0x00000200;
+constexpr u32 GuestUlfWaitWorkqDataContention = 0x00010000;
+constexpr u32 GuestUlfNoErrno = 0x01000000;
+constexpr u32 GuestUlfWaitMask =
+    GuestUlfWaitWorkqDataContention | GuestUlfNoErrno;
+constexpr u32 GuestUlfWakeMask =
+    GuestUlfWakeAll | GuestUlfWakeThread | GuestUlfNoErrno;
+
+static u32 GuestUlockReturn(
+        int error, u32 flags, size_t successValue = 0) {
+    if (error == 0) {
+        return return_with_carry_direct(
+            static_cast<int>(std::min<size_t>(
+                successValue, INT32_MAX)),
+            false);
+    }
+    if ((flags & GuestUlfNoErrno) != 0) {
+        return return_with_carry_direct(-error, false);
+    }
+    return return_with_carry_direct(error, true);
+}
+
+static int ReadGuestUlockWord(u32 address, u32 &word) {
+    if (address == 0 || (address & (sizeof(word) - 1)) != 0) {
+        return EINVAL;
+    }
+
+    std::lock_guard<std::recursive_mutex> vmLock(guestVmMutex);
+    auto *hostWord = static_cast<u32 *>(get_memory(address));
+    if (hostWord == nullptr) {
+        return EFAULT;
+    }
+    word = __atomic_load_n(hostWord, __ATOMIC_ACQUIRE);
+    return 0;
+}
+
+static bool GuestUlockOpcodeValid(uint8_t opcode) {
+    return opcode == GuestUlCompareAndWait ||
+        opcode == GuestUlUnfairLock;
+}
+
+static size_t MatchingNativeUlockWaitersLocked(
+        u32 address, uint8_t opcode) {
+    return static_cast<size_t>(std::count_if(
+        nativeGuestWaiters.begin(), nativeGuestWaiters.end(),
+        [address, opcode](
+                const std::shared_ptr<NativeGuestWaiter> &waiter) {
+            return waiter->kind == GuestThreadWaitKind::Ulock &&
+                waiter->address == address &&
+                waiter->ulockOpcode == opcode;
+        }));
+}
+
+static bool NativeUlockAddressHasOtherOpcodeLocked(
+        u32 address, uint8_t opcode) {
+    return std::any_of(
+        nativeGuestWaiters.begin(), nativeGuestWaiters.end(),
+        [address, opcode](
+                const std::shared_ptr<NativeGuestWaiter> &waiter) {
+            return waiter->kind == GuestThreadWaitKind::Ulock &&
+                waiter->address == address &&
+                waiter->ulockOpcode != opcode;
+        });
+}
+
+static bool GuestUlockTargetThreadExists(mach_port_t target) {
+    if (!MACH_PORT_VALID(target)) {
+        return false;
+    }
+    EnsureGuestThreadRegistry();
+    mach_port_t workqueueThreadPort = MACH_PORT_NULL;
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestWorkqueueMutex);
+        workqueueThreadPort = guestWorkqueueThreadPort;
+    }
+    if (target == workqueueThreadPort) {
+        return true;
+    }
+    std::lock_guard<std::recursive_mutex> lock(guestThreadMutex);
+    return std::any_of(
+        guestThreads.begin(), guestThreads.end(),
+        [target](const GuestThreadContext &thread) {
+            return thread.alive && thread.threadPort == target;
+        });
+}
+
+} // namespace
+
+static u32 GuestUlockWait(
+        u32 operation, u32 address, u64 value, u32 timeout) {
+    const uint8_t opcode =
+        static_cast<uint8_t>(operation & GuestUlOpcodeMask);
+    const u32 flags = operation & ~GuestUlOpcodeMask;
+    if (!GuestUlockOpcodeValid(opcode) ||
+            (flags & ~GuestUlfWaitMask) != 0) {
+        return GuestUlockReturn(EINVAL, flags);
+    }
+
+    if (NativeGuestThreadIsCurrent() &&
+            !GuestWorkqueueActiveForCurrentThread()) {
+        auto waiter = std::make_shared<NativeGuestWaiter>();
+        waiter->kind = GuestThreadWaitKind::Ulock;
+        waiter->address = address;
+        waiter->ulockOpcode = opcode;
+        waiter->threadPort = GuestCurrentSyntheticThreadPort();
+
+        std::unique_lock<std::mutex> lock(nativeGuestWaitMutex);
+        if (NativeUlockAddressHasOtherOpcodeLocked(
+                address, opcode)) {
+            return GuestUlockReturn(EDOM, flags);
+        }
+
+        /*
+         * The guest stores the unlocked value before entering ulock_wake.
+         * Compare and enqueue while holding the same mutex used by wake so
+         * that a wake cannot slip between those two operations and get lost.
+         */
+        u32 currentValue = 0;
+        const int readError =
+            ReadGuestUlockWord(address, currentValue);
+        if (readError != 0) {
+            return GuestUlockReturn(readError, flags);
+        }
+        if (static_cast<u64>(currentValue) != value) {
+            return GuestUlockReturn(
+                0, flags,
+                MatchingNativeUlockWaitersLocked(
+                    address, opcode));
+        }
+
+        waiter->sequence = guestNextWaitSequence.fetch_add(
+            1, std::memory_order_relaxed);
+        nativeGuestWaiters.push_back(waiter);
+        bool woke = true;
+        if (timeout == 0) {
+            waiter->condition.wait(lock, [&] {
+                return waiter->signaled;
+            });
+        } else {
+            woke = waiter->condition.wait_for(
+                lock, std::chrono::microseconds(timeout), [&] {
+                    return waiter->signaled;
+                });
+        }
+
+        nativeGuestWaiters.erase(std::remove(
+            nativeGuestWaiters.begin(), nativeGuestWaiters.end(),
+            waiter), nativeGuestWaiters.end());
+        if (!woke) {
+            return GuestUlockReturn(ETIMEDOUT, flags);
+        }
+        return GuestUlockReturn(
+            0, flags,
+            MatchingNativeUlockWaitersLocked(address, opcode));
+    }
+
+    u32 currentValue = 0;
+    const int readError =
+        ReadGuestUlockWord(address, currentValue);
+    if (readError != 0) {
+        return GuestUlockReturn(readError, flags);
+    }
+    if (static_cast<u64>(currentValue) != value) {
+        return GuestUlockReturn(0, flags);
+    }
+    if (timeout != 0) {
+        /*
+         * Cooperative threads have no independent timer source. Returning a
+         * timeout is preferable to parking forever when no guest can wake it.
+         */
+        return GuestUlockReturn(ETIMEDOUT, flags);
+    }
+    if (ParkCurrentGuestThread(
+            GuestThreadWaitKind::Ulock, address, 0)) {
+        return GuestUlockReturn(0, flags);
+    }
+    return GuestUlockReturn(EINTR, flags);
+}
+
+static u32 GuestUlockWake(
+        u32 operation, u32 address, u64 wakeValue) {
+    const uint8_t opcode =
+        static_cast<uint8_t>(operation & GuestUlOpcodeMask);
+    const u32 flags = operation & ~GuestUlOpcodeMask;
+    if (!GuestUlockOpcodeValid(opcode) ||
+            (flags & ~GuestUlfWakeMask) != 0 ||
+            (flags & (GuestUlfWakeAll |
+                      GuestUlfWakeThread)) ==
+                (GuestUlfWakeAll | GuestUlfWakeThread) ||
+            address == 0) {
+        return GuestUlockReturn(EINVAL, flags);
+    }
+
+    const bool targetWake =
+        (flags & GuestUlfWakeThread) != 0;
+    const mach_port_t target =
+        static_cast<mach_port_t>(wakeValue);
+    if (targetWake && !GuestUlockTargetThreadExists(target)) {
+        return GuestUlockReturn(ESRCH, flags);
+    }
+
+    if (NativeGuestThreadIsCurrent()) {
+        std::lock_guard<std::mutex> lock(nativeGuestWaitMutex);
+        const bool otherOpcode =
+            NativeUlockAddressHasOtherOpcodeLocked(
+                address, opcode);
+        const size_t matching =
+            MatchingNativeUlockWaitersLocked(
+                address, opcode);
+        if (matching == 0) {
+            return GuestUlockReturn(
+                otherOpcode ? EDOM : ENOENT, flags);
+        }
+
+        size_t woken = 0;
+        for (;;) {
+            std::shared_ptr<NativeGuestWaiter> selected;
+            for (const auto &waiter : nativeGuestWaiters) {
+                if (waiter->kind != GuestThreadWaitKind::Ulock ||
+                        waiter->address != address ||
+                        waiter->ulockOpcode != opcode ||
+                        waiter->signaled ||
+                        (targetWake &&
+                         waiter->threadPort != target)) {
+                    continue;
+                }
+                if (!selected ||
+                        waiter->sequence < selected->sequence) {
+                    selected = waiter;
+                }
+            }
+            if (!selected) {
+                break;
+            }
+            selected->signaled = true;
+            selected->condition.notify_one();
+            ++woken;
+            if ((flags & GuestUlfWakeAll) == 0 ||
+                    targetWake) {
+                break;
+            }
+        }
+        if (targetWake && woken == 0) {
+            return GuestUlockReturn(EALREADY, flags);
+        }
+        /*
+         * A matching ulock object can temporarily contain only threads that
+         * have been signaled but have not yet completed syscall cleanup. XNU
+         * treats an additional non-targeted wake in that window as success.
+         */
+        return GuestUlockReturn(0, flags);
+    }
+
+    const size_t woken = WakeGuestThreads(
+        GuestThreadWaitKind::Ulock, address,
+        (flags & GuestUlfWakeAll) != 0,
+        targetWake ? target : MACH_PORT_NULL);
+    if (woken == 0) {
+        return GuestUlockReturn(
+            targetWake ? EALREADY : ENOENT, flags);
+    }
+    return GuestUlockReturn(0, flags);
 }
 
 static bool GuestContextTransitionPending() {
@@ -4002,6 +5024,12 @@ static bool HandleGuestContextTransition() {
 }
 
 static bool PumpGuestWorkqueue() {
+    if (NativeGuestThreadIsCurrent() &&
+            CurrentGuestThreadId() != 1) {
+        return false;
+    }
+    std::lock_guard<std::recursive_mutex> lock(
+        guestWorkqueueMutex);
     if (guestWorkqueueUpcallActive || !guest_workqueue_opened) {
         return false;
     }
@@ -4049,8 +5077,14 @@ static bool PumpGuestWorkqueue() {
 }
 
 static bool HandleGuestWorkqueueTransition() {
+    if (NativeGuestThreadIsCurrent() &&
+            CurrentGuestThreadId() != 1) {
+        return false;
+    }
+    std::lock_guard<std::recursive_mutex> lock(
+        guestWorkqueueMutex);
     Dynarmic::A32::Jit *jit = threadHandle.jit;
-    DynarmicCallbacks32 *callbacks = sharedHandle.cb;
+    DynarmicCallbacks32 *callbacks = threadHandle.cb;
     if (guestWorkqueuePendingUpcall.valid ||
             guestWorkqueueRestoreRequested) {
         WORKQUEUE_TRACE(
@@ -4074,6 +5108,7 @@ static bool HandleGuestWorkqueueTransition() {
         guestWorkqueueWaitingContextValid = false;
         guestWorkqueueWaitingThreadId = 0;
         guestWorkqueueUpcallActive = false;
+        guestWorkqueueOverlayCurrent = false;
         WORKQUEUE_TRACE(
             "LC32: restored waiting context pc=0x%x\n",
             jit->Regs()[Reg::PC]);
@@ -4087,10 +5122,14 @@ static bool HandleGuestWorkqueueTransition() {
 
     SaveGuestContext(guestWorkqueueWaitingContext);
     guestWorkqueueWaitingContextValid = true;
-    guestWorkqueueWaitingThreadId = guestCurrentThreadId;
-    if (GuestThreadContext *thread =
-            FindGuestThread(guestCurrentThreadId, true)) {
-        guestWorkqueueSignalMask = thread->signalMask;
+    guestWorkqueueWaitingThreadId = CurrentGuestThreadId();
+    {
+        std::lock_guard<std::recursive_mutex> threadLock(
+            guestThreadMutex);
+        if (GuestThreadContext *thread =
+                FindGuestThread(CurrentGuestThreadId(), true)) {
+            guestWorkqueueSignalMask = thread->signalMask;
+        }
     }
 
     const GuestWorkqueuePendingUpcall upcall =
@@ -4116,6 +5155,7 @@ static bool HandleGuestWorkqueueTransition() {
 
     guestWorkqueueWorkerInitialized = true;
     guestWorkqueueUpcallActive = true;
+    guestWorkqueueOverlayCurrent = true;
     WORKQUEUE_TRACE(
         "LC32: entered workqueue upcall pc=0x%x self=0x%x "
         "tsd=0x%x flags=0x%x\n",
@@ -4125,6 +5165,12 @@ static bool HandleGuestWorkqueueTransition() {
 }
 
 static bool GuestWorkqueueTransitionPending() {
+    if (NativeGuestThreadIsCurrent() &&
+            CurrentGuestThreadId() != 1) {
+        return false;
+    }
+    std::lock_guard<std::recursive_mutex> lock(
+        guestWorkqueueMutex);
     return guestWorkqueuePendingUpcall.valid ||
         guestWorkqueueRestoreRequested;
 }
@@ -4151,7 +5197,9 @@ bool Dynarmic_nativeInitialize() {
         abort();
         return 0;
     }
-    sharedHandle.monitor = new Dynarmic::ExclusiveMonitor(1);
+    sharedHandle.monitor =
+        new Dynarmic::ExclusiveMonitor(
+            MaxNativeGuestProcessors);
     {
         DynarmicCallbacks32 *callbacks = new DynarmicCallbacks32(sharedHandle.memory);
         
@@ -4192,6 +5240,7 @@ bool Dynarmic_nativeInitialize() {
         sharedHandle.cb = callbacks;
         threadHandle.jit = new Dynarmic::A32::Jit(config);
         threadHandle.cpsr = new DynarmicCpsr(threadHandle.jit);
+        threadHandle.cb = callbacks;
         sharedHandle.fs = new LC32Filesystem();
         callbacks->cpu = threadHandle.jit;
         callbacks->cpsr = threadHandle.cpsr;
@@ -4199,15 +5248,32 @@ bool Dynarmic_nativeInitialize() {
     return true;
 }
 
+static void ReleaseMemoryPageBacking(t_memory_page page) {
+    if (page == nullptr || page->backing == nullptr) {
+        return;
+    }
+    t_memory_backing backing = page->backing;
+    page->backing = nullptr;
+    assert(backing->references != 0);
+    if (--backing->references != 0) {
+        return;
+    }
+    if (munmap(backing->addr, backing->size) != 0) {
+        fprintf(stderr,
+            "munmap backing failed[%s->%s:%d]: "
+            "addr=%p, size=0x%zx, errno=%d\n",
+            __FILE__, __func__, __LINE__,
+            backing->addr, backing->size, errno);
+    }
+    free(backing);
+}
+
 void Dynarmic_nativeDestroy() {
     khash_t(memory) *memory = sharedHandle.memory;
     for (khiter_t k = kh_begin(memory); k < kh_end(memory); k++) {
         if(kh_exist(memory, k)) {
             t_memory_page page = kh_value(memory, k);
-            int ret = munmap(page->addr, DYN_PAGE_SIZE);
-            if(ret != 0) {
-                fprintf(stderr, "munmap failed[%s->%s:%d]: addr=%p, ret=%d\n", __FILE__, __func__, __LINE__, page->addr, ret);
-            }
+            ReleaseMemoryPageBacking(page);
             free(page);
         }
     }
@@ -4231,8 +5297,8 @@ void Dynarmic_nativeDestroy() {
     delete sharedHandle.monitor;
 }
 
-// FIXME: unmapping 1/4 of 16k page will unmap other 3/4 pages
 int Dynarmic_munmap(u64 address, u64 size) {
+    std::lock_guard<std::recursive_mutex> lock(guestVmMutex);
     if(address & DYN_PAGE_MASK) {
         errno = EINVAL;
         return -1;
@@ -4251,13 +5317,19 @@ int Dynarmic_munmap(u64 address, u64 size) {
             return -1;
         }
         if(sharedHandle.page_table && idx < sharedHandle.num_page_table_entries) {
-            sharedHandle.page_table[idx] = NULL;
+            __atomic_store_n(
+                &sharedHandle.page_table[idx], nullptr,
+                __ATOMIC_RELEASE);
         }
         t_memory_page page = kh_value(memory, k);
-        int ret = munmap(page->addr, DYN_PAGE_SIZE);
-        if(ret != 0) {
-            fprintf(stderr, "munmap failed[%s->%s:%d]: addr=%p, ret=%d\n", __FILE__, __func__, __LINE__, page->addr, ret);
-        }
+        /*
+         * Guest pages are 4 KiB while Apple Silicon host VM pages are
+         * 16 KiB. Anonymous guest mappings therefore share one host mmap
+         * backing object and release it only after every guest slice has
+         * gone away. Per-slice munmap would also remove adjacent live guest
+         * pages (notably the pthread structure beside a retired stack).
+         */
+        ReleaseMemoryPageBacking(page);
         free(page);
         kh_del(memory, memory, k);
     }
@@ -4265,13 +5337,11 @@ int Dynarmic_munmap(u64 address, u64 size) {
 }
 
 u64 Dynarmic_mem_reserve(u64 address, u64 size, bool fixed, u64 mask) {
-    static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-    pthread_mutex_lock(&mutex);
+    std::lock_guard<std::recursive_mutex> lock(guestVmMutex);
     
     // Don't allocate anything below 16MB region to better catch bad accesses
     if (address < 0x10000000) { // DYN_PAGE_SIZE
         if (fixed) {
-            pthread_mutex_unlock(&mutex);
             printf("Dynarmic_mem_reserve: refusing to reserve below 16MB range\n");
             return -1;
         } else {
@@ -4330,12 +5400,12 @@ u64 Dynarmic_mem_reserve(u64 address, u64 size, bool fixed, u64 mask) {
         kh_value(memory, k) = page;
     }
     
-    pthread_mutex_unlock(&mutex);
     printf("Dynarmic_mem_reserve: 0x%llx-0x%llx\n", address, address + size);
     return address;
 }
 
 u32 Dynarmic_direct_mmap(u32 address, u32 size, int protection, int flags, void *src, u64 off) {
+    std::lock_guard<std::recursive_mutex> lock(guestVmMutex);
     if(address & DYN_PAGE_MASK) {
         errno = EINVAL;
         return -1;
@@ -4356,19 +5426,24 @@ u32 Dynarmic_direct_mmap(u32 address, u32 size, int protection, int flags, void 
         u64 idx = vaddr >> DYN_PAGE_BITS;
         
         void *addr = (void *)((u64)src + off + vaddr - address);
+        t_memory_page page = kh_value(memory, kh_get(memory, memory, vaddr));
+        ReleaseMemoryPageBacking(page);
+        page->addr = addr;
+        page->perms = protection;
+        page->backing = nullptr;
         if(sharedHandle.page_table && idx < sharedHandle.num_page_table_entries) {
-            sharedHandle.page_table[idx] = addr;
+            __atomic_store_n(
+                &sharedHandle.page_table[idx], addr,
+                __ATOMIC_RELEASE);
         } else {
             // 0xffffff80001f0000ULL: 0x10000
         }
-        t_memory_page page = kh_value(memory, kh_get(memory, memory, vaddr));
-        page->addr = addr;
-        page->perms = protection;
     }
     return address;
 }
 
 u32 Dynarmic_mmap(u32 address, u32 size, int protection, int flags, int fildes, u64 off, u64 mask) {
+    std::lock_guard<std::recursive_mutex> lock(guestVmMutex);
     if(address & DYN_PAGE_MASK) {
         errno = EINVAL;
         return -1;
@@ -4392,26 +5467,46 @@ u32 Dynarmic_mmap(u32 address, u32 size, int protection, int flags, int fildes, 
     }
     
     off_t aligned_off = off & ~(PAGE_SIZE-1);
-    u64 addr = (u64)mmap(NULL, size + (off - aligned_off), protection & ~PROT_EXEC, flags & ~MAP_FIXED, fildes, aligned_off);
-    if(addr == (u64)MAP_FAILED) {
-        fprintf(stderr, "mmap failed[%s->%s:%d]: addr=%p\n", __FILE__, __func__, __LINE__, (void*)addr);
+    const size_t mappingSize = size + (off - aligned_off);
+    void *mappingAddress = mmap(
+        NULL, mappingSize, protection & ~PROT_EXEC,
+        flags & ~MAP_FIXED, fildes, aligned_off);
+    if(mappingAddress == MAP_FAILED) {
+        fprintf(stderr, "mmap failed[%s->%s:%d]: addr=%p\n", __FILE__, __func__, __LINE__, mappingAddress);
         return -1;
     }
-    addr += off - aligned_off;
+    t_memory_backing backing =
+        static_cast<t_memory_backing>(
+            calloc(1, sizeof(struct memory_backing)));
+    if (backing == nullptr) {
+        (void)munmap(mappingAddress, mappingSize);
+        errno = ENOMEM;
+        return -1;
+    }
+    backing->addr = mappingAddress;
+    backing->size = mappingSize;
+    backing->references = size / DYN_PAGE_SIZE;
+    u64 addr = reinterpret_cast<u64>(mappingAddress) +
+        (off - aligned_off);
     
     printf("DBG: mmaping host 0x%llx to 0x%x\n", addr, address);
     
     for(u64 vaddr = address; vaddr < address + size; vaddr += DYN_PAGE_SIZE) {
         u64 idx = vaddr >> DYN_PAGE_BITS;
         
+        t_memory_page page = kh_value(memory, kh_get(memory, memory, vaddr));
+        ReleaseMemoryPageBacking(page);
+        page->addr = (void *)addr;
+        page->perms = protection;
+        page->backing = backing;
         if(sharedHandle.page_table && idx < sharedHandle.num_page_table_entries) {
-            sharedHandle.page_table[idx] = (void *)addr;
+            __atomic_store_n(
+                &sharedHandle.page_table[idx],
+                reinterpret_cast<void *>(addr),
+                __ATOMIC_RELEASE);
         } else {
             // 0xffffff80001f0000ULL: 0x10000
         }
-        t_memory_page page = kh_value(memory, kh_get(memory, memory, vaddr));
-        page->addr = (void *)addr;
-        page->perms = protection;
         
         addr += DYN_PAGE_SIZE;
     }
@@ -4419,6 +5514,7 @@ u32 Dynarmic_mmap(u32 address, u32 size, int protection, int flags, int fildes, 
 }
 
 int Dynarmic_mprotect(u64 address, u64 size, int perms) {
+    std::lock_guard<std::recursive_mutex> lock(guestVmMutex);
     if(address & DYN_PAGE_MASK) {
         errno = EINVAL;
         return -1;
@@ -4447,6 +5543,7 @@ int Dynarmic_mprotect(u64 address, u64 size, int perms) {
  * Signature: (JJ[B)I
  */
 int Dynarmic_mem_1write(u64 address, u64 size, char* src) {
+    std::lock_guard<std::recursive_mutex> lock(guestVmMutex);
     u64 vaddr_end = address + size;
     for(u64 vaddr = address & ~DYN_PAGE_MASK; vaddr < vaddr_end; vaddr += DYN_PAGE_SIZE) {
         u64 start = vaddr < address ? address - vaddr : 0;
@@ -4471,6 +5568,7 @@ int Dynarmic_mem_1write(u64 address, u64 size, char* src) {
  * Signature: (JJI)[B
  */
 int Dynarmic_mem_1read(u64 address, u64 size, char* dest) {
+    std::lock_guard<std::recursive_mutex> lock(guestVmMutex);
     u64 vaddr_end = address + size;
     for(u64 vaddr = address & ~DYN_PAGE_MASK; vaddr < vaddr_end; vaddr += DYN_PAGE_SIZE) {
         u64 start = vaddr < address ? address - vaddr : 0;
@@ -4714,10 +5812,9 @@ int Dynarmic_debugger_mem_write(u64 address, u64 size, char* src) {
                overlapEnd - overlapStart);
     }
 
-    if (threadHandle.jit != nullptr) {
-        threadHandle.jit->InvalidateCacheRange(
-            static_cast<u32>(address), static_cast<size_t>(size));
-    }
+    InvalidateAllGuestJits(
+        static_cast<u32>(address),
+        static_cast<size_t>(size));
     return 0;
 }
 
@@ -4790,9 +5887,7 @@ bool Dynarmic_debugger_set_breakpoint(u64 address, size_t kind) {
         debuggerSoftwareBreakpoints.pop_back();
         return false;
     }
-    if (threadHandle.jit != NULL) {
-        threadHandle.jit->InvalidateCacheRange(guestAddress, kind);
-    }
+    InvalidateAllGuestJits(guestAddress, kind);
     return true;
 }
 
@@ -4821,10 +5916,8 @@ bool Dynarmic_debugger_delete_breakpoint(u64 address, size_t kind) {
                     it->original.data())) != 0) {
             return false;
         }
-        if (threadHandle.jit != NULL) {
-            threadHandle.jit->InvalidateCacheRange(
-                guestAddress, it->kind);
-        }
+        InvalidateAllGuestJits(
+            guestAddress, it->kind);
         debuggerSoftwareBreakpoints.erase(it);
         return true;
     }
@@ -5020,7 +6113,7 @@ int Dynarmic_reg_1write_1cpsr(int value) {
  * Signature: (JI)I
  */
 int Dynarmic_reg_1write_1c13_1c0_13(int value) {
-    DynarmicCallbacks32 *cb = sharedHandle.cb;
+    DynarmicCallbacks32 *cb = threadHandle.cb;
     if(cb) {
       cb->cp15.get()->uro = value;
       return 0;
@@ -5051,6 +6144,14 @@ Dynarmic::HaltReason Dynarmic_emu_1start(u32 pc) {
       cpu->Regs()[15] = (u32) (pc & ~1);
       for (;;) {
         reason = cpu->Run();
+        if (Dynarmic::Has(
+                reason, Dynarmic::HaltReason::CacheInvalidation)) {
+          reason = reason &
+              ~Dynarmic::HaltReason::CacheInvalidation;
+          if (!reason) {
+            continue;
+          }
+        }
         if (Dynarmic::Has(reason, LC32HaltReasonWorkqueue)) {
           if (!HandleGuestContextTransition()) {
             reason = LC32HaltReasonTrap;
@@ -5067,7 +6168,7 @@ Dynarmic::HaltReason Dynarmic_emu_1start(u32 pc) {
         if (!Dynarmic::Has(reason, LC32HaltReasonSVC)) {
           break;
         }
-        sharedHandle.ucb->CallSVC(0x80);
+        threadHandle.cb->CallSVC(0x80);
         HandleGuestContextTransition();
       }
     } else {
@@ -5089,6 +6190,14 @@ Dynarmic::HaltReason Dynarmic_emu_1resume() {
     Dynarmic::HaltReason reason;
     for (;;) {
         reason = jit->Run();
+        if (Dynarmic::Has(
+                reason, Dynarmic::HaltReason::CacheInvalidation)) {
+            reason = reason &
+                ~Dynarmic::HaltReason::CacheInvalidation;
+            if (!reason) {
+                continue;
+            }
+        }
         if (Dynarmic::Has(reason, LC32HaltReasonWorkqueue)) {
             if (!HandleGuestContextTransition()) {
                 reason = LC32HaltReasonTrap;
@@ -5105,7 +6214,7 @@ Dynarmic::HaltReason Dynarmic_emu_1resume() {
         if (!Dynarmic::Has(reason, LC32HaltReasonSVC)) {
             break;
         }
-        sharedHandle.ucb->CallSVC(0x80);
+        threadHandle.cb->CallSVC(0x80);
         HandleGuestContextTransition();
     }
     UpdateGuestStopSignalForHalt(reason);
@@ -5126,6 +6235,14 @@ Dynarmic::HaltReason Dynarmic_emu_1step() {
     guestSingleStepping = true;
     for (;;) {
         reason = drainInternalWorker ? jit->Run() : jit->Step();
+        if (Dynarmic::Has(
+                reason, Dynarmic::HaltReason::CacheInvalidation)) {
+            reason = reason &
+                ~Dynarmic::HaltReason::CacheInvalidation;
+            if (!reason) {
+                continue;
+            }
+        }
         if (Dynarmic::Has(reason, LC32HaltReasonWorkqueue)) {
             const bool wasWorkerActive = guestWorkqueueUpcallActive;
             const bool hadGuestThreadTransition =
@@ -5166,7 +6283,7 @@ Dynarmic::HaltReason Dynarmic_emu_1step() {
         if (!Dynarmic::Has(reason, LC32HaltReasonSVC)) {
             break;
         }
-        sharedHandle.ucb->CallSVC(0x80);
+        threadHandle.cb->CallSVC(0x80);
         HandleGuestContextTransition();
     }
     guestSingleStepping = false;
@@ -5258,7 +6375,7 @@ void Dynarmic_context_1restore(t_context32 ctx) {
     jit->SetCpsr(ctx->cpsr);
     jit->SetFpscr(ctx->fpscr);
 
-    DynarmicCallbacks32 *cb = sharedHandle.cb;
+    DynarmicCallbacks32 *cb = threadHandle.cb;
     cb->cp15.get()->uro = ctx->uro;
 }
 
@@ -5274,7 +6391,7 @@ void Dynarmic_context_1save(t_context32 ctx) {
     ctx->cpsr = jit->Cpsr();
     ctx->fpscr = jit->Fpscr();
 
-    DynarmicCallbacks32 *cb = sharedHandle.cb;
+    DynarmicCallbacks32 *cb = threadHandle.cb;
     ctx->uro = cb->cp15.get()->uro;
 }
 

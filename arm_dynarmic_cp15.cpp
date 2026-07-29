@@ -4,11 +4,22 @@
 
 #include "arm_dynarmic_cp15.h"
 
+#include <atomic>
+
 using Callback = Dynarmic::A32::Coprocessor::Callback;
 using CallbackOrAccessOneWord = Dynarmic::A32::Coprocessor::CallbackOrAccessOneWord;
 using CallbackOrAccessTwoWords = Dynarmic::A32::Coprocessor::CallbackOrAccessTwoWords;
 
-static u32 dummy_value;
+static Callback MemoryBarrierCallback() {
+    const auto callback =
+        static_cast<u64 (*)(void *, u32, u32)>(
+            [](void *, u32, u32) -> u64 {
+                std::atomic_thread_fence(
+                    std::memory_order_seq_cst);
+                return 0;
+            });
+    return {callback, nullptr};
+}
 
 std::optional<Callback> DynarmicCP15::CompileInternalOperation(bool two, unsigned opc1,
                                                                CoprocReg CRd, CoprocReg CRn,
@@ -22,20 +33,17 @@ CallbackOrAccessOneWord DynarmicCP15::CompileSendOneWord(bool two, unsigned opc1
     printf("CompileSendOneWord two=%d, opc1=%u, CRn=%d, CRm=%d, opc2=%u\n", two, opc1, CRn, CRm, opc2);
     if (!two && CRn == CoprocReg::C7 && opc1 == 0 && CRm == CoprocReg::C5 && opc2 == 4) {
         // CP15_FLUSH_PREFETCH_BUFFER
-        // This is a dummy write, we ignore the value written here.
-        return &dummy_value;
+        return MemoryBarrierCallback();
     }
 
     if (!two && CRn == CoprocReg::C7 && opc1 == 0 && CRm == CoprocReg::C10) {
         switch (opc2) {
         case 4:
             // CP15_DATA_SYNC_BARRIER
-            // This is a dummy write, we ignore the value written here.
-            return &dummy_value;
+            return MemoryBarrierCallback();
         case 5:
             // CP15_DATA_MEMORY_BARRIER
-            // This is a dummy write, we ignore the value written here.
-            return &dummy_value;
+            return MemoryBarrierCallback();
         }
     }
 
