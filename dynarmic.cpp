@@ -56,6 +56,7 @@
 static std::atomic<int> guestStopSignal{SIGTRAP};
 static std::atomic<int> pendingGuestFatalSignal{0};
 static std::atomic<bool> reemitPendingGuestStop{false};
+static std::atomic<bool> guestDebuggerEnabled{false};
 
 struct DebuggerSoftwareBreakpoint {
     u32 address;
@@ -1154,7 +1155,11 @@ public:
         // Diagnostic frame walking is not guest execution.  A failed unwind
         // read must not replace the original debugger stop with SIGSEGV.
         if (!dumpingBacktrace) {
-            StopForDebugger(SIGSEGV, true);
+            if (guestDebuggerEnabled.load(std::memory_order_relaxed)) {
+                StopForDebugger(SIGSEGV, true);
+            } else {
+                DumpCrashReport(SIGSEGV);
+            }
         }
 #endif
     }
@@ -1405,10 +1410,15 @@ public:
         }
 
         if (isBkpt) {
-            fprintf(stderr, "%s breakpoint at 0x%08x\n",
-                    isDebuggerBreakpoint ? "Debugger-managed" : "Guest",
-                    pc);
-            StopForDebugger(SIGTRAP, false);
+            if (guestDebuggerEnabled.load(std::memory_order_relaxed)) {
+                fprintf(stderr, "%s breakpoint at 0x%08x\n",
+                        isDebuggerBreakpoint ? "Debugger-managed" : "Guest",
+                        pc);
+                StopForDebugger(SIGTRAP, false);
+            } else {
+                printf("Breakpoint!\n");
+                DumpCrashReport(SIGTRAP, false);
+            }
             return;
         }
 
@@ -2641,6 +2651,10 @@ Dynarmic::HaltReason Dynarmic_emu_1step() {
     }
     UpdateGuestStopSignalForHalt(reason);
     return reason;
+}
+
+void Dynarmic_emu_1set_1debugger_1enabled(bool enabled) {
+    guestDebuggerEnabled.store(enabled, std::memory_order_relaxed);
 }
 
 int Dynarmic_emu_1get_1stop_1signal() {

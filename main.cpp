@@ -706,12 +706,8 @@ struct target_ops emu_ops = {
     .get_loaded_libraries_json = emu_get_loaded_libraries_json,
 };
 
-int setupGDBStub(void) {
+int setupGDBStub(const char *gdbListenAddress) {
     extern const char *TARGET_ARMV7;
-    const char *gdbListenAddress = getenv("GDB_LISTEN_ADDRESS");
-    if (gdbListenAddress == NULL || gdbListenAddress[0] == '\0') {
-        gdbListenAddress = "127.0.0.1:1234";
-    }
     arch_info_t info = {
         .smp = 1,
         .reg_num = GDB_ARM_REG_COUNT,
@@ -998,8 +994,23 @@ int main(int argc, char* argv[], char* envp[]) {
     Dynarmic_nativeInitialize();
     setupPathEnvs(argv[0]);
     
-    // map the main executable first
+    // Make the executable and its adjacent bundle resources visible at the
+    // path dyld publishes through _NSGetExecutablePath.  Without this mount,
+    // guest file syscalls prepend ROOT_PATH to an absolute host-side argv[1],
+    // causing CFBundleGetMainBundle() to return NULL.
+    char resolvedExecPath[PATH_MAX];
     const char *execPath = argv[1];
+    if (realpath(execPath, resolvedExecPath) != NULL) {
+        execPath = resolvedExecPath;
+        const char *lastSlash = strrchr(execPath, '/');
+        if (lastSlash != NULL && lastSlash != execPath) {
+            const std::string execDirectory(
+                execPath, static_cast<size_t>(lastSlash - execPath));
+            sharedHandle.fs->addMountpoint(execDirectory, execDirectory);
+        }
+    }
+
+    // map the main executable first
     u32 execAddr = Dynarmic_map_file(false, 0x11000000, execPath);
     
     // map dyld
@@ -1096,17 +1107,25 @@ int main(int argc, char* argv[], char* envp[]) {
     
     printf("LC32: stack ptr now 0x%x\n", dyldStackPtr);
     
-    if (setupGDBStub() != 0) {
-        return -1;
-    }
-    
     // Go!
     Dynarmic_reg_1write(13, dyldStackPtr);
-    
-    const bool gdbstubRan = gdbstub_run(&sharedHandle.gdbstub, (void *)&sharedHandle);
-    gdbstub_close(&sharedHandle.gdbstub);
-    if (!gdbstubRan) {
-        fprintf(stderr, "Fail to run in debug mode.\n");
-        return -1;
+
+    const char *gdbListenAddress = getenv("GDB_LISTEN_ADDRESS");
+    if (gdbListenAddress != NULL && gdbListenAddress[0] != '\0') {
+        if (setupGDBStub(gdbListenAddress) != 0) {
+            return -1;
+        }
+
+        Dynarmic_emu_1set_1debugger_1enabled(true);
+        const bool gdbstubRan =
+            gdbstub_run(&sharedHandle.gdbstub, (void *)&sharedHandle);
+        Dynarmic_emu_1set_1debugger_1enabled(false);
+        gdbstub_close(&sharedHandle.gdbstub);
+        if (!gdbstubRan) {
+            fprintf(stderr, "Fail to run in debug mode.\n");
+            return -1;
+        }
+    } else {
+        Dynarmic_emu_1start(threadHandle.jit->Regs()[15]);
     }
 }

@@ -261,6 +261,7 @@ int Dynarmic_reg_1write_1c13_1c0_13(int value);
 Dynarmic::HaltReason Dynarmic_emu_1start(u32 pc);
 Dynarmic::HaltReason Dynarmic_emu_1resume();
 Dynarmic::HaltReason Dynarmic_emu_1step();
+void Dynarmic_emu_1set_1debugger_1enabled(bool enabled);
 int Dynarmic_emu_1get_1stop_1signal();
 void Dynarmic_emu_1set_1resume_1signal(int signal);
 int Dynarmic_emu_1stop();
