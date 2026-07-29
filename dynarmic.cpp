@@ -541,6 +541,40 @@ guest_mach_msg_trap(u32 guest_msg,
             host_header->msgh_size        = sizeof(*host_header);
             break;
         }
+        case 3213: {
+            MACH_MSG_UNION(mach_port_request_notification, Mess);
+            /*
+             * Translate through the host API rather than forwarding the old
+             * kernel MIG request verbatim. This lets the host stub use its
+             * current wire ABI while preserving the port-right disposition.
+             */
+            mach_port_t previous = MACH_PORT_NULL;
+            const kern_return_t kr = mach_port_request_notification(
+                Mess->In.Head.msgh_request_port,
+                Mess->In.name,
+                Mess->In.msgid,
+                Mess->In.sync,
+                Mess->In.notify.name,
+                Mess->In.notify.disposition,
+                &previous);
+            if (kr != KERN_SUCCESS) {
+                auto *error = reinterpret_cast<mig_reply_error_t *>(
+                    host_header);
+                host_header->msgh_size = sizeof(*error);
+                error->NDR = NDR_record;
+                error->RetCode = kr;
+                break;
+            }
+
+            host_header->msgh_bits |= MACH_MSGH_BITS_COMPLEX;
+            host_header->msgh_size = sizeof(Mess->Out);
+            Mess->Out.msgh_body.msgh_descriptor_count = 1;
+            Mess->Out.previous = {};
+            Mess->Out.previous.name = previous;
+            Mess->Out.previous.disposition = MACH_MSG_TYPE_MOVE_SEND_ONCE;
+            Mess->Out.previous.type = MACH_MSG_PORT_DESCRIPTOR;
+            break;
+        }
         case 3409: {
             MACH_MSG_UNION(task_get_special_port, Mess);
             host_header->msgh_bits |= MACH_MSGH_BITS_COMPLEX;
@@ -590,6 +624,20 @@ guest_mach_msg_trap(u32 guest_msg,
             Mess->Out.token = 0;
             Mess->Out.status = 0;
             Mess->Out.RetCode = 0;
+            break;
+        }
+        case 78945679: {
+            MACH_MSG_UNION(_notify_server_cancel, Mess);
+            /*
+             * Guest libnotify removes its client-side registration before
+             * sending this request. register_check is synthesized above, so
+             * its token has no corresponding host notifyd registration.
+             * Acknowledge the cancellation locally rather than forwarding a
+             * guest token into the host namespace.
+             */
+            host_header->msgh_size = sizeof(Mess->Out);
+            Mess->Out.RetCode = KERN_SUCCESS;
+            Mess->Out.status = 0;
             break;
         }
         case 78945680: {

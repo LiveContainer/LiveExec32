@@ -159,6 +159,19 @@ typedef struct {
 	mach_msg_header_t Head;
 	NDR_record_t NDR;
 	int token;
+} __Request___notify_server_cancel_t __attribute__((unused));
+
+typedef struct {
+	mach_msg_header_t Head;
+	NDR_record_t NDR;
+	kern_return_t RetCode;
+	int status;
+} __Reply___notify_server_cancel_t __attribute__((unused));
+
+typedef struct {
+	mach_msg_header_t Head;
+	NDR_record_t NDR;
+	int token;
 } __Request___notify_server_check_t __attribute__((unused));
 
 typedef struct {
