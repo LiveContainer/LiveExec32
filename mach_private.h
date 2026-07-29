@@ -27,9 +27,62 @@ __BEGIN_DECLS
 #define WQOPS_THREAD_KEVENT_RETURN          0x40
 #define WQOPS_SET_EVENT_MANAGER_PRIORITY    0x80
 
+#define WQ_FLAG_THREAD_PRIOMASK             0x0000ffff
+#define WQ_FLAG_THREAD_OVERCOMMIT           0x00010000
+#define WQ_FLAG_THREAD_REUSE                0x00020000
+#define WQ_FLAG_THREAD_NEWSPI               0x00040000
+#define WQ_FLAG_THREAD_KEVENT               0x00080000
+#define WQ_FLAG_THREAD_EVENT_MANAGER        0x00100000
+#define WQ_FLAG_THREAD_TSD_BASE_SET         0x00200000
+
+#define PTHREAD_PRIORITY_FLAGS_MASK         0xff000000
+#define PTHREAD_PRIORITY_QOS_CLASS_MASK     0x003fff00
+#define PTHREAD_PRIORITY_QOS_CLASS_SHIFT    8
+#define PTHREAD_PRIORITY_OVERCOMMIT_FLAG    0x80000000
+#define PTHREAD_PRIORITY_EVENT_MANAGER_FLAG 0x02000000
+
+#define PTHREAD_PRIORITY_CBIT_USER_INTERACTIVE 0x20
+#define PTHREAD_PRIORITY_CBIT_USER_INITIATED   0x10
+#define PTHREAD_PRIORITY_CBIT_DEFAULT          0x08
+#define PTHREAD_PRIORITY_CBIT_UTILITY          0x04
+#define PTHREAD_PRIORITY_CBIT_BACKGROUND       0x02
+#define PTHREAD_PRIORITY_CBIT_MAINTENANCE      0x01
+
+#define GUEST_QOS_CLASS_USER_INTERACTIVE    0x21
+#define GUEST_QOS_CLASS_USER_INITIATED      0x19
+#define GUEST_QOS_CLASS_DEFAULT             0x15
+#define GUEST_QOS_CLASS_UTILITY             0x11
+#define GUEST_QOS_CLASS_BACKGROUND          0x09
+#define GUEST_QOS_CLASS_MAINTENANCE         0x05
+
+#ifndef KEVENT_FLAG_IMMEDIATE
 #define KEVENT_FLAG_IMMEDIATE                0x001
+#endif
+#ifndef KEVENT_FLAG_ERROR_EVENTS
 #define KEVENT_FLAG_ERROR_EVENTS             0x002
+#endif
+#ifndef KEVENT_FLAG_WORKQ
 #define KEVENT_FLAG_WORKQ                    0x020
+#endif
+
+struct guest_kevent_qos_s {
+	uint64_t ident;
+	int16_t filter;
+	uint16_t flags;
+	int32_t qos;
+	uint64_t udata;
+	uint32_t fflags;
+	uint32_t xflags;
+	int64_t data;
+	uint64_t ext[4];
+};
+
+struct guest_pthread_registration_data {
+	uint64_t version;
+	uint64_t dispatch_queue_offset;
+	uint64_t main_qos;
+	uint32_t tsd_offset;
+} __attribute__((packed));
 
 // Others
 

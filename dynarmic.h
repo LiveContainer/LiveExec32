@@ -52,6 +52,7 @@ extern "C" {
 #define LC32HaltReasonExit Dynarmic::HaltReason::UserDefined3
 #define LC32HaltReasonTrap Dynarmic::HaltReason::UserDefined4
 #define LC32HaltReasonInterrupt Dynarmic::HaltReason::UserDefined5
+#define LC32HaltReasonWorkqueue Dynarmic::HaltReason::UserDefined6
 
 class Reg {
 public:

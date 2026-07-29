@@ -1,9 +1,12 @@
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <deque>
 #include <exception>
 #include <iostream>
+#include <vector>
 
 #include <assert.h>
 #include <fcntl.h>
@@ -13,6 +16,9 @@
 #include <unistd.h>
 
 #include <mach/thread_act.h>
+#include <mach/vm_map.h>
+#include <mach/vm_page_size.h>
+#include <mach/vm_region.h>
 #include <mach-o/getsect.h>
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
@@ -25,6 +31,7 @@
 #include <signal.h>
 #include <sys/attr.h>
 #include <sys/errno.h>
+#include <sys/event.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
@@ -45,9 +52,16 @@
 #define TRACE_RW 0
 #define TRACE_BRANCH 0
 #define TRACE_SVC 0
+#define TRACE_WORKQUEUE 0
 //#define TRACE_ALLOC 0
 //#define fprintf(...)
 //#define printf(...)
+
+#if TRACE_WORKQUEUE
+#define WORKQUEUE_TRACE(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define WORKQUEUE_TRACE(...) do {} while (0)
+#endif
 
 #define CS_OPS_STATUS 0
 #define CS_ENFORCEMENT 0x00001000
@@ -70,6 +84,10 @@ enum class DebuggerMachCallPhase : uint8_t {
 static std::atomic<DebuggerMachCallPhase> debuggerMachCallPhase{
     DebuggerMachCallPhase::Idle};
 static std::atomic<mach_port_t> debuggerMachCallThread{MACH_PORT_NULL};
+
+static bool PumpGuestWorkqueue();
+static bool HandleGuestWorkqueueTransition();
+static bool GuestWorkqueueTransitionPending();
 
 struct DebuggerSoftwareBreakpoint {
     u32 address;
@@ -386,9 +404,15 @@ guest_mach_msg_trap(u32 guest_msg,
 
     /*
      * A receive-only trap has no request header or message ID to dispatch.
-     * Pass the receive through to the host Mach port.
+     * Give the cooperative guest workqueue a chance to drain any libdispatch
+     * sends and in-process Mach listeners first. A real kernel would run
+     * those workers concurrently while this thread waits for its reply.
      */
     if (send_size == 0 && (option & MACH_RCV_MSG) != 0) {
+        if (PumpGuestWorkqueue()) {
+            free(host_msg);
+            return MACH_RCV_INTERRUPTED;
+        }
         result = debugger_aware_mach_msg(host_header, option, 0, rcv_size,
             rcv_name, timeout, notify);
         if (rcv_size != 0 && result != MACH_RCV_INTERRUPTED &&
@@ -604,7 +628,8 @@ guest_mach_msg_trap(u32 guest_msg,
             return result;
         }
         default:
-            printf("LC32: Unhandled msgh_id\n");
+            printf("LC32: Unhandled msgh_id %d\n",
+                host_header->msgh_id);
             sharedHandle.ucb->ExceptionRaised(0xDEADDEAD, Dynarmic::A32::Exception::Yield);
             break;
     }
@@ -721,10 +746,168 @@ int guest_bsdthread_pthread_size;
 int guest_workqueue_dispatch_offset;
 bool guest_workqueue_kevent_enabled;
 bool guest_workqueue_opened;
+u32 guest_bsdthread_tsd_offset;
+
+struct GuestWorkqueueKevent {
+    guest_kevent_qos_s event;
+    bool enabled;
+    bool triggered;
+};
+
+struct GuestWorkqueueRequest {
+    int remaining;
+    u32 priority;
+};
+
+static std::vector<GuestWorkqueueKevent> guestWorkqueueKevents;
+static std::deque<GuestWorkqueueRequest> guestWorkqueueRequests;
+static u32 guestWorkqueueEventManagerPriority;
+static bool guestWorkqueueUpcallActive;
+static bool guestWorkqueueRestoreRequested;
+
+static_assert(sizeof(guest_kevent_qos_s) == 72,
+    "iOS 10 kevent_qos_s ABI changed");
+
+static u32 GuestWorkqueueQosClass(u32 priority) {
+    switch ((priority & PTHREAD_PRIORITY_QOS_CLASS_MASK) >>
+            PTHREAD_PRIORITY_QOS_CLASS_SHIFT) {
+        case PTHREAD_PRIORITY_CBIT_USER_INTERACTIVE:
+            return GUEST_QOS_CLASS_USER_INTERACTIVE;
+        case PTHREAD_PRIORITY_CBIT_USER_INITIATED:
+            return GUEST_QOS_CLASS_USER_INITIATED;
+        case PTHREAD_PRIORITY_CBIT_UTILITY:
+            return GUEST_QOS_CLASS_UTILITY;
+        case PTHREAD_PRIORITY_CBIT_BACKGROUND:
+            return GUEST_QOS_CLASS_BACKGROUND;
+        case PTHREAD_PRIORITY_CBIT_MAINTENANCE:
+            return GUEST_QOS_CLASS_MAINTENANCE;
+        case PTHREAD_PRIORITY_CBIT_DEFAULT:
+        default:
+            return GUEST_QOS_CLASS_DEFAULT;
+    }
+}
+
+static bool GuestKeventMatches(const GuestWorkqueueKevent &registered,
+                               const guest_kevent_qos_s &change) {
+    if (registered.event.ident != change.ident ||
+            registered.event.filter != change.filter) {
+        return false;
+    }
+    if (((registered.event.flags | change.flags) &
+            EV_UDATA_SPECIFIC) != 0) {
+        return registered.event.udata == change.udata;
+    }
+    return true;
+}
+
+static int ApplyGuestKeventChanges(u32 changelist, int nchanges) {
+    if (nchanges < 0 || nchanges > 4096 ||
+            (nchanges != 0 && changelist == 0)) {
+        return EINVAL;
+    }
+    if (nchanges == 0) {
+        return 0;
+    }
+
+    std::vector<guest_kevent_qos_s> changes(
+        static_cast<size_t>(nchanges));
+    if (Dynarmic_mem_1read(changelist,
+            changes.size() * sizeof(changes[0]),
+            reinterpret_cast<char *>(changes.data())) != 0) {
+        return EFAULT;
+    }
+
+    for (const guest_kevent_qos_s &change : changes) {
+        WORKQUEUE_TRACE(
+            "LC32: workqueue change ident=0x%llx filter=%d "
+            "flags=0x%x qos=0x%x fflags=0x%x udata=0x%llx\n",
+            change.ident, change.filter, change.flags, change.qos,
+            change.fflags, change.udata);
+        auto registered = std::find_if(
+            guestWorkqueueKevents.begin(), guestWorkqueueKevents.end(),
+            [&change](const GuestWorkqueueKevent &candidate) {
+                return GuestKeventMatches(candidate, change);
+            });
+
+        if (change.filter == EVFILT_USER &&
+                (change.fflags & NOTE_TRIGGER) != 0 &&
+                (change.flags & EV_ADD) == 0) {
+            if (registered != guestWorkqueueKevents.end()) {
+                registered->triggered = true;
+            }
+            continue;
+        }
+
+        if ((change.flags & EV_DELETE) != 0) {
+            if (registered != guestWorkqueueKevents.end()) {
+                guestWorkqueueKevents.erase(registered);
+            }
+            continue;
+        }
+
+        if ((change.flags & EV_ADD) != 0) {
+            const bool enabled = (change.flags & EV_DISABLE) == 0;
+            if (registered == guestWorkqueueKevents.end()) {
+                guestWorkqueueKevents.push_back(
+                    {.event = change,
+                     .enabled = enabled,
+                     .triggered = false});
+            } else {
+                registered->event = change;
+                registered->enabled = enabled;
+            }
+            continue;
+        }
+
+        if (registered == guestWorkqueueKevents.end()) {
+            continue;
+        }
+        registered->event = change;
+        if ((change.flags & EV_DISABLE) != 0) {
+            registered->enabled = false;
+        } else if ((change.flags & EV_ENABLE) != 0) {
+            registered->enabled = true;
+        }
+    }
+    return 0;
+}
+
 int guest_bsdthread_register(u32 guest_func_thread_start, u32 guest_func_start_wqthread, int pthread_size, u32 data, int32_t datasize, off_t offset) {
     guest_bsdthread_thread_start = guest_func_thread_start;
     guest_bsdthread_wqthread_start = guest_func_start_wqthread;
     guest_bsdthread_pthread_size = pthread_size;
+    guest_bsdthread_tsd_offset = 0;
+    WORKQUEUE_TRACE(
+        "LC32: bsdthread_register thread=0x%x workq=0x%x "
+        "pthread_size=0x%x data_size=0x%x\n",
+        guest_func_thread_start, guest_func_start_wqthread,
+        pthread_size, datasize);
+    if (data != 0 && datasize > 0) {
+        guest_pthread_registration_data registration = {};
+        const size_t copySize = MIN(
+            static_cast<size_t>(datasize), sizeof(registration));
+        if (Dynarmic_mem_1read(data, copySize,
+                reinterpret_cast<char *>(&registration)) != 0) {
+            return return_with_carry_direct(EINVAL, true);
+        }
+        if (registration.version >
+                offsetof(guest_pthread_registration_data, tsd_offset) &&
+                registration.tsd_offset <
+                static_cast<u32>(pthread_size)) {
+            guest_bsdthread_tsd_offset = registration.tsd_offset;
+        }
+        WORKQUEUE_TRACE(
+            "LC32: bsdthread registration version=%llu "
+            "dispatch_offset=0x%llx tsd_offset=0x%x\n",
+            registration.version, registration.dispatch_queue_offset,
+            registration.tsd_offset);
+        registration.version = sizeof(registration);
+        registration.main_qos = 0;
+        if (Dynarmic_mem_1write(data, copySize,
+                reinterpret_cast<char *>(&registration)) != 0) {
+            return return_with_carry_direct(EINVAL, true);
+        }
+    }
     return return_with_carry(PTHREAD_FEATURE_DISPATCHFUNC |
         PTHREAD_FEATURE_FINEPRIO |
         PTHREAD_FEATURE_BSDTHREADCTL |
@@ -743,6 +926,10 @@ int guest_workq_open() {
 }
 
 int guest_workq_kernreturn(int options, u32 item, int arg2, int arg3) {
+    WORKQUEUE_TRACE(
+        "LC32: workq_kernreturn op=0x%x item=0x%x arg2=%d "
+        "arg3=0x%x active=%d\n",
+        options, item, arg2, arg3, guestWorkqueueUpcallActive);
     switch (options) {
         case WQOPS_QUEUE_NEWSPISUPP:
             /*
@@ -754,17 +941,28 @@ int guest_workq_kernreturn(int options, u32 item, int arg2, int arg3) {
             guest_workqueue_kevent_enabled = (arg3 & 1) != 0;
             return return_with_carry_direct(0, false);
         case WQOPS_SET_EVENT_MANAGER_PRIORITY:
-            // Scheduling priority is not meaningful until guest workers exist.
+            guestWorkqueueEventManagerPriority = static_cast<u32>(arg2);
             return return_with_carry_direct(0, false);
-        case WQOPS_QUEUE_REQTHREADS:
+        case WQOPS_QUEUE_REQTHREADS: {
+            if (!guest_workqueue_opened || arg2 <= 0 || arg2 > 4096) {
+                return return_with_carry_direct(EINVAL, true);
+            }
+            guestWorkqueueRequests.push_back(
+                {.remaining = arg2, .priority = static_cast<u32>(arg3)});
+            return return_with_carry_direct(0, false);
+        }
         case WQOPS_QUEUE_REQTHREADS2:
-        case WQOPS_THREAD_RETURN:
-        case WQOPS_THREAD_KEVENT_RETURN:
             /*
-             * Do not report success and lose dispatch work. These operations
-             * need a guest workqueue scheduler and _pthread_wqthread upcalls.
+             * The iOS 10 userspace library does not issue this operation, and
+             * its request-array ABI is distinct from QUEUE_REQTHREADS.
              */
             return return_with_carry_direct(ENOTSUP, true);
+        case WQOPS_THREAD_KEVENT_RETURN: {
+            const int error = ApplyGuestKeventChanges(item, arg2);
+            return return_with_carry_direct(error, error != 0);
+        }
+        case WQOPS_THREAD_RETURN:
+            return return_with_carry_direct(0, false);
         default:
             return return_with_carry_direct(EINVAL, true);
     }
@@ -773,6 +971,9 @@ int guest_workq_kernreturn(int options, u32 item, int arg2, int arg3) {
 int guest_kevent_qos(int kq, u32 changelist, int nchanges,
         u32 eventlist, int nevents, u32 data_out, u32 data_available,
         unsigned int flags) {
+    WORKQUEUE_TRACE(
+        "LC32: kevent_qos kq=%d changes=%d events=%d flags=0x%x\n",
+        kq, nchanges, nevents, flags);
     /*
      * This is the registration half of direct-kevent workqueue support.
      * libdispatch asks the default workqueue kqueue (-1) to install changes
@@ -788,7 +989,8 @@ int guest_kevent_qos(int kq, u32 changelist, int nchanges,
             (flags & KEVENT_FLAG_ERROR_EVENTS) == 0) {
         return return_with_carry_direct(ENOTSUP, true);
     }
-    return return_with_carry_direct(0, false);
+    const int error = ApplyGuestKeventChanges(changelist, nchanges);
+    return return_with_carry_direct(error, error != 0);
 }
 
 int guest_sandbox_ms(u32 guest_policyname, int call, u32 guest_arg) {
@@ -2018,8 +2220,23 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             case 367: // workq_open
                 cpu->Regs()[0] = guest_workq_open();
                 break;
-            case 368: // workq_kernreturn
-                cpu->Regs()[0] = guest_workq_kernreturn(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3]);
+            case 368: { // workq_kernreturn
+                const int operation = static_cast<int>(cpu->Regs()[0]);
+                cpu->Regs()[0] = guest_workq_kernreturn(
+                    operation, cpu->Regs()[1], cpu->Regs()[2],
+                    cpu->Regs()[3]);
+                if (guestWorkqueueUpcallActive && cpu->Regs()[0] == 0 &&
+                        (operation == WQOPS_THREAD_RETURN ||
+                         operation == WQOPS_THREAD_KEVENT_RETURN)) {
+                    /*
+                     * These calls park a kernel-created worker and never
+                     * return to its abandoned userspace stack. The outer
+                     * execution loop restores the waiting guest context
+                     * before it executes another worker instruction.
+                     */
+                    guestWorkqueueRestoreRequested = true;
+                }
+            }
                 break;
             case 374: { // kevent_qos
                 /*
@@ -2134,6 +2351,16 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
 #if TRACE_SVC
         printf("CallSVC returned 0x%08x, carry %d\n", cpu->Regs()[0], cpsr->hasCarry());
 #endif
+        /*
+         * Ordinary SVC callbacks execute inline inside Dynarmic::Run().
+         * Context replacement is only legal after Run() has unwound, so use
+         * a private halt reason to transfer control to the outer loop without
+         * replaying this already-completed syscall.
+         */
+        if (cpu->IsExecuting() &&
+                GuestWorkqueueTransitionPending()) {
+            cpu->HaltExecution(LC32HaltReasonWorkqueue);
+        }
     }
 
     bool handleMachineDependentSyscall(int NR) {
@@ -2171,6 +2398,430 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
     DynarmicCpsr *cpsr;
     std::shared_ptr<DynarmicCP15> cp15;
 };
+
+namespace {
+
+constexpr u32 GuestWorkqueueGuardSize = DYN_PAGE_SIZE;
+constexpr u32 GuestWorkqueueStackSize = 0x80000;
+constexpr size_t GuestWorkqueueEventCapacity = 16;
+constexpr size_t GuestWorkqueueMessageCapacity = 32 * 1024;
+
+u32 guestWorkqueueAllocation;
+u32 guestWorkqueueAllocationSize;
+u32 guestWorkqueuePthread;
+u32 guestWorkqueueStackBottom;
+mach_port_t guestWorkqueueThreadPort;
+bool guestWorkqueueWorkerInitialized;
+
+struct GuestWorkqueueDelivery {
+    guest_kevent_qos_s event = {};
+    std::vector<uint8_t> message;
+    bool eventManager = false;
+};
+
+struct GuestWorkqueuePendingUpcall {
+    u32 eventList;
+    u32 eventCount;
+    u32 stackPointer;
+    u32 flags;
+    bool valid;
+};
+
+GuestWorkqueuePendingUpcall guestWorkqueuePendingUpcall;
+context32 guestWorkqueueWaitingContext;
+bool guestWorkqueueWaitingContextValid;
+
+bool EnsureGuestWorkqueueWorker() {
+    if (guestWorkqueueAllocation != 0) {
+        return MACH_PORT_VALID(guestWorkqueueThreadPort);
+    }
+    if (guest_bsdthread_wqthread_start == 0 ||
+            guest_bsdthread_pthread_size <= 0 ||
+            guest_bsdthread_tsd_offset >=
+            static_cast<u32>(guest_bsdthread_pthread_size)) {
+        return false;
+    }
+
+    const u32 pthreadSize =
+        (static_cast<u32>(guest_bsdthread_pthread_size) +
+         DYN_PAGE_MASK) & ~DYN_PAGE_MASK;
+    if (pthreadSize == 0 ||
+            pthreadSize > UINT32_MAX - GuestWorkqueueGuardSize -
+                GuestWorkqueueStackSize) {
+        return false;
+    }
+    guestWorkqueueAllocationSize =
+        GuestWorkqueueGuardSize + GuestWorkqueueStackSize + pthreadSize;
+    guestWorkqueueAllocation = Dynarmic_mmap(
+        0, guestWorkqueueAllocationSize, PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (guestWorkqueueAllocation == UINT32_MAX) {
+        guestWorkqueueAllocation = 0;
+        guestWorkqueueAllocationSize = 0;
+        return false;
+    }
+
+    guestWorkqueueStackBottom =
+        guestWorkqueueAllocation + GuestWorkqueueGuardSize;
+    guestWorkqueuePthread =
+        guestWorkqueueStackBottom + GuestWorkqueueStackSize;
+    kern_return_t portResult = mach_port_allocate(
+        mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+        &guestWorkqueueThreadPort);
+    if (portResult == KERN_SUCCESS) {
+        portResult = mach_port_insert_right(
+            mach_task_self(), guestWorkqueueThreadPort,
+            guestWorkqueueThreadPort, MACH_MSG_TYPE_MAKE_SEND);
+    }
+    if (portResult != KERN_SUCCESS) {
+        if (MACH_PORT_VALID(guestWorkqueueThreadPort)) {
+            mach_port_destroy(
+                mach_task_self(), guestWorkqueueThreadPort);
+        }
+        guestWorkqueueThreadPort = MACH_PORT_NULL;
+        Dynarmic_munmap(
+            guestWorkqueueAllocation, guestWorkqueueAllocationSize);
+        guestWorkqueueAllocation = 0;
+        guestWorkqueueAllocationSize = 0;
+        guestWorkqueueStackBottom = 0;
+        guestWorkqueuePthread = 0;
+        return false;
+    }
+    return true;
+}
+
+bool PrepareGuestWorkqueueUpcall(const GuestWorkqueueDelivery *delivery,
+                                 u32 priority) {
+    if (!EnsureGuestWorkqueueWorker() || guestWorkqueueUpcallActive ||
+            guestWorkqueuePendingUpcall.valid) {
+        return false;
+    }
+
+    const u32 eventList = guestWorkqueuePthread -
+        static_cast<u32>(GuestWorkqueueEventCapacity *
+                         sizeof(guest_kevent_qos_s));
+    const u32 messageBuffer =
+        eventList - static_cast<u32>(GuestWorkqueueMessageCapacity);
+    const u32 stackPointer = (messageBuffer - 16) & ~0xfu;
+
+    u32 upcallFlags =
+        WQ_FLAG_THREAD_NEWSPI | WQ_FLAG_THREAD_TSD_BASE_SET;
+    if (guestWorkqueueWorkerInitialized) {
+        upcallFlags |= WQ_FLAG_THREAD_REUSE;
+    }
+
+    u32 eventListArgument = 0;
+    u32 eventCount = 0;
+    if (delivery != nullptr) {
+        guest_kevent_qos_s event = delivery->event;
+        if (delivery->message.size() > GuestWorkqueueMessageCapacity) {
+            return false;
+        }
+        if (!delivery->message.empty()) {
+            if (Dynarmic_mem_1write(
+                    messageBuffer, delivery->message.size(),
+                    reinterpret_cast<char *>(
+                        const_cast<uint8_t *>(
+                            delivery->message.data()))) != 0) {
+                return false;
+            }
+            event.ext[0] = messageBuffer;
+            event.ext[1] = delivery->message.size();
+        }
+        if (Dynarmic_mem_1write(
+                eventList, sizeof(event),
+                reinterpret_cast<char *>(&event)) != 0) {
+            return false;
+        }
+        eventListArgument = eventList;
+        eventCount = 1;
+        upcallFlags |= WQ_FLAG_THREAD_KEVENT;
+        priority = static_cast<u32>(event.qos);
+        if (delivery->eventManager) {
+            upcallFlags |= WQ_FLAG_THREAD_EVENT_MANAGER;
+            priority = guestWorkqueueEventManagerPriority;
+        }
+    }
+    if ((priority & PTHREAD_PRIORITY_OVERCOMMIT_FLAG) != 0) {
+        upcallFlags |= WQ_FLAG_THREAD_OVERCOMMIT;
+    }
+    upcallFlags |= GuestWorkqueueQosClass(priority);
+
+    guestWorkqueuePendingUpcall = {
+        .eventList = eventListArgument,
+        .eventCount = eventCount,
+        .stackPointer = stackPointer,
+        .flags = upcallFlags,
+        .valid = true,
+    };
+    WORKQUEUE_TRACE(
+        "LC32: prepared workqueue upcall events=%u flags=0x%x "
+        "sp=0x%x\n",
+        eventCount, upcallFlags, stackPointer);
+    return true;
+}
+
+bool NextGuestWorkqueueEvent(GuestWorkqueueDelivery &delivery) {
+    for (size_t i = 0; i < guestWorkqueueKevents.size(); ++i) {
+        GuestWorkqueueKevent &registered = guestWorkqueueKevents[i];
+        if (!registered.enabled) {
+            continue;
+        }
+
+        if (registered.event.filter == EVFILT_USER &&
+                registered.triggered) {
+            delivery = {};
+            delivery.event = registered.event;
+            delivery.event.fflags = NOTE_TRIGGER;
+            delivery.eventManager =
+                (registered.event.qos &
+                 PTHREAD_PRIORITY_EVENT_MANAGER_FLAG) != 0;
+            registered.triggered = false;
+            if ((registered.event.flags & EV_DISPATCH) != 0) {
+                registered.enabled = false;
+            }
+            return true;
+        }
+        if (registered.event.filter != EVFILT_MACHPORT) {
+            continue;
+        }
+
+        delivery = {};
+        delivery.event = registered.event;
+        delivery.eventManager =
+            (registered.event.qos &
+             PTHREAD_PRIORITY_EVENT_MANAGER_FLAG) != 0;
+
+        mach_msg_return_t result;
+        if ((registered.event.fflags & MACH_RCV_MSG) == 0) {
+            /*
+             * Without MACH_RCV_MSG, EVFILT_MACHPORT only reports readiness.
+             * Deliberately use a 20-byte LARGE receive: that is sufficient
+             * for Mach's size/identity copyout but smaller than every valid
+             * message header, so the queued XPC message is not consumed.
+             */
+            mach_msg_header_t probe = {};
+            constexpr mach_msg_size_t ProbeSize =
+                sizeof(mach_msg_header_t) - sizeof(mach_msg_id_t);
+            result = mach_msg(
+                &probe,
+                MACH_RCV_MSG | MACH_RCV_TIMEOUT | MACH_RCV_LARGE |
+                    MACH_RCV_LARGE_IDENTITY,
+                0, ProbeSize,
+                static_cast<mach_port_t>(registered.event.ident),
+                MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+            if (result == MACH_RCV_TIMED_OUT) {
+                continue;
+            }
+            if (result != MACH_RCV_TOO_LARGE) {
+                fprintf(stderr,
+                    "LC32: workqueue probe on port 0x%llx failed: 0x%x\n",
+                    registered.event.ident, result);
+                registered.enabled = false;
+                continue;
+            }
+            delivery.event.data = static_cast<int64_t>(
+                MACH_PORT_VALID(probe.msgh_local_port)
+                    ? probe.msgh_local_port
+                    : static_cast<mach_port_t>(registered.event.ident));
+            delivery.event.ext[0] = 0;
+            delivery.event.ext[1] = 0;
+        } else {
+            std::vector<uint8_t> buffer(
+                GuestWorkqueueMessageCapacity);
+            auto *header =
+                reinterpret_cast<mach_msg_header_t *>(buffer.data());
+            const mach_msg_option_t options =
+                static_cast<mach_msg_option_t>(
+                    registered.event.fflags) |
+                MACH_RCV_MSG | MACH_RCV_TIMEOUT | MACH_RCV_LARGE |
+                MACH_RCV_LARGE_IDENTITY;
+            result = mach_msg(
+                header, options, 0,
+                static_cast<mach_msg_size_t>(buffer.size()),
+                static_cast<mach_port_t>(registered.event.ident),
+                MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+            if (result == MACH_RCV_TIMED_OUT) {
+                continue;
+            }
+            if (result == MACH_RCV_TOO_LARGE) {
+                delivery.event.fflags = MACH_RCV_TOO_LARGE;
+                delivery.event.data =
+                    static_cast<int64_t>(header->msgh_local_port);
+                delivery.event.ext[0] = 0;
+                delivery.event.ext[1] = header->msgh_size;
+            } else if (result == MACH_MSG_SUCCESS) {
+                const size_t roundedMessageSize =
+                    (static_cast<size_t>(header->msgh_size) + 3) & ~3u;
+                size_t receivedExtent = roundedMessageSize;
+                if (roundedMessageSize +
+                        sizeof(mach_msg_trailer_t) <= buffer.size()) {
+                    const auto *trailer =
+                        reinterpret_cast<const mach_msg_trailer_t *>(
+                            buffer.data() + roundedMessageSize);
+                    if (trailer->msgh_trailer_size <=
+                            buffer.size() - roundedMessageSize) {
+                        receivedExtent += trailer->msgh_trailer_size;
+                    }
+                }
+                buffer.resize(receivedExtent);
+                delivery.event.fflags = MACH_MSG_SUCCESS;
+                delivery.event.data = MACH_PORT_NULL;
+                delivery.message = std::move(buffer);
+            } else {
+                fprintf(stderr,
+                    "LC32: workqueue receive on port 0x%llx failed: 0x%x\n",
+                    registered.event.ident, result);
+                registered.enabled = false;
+                continue;
+            }
+        }
+
+        const bool oneShot =
+            (registered.event.flags & EV_ONESHOT) != 0;
+        if (oneShot) {
+            delivery.event.flags |= EV_DELETE;
+            guestWorkqueueKevents.erase(
+                guestWorkqueueKevents.begin() + i);
+        } else if ((registered.event.flags & EV_DISPATCH) != 0) {
+            registered.enabled = false;
+        }
+        return true;
+    }
+    return false;
+}
+
+} // anonymous namespace
+
+static bool PumpGuestWorkqueue() {
+    if (guestWorkqueueUpcallActive || !guest_workqueue_opened) {
+        return false;
+    }
+    /*
+     * Allocate the worker before consuming a request or Mach message.  A
+     * setup failure must leave the work available for a later attempt.
+     */
+    if (!EnsureGuestWorkqueueWorker()) {
+        return false;
+    }
+
+    /*
+     * The emulator currently has one JIT context. Cooperatively run the work
+     * that XNU would schedule concurrently. The syscall returns interrupted,
+     * the outer execution loop runs exactly one worker upcall, and libsystem
+     * retries the original receive after that worker parks.
+     */
+    while (!guestWorkqueueRequests.empty() &&
+            guestWorkqueueRequests.front().remaining <= 0) {
+        guestWorkqueueRequests.pop_front();
+    }
+    if (!guestWorkqueueRequests.empty()) {
+        GuestWorkqueueRequest &request =
+            guestWorkqueueRequests.front();
+        const u32 priority = request.priority;
+        WORKQUEUE_TRACE(
+            "LC32: pumping root worker priority=0x%x remaining=%d\n",
+            priority, request.remaining - 1);
+        if (!PrepareGuestWorkqueueUpcall(nullptr, priority)) {
+            return false;
+        }
+        --request.remaining;
+        return true;
+    }
+
+    GuestWorkqueueDelivery delivery;
+    if (!NextGuestWorkqueueEvent(delivery)) {
+        return false;
+    }
+    WORKQUEUE_TRACE(
+        "LC32: pumping event ident=0x%llx filter=%d data=0x%llx\n",
+        delivery.event.ident, delivery.event.filter,
+        static_cast<uint64_t>(delivery.event.data));
+    return PrepareGuestWorkqueueUpcall(&delivery, 0);
+}
+
+static bool HandleGuestWorkqueueTransition() {
+    Dynarmic::A32::Jit *jit = threadHandle.jit;
+    DynarmicCallbacks32 *callbacks = sharedHandle.cb;
+    if (guestWorkqueuePendingUpcall.valid ||
+            guestWorkqueueRestoreRequested) {
+        WORKQUEUE_TRACE(
+            "LC32: workqueue transition pending=%d restore=%d "
+            "active=%d jit=%p callbacks=%p\n",
+            guestWorkqueuePendingUpcall.valid,
+            guestWorkqueueRestoreRequested,
+            guestWorkqueueUpcallActive, jit, callbacks);
+    }
+    if (jit == nullptr || callbacks == nullptr) {
+        return false;
+    }
+
+    if (guestWorkqueueRestoreRequested) {
+        guestWorkqueueRestoreRequested = false;
+        if (!guestWorkqueueUpcallActive ||
+                !guestWorkqueueWaitingContextValid) {
+            return false;
+        }
+        jit->Regs() = guestWorkqueueWaitingContext.regs;
+        jit->ExtRegs() = guestWorkqueueWaitingContext.extRegs;
+        jit->SetCpsr(guestWorkqueueWaitingContext.cpsr);
+        jit->SetFpscr(guestWorkqueueWaitingContext.fpscr);
+        callbacks->cp15->uro = guestWorkqueueWaitingContext.uro;
+        guestWorkqueueWaitingContextValid = false;
+        guestWorkqueueUpcallActive = false;
+        WORKQUEUE_TRACE(
+            "LC32: restored waiting context pc=0x%x\n",
+            jit->Regs()[Reg::PC]);
+        return true;
+    }
+
+    if (!guestWorkqueuePendingUpcall.valid ||
+            guestWorkqueueUpcallActive) {
+        return false;
+    }
+
+    guestWorkqueueWaitingContext.regs = jit->Regs();
+    guestWorkqueueWaitingContext.extRegs = jit->ExtRegs();
+    guestWorkqueueWaitingContext.cpsr = jit->Cpsr();
+    guestWorkqueueWaitingContext.fpscr = jit->Fpscr();
+    guestWorkqueueWaitingContext.uro = callbacks->cp15->uro;
+    guestWorkqueueWaitingContextValid = true;
+
+    const GuestWorkqueuePendingUpcall upcall =
+        guestWorkqueuePendingUpcall;
+    guestWorkqueuePendingUpcall.valid = false;
+    jit->Regs().fill(0);
+    jit->ExtRegs().fill(0);
+    jit->SetFpscr(0);
+    jit->SetCpsr((guest_bsdthread_wqthread_start & 1) != 0
+        ? 0x00000030
+        : 0x000001d0);
+    jit->Regs()[Reg::R0] = guestWorkqueuePthread;
+    jit->Regs()[Reg::R1] = guestWorkqueueThreadPort;
+    jit->Regs()[Reg::R2] = guestWorkqueueStackBottom;
+    jit->Regs()[Reg::R3] = upcall.eventList;
+    jit->Regs()[Reg::R4] = upcall.flags;
+    jit->Regs()[Reg::R5] = upcall.eventCount;
+    jit->Regs()[Reg::SP] = upcall.stackPointer;
+    jit->Regs()[Reg::PC] =
+        guest_bsdthread_wqthread_start & ~1u;
+    callbacks->cp15->uro =
+        guestWorkqueuePthread + guest_bsdthread_tsd_offset;
+
+    guestWorkqueueWorkerInitialized = true;
+    guestWorkqueueUpcallActive = true;
+    WORKQUEUE_TRACE(
+        "LC32: entered workqueue upcall pc=0x%x self=0x%x "
+        "tsd=0x%x flags=0x%x\n",
+        jit->Regs()[Reg::PC], guestWorkqueuePthread,
+        callbacks->cp15->uro, upcall.flags);
+    return true;
+}
+
+static bool GuestWorkqueueTransitionPending() {
+    return guestWorkqueuePendingUpcall.valid ||
+        guestWorkqueueRestoreRequested;
+}
 
 #ifdef __cplusplus
 extern "C" {
@@ -2535,6 +3186,109 @@ static bool DebuggerMemoryRangeIsMapped(u64 address, u64 size) {
 }
 
 /*
+ * LLDB's expression evaluator writes a small JIT image into inferior memory.
+ * Some guest pages are backed by read-only host mappings, so a plain memcpy
+ * would crash LiveExec32 itself. Temporarily add write permission to the
+ * actual host VM pages, then restore their original protection.
+ */
+static int DebuggerWriteHostMemory(void *destination,
+                                   const void *source,
+                                   size_t size) {
+    auto *dest = static_cast<uint8_t *>(destination);
+    auto *src = static_cast<const uint8_t *>(source);
+
+    while (size != 0) {
+        vm_address_t regionAddress =
+            reinterpret_cast<vm_address_t>(dest);
+        vm_size_t regionSize = 0;
+        vm_region_basic_info_data_64_t regionInfo = {};
+        mach_msg_type_number_t regionInfoCount =
+            VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t objectName = MACH_PORT_NULL;
+        const kern_return_t regionResult = vm_region_64(
+            mach_task_self(), &regionAddress, &regionSize,
+            VM_REGION_BASIC_INFO_64,
+            reinterpret_cast<vm_region_info_t>(&regionInfo),
+            &regionInfoCount, &objectName);
+        if (objectName != MACH_PORT_NULL) {
+            mach_port_deallocate(mach_task_self(), objectName);
+        }
+
+        const vm_address_t destinationAddress =
+            reinterpret_cast<vm_address_t>(dest);
+        if (regionResult != KERN_SUCCESS ||
+            destinationAddress < regionAddress ||
+            destinationAddress - regionAddress >= regionSize) {
+            return 1;
+        }
+        const vm_size_t available =
+            regionSize - (destinationAddress - regionAddress);
+        const size_t chunk =
+            size < available ? size : static_cast<size_t>(available);
+
+        bool protectionChanged = false;
+        vm_address_t protectStart = 0;
+        vm_size_t protectSize = 0;
+        if ((regionInfo.protection & VM_PROT_WRITE) == 0) {
+            if ((regionInfo.max_protection & VM_PROT_WRITE) == 0 ||
+                vm_page_size == 0 ||
+                destinationAddress >
+                    UINTPTR_MAX - chunk - (vm_page_size - 1)) {
+                return 1;
+            }
+            protectStart =
+                destinationAddress -
+                destinationAddress % vm_page_size;
+            const vm_address_t protectEnd =
+                (destinationAddress + chunk + vm_page_size - 1) /
+                vm_page_size * vm_page_size;
+            protectSize = protectEnd - protectStart;
+            if (vm_protect(mach_task_self(), protectStart, protectSize,
+                           FALSE,
+                           regionInfo.protection | VM_PROT_WRITE) !=
+                KERN_SUCCESS) {
+                return 1;
+            }
+            protectionChanged = true;
+        }
+
+        memcpy(dest, src, chunk);
+
+        if (protectionChanged &&
+            vm_protect(mach_task_self(), protectStart, protectSize,
+                       FALSE, regionInfo.protection) != KERN_SUCCESS) {
+            return 1;
+        }
+        dest += chunk;
+        src += chunk;
+        size -= chunk;
+    }
+    return 0;
+}
+
+static int DebuggerWritePhysicalMemory(u64 address,
+                                       u64 size,
+                                       const char *source) {
+    const u64 end = address + size;
+    for (u64 page = address & ~DYN_PAGE_MASK; page < end;
+         page += DYN_PAGE_SIZE) {
+        const u64 start = page < address ? address - page : 0;
+        const u64 pageEnd =
+            page + DYN_PAGE_SIZE < end ? page + DYN_PAGE_SIZE : end;
+        const size_t length =
+            static_cast<size_t>(pageEnd - page - start);
+        char *hostPage = get_memory_page(page);
+        if (hostPage == nullptr ||
+            DebuggerWriteHostMemory(hostPage + start, source,
+                                    length) != 0) {
+            return 1;
+        }
+        source += length;
+    }
+    return 0;
+}
+
+/*
  * RSP memory reads describe the logical inferior memory.  Software
  * breakpoints are a debugger implementation detail, so overlay the saved
  * instruction bytes over the physically planted trap before replying.
@@ -2605,9 +3359,9 @@ int Dynarmic_debugger_mem_write(u64 address, u64 size, char* src) {
                overlapEnd - overlapStart);
     }
 
-    if (Dynarmic_mem_1write(
+    if (DebuggerWritePhysicalMemory(
             address, size,
-            reinterpret_cast<char *>(physical.data())) != 0) {
+            reinterpret_cast<const char *>(physical.data())) != 0) {
         return 1;
     }
 
@@ -2700,9 +3454,9 @@ bool Dynarmic_debugger_set_breakpoint(u64 address, size_t kind) {
     // Allocate registry storage before modifying guest code so the running
     // process can never contain an untracked trap instruction.
     debuggerSoftwareBreakpoints.push_back(breakpoint);
-    if (Dynarmic_mem_1write(
+    if (DebuggerWritePhysicalMemory(
             guestAddress, kind,
-            reinterpret_cast<char *>(
+            reinterpret_cast<const char *>(
                 debuggerSoftwareBreakpoints.back().trap.data())) != 0) {
         debuggerSoftwareBreakpoints.pop_back();
         return false;
@@ -2732,9 +3486,10 @@ bool Dynarmic_debugger_delete_breakpoint(u64 address, size_t kind) {
         if (it->address != guestAddress) {
             continue;
         }
-        if (Dynarmic_mem_1write(
+        if (DebuggerWritePhysicalMemory(
                 guestAddress, it->kind,
-                reinterpret_cast<char *>(it->original.data())) != 0) {
+                reinterpret_cast<const char *>(
+                    it->original.data())) != 0) {
             return false;
         }
         if (threadHandle.jit != NULL) {
@@ -2845,8 +3600,26 @@ Dynarmic::HaltReason Dynarmic_emu_1start(u32 pc) {
         cpu->SetCpsr(0x000001d0); // Arm user mode
       }
       cpu->Regs()[15] = (u32) (pc & ~1);
-      while((reason = cpu->Run()) == LC32HaltReasonSVC) {
+      for (;;) {
+        reason = cpu->Run();
+        if (Dynarmic::Has(reason, LC32HaltReasonWorkqueue)) {
+          if (!HandleGuestWorkqueueTransition()) {
+            reason = LC32HaltReasonTrap;
+            break;
+          }
+          const Dynarmic::HaltReason remaining =
+              reason & ~LC32HaltReasonWorkqueue;
+          if (!!remaining) {
+            reason = remaining;
+            break;
+          }
+          continue;
+        }
+        if (!Dynarmic::Has(reason, LC32HaltReasonSVC)) {
+          break;
+        }
         sharedHandle.ucb->CallSVC(0x80);
+        HandleGuestWorkqueueTransition();
       }
     } else {
       return LC32HaltReasonTrap;
@@ -2865,8 +3638,26 @@ Dynarmic::HaltReason Dynarmic_emu_1resume() {
     }
 
     Dynarmic::HaltReason reason;
-    while ((reason = jit->Run()) == LC32HaltReasonSVC) {
+    for (;;) {
+        reason = jit->Run();
+        if (Dynarmic::Has(reason, LC32HaltReasonWorkqueue)) {
+            if (!HandleGuestWorkqueueTransition()) {
+                reason = LC32HaltReasonTrap;
+                break;
+            }
+            const Dynarmic::HaltReason remaining =
+                reason & ~LC32HaltReasonWorkqueue;
+            if (!!remaining) {
+                reason = remaining;
+                break;
+            }
+            continue;
+        }
+        if (!Dynarmic::Has(reason, LC32HaltReasonSVC)) {
+            break;
+        }
         sharedHandle.ucb->CallSVC(0x80);
+        HandleGuestWorkqueueTransition();
     }
     UpdateGuestStopSignalForHalt(reason);
     return reason;
@@ -2882,8 +3673,43 @@ Dynarmic::HaltReason Dynarmic_emu_1step() {
     }
 
     Dynarmic::HaltReason reason;
-    while ((reason = jit->Step()) == LC32HaltReasonSVC) {
+    bool drainInternalWorker = false;
+    for (;;) {
+        reason = drainInternalWorker ? jit->Run() : jit->Step();
+        if (Dynarmic::Has(reason, LC32HaltReasonWorkqueue)) {
+            const bool wasWorkerActive = guestWorkqueueUpcallActive;
+            if (!HandleGuestWorkqueueTransition()) {
+                reason = LC32HaltReasonTrap;
+                break;
+            }
+            const Dynarmic::HaltReason remaining =
+                reason & ~(LC32HaltReasonWorkqueue |
+                           Dynarmic::HaltReason::Step);
+            if (!!remaining) {
+                reason = remaining;
+                break;
+            }
+            if (!wasWorkerActive && guestWorkqueueUpcallActive) {
+                /*
+                 * Finish an internal worker spawned by the instruction being
+                 * stepped. If the debugger was already stopped in a worker,
+                 * drainInternalWorker remains false and Step() retains normal
+                 * single-instruction semantics for that worker.
+                 */
+                drainInternalWorker = true;
+                continue;
+            }
+            if (wasWorkerActive && !guestWorkqueueUpcallActive) {
+                reason = Dynarmic::HaltReason::Step;
+                break;
+            }
+            continue;
+        }
+        if (!Dynarmic::Has(reason, LC32HaltReasonSVC)) {
+            break;
+        }
         sharedHandle.ucb->CallSVC(0x80);
+        HandleGuestWorkqueueTransition();
     }
     UpdateGuestStopSignalForHalt(reason);
     return reason;

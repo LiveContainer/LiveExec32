@@ -43,6 +43,7 @@ static std::string debuggerImageCacheRoot;
 static std::vector<std::string> debuggerImageCacheFiles;
 static std::vector<std::string> debuggerImageCacheDirectories;
 static std::unordered_map<std::string, std::string> debuggerImagePathCache;
+static std::unordered_map<u32, u32> debuggerInferiorAllocations;
 
 static bool DebuggerWasRequested() {
     const char *listenAddress = getenv("GDB_LISTEN_ADDRESS");
@@ -586,6 +587,62 @@ static int emu_write_mem(void *args __attribute__((unused)), size_t addr, size_t
                addr, len, static_cast<char *>(val))
                ? EFAULT
                : 0;
+}
+static size_t emu_alloc_mem(
+        void *args __attribute__((unused)),
+        size_t len,
+        target_memory_protection_t protection) {
+    if (len == 0 || len > UINT32_MAX - DYN_PAGE_MASK) {
+        return 0;
+    }
+
+    const u32 alignedLength = static_cast<u32>(
+        (len + DYN_PAGE_MASK) & ~DYN_PAGE_MASK);
+    int nativeProtection = 0;
+    if ((protection & TARGET_MEMORY_READ) != 0) {
+        nativeProtection |= PROT_READ;
+    }
+    if ((protection & TARGET_MEMORY_WRITE) != 0) {
+        nativeProtection |= PROT_WRITE;
+    }
+    if ((protection & TARGET_MEMORY_EXECUTE) != 0) {
+        /*
+         * Dynarmic fetches instructions through the host page-table pointer,
+         * while Dynarmic_mmap deliberately strips host PROT_EXEC.  Keep every
+         * executable debugger scratch page host-readable even if LLDB asks
+         * for execute-only memory.
+         */
+        nativeProtection |= PROT_READ | PROT_EXEC;
+    }
+
+    const u32 address = Dynarmic_mmap(
+        0, alignedLength, nativeProtection,
+        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (address == UINT32_MAX) {
+        return 0;
+    }
+    debuggerInferiorAllocations[address] = alignedLength;
+    return address;
+}
+static int emu_free_mem(void *args __attribute__((unused)), size_t addr) {
+    if (addr > UINT32_MAX) {
+        return EINVAL;
+    }
+    const auto allocation =
+        debuggerInferiorAllocations.find(static_cast<u32>(addr));
+    if (allocation == debuggerInferiorAllocations.end()) {
+        return EINVAL;
+    }
+
+    if (threadHandle.jit != nullptr) {
+        threadHandle.jit->InvalidateCacheRange(
+            allocation->first, allocation->second);
+    }
+    if (Dynarmic_munmap(allocation->first, allocation->second) != 0) {
+        return errno != 0 ? errno : EFAULT;
+    }
+    debuggerInferiorAllocations.erase(allocation);
+    return 0;
 }
 static bool emu_set_bp(void *args __attribute__((unused)),
                        size_t addr,
@@ -1175,6 +1232,8 @@ struct target_ops emu_ops = {
     .write_reg = emu_write_reg,
     .read_mem = emu_read_mem,
     .write_mem = emu_write_mem,
+    .alloc_mem = emu_alloc_mem,
+    .free_mem = emu_free_mem,
     .cont = emu_cont,
     .stepi = emu_stepi,
     .set_bp = emu_set_bp,
