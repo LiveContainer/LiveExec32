@@ -658,11 +658,14 @@ guest_mach_msg_trap(u32 guest_msg,
             free(host_msg);
             return MACH_MSG_SUCCESS;
         }
+        case 0x77303074:
         case 0x10000000: {
             /*
-             * _xpc_send_serializer uses both send-only and combined
-             * send/receive calls. Preserve the request port dispositions and
-             * forward the complete operation.
+             * libxpc's 'w00t' connection check-in and
+             * _xpc_send_serializer messages are transport messages rather
+             * than MIG requests. They may transfer port rights and use both
+             * send-only and combined send/receive calls, so preserve the
+             * request dispositions and forward the complete operation.
              */
             host_header->msgh_bits = request_bits;
             result = debugger_aware_mach_msg(host_header, option, send_size,
