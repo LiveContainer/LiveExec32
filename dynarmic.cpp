@@ -584,11 +584,79 @@ int guest_fstatfs64(int fildes, u32 guest_buf) {
 }
 
 u32 guest_bsdthread_thread_start;
+u32 guest_bsdthread_wqthread_start;
 int guest_bsdthread_pthread_size;
+int guest_workqueue_dispatch_offset;
+bool guest_workqueue_kevent_enabled;
+bool guest_workqueue_opened;
 int guest_bsdthread_register(u32 guest_func_thread_start, u32 guest_func_start_wqthread, int pthread_size, u32 data, int32_t datasize, off_t offset) {
     guest_bsdthread_thread_start = guest_func_thread_start;
+    guest_bsdthread_wqthread_start = guest_func_start_wqthread;
     guest_bsdthread_pthread_size = pthread_size;
-    return return_with_carry(PTHREAD_FEATURE_FINEPRIO | PTHREAD_FEATURE_BSDTHREADCTL | PTHREAD_FEATURE_SETSELF | PTHREAD_FEATURE_QOS_MAINTENANCE | PTHREAD_FEATURE_QOS_DEFAULT, false);
+    return return_with_carry(PTHREAD_FEATURE_DISPATCHFUNC |
+        PTHREAD_FEATURE_FINEPRIO |
+        PTHREAD_FEATURE_BSDTHREADCTL |
+        PTHREAD_FEATURE_SETSELF |
+        PTHREAD_FEATURE_QOS_MAINTENANCE |
+        PTHREAD_FEATURE_KEVENT |
+        PTHREAD_FEATURE_QOS_DEFAULT, false);
+}
+
+int guest_workq_open() {
+    if (guest_bsdthread_wqthread_start == 0) {
+        return return_with_carry_direct(EINVAL, true);
+    }
+    guest_workqueue_opened = true;
+    return return_with_carry_direct(0, false);
+}
+
+int guest_workq_kernreturn(int options, u32 item, int arg2, int arg3) {
+    switch (options) {
+        case WQOPS_QUEUE_NEWSPISUPP:
+            /*
+             * libpthread uses this as the dispatch/kevent capability
+             * handshake. arg2 is the dispatch queue serial-number offset and
+             * bit zero of arg3 requests direct kevent delivery.
+             */
+            guest_workqueue_dispatch_offset = arg2;
+            guest_workqueue_kevent_enabled = (arg3 & 1) != 0;
+            return return_with_carry_direct(0, false);
+        case WQOPS_SET_EVENT_MANAGER_PRIORITY:
+            // Scheduling priority is not meaningful until guest workers exist.
+            return return_with_carry_direct(0, false);
+        case WQOPS_QUEUE_REQTHREADS:
+        case WQOPS_QUEUE_REQTHREADS2:
+        case WQOPS_THREAD_RETURN:
+        case WQOPS_THREAD_KEVENT_RETURN:
+            /*
+             * Do not report success and lose dispatch work. These operations
+             * need a guest workqueue scheduler and _pthread_wqthread upcalls.
+             */
+            return return_with_carry_direct(ENOTSUP, true);
+        default:
+            return return_with_carry_direct(EINVAL, true);
+    }
+}
+
+int guest_kevent_qos(int kq, u32 changelist, int nchanges,
+        u32 eventlist, int nevents, u32 data_out, u32 data_available,
+        unsigned int flags) {
+    /*
+     * This is the registration half of direct-kevent workqueue support.
+     * libdispatch asks the default workqueue kqueue (-1) to install changes
+     * and optionally return change errors. There can be no delivery until
+     * WQOPS_QUEUE_REQTHREADS can create a guest event-manager thread.
+     */
+    if (kq != -1 || !guest_workqueue_opened ||
+            !guest_workqueue_kevent_enabled ||
+            (flags & KEVENT_FLAG_WORKQ) == 0) {
+        return return_with_carry_direct(ENOTSUP, true);
+    }
+    if (eventlist != 0 && nevents > 0 &&
+            (flags & KEVENT_FLAG_ERROR_EVENTS) == 0) {
+        return return_with_carry_direct(ENOTSUP, true);
+    }
+    return return_with_carry_direct(0, false);
 }
 
 int guest_sandbox_ms(u32 guest_policyname, int call, u32 guest_arg) {
@@ -998,19 +1066,35 @@ guest_file_mapping guestMappings[1000];
 size_t guestMappingGeneration = 0;
 
 static void load_symbols_for_image(guest_file_mapping *mapping, void(^iterator)(u32 address, const char *name)) {
-    u32 slide = mapping->start; // FIXME: properly calculate this slide
     const struct mach_header *header = (const struct mach_header *)mapping->hostAddr;
+    u32 slide = mapping->start;
+    uintptr_t loadCommand = (uintptr_t)header + sizeof(*header);
+    for (uint32_t i = 0; i < header->ncmds; ++i) {
+        const load_command *command = (const load_command *)loadCommand;
+        if (command->cmd == LC_SEGMENT) {
+            const segment_command *segment =
+                (const segment_command *)command;
+            if (strncmp(segment->segname, "__PAGEZERO",
+                    sizeof(segment->segname)) != 0) {
+                slide = mapping->start - segment->vmaddr;
+                break;
+            }
+        }
+        loadCommand += command->cmdsize;
+    }
     
     u32 crashInfoSize;
     u64 crash_info = (u32)(u64)getsectdatafromheader(header, SEG_DATA, "__crash_info", &crashInfoSize);
-    if (crash_info) {
+    if (crash_info && crashInfoSize >= sizeof(crashreporter_annotations_t)) {
         crash_info += slide;
         crashreporter_annotations_t host_gCRAnnotations;
         Dynarmic_mem_1read(crash_info, sizeof(crashreporter_annotations_t), (char *)&host_gCRAnnotations);
         if (host_gCRAnnotations.message) {
-            char message[0x1000];
+            char message[0x1000] = {};
             Dynarmic_mem_1read(host_gCRAnnotations.message, sizeof(message), message);
-            printf("Crash message from %s: %s\n", mapping->name, message);
+            message[sizeof(message) - 1] = '\0';
+            printf("Crash message from %s: %s (cause: 0x%llx)\n",
+                mapping->name, message, host_gCRAnnotations.abort_cause);
         } else if (host_gCRAnnotations.message2) {
             printf("gCRAnnotations has message2 but unhandled. Crashing to raise attention\n");
         }
@@ -1799,6 +1883,26 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             case 366:
                 cpu->Regs()[0] = guest_bsdthread_register(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5] | ((u64)cpu->Regs()[6] << 32));
                 break;
+            case 367: // workq_open
+                cpu->Regs()[0] = guest_workq_open();
+                break;
+            case 368: // workq_kernreturn
+                cpu->Regs()[0] = guest_workq_kernreturn(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3]);
+                break;
+            case 374: { // kevent_qos
+                /*
+                 * libsystem_kernel's ARM wrapper loads arguments 5-7 into
+                 * r4-r6 and leaves argument 8 in its caller's stack. It has
+                 * pushed r4-r6/r8 by the time SVC executes, hence sp + 28.
+                 */
+                const u32 flags = MemoryRead32(cpu->Regs()[Reg::SP] + 28,
+                    false);
+                cpu->Regs()[0] = guest_kevent_qos(
+                    cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2],
+                    cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5],
+                    cpu->Regs()[6], flags);
+                break;
+            }
             case 381:
                 cpu->Regs()[0] = guest_sandbox_ms(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
                 break;

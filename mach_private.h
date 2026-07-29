@@ -19,6 +19,18 @@ __BEGIN_DECLS
 #define PTHREAD_FEATURE_WORKLOOP          0x80		/* supports workloops */
 #define PTHREAD_FEATURE_QOS_DEFAULT		0x40000000	/* the kernel supports QOS_CLASS_DEFAULT */
 
+/* iOS 10.3 libpthread workq_kernreturn operations. */
+#define WQOPS_THREAD_RETURN                 0x04
+#define WQOPS_QUEUE_NEWSPISUPP              0x10
+#define WQOPS_QUEUE_REQTHREADS              0x20
+#define WQOPS_QUEUE_REQTHREADS2             0x30
+#define WQOPS_THREAD_KEVENT_RETURN          0x40
+#define WQOPS_SET_EVENT_MANAGER_PRIORITY    0x80
+
+#define KEVENT_FLAG_IMMEDIATE                0x001
+#define KEVENT_FLAG_ERROR_EVENTS             0x002
+#define KEVENT_FLAG_WORKQ                    0x020
+
 // Others
 
 #define PROC_PIDT_SHORTBSDINFO		13
@@ -53,6 +65,7 @@ struct crashreporter_annotations_t {
 	uint64_t message2;		// char *
 	uint64_t thread;		// uint64_t
 	uint64_t dialog_mode;		// unsigned int
+	uint64_t abort_cause;		// uint64_t
 };
 
 // Mach private
