@@ -7,3 +7,4 @@ a.out
 tmp/
 Generator/GenerateShimAPI/GenerateShimObjC
 Generator/GenerateShimAPI/GenerateShimOpenGLES
+Generator/GenerateMethodSignatures/GenerateMethodSignatures

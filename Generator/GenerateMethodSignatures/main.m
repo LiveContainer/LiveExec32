@@ -1,6 +1,7 @@
-// This may be to buggy to generate, so I have put pre-generated files in templates folder. Please use it instead
-// This code should run inside of this emulator, with full iOS 10 filesystem, or if you have an iPhone running iOS 10
-// The purpose of this is to obtain the correct method signatures. Mainly because of NSInteger and CGFloat having different bit length
+// Run this inside the emulator with a full iOS 10 filesystem, or on an iOS 10
+// device. It captures the 32-bit Objective-C method encodings needed by the
+// shim generator, including the correct NSInteger and CGFloat widths.
+// Input is read from /private/var/tmp/classes.plist.
 
 @import Darwin;
 @import ObjectiveC;
@@ -64,7 +65,9 @@
 @import SpriteKit;
 @import PushKit;
 @import PassKit;
-// @import WatchKit;
+#if __has_include(<WatchKit/WatchKit.h>)
+@import WatchKit;
+#endif
 // @import OpenAL;
 @import WebKit;
 @import Contacts;
@@ -122,52 +125,105 @@
 }
 @end
 
+static char *copyXMLEscapedString(const char *value) {
+    size_t escapedLength = 0;
+    for(const char *cursor = value; *cursor; cursor++) {
+        switch(*cursor) {
+            case '&':
+                escapedLength += strlen("&amp;");
+                break;
+            case '<':
+            case '>':
+                escapedLength += strlen("&lt;");
+                break;
+            default:
+                escapedLength++;
+                break;
+        }
+    }
+
+    char *escaped = malloc(escapedLength + 1);
+    assert(escaped);
+    char *output = escaped;
+    for(const char *cursor = value; *cursor; cursor++) {
+        const char *replacement = NULL;
+        switch(*cursor) {
+            case '&':
+                replacement = "&amp;";
+                break;
+            case '<':
+                replacement = "&lt;";
+                break;
+            case '>':
+                replacement = "&gt;";
+                break;
+        }
+
+        if(replacement) {
+            size_t replacementLength = strlen(replacement);
+            memcpy(output, replacement, replacementLength);
+            output += replacementLength;
+        } else {
+            *output++ = *cursor;
+        }
+    }
+    *output = '\0';
+    return escaped;
+}
+
 void dumpMethodList(Class cls) {
-    BOOL isClass = object_getClass(cls) == cls;
+    if(!cls) {
+        printf("Skipping methods for a class that is not present in this runtime\n");
+        return;
+    }
+
+    BOOL isClass = class_isMetaClass(cls);
     printf("Dumping %s methods of %s\n", isClass ? "class" : "instance", class_getName(cls));
-    unsigned int mc;
+    unsigned int mc = 0;
     Method *mlist = class_copyMethodList(cls, &mc);
     for(int m = 0; m < mc; m++) {
         const char *name = sel_getName(method_getName(mlist[m]));
         const char *signature = method_getTypeEncoding(mlist[m]);
+        if(!name || !signature) {
+            printf("Skipped method with a missing name or type encoding\n");
+            continue;
+        }
         if(strchr(name, '_')) {
             printf("Skipped private method: %s %s\n", name, signature);
             continue;
         }
 
-        // Replace < and > with &lt; and &gt;
-        // Can't use NSString because of buggy ARC
-        char signatureFmt[0x1000] = {0};
-        assert(strlen(signature) < 0x1000);
-        strncpy(signatureFmt, signature, strlen(signature));
-        int i = 0;
-        do {
-            for(; i < strlen(signatureFmt); i++) {
-                if(signatureFmt[i] != '<' && signatureFmt[i] != '>') continue;
-                char c = signatureFmt[i] == '<' ? 'l' : 'g';
-                memmove(&signatureFmt[i] + 3, &signatureFmt[i], (signatureFmt + strlen(signatureFmt)) - &signatureFmt[i]);
-                signatureFmt[i+0] = '&';
-                signatureFmt[i+1] = c;
-                signatureFmt[i+2] = 't';
-                signatureFmt[i+3] = ';';
-                i += 4; // skip over &?t;
-                break;
-            }
-        } while(i + 1 < strlen(signatureFmt));
-
-        printf("<!--.--> <key>%s</key><string>%s</string>\n", name, signatureFmt);
+        // Avoid NSString here because ARC is unreliable in this guest.  Some
+        // SpriteKit encodings are larger than 4 KiB, so size the escaped
+        // strings dynamically instead of using the old fixed stack buffer.
+        char *escapedName = copyXMLEscapedString(name);
+        char *escapedSignature = copyXMLEscapedString(signature);
+        printf("<!--.--> <key>%s</key><string>%s</string>\n",
+               escapedName, escapedSignature);
+        free(escapedName);
+        free(escapedSignature);
     }
     free(mlist);
 }
 
-void toggleConstructorExecution(BOOL enable) {
-    uintptr_t ptr = 0x1000ceda;
-    *(uint16_t*)ptr = 0xbebe;
-    //enable ? 0x47c0 : 0xbf00;
-    __clear_cache((void *)(ptr), (void *)(ptr + 2));
+static const char *imagePathForFramework(NSString *framework, char path[PATH_MAX]) {
+    const char *name = framework.UTF8String;
+    if(!strcmp(name, "AVFAudio")) {
+        snprintf(path, PATH_MAX,
+                 "/System/Library/Frameworks/AVFoundation.framework/"
+                 "Frameworks/AVFAudio.framework/AVFAudio");
+    } else {
+        snprintf(path, PATH_MAX,
+                 "/System/Library/Frameworks/%1$s.framework/%1$s", name);
+    }
+    return path;
 }
 
 int main() {
+    // Host diagnostics and guest stdio share the same file descriptors.
+    // Line buffering keeps their output from being reordered when redirected.
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IOLBF, 0);
     printf("Hello from 32bit!\n");
 
 /*
@@ -195,6 +251,11 @@ libobjc.A.dylib[0x22484] <+64>:  ldrne  r6, [r1]; r6 == _objc_fatal
 @autoreleasepool {
     NSString *path = @"/private/var/tmp/classes.plist";
     NSMutableDictionary *dict = [[NSMutableDictionary alloc] initWithContentsOfFile:path];
+    if(!dict) {
+        fprintf(stderr, "Unable to read generator input at %s\n", path.UTF8String);
+        exit(1);
+    }
+
     printf("<!--.--> <?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     printf("<!--.--> <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n");
     printf("<!--.--> <plist version=\"1.0\">\n");
@@ -204,10 +265,10 @@ libobjc.A.dylib[0x22484] <+64>:  ldrne  r6, [r1]; r6 == _objc_fatal
         NSMutableDictionary *classes = dict[framework];
         if(classes.count == 0 || [classes[@"_resolved"] boolValue]) continue;
         printf("Dumping framework %s\n", framework.UTF8String);
-        sprintf(frameworkPath, "/System/Library/Frameworks/%1$s.framework/%1$s", framework.UTF8String);
-        void *handle = dlopen(frameworkPath, 0);
+        imagePathForFramework(framework, frameworkPath);
+        void *handle = dlopen(frameworkPath, RTLD_LAZY | RTLD_LOCAL);
         if(!handle) {
-            printf("%s\n", dlerror());
+            fprintf(stderr, "%s\n", dlerror());
             abort();
         }
 
@@ -216,7 +277,6 @@ libobjc.A.dylib[0x22484] <+64>:  ldrne  r6, [r1]; r6 == _objc_fatal
         for(NSString *className in classes) {
             printf("Dumping class %s\n", className.UTF8String);
             Class cls = NSClassFromString(className);
-            NSMutableDictionary *methods = classes[className];
 
             printf("<!--.--> <key>%s</key>\n", className.UTF8String);
             printf("<!--.--> <dict>\n");
