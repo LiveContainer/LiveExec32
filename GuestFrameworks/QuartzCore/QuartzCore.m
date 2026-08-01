@@ -1,34 +1,34 @@
 #import <QuartzCore/QuartzCore.h>
 #import <Foundation/Foundation+LC32.h>
 
-LC32_CONST_STR_DECL(CAMediaTimingFillMode const kCAFillModeBoth)
-LC32_CONST_STR_DECL(CAMediaTimingFillMode const kCAFillModeBackwards)
-LC32_CONST_STR_DECL(CAMediaTimingFillMode const kCAFillModeForwards)
-LC32_CONST_STR_DECL(CAMediaTimingFillMode const kCAFillModeRemoved)
+LC32_CONST_STR_DECL(NSString * const kCAFillModeBoth)
+LC32_CONST_STR_DECL(NSString * const kCAFillModeBackwards)
+LC32_CONST_STR_DECL(NSString * const kCAFillModeForwards)
+LC32_CONST_STR_DECL(NSString * const kCAFillModeRemoved)
 
-LC32_CONST_STR_DECL(CALayerContentsGravity const kCAGravityCenter)
-LC32_CONST_STR_DECL(CALayerContentsGravity const kCAGravityTop)
-LC32_CONST_STR_DECL(CALayerContentsGravity const kCAGravityLeft)
-LC32_CONST_STR_DECL(CALayerContentsGravity const kCAGravityRight)
-LC32_CONST_STR_DECL(CALayerContentsGravity const kCAGravityBottom)
-LC32_CONST_STR_DECL(CALayerContentsGravity const kCAGravityTopLeft)
-LC32_CONST_STR_DECL(CALayerContentsGravity const kCAGravityTopRight)
-LC32_CONST_STR_DECL(CALayerContentsGravity const kCAGravityBottomLeft)
-LC32_CONST_STR_DECL(CALayerContentsGravity const kCAGravityBottomRight)
-LC32_CONST_STR_DECL(CALayerContentsGravity const kCAGravityResize)
-LC32_CONST_STR_DECL(CALayerContentsGravity const kCAGravityResizeAspect)
-LC32_CONST_STR_DECL(CALayerContentsGravity const kCAGravityResizeAspectFill)
+LC32_CONST_STR_DECL(NSString * const kCAGravityCenter)
+LC32_CONST_STR_DECL(NSString * const kCAGravityTop)
+LC32_CONST_STR_DECL(NSString * const kCAGravityLeft)
+LC32_CONST_STR_DECL(NSString * const kCAGravityRight)
+LC32_CONST_STR_DECL(NSString * const kCAGravityBottom)
+LC32_CONST_STR_DECL(NSString * const kCAGravityTopLeft)
+LC32_CONST_STR_DECL(NSString * const kCAGravityTopRight)
+LC32_CONST_STR_DECL(NSString * const kCAGravityBottomLeft)
+LC32_CONST_STR_DECL(NSString * const kCAGravityBottomRight)
+LC32_CONST_STR_DECL(NSString * const kCAGravityResize)
+LC32_CONST_STR_DECL(NSString * const kCAGravityResizeAspect)
+LC32_CONST_STR_DECL(NSString * const kCAGravityResizeAspectFill)
 
-LC32_CONST_STR_DECL(CAMediaTimingFunctionName const kCAMediaTimingFunctionLinear)
-LC32_CONST_STR_DECL(CAMediaTimingFunctionName const kCAMediaTimingFunctionEaseIn)
-LC32_CONST_STR_DECL(CAMediaTimingFunctionName const kCAMediaTimingFunctionEaseOut)
-LC32_CONST_STR_DECL(CAMediaTimingFunctionName const kCAMediaTimingFunctionEaseInEaseOut)
-LC32_CONST_STR_DECL(CAMediaTimingFunctionName const kCAMediaTimingFunctionDefault)
+LC32_CONST_STR_DECL(NSString * const kCAMediaTimingFunctionLinear)
+LC32_CONST_STR_DECL(NSString * const kCAMediaTimingFunctionEaseIn)
+LC32_CONST_STR_DECL(NSString * const kCAMediaTimingFunctionEaseOut)
+LC32_CONST_STR_DECL(NSString * const kCAMediaTimingFunctionEaseInEaseOut)
+LC32_CONST_STR_DECL(NSString * const kCAMediaTimingFunctionDefault)
 
-LC32_CONST_STR_DECL(CATransitionType const kCATransitionFade);
-LC32_CONST_STR_DECL(CATransitionType const kCATransitionMoveIn);
-LC32_CONST_STR_DECL(CATransitionType const kCATransitionPush);
-LC32_CONST_STR_DECL(CATransitionType const kCATransitionReveal);
+LC32_CONST_STR_DECL(NSString * const kCATransitionFade);
+LC32_CONST_STR_DECL(NSString * const kCATransitionMoveIn);
+LC32_CONST_STR_DECL(NSString * const kCATransitionPush);
+LC32_CONST_STR_DECL(NSString * const kCATransitionReveal);
 
 __attribute__((constructor)) void QuartzCoreInit() {
     LC32_CONST_STR_INIT(kCAFillModeBoth);

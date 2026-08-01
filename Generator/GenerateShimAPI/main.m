@@ -306,7 +306,7 @@ static BOOL LC32MethodIsInInitFamily(LC32ObjCMethod *method) {
 
     // pull host objects
     for(MethodParameter *param in self.parameters) {
-        [self.lines addObject:[NSString stringWithFormat:@"  %@ ", param.declaration]];
+        [self.lines addObject:[NSString stringWithFormat:@"  %@", param.declaration]];
     }
 
     // perform selector
@@ -314,7 +314,7 @@ static BOOL LC32MethodIsInInitFamily(LC32ObjCMethod *method) {
 
     // post-call: eg set NSError pointer
     for(MethodParameter *param in self.parameters) {
-        [self.lines addObject:[NSString stringWithFormat:@"  %@ ", param.postCall]];
+        [self.lines addObject:[NSString stringWithFormat:@"  %@", param.postCall]];
     }
 
     // Return value

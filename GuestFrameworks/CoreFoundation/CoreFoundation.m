@@ -30,6 +30,10 @@ void CFRelease(CFTypeRef ref) {
     [(id)ref release];
 }
 
+CFTypeRef CFRetain(CFTypeRef ref) {
+    return [(id)ref retain];
+}
+
 __attribute__((constructor)) void __CFInitialize() {
     // Since we cannot link against Foundation, we have to change superclass at runtime
     // Actually, internal CF does this aswel
