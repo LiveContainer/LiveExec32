@@ -5,30 +5,40 @@
 @import UIKit;
 @import ObjectiveC;
 
-#define STRUCT_CGAffineTransform 0x6e6966664147437b
-#define STRUCT_CGPoint 0x746e696f5047437b
-#define STRUCT_CGRect 0x3d7463655247437b
-#define STRUCT_CGSize 0x3d657a695347437b
-#define STRUCT_UIEdgeInsets 0x496567644549557b
+#import "ObjCMethod.h"
 
-#define CLS(name) objc_getClass(#name)
-#define printNS(...) printf("%s\n", [NSString stringWithFormat:__VA_ARGS__].UTF8String)
+#include <string.h>
 
-@interface FLEXMethod : NSObject
-@property(nonatomic, assign, readonly) char *returnType;
-@property(nonatomic, assign, readonly) SEL selector;
-@property(nonatomic, assign, readonly) NSMethodSignature *signature;
-@property(nonatomic, assign, readonly) NSUInteger numberOfArguments;
-@property(nonatomic, assign, readonly) NSString *selectorString;
-@property(nonatomic, assign, readonly) BOOL isInstanceMethod;
-@property(nonatomic, assign, readonly) NSString *imagePath;
-+ (id)method:(Method)method isInstanceMethod:(BOOL)isInstanceMethod;
-- (NSArray<NSString *>*)prettyArgumentComponents;
-@end
+typedef NS_ENUM(NSUInteger, LC32KnownStruct) {
+    LC32KnownStructNone,
+    LC32KnownStructCGAffineTransform,
+    LC32KnownStructCGPoint,
+    LC32KnownStructCGRect,
+    LC32KnownStructCGSize,
+    LC32KnownStructUIEdgeInsets,
+};
 
-@interface FLEXRuntimeUtility : NSObject
-+ (NSString *)readableTypeForEncoding:(NSString *)encodingString;
-@end
+static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
+    if(!encoding) return LC32KnownStructNone;
+
+    while(*encoding && strchr("rnNoORVA", *encoding)) encoding++;
+    if(!strncmp(encoding, "{CGAffineTransform=", sizeof("{CGAffineTransform=") - 1)) {
+        return LC32KnownStructCGAffineTransform;
+    }
+    if(!strncmp(encoding, "{CGPoint=", sizeof("{CGPoint=") - 1)) {
+        return LC32KnownStructCGPoint;
+    }
+    if(!strncmp(encoding, "{CGRect=", sizeof("{CGRect=") - 1)) {
+        return LC32KnownStructCGRect;
+    }
+    if(!strncmp(encoding, "{CGSize=", sizeof("{CGSize=") - 1)) {
+        return LC32KnownStructCGSize;
+    }
+    if(!strncmp(encoding, "{UIEdgeInsets=", sizeof("{UIEdgeInsets=") - 1)) {
+        return LC32KnownStructUIEdgeInsets;
+    }
+    return LC32KnownStructNone;
+}
 
 @interface MethodParameter : NSObject
 @property(nonatomic, retain) NSString *name;
@@ -41,8 +51,27 @@
 
 // FIXME: will need to parse header to return correctly. On 64bit, NS*Integer and CGFloat are not distinguishable from 32bit
 + (NSString *)readableTypeForSignature:(const char *)signature {
+    if(!signature || !*signature) return @"?";
+
     // Correct some 32bit types
-    switch(((uint16_t *)signature)[0]) {
+    if(signature[0] == '^' && signature[1]) {
+        switch(signature[1]) {
+            case 'L':
+                return @"uint32_t *";
+            case 'Q':
+                return @"uint64_t *";
+            case 'c':
+                return @"BOOL *";
+            case 'd':
+                return @"double *";
+            case 'l':
+                return @"int32_t *";
+            case 'q':
+                return @"int64_t *";
+        }
+    }
+
+    switch(signature[0]) {
         case 'C':
             return @"unsigned char";
         case 'L':
@@ -57,20 +86,8 @@
             return @"int32_t";
         case 'q':
             return @"int64_t";
-        case 'L^':
-            return @"uint32_t *";
-        case 'Q^':
-            return @"uint64_t *";
-        case 'c^':
-            return @"BOOL *";
-        case 'd^':
-            return @"double *";
-        case 'l^':
-            return @"int32_t *";
-        case 'q^':
-            return @"int64_t *";
         default:
-            return [CLS(FLEXRuntimeUtility) readableTypeForEncoding:@(signature)];
+            return LC32ReadableTypeForEncoding(signature);
     }
 }
 
@@ -142,22 +159,17 @@
             }
     }
 
-    // structs
-    switch(*(uint64_t*)self.signature) {
-        case STRUCT_CGAffineTransform:
-        case STRUCT_CGPoint:
-        case STRUCT_CGRect:
-        case STRUCT_CGSize:
-        case STRUCT_UIEdgeInsets:
-            return [NSString stringWithFormat:@"%1$@_64 host_arg%2$d = LC32Host%1$@(guest_arg%2$d);", self.type, self.index];
-            //return [NSString stringWithFormat:@"%1$@_64 host_arg%2$d_value = LC32Host%1$@(guest_arg%2$d); uint64_t host_arg%2$d = LC32GuestToHostCString((const char *)&host_arg%2$d_value, sizeof(host_arg%2$d_value));", self.type, self.index];
+    if(LC32KnownStructForEncoding(self.signature) != LC32KnownStructNone) {
+        return [NSString stringWithFormat:@"%1$@_64 host_arg%2$d = LC32Host%1$@(guest_arg%2$d);", self.type, self.index];
+        //return [NSString stringWithFormat:@"%1$@_64 host_arg%2$d_value = LC32Host%1$@(guest_arg%2$d); uint64_t host_arg%2$d = LC32GuestToHostCString((const char *)&host_arg%2$d_value, sizeof(host_arg%2$d_value));", self.type, self.index];
     }
 
     return [NSString stringWithFormat:@"/* %s: unhandled type %@ */", sel_getName(_cmd), self.type];
 }
 
 - (NSString *)parameterToBePassed {
-    BOOL returnDirect, returnPointer;
+    BOOL returnDirect = NO;
+    BOOL returnPointer = NO;
     switch(self.signature[0]) {
         case '@':
         case '#':
@@ -177,15 +189,8 @@
             break;
     }
 
-    // structs
-    switch(*(uint64_t*)self.signature) {
-        case STRUCT_CGAffineTransform:
-        case STRUCT_CGPoint:
-        case STRUCT_CGRect:
-        case STRUCT_CGSize:
-        case STRUCT_UIEdgeInsets:
-            returnDirect = YES;
-            break;
+    if(LC32KnownStructForEncoding(self.signature) != LC32KnownStructNone) {
+        returnDirect = YES;
     }
 
     if(returnDirect) {
@@ -225,8 +230,13 @@
             return [NSString stringWithFormat:@"*guest_arg%1$d = LC32HostToGuestObject(host_arg%1$d);", self.index];
         default:
             // int*, float *, etc
-            if([MethodParameter isDirectCastType:self.signature[1]]) {
-                return [NSString stringWithFormat:@"*guest_arg%1$d = (%2$@)host_arg%1$d;", self.index, [self.type substringToIndex:self.type.length-2]];
+            if([MethodParameter isDirectCastType:self.signature[1]] &&
+               [self.type hasSuffix:@" *"]) {
+                NSString *pointeeType =
+                    [self.type substringToIndex:self.type.length - 2];
+                return [NSString stringWithFormat:
+                    @"*guest_arg%1$d = (%2$@)host_arg%1$d;",
+                    self.index, pointeeType];
             }
             break;
     }
@@ -238,8 +248,18 @@
 }
 @end
 
+static BOOL LC32MethodIsInInitFamily(LC32ObjCMethod *method) {
+    if(!method.isInstanceMethod) return NO;
+
+    const char *selectorName = sel_getName(method.selector);
+    if(!selectorName || strncmp(selectorName, "init", 4) != 0) return NO;
+
+    char next = selectorName[4];
+    return next == '\0' || next < 'a' || next > 'z';
+}
+
 @interface MethodBuilder : NSObject
-@property(nonatomic, retain) FLEXMethod *method;
+@property(nonatomic, retain) LC32ObjCMethod *method;
 @property(nonatomic, retain) NSString *returnType;
 @property(nonatomic, retain) NSMutableArray<MethodParameter *> *parameters;
 @property(nonatomic, retain) NSMutableArray<NSString *> *lines;
@@ -247,19 +267,30 @@
 @end
 @implementation MethodBuilder
 
-- (instancetype)initWithMethod:(FLEXMethod *)method {
+- (instancetype)initWithMethod:(LC32ObjCMethod *)method {
     self = [super init];
     self.lines = [NSMutableArray new];
     self.parameters = [NSMutableArray new];
     self.method = method;
-    self.returnType = [MethodParameter readableTypeForSignature:(self.method.returnType ?: "")];
+    const char *returnType = self.method.returnType;
+    self.returnType =
+        [MethodParameter readableTypeForSignature:returnType ? returnType : ""];
 
     SEL selector = method.selector;
     NSArray<NSString *> *selectorParameters = [@(sel_getName(selector)) componentsSeparatedByString:@":"];
-    for(int i = 2; i < self.method.numberOfArguments; i++) {
-        const char *argType = [self.method.signature getArgumentTypeAtIndex:i] ?: "?";
+    for(NSUInteger i = 2; i < self.method.numberOfArguments; i++) {
+        const char *argType = [self.method argumentTypeAtIndex:i];
+        if(!argType) argType = "?";
         NSString *arg = [MethodParameter readableTypeForSignature:argType];
-        [self.parameters addObject:[[MethodParameter alloc] initWithIndex:i-2 name:selectorParameters[i-2] type:arg signature:argType]];
+        NSUInteger selectorIndex = i - 2;
+        NSString *name = selectorIndex < selectorParameters.count
+            ? selectorParameters[selectorIndex]
+            : [NSString stringWithFormat:@"argument%lu", (unsigned long)selectorIndex];
+        [self.parameters addObject:[[MethodParameter alloc]
+            initWithIndex:(int)selectorIndex
+                     name:name
+                     type:arg
+                signature:argType]];
     }
 
     // declare method
@@ -274,7 +305,6 @@
     [self.lines addObject:[NSString stringWithFormat:@"  if(!_host_cmd) _host_cmd = LC32GetHostSelector(_cmd) | (uint64_t)%d << 63;", self.method.returnType[0] == '{']];
 
     // pull host objects
-    NSMutableString *methodDeclaration = [NSMutableString new];
     for(MethodParameter *param in self.parameters) {
         [self.lines addObject:[NSString stringWithFormat:@"  %@ ", param.declaration]];
     }
@@ -336,7 +366,7 @@
             }
         case '@':
         case '#':
-            if([self.method.selectorString hasPrefix:@"init"]) {// init, initWith*
+            if(LC32MethodIsInInitFamily(self.method)) {
                 return @"self.host_self = host_ret; return self;";
             } else {
                 return @"return LC32HostToGuestObject(host_ret);";
@@ -358,14 +388,8 @@
             return [NSString stringWithFormat:@"return (%@)host_ret;", self.returnType];
     }
     
-    // structs
-    switch(*(uint64_t*)self.method.returnType) {
-        case STRUCT_CGAffineTransform:
-        case STRUCT_CGPoint:
-        case STRUCT_CGRect:
-        case STRUCT_CGSize:
-        case STRUCT_UIEdgeInsets:
-            return [NSString stringWithFormat:@"return LC32Guest%@(host_ret);", self.returnType];
+    if(LC32KnownStructForEncoding(self.method.returnType) != LC32KnownStructNone) {
+        return [NSString stringWithFormat:@"return LC32Guest%@(host_ret);", self.returnType];
     }
 
     return [NSString stringWithFormat:@"/* %s: unhandled type %@ */", sel_getName(_cmd), self.returnType];
@@ -377,99 +401,131 @@
 @end
 
 @interface ClassBuilder : NSObject
-@property(nonatomic, retain) NSMutableDictionary<NSString *, MethodBuilder *> *methods;
-@property(nonatomic) Class cls;
+@property(nonatomic, retain) NSMutableDictionary<NSString *, id> *methods;
+@property(nonatomic, retain) NSString *className;
 @property(nonatomic, retain) NSString *imagePath;
+@property(nonatomic) BOOL usesRuntimeSignatures;
+@property(nonatomic) NSUInteger skippedIncompleteMethods;
+@property(nonatomic) NSUInteger skippedFilteredMethods;
 @end
 @implementation ClassBuilder
 - (instancetype)initWithClass:(Class)cls imagePath:(NSString *)imagePath {
     self = [super init];
-    self.cls = cls;
+    if(!self || !cls) return nil;
+
+    self.className = NSStringFromClass(cls);
     self.imagePath = imagePath;
+    self.usesRuntimeSignatures = YES;
     self.methods = [NSMutableDictionary new];
 
     unsigned int mc = 0;
     Method *mlist;
 
     mlist = class_copyMethodList(object_getClass(cls), &mc);
-    for(int m = 0; m < mc; m++) {
-        [self validateAndAddMethod:mlist[m] isInstanceMethod:NO];
+    for(unsigned int m = 0; m < mc; m++) {
+        [self validateAndAddRuntimeMethod:mlist[m] isInstanceMethod:NO];
     }
     free(mlist);
 
     mlist = class_copyMethodList(cls, &mc);
-    for(int m = 0; m < mc; m++) {
-        [self validateAndAddMethod:mlist[m] isInstanceMethod:YES];
+    for(unsigned int m = 0; m < mc; m++) {
+        [self validateAndAddRuntimeMethod:mlist[m] isInstanceMethod:YES];
     }
     free(mlist);
 
     return self;
 }
 
-- (instancetype)initWithClass:(Class)cls imagePath:(NSString *)imagePath methodSignatures:(NSDictionary *)dict {
+- (instancetype)initWithClassName:(NSString *)className
+                        imagePath:(NSString *)imagePath
+                 methodSignatures:(NSDictionary *)dict {
     self = [super init];
-    self.cls = cls;
+    if(!self) return nil;
+
+    self.className = className;
     self.imagePath = imagePath;
-    if([imagePath hasSuffix:@"/OpenGLES"]) {
-        self.imagePath = @"/System/Library/Frameworks/GLKit.framework/GLKit";
+    if([imagePath.lastPathComponent isEqualToString:@"OpenGLES"]) {
+        self.imagePath = @"GLKit";
     }
     self.methods = [NSMutableDictionary new];
-    NSDictionary *methods;
-    // it's safe to store this fake method struct on the stack, since all generators happen at init
-    uint64_t methodInStack[3];
-    Method m = (Method)&methodInStack;
 
-    methods = dict[@"+"];
-    for(NSString *method in methods) {
-        methodInStack[0] = (uint64_t)NSSelectorFromString(method);
-        methodInStack[1] = (uint64_t)[methods[method] UTF8String];
-        [self validateAndAddMethod:m isInstanceMethod:NO];
-    }
-
-    methods = dict[@"-"];
-    for(NSString *method in methods) {
-        methodInStack[0] = (uint64_t)NSSelectorFromString(method);
-        methodInStack[1] = (uint64_t)[methods[method] UTF8String];
-        [self validateAndAddMethod:m isInstanceMethod:YES];
+    for(NSString *kind in @[@"+", @"-"]) {
+        NSDictionary *methods = dict[kind];
+        BOOL isInstanceMethod = [kind isEqualToString:@"-"];
+        for(NSString *selectorName in
+                [methods.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+            NSString *typeEncoding = methods[selectorName];
+            LC32ObjCMethod *method = [LC32ObjCMethod
+                methodWithSelector:NSSelectorFromString(selectorName)
+                      typeEncoding:typeEncoding.UTF8String
+                  isInstanceMethod:isInstanceMethod];
+            [self validateAndAddMethod:method];
+        }
     }
 
     return self;
 }
 
-- (void)validateAndAddMethod:(Method)objcMethod isInstanceMethod:(BOOL)isInstanceMethod {
-    SEL selector = method_getName(objcMethod);
-    const char *selectorName = sel_getName(selector);
-    if(strchr(selectorName, '_') != NULL) {
-        // this is a private API, skip
-        printNS(@"// Skipped private method: %s", selectorName);
-        return;
-    } else if(!strncmp(selectorName, "allocWithZone:", 14)) {
-        // skip alloc
-        printNS(@"// Skipped alloc method: %s", selectorName);
-        return;
-    } else if(!strncmp(selectorName, "dealloc", 7) || !strncmp(selectorName, "autorelease", 11) || !strncmp(selectorName, "release", 7) || !strncmp(selectorName, "retain", 6) || !strncmp(selectorName, "retainCount", 11)) {
-        // skip ARC methods
-        printNS(@"// Skipped ARC method: %s", selectorName);
+- (void)validateAndAddRuntimeMethod:(Method)objcMethod
+                  isInstanceMethod:(BOOL)isInstanceMethod {
+    [self validateAndAddMethod:[LC32ObjCMethod method:objcMethod
+                                    isInstanceMethod:isInstanceMethod]];
+}
+
+- (void)validateAndAddMethod:(LC32ObjCMethod *)method {
+    if(!method) {
+        self.skippedIncompleteMethods++;
         return;
     }
 
-    FLEXMethod *method = [CLS(FLEXMethod) method:objcMethod isInstanceMethod:isInstanceMethod];
-    if(sel_getName(@selector(initialize)) == selectorName) {
+    const char *selectorName = sel_getName(method.selector);
+    if(strchr(selectorName, '_') != NULL) {
+        // this is a private API, skip
+        self.skippedFilteredMethods++;
+        return;
+    } else if(!strcmp(selectorName, "allocWithZone:")) {
+        // skip alloc
+        self.skippedFilteredMethods++;
+        return;
+    } else if(!strcmp(selectorName, "dealloc") ||
+              !strcmp(selectorName, "autorelease") ||
+              !strcmp(selectorName, "release") ||
+              !strcmp(selectorName, "retain") ||
+              !strcmp(selectorName, "retainCount")) {
+        // skip ARC methods
+        self.skippedFilteredMethods++;
+        return;
+    }
+
+    if(!method.hasCompleteTypeEncoding) {
+        fprintf(stderr, "Skipping incomplete encoding: %s %s\n",
+                self.className.UTF8String, selectorName);
+        self.skippedIncompleteMethods++;
+        return;
+    }
+
+    NSString *methodKey = [NSString stringWithFormat:@"%@%s",
+        method.isInstanceMethod ? @"-" : @"+", selectorName];
+    if(!method.isInstanceMethod &&
+       sel_isEqual(method.selector, @selector(initialize))) {
         // For +(void)initialize, we must first obtain the host class pointer
         NSMutableString *string = [NSMutableString new];
         [string appendFormat:@"%@ {\n", method.description];
         //[string appendString:@"  self.host_self = LC32GetHostClass(class_getName(self.class));\n"];
         [string appendFormat:@"}"];
-        self.methods[method.description] = (id)string;
+        self.methods[methodKey] = string;
         return;
     }
 
-    self.methods[method.description] = [[MethodBuilder alloc] initWithMethod:method];
+    self.methods[methodKey] = [[MethodBuilder alloc] initWithMethod:method];
 }
 
 - (NSString *)description {
     NSMutableString *string = [NSMutableString new];
     [string appendString:@"// Generated file\n"];
+    if(self.usesRuntimeSignatures) {
+        [string appendString:@"// WARNING: types came from the current 64-bit host runtime; audit width-dependent types before using this shim.\n"];
+    }
     [string appendFormat:@"#if __has_include(<%1$@/%1$@+LC32.h>)\n", self.imagePath.lastPathComponent];
     [string appendFormat:@"#import <%1$@/%1$@+LC32.h>\n", self.imagePath.lastPathComponent];
     [string appendFormat:@"#else\n"];
@@ -478,81 +534,355 @@
     [string appendFormat:@"#import <LC32/LC32.h>\n"];
     [string appendFormat:@"#import <CoreGraphics/CoreGraphics+LC32.h>\n"];
     [string appendFormat:@"#import <UIKit/UIKit+LC32.h>\n"];
-    [string appendFormat:@"@implementation %@\n", self.cls.description];
-    [string appendString:[self.methods.allValues componentsJoinedByString:@"\n\n"]];
+    [string appendFormat:@"@implementation %@\n", self.className];
+    NSArray<NSString *> *methodKeys =
+        [self.methods.allKeys sortedArrayUsingSelector:@selector(compare:)];
+    NSMutableArray<NSString *> *methodSources =
+        [NSMutableArray arrayWithCapacity:methodKeys.count];
+    for(NSString *methodKey in methodKeys) {
+        [methodSources addObject:[self.methods[methodKey] description]];
+    }
+    [string appendString:[methodSources componentsJoinedByString:@"\n\n"]];
     [string appendString:@"\n"];
     [string appendString:@"@end"];
     return string;
 }
 @end
 
-int main(int argc, char **argv) {
-/*
-    if(argc != 2) {
-        printf("Usage: %s ClassName\n", argv[0]);
-        return 1;
-    }
-    Class cls = objc_getClass(argv[1]);
-    if(!cls) {
-        printf("Class %s not found\n", argv[1]);
-        return 1;
-    }
-*/
-    dlopen("/var/jb/usr/lib/TweakInject/libFLEX.dylib", RTLD_GLOBAL);
-
-    chdir(NSBundle.mainBundle.bundlePath.UTF8String);
-#if 0
-    NSDictionary *frameworks = [NSDictionary dictionaryWithContentsOfFile:@"../templates/generated.plist"];
-    for(NSString *framework in frameworks) {
-        NSString *fwPath = [NSString stringWithFormat:@"/System/Library/Frameworks/%1$@.framework/%1$@", framework];
-        if(!dlopen(fwPath.UTF8String, RTLD_GLOBAL)) {
-            printf("Skipping nonexistent framework %s\n", framework.UTF8String);
-            continue;
+static BOOL LC32CreateEmptyOutputDirectory(NSString *outputPath,
+                                           NSError **error) {
+    NSFileManager *fileManager = NSFileManager.defaultManager;
+    BOOL isDirectory = NO;
+    if([fileManager fileExistsAtPath:outputPath isDirectory:&isDirectory]) {
+        if(!isDirectory) {
+            if(error) {
+                *error = [NSError errorWithDomain:NSCocoaErrorDomain
+                                             code:NSFileWriteFileExistsError
+                                         userInfo:@{
+                    NSLocalizedDescriptionKey:
+                        @"Output path exists and is not a directory"
+                }];
+            }
+            return NO;
         }
 
-        NSString *_outPath = [NSString stringWithFormat:@"../../GuestFrameworks/%@", framework];
-        [NSFileManager.defaultManager createDirectoryAtPath:_outPath withIntermediateDirectories:YES attributes:@{} error:nil];
+        NSArray *contents = [fileManager contentsOfDirectoryAtPath:outputPath
+                                                              error:error];
+        if(!contents) return NO;
+        if(contents.count != 0) {
+            if(error) {
+                *error = [NSError errorWithDomain:NSCocoaErrorDomain
+                                             code:NSFileWriteFileExistsError
+                                         userInfo:@{
+                    NSLocalizedDescriptionKey:
+                        @"Output directory must be empty"
+                }];
+            }
+            return NO;
+        }
+        return YES;
+    }
 
-        NSDictionary *classes = frameworks[framework];
-        for(NSString *cls in classes) {
-            Class clsObject = NSClassFromString(cls);
-            if(!clsObject) {
-                printf("Skipping nonexistent class %s\n", cls.UTF8String);
-                continue;
+    return [fileManager createDirectoryAtPath:outputPath
+                  withIntermediateDirectories:YES
+                                   attributes:nil
+                                        error:error];
+}
+
+static BOOL LC32IsSafePathComponent(NSString *component) {
+    if(![component isKindOfClass:NSString.class] || component.length == 0) {
+        return NO;
+    }
+    if([component isEqualToString:@"."] ||
+       [component isEqualToString:@".."]) {
+        return NO;
+    }
+    return [component rangeOfString:@"/"].location == NSNotFound;
+}
+
+static BOOL LC32SetValidationError(NSError **error, NSString *description) {
+    if(error) {
+        *error = [NSError errorWithDomain:NSCocoaErrorDomain
+                                     code:NSFileReadCorruptFileError
+                                 userInfo:@{
+            NSLocalizedDescriptionKey: description
+        }];
+    }
+    return NO;
+}
+
+static BOOL LC32ValidateSignaturesPlist(NSDictionary *frameworks,
+                                        NSError **error) {
+    for(id frameworkName in frameworks) {
+        if(!LC32IsSafePathComponent(frameworkName)) {
+            return LC32SetValidationError(error,
+                [NSString stringWithFormat:
+                    @"Invalid framework path component: %@", frameworkName]);
+        }
+
+        id classes = frameworks[frameworkName];
+        if(![classes isKindOfClass:NSDictionary.class]) {
+            return LC32SetValidationError(error,
+                [NSString stringWithFormat:
+                    @"Framework %@ is not a dictionary", frameworkName]);
+        }
+
+        for(id className in classes) {
+            if(!LC32IsSafePathComponent(className)) {
+                return LC32SetValidationError(error,
+                    [NSString stringWithFormat:
+                        @"Invalid class path component: %@/%@",
+                        frameworkName, className]);
             }
-            NSString *outPath = _outPath;
-            // Find the actual framework containing the class
-            NSString *containingBundlePath = [NSBundle bundleForClass:clsObject].executablePath;
-            // Do not replace if it happens to be from a private framework (eg UIKitCore)
-            if(![containingBundlePath hasPrefix:@"/System/Library/PrivateFrameworks"] && ![containingBundlePath.lastPathComponent isEqualToString:framework]) {
-                outPath = [NSString stringWithFormat:@"../../GuestFrameworks/%@", containingBundlePath.lastPathComponent];
-                [NSFileManager.defaultManager createDirectoryAtPath:outPath withIntermediateDirectories:YES attributes:@{} error:nil];
+
+            id methodKinds = classes[className];
+            if(![methodKinds isKindOfClass:NSDictionary.class]) {
+                return LC32SetValidationError(error,
+                    [NSString stringWithFormat:
+                        @"Class %@/%@ is not a dictionary",
+                        frameworkName, className]);
             }
-            ClassBuilder *classContent = [[ClassBuilder alloc] initWithClass:clsObject imagePath:fwPath methodSignatures:classes[cls]];
-            [classContent.description writeToFile:[outPath stringByAppendingFormat:@"/%@.m", cls] atomically:YES];
+
+            for(id kind in methodKinds) {
+                if(![kind isKindOfClass:NSString.class] ||
+                   (![(NSString *)kind isEqualToString:@"+"] &&
+                    ![(NSString *)kind isEqualToString:@"-"])) {
+                    return LC32SetValidationError(error,
+                        [NSString stringWithFormat:
+                            @"Invalid method kind for %@/%@: %@",
+                            frameworkName, className, kind]);
+                }
+
+                id methods = methodKinds[kind];
+                if(![methods isKindOfClass:NSDictionary.class]) {
+                    return LC32SetValidationError(error,
+                        [NSString stringWithFormat:
+                            @"Method kind %@ for %@/%@ is not a dictionary",
+                            kind, frameworkName, className]);
+                }
+
+                for(id selectorName in methods) {
+                    id typeEncoding = methods[selectorName];
+                    if(![selectorName isKindOfClass:NSString.class] ||
+                       [(NSString *)selectorName length] == 0 ||
+                       ![typeEncoding isKindOfClass:NSString.class] ||
+                       [(NSString *)typeEncoding length] == 0) {
+                        return LC32SetValidationError(error,
+                            [NSString stringWithFormat:
+                                @"Invalid method entry for %@/%@: %@",
+                                frameworkName, className, selectorName]);
+                    }
+                }
+            }
         }
     }
-#endif
+    return YES;
+}
 
-    // UIKit ONLY!!!!!!
+static BOOL LC32WriteClass(ClassBuilder *classBuilder,
+                           NSString *outputPath,
+                           NSError **error) {
+    NSString *fileName =
+        [classBuilder.className stringByAppendingPathExtension:@"m"];
+    NSString *filePath = [outputPath stringByAppendingPathComponent:fileName];
+    return [classBuilder.description writeToFile:filePath
+                                      atomically:YES
+                                        encoding:NSUTF8StringEncoding
+                                           error:error];
+}
+
+typedef struct {
+    NSUInteger generated;
+    NSUInteger unavailable;
+    NSUInteger failures;
+} LC32RuntimeGenerationResult;
+
+static LC32RuntimeGenerationResult
+LC32GenerateRuntimeUIKitExtras(NSString *outputRoot) {
+    LC32RuntimeGenerationResult result = {0};
     NSString *uikitPath = @"/System/Library/Frameworks/UIKit.framework/UIKit";
     NSArray<NSString *> *classes = @[
-        @"UIDynamicSystemColor", @"UIDynamicColor", @"UILayoutContainerView", @"UICachedDeviceWhiteColor", @"UIDeviceWhiteColor", @"UIDeviceRGBColor",
-        @"UILayoutContainerView", @"UITableViewCellLayoutManager", @"_UIMoreListTableView", @"UIMoreListCellLayoutManager", @"UIMoreListController",
+        @"UIDynamicSystemColor", @"UIDynamicColor", @"UILayoutContainerView",
+        @"UICachedDeviceWhiteColor", @"UIDeviceWhiteColor", @"UIDeviceRGBColor",
+        @"UITableViewCellLayoutManager", @"_UIMoreListTableView",
+        @"UIMoreListCellLayoutManager", @"UIMoreListController",
         @"UIMoreNavigationController", @"UINibDecoder"
     ];
-    for(NSString *clsStr in classes) {
-        Class cls = NSClassFromString(clsStr);
-        if(!cls) {
-            NSLog(@"Didn't find class %@", clsStr);
-            continue;
-        }
-        NSString *outPath = @"../../GuestFrameworks/UIKit";
-        [NSFileManager.defaultManager createDirectoryAtPath:outPath withIntermediateDirectories:YES attributes:@{} error:nil];
-
-        ClassBuilder *classContent = [[ClassBuilder alloc] initWithClass:cls imagePath:uikitPath];
-        [classContent.description writeToFile:[outPath stringByAppendingFormat:@"/%@.m", cls] atomically:YES];
+    NSString *outputPath =
+        [outputRoot stringByAppendingPathComponent:@"UIKit"];
+    NSError *error = nil;
+    if(![NSFileManager.defaultManager
+            createDirectoryAtPath:outputPath
+      withIntermediateDirectories:YES
+                       attributes:nil
+                            error:&error]) {
+        fprintf(stderr, "Could not create %s: %s\n",
+                outputPath.UTF8String, error.localizedDescription.UTF8String);
+        result.failures++;
+        return result;
     }
 
-    return 0;
+    for(NSString *className in classes) {
+        NSString *fileName =
+            [className stringByAppendingPathExtension:@"m"];
+        NSString *filePath =
+            [outputPath stringByAppendingPathComponent:fileName];
+        if([NSFileManager.defaultManager fileExistsAtPath:filePath]) {
+            fprintf(stderr,
+                    "Keeping captured UIKit class instead of runtime class: %s\n",
+                    className.UTF8String);
+            continue;
+        }
+
+        Class cls = NSClassFromString(className);
+        if(!cls) {
+            fprintf(stderr, "Runtime UIKit class not found: %s\n",
+                    className.UTF8String);
+            result.unavailable++;
+            continue;
+        }
+
+        ClassBuilder *classBuilder =
+            [[ClassBuilder alloc] initWithClass:cls imagePath:uikitPath];
+        error = nil;
+        if(!LC32WriteClass(classBuilder, outputPath, &error)) {
+            fprintf(stderr, "Could not write runtime class %s: %s\n",
+                    className.UTF8String,
+                    error.localizedDescription.UTF8String);
+            result.failures++;
+            continue;
+        }
+        result.generated++;
+    }
+    return result;
+}
+
+int main(int argc, char **argv) {
+    @autoreleasepool {
+        if(argc < 3 || argc > 4 ||
+           (argc == 4 && strcmp(argv[3], "--runtime-uikit") != 0)) {
+            fprintf(stderr,
+                    "Usage: %s INPUT_PLIST EMPTY_OUTPUT_DIRECTORY "
+                    "[--runtime-uikit]\n",
+                    argv[0]);
+            return 2;
+        }
+
+        NSString *inputPath = [@(argv[1]) stringByStandardizingPath];
+        NSString *outputRoot = [@(argv[2]) stringByStandardizingPath];
+        NSDictionary *frameworks =
+            [NSDictionary dictionaryWithContentsOfFile:inputPath];
+        if(![frameworks isKindOfClass:NSDictionary.class]) {
+            fprintf(stderr, "Could not read signatures plist: %s\n",
+                    inputPath.UTF8String);
+            return 1;
+        }
+
+        NSError *error = nil;
+        if(!LC32ValidateSignaturesPlist(frameworks, &error)) {
+            fprintf(stderr, "Invalid signatures plist %s: %s\n",
+                    inputPath.UTF8String,
+                    error.localizedDescription.UTF8String);
+            return 1;
+        }
+
+        if(!LC32CreateEmptyOutputDirectory(outputRoot, &error)) {
+            fprintf(stderr, "Could not use output directory %s: %s\n",
+                    outputRoot.UTF8String,
+                    error.localizedDescription.UTF8String);
+            return 1;
+        }
+
+        NSUInteger frameworkCount = 0;
+        NSUInteger classCount = 0;
+        NSUInteger methodCount = 0;
+        NSUInteger skippedIncompleteMethods = 0;
+        NSUInteger skippedFilteredMethods = 0;
+        NSUInteger writeFailureCount = 0;
+
+        NSArray<NSString *> *frameworkNames =
+            [frameworks.allKeys sortedArrayUsingSelector:@selector(compare:)];
+        for(NSString *frameworkName in frameworkNames) {
+            NSDictionary *classes = frameworks[frameworkName];
+            if(![classes isKindOfClass:NSDictionary.class]) {
+                fprintf(stderr, "Invalid framework entry: %s\n",
+                        frameworkName.UTF8String);
+                writeFailureCount++;
+                continue;
+            }
+
+            NSString *outputPath =
+                [outputRoot stringByAppendingPathComponent:frameworkName];
+            error = nil;
+            if(![NSFileManager.defaultManager
+                    createDirectoryAtPath:outputPath
+              withIntermediateDirectories:YES
+                               attributes:nil
+                                    error:&error]) {
+                fprintf(stderr, "Could not create framework directory %s: %s\n",
+                        outputPath.UTF8String,
+                        error.localizedDescription.UTF8String);
+                writeFailureCount++;
+                continue;
+            }
+            frameworkCount++;
+
+            NSArray<NSString *> *classNames =
+                [classes.allKeys sortedArrayUsingSelector:@selector(compare:)];
+            for(NSString *className in classNames) {
+                @autoreleasepool {
+                    NSDictionary *methodSignatures = classes[className];
+                    if(![methodSignatures isKindOfClass:NSDictionary.class]) {
+                        fprintf(stderr, "Invalid class entry: %s/%s\n",
+                                frameworkName.UTF8String,
+                                className.UTF8String);
+                        writeFailureCount++;
+                        continue;
+                    }
+
+                    ClassBuilder *classBuilder = [[ClassBuilder alloc]
+                        initWithClassName:className
+                               imagePath:frameworkName
+                        methodSignatures:methodSignatures];
+                    methodCount += classBuilder.methods.count;
+                    skippedIncompleteMethods +=
+                        classBuilder.skippedIncompleteMethods;
+                    skippedFilteredMethods +=
+                        classBuilder.skippedFilteredMethods;
+
+                    error = nil;
+                    if(!LC32WriteClass(classBuilder, outputPath, &error)) {
+                        fprintf(stderr, "Could not write %s/%s: %s\n",
+                                frameworkName.UTF8String,
+                                className.UTF8String,
+                                error.localizedDescription.UTF8String);
+                        writeFailureCount++;
+                        continue;
+                    }
+                    classCount++;
+                }
+            }
+        }
+
+        LC32RuntimeGenerationResult runtimeResult = {0};
+        if(argc == 4) {
+            runtimeResult = LC32GenerateRuntimeUIKitExtras(outputRoot);
+        }
+        printf("Generated %lu methods in %lu classes from %lu frameworks; "
+               "skipped %lu incomplete and %lu filtered methods",
+               (unsigned long)methodCount,
+               (unsigned long)classCount,
+               (unsigned long)frameworkCount,
+               (unsigned long)skippedIncompleteMethods,
+               (unsigned long)skippedFilteredMethods);
+        if(argc == 4) {
+            printf("; added %lu runtime UIKit classes, %lu unavailable",
+                   (unsigned long)runtimeResult.generated,
+                   (unsigned long)runtimeResult.unavailable);
+        }
+        printf(".\n");
+
+        return writeFailureCount == 0 && runtimeResult.failures == 0 &&
+               runtimeResult.unavailable == 0 ? 0 : 1;
+    }
 }
