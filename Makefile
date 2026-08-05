@@ -16,10 +16,12 @@ LiveExec32_FILES = \
 	HostFrameworks/Foundation/Foundation.mm \
 	HostFrameworks/Foundation/NSString.mm \
 	HostFrameworks/CoreGraphics/CoreGraphics.mm \
+	HostFrameworks/OpenAL/OpenAL.mm \
 	HostFrameworks/UIKit/UIKit.mm
 LiveExec32_CFLAGS = -Iinclude -DDYNARMIC_MASTER
 LiveExec32_CCFLAGS = -std=c++17
 LiveExec32_LDFLAGS = -L./Resources/Frameworks -ldynarmic
+LiveExec32_FRAMEWORKS = OpenAL
 LiveExec32_CODESIGN_FLAGS = -Sentitlements.plist
 #LiveExec32_INSTALL_PATH = /usr/local/bin
 
