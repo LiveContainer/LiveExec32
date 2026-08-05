@@ -77,6 +77,19 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
     guestMappings[guestMappingLen].hostAddr = map;
     struct mach_header *header = (struct mach_header *)map;
     assert(header->magic == MH_MAGIC && header->cputype == CPU_TYPE_ARM);
+
+    /*
+     * A non-PIE executable is linked for its preferred VM addresses and may
+     * contain absolute pointers with no rebase records.  Sliding such an
+     * image leaves (among other things) Objective-C class-list entries
+     * pointing at the unmapped original addresses.  Let dyld load fixed
+     * executables where they were linked; PIE executables still use the
+     * caller-provided ASLR base.
+     */
+    if(header->filetype == MH_EXECUTE && !(header->flags & MH_PIE)) {
+        target = 0;
+        printf("LC32: mapping non-PIE executable at preferred addresses\n");
+    }
     
     uintptr_t cur = (uintptr_t)header + sizeof(mach_header);
     load_command *lc;

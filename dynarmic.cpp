@@ -7329,15 +7329,21 @@ static u64 Dynarmic_mem_reserve(
     }
     reservations->clear();
     
-    // Don't allocate anything below 16MB region to better catch bad accesses
-    if (address < 0x10000000) { // DYN_PAGE_SIZE
-        if (fixed) {
-            printf("Dynarmic_mem_reserve: refusing to reserve below 16MB range\n");
+    /*
+     * Keep anonymous allocations away from low addresses so stray pointers
+     * are still easy to diagnose.  Fixed mappings are different: legacy
+     * non-PIE ARM executables are linked as low as 0x1000 and must retain
+     * those addresses because they have no rebase records.  Preserve only
+     * the actual null-page guard for MAP_FIXED mappings.
+     */
+    if (fixed) {
+        if (address < DYN_PAGE_SIZE) {
+            printf("Dynarmic_mem_reserve: refusing to reserve the null page\n");
             errno = ENOMEM;
             return UINT64_MAX;
-        } else {
-            address += 0x10000000;
         }
+    } else if (address < 0x10000000) {
+        address += 0x10000000;
     }
 
     if (!AlignGuestAddress(
