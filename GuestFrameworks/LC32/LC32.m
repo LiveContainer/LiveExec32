@@ -22,6 +22,10 @@ id LC32HostToGuestObject(uint64_t host_object) {
     return (id)LC32InvokeHostSelector(host_object, hostPtr);
 }
 
+id LC32DisposeFailedInit(id object) {
+    return object_dispose(object);
+}
+
 // We cannot use NSValue or NSInteger here since they're proxied aswell
 @interface LC32HostObjectPointer : NSObject
 @property(nonatomic) uint64_t value;

@@ -36,6 +36,11 @@ Class LC32HostToGuestClass(uint64_t address);
 // Get the guest object pointer from host
 id LC32HostToGuestObject(uint64_t host_object);
 
+// Dispose an allocated guest proxy when its corresponding host initializer
+// returns nil. This lives in the non-ARC LC32 framework so generated ARC and
+// non-ARC shims can share the same failed-initializer path.
+id LC32DisposeFailedInit(id object);
+
 // Returns host SEL address
 uint64_t LC32GetHostSelector(SEL selector);
 
