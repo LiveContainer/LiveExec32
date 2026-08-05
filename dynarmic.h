@@ -303,6 +303,12 @@ u64 LC32Dlsym(u32 guest_name, bool isFunction);
 u64 LC32GetHostObject(u32 guest_self, u32 guest_class, bool returnClass);
 u64 LC32GetHostSelector(u32 guest_selector);
 u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args);
+u64 LC32InvokeHostNSStringFormat(u64 host_self,
+                                 u64 host_selector,
+                                 u64 host_format,
+                                 u64 host_locale,
+                                 u32 guest_arguments,
+                                 u32 options);
 u32 LC32HostToGuestCopyClassName(u32 guest_output, size_t length, u64 host_object);
 
 __END_DECLS

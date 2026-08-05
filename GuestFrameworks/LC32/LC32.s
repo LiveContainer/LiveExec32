@@ -55,3 +55,8 @@ _LC32InvokeGuestC:
     svc #0x80
     bkpt
 
+.global _LC32InvokeHostNSStringFormat
+_LC32InvokeHostNSStringFormat:
+    movw r12, #1010
+    svc #0x80
+    bx lr

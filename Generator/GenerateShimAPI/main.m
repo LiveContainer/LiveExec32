@@ -408,6 +408,28 @@ static BOOL LC32MethodIsInInitFamily(LC32ObjCMethod *method) {
 @property(nonatomic) NSUInteger skippedIncompleteMethods;
 @property(nonatomic) NSUInteger skippedFilteredMethods;
 @end
+
+static BOOL LC32MethodHasManualVariadicAdapter(NSString *className,
+                                               LC32ObjCMethod *method) {
+    NSString *selector = method.selectorString;
+    if([className isEqualToString:@"NSString"]) {
+        if(!method.isInstanceMethod) {
+            return [selector isEqualToString:@"stringWithFormat:"] ||
+                   [selector isEqualToString:@"stringWithFormat:locale:"] ||
+                   [selector isEqualToString:@"localizedStringWithFormat:"];
+        }
+        return [selector isEqualToString:@"initWithFormat:"] ||
+               [selector isEqualToString:@"initWithFormat:arguments:"] ||
+               [selector isEqualToString:@"initWithFormat:locale:"] ||
+               [selector isEqualToString:
+                   @"initWithFormat:locale:arguments:"] ||
+               [selector isEqualToString:@"stringByAppendingFormat:"];
+    }
+    return [className isEqualToString:@"NSMutableString"] &&
+           method.isInstanceMethod &&
+           [selector isEqualToString:@"appendFormat:"];
+}
+
 @implementation ClassBuilder
 - (instancetype)initWithClass:(Class)cls imagePath:(NSString *)imagePath {
     self = [super init];
@@ -479,7 +501,13 @@ static BOOL LC32MethodIsInInitFamily(LC32ObjCMethod *method) {
     }
 
     const char *selectorName = sel_getName(method.selector);
-    if(strchr(selectorName, '_') != NULL) {
+    if(LC32MethodHasManualVariadicAdapter(self.className, method)) {
+        // Objective-C runtime encodings omit the ellipsis. These methods are
+        // emitted by a hand-written adapter that can capture the real ARMv7
+        // va_list before crossing into the host.
+        self.skippedFilteredMethods++;
+        return;
+    } else if(strchr(selectorName, '_') != NULL) {
         // this is a private API, skip
         self.skippedFilteredMethods++;
         return;

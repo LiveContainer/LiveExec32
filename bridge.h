@@ -38,6 +38,12 @@ u32 LC32HostToGuestCopyClassName(u32 guest_output, size_t length, u64 host_objec
 u64 LC32GetHostObject(u32 guest_self, u32 guest_class, bool returnClass);
 u64 LC32GetHostSelector(u32 guest_selector);
 u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args);
+u64 LC32InvokeHostNSStringFormat(u64 host_self,
+                                 u64 host_selector,
+                                 u64 host_format,
+                                 u64 host_locale,
+                                 u32 guest_arguments,
+                                 u32 options);
 void LC32SetInvokeGuestFuncPtr(u32 dlsymFunc, u32 invokeFunc);
 u64 LC32InvokeGuestC(u32 pc, bool ret64, int argc, u32 *args);
 u32 LC32HostToGuestArgument(char *type, u64 value);

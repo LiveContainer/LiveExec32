@@ -14,6 +14,7 @@ LiveExec32_FILES = \
 	ap_getparents.c target.c \
 	bridge.mm bridge.s log.m \
 	HostFrameworks/Foundation/Foundation.mm \
+	HostFrameworks/Foundation/NSString.mm \
 	HostFrameworks/CoreGraphics/CoreGraphics.mm \
 	HostFrameworks/UIKit/UIKit.mm
 LiveExec32_CFLAGS = -Iinclude -DDYNARMIC_MASTER

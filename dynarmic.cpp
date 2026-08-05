@@ -3991,6 +3991,33 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 // We're returning from guest call
                 cpu->HaltExecution(LC32HaltReasonRetFromGuest);
                 break;
+            case 1010: { // LC32InvokeHostNSStringFormat
+                if(cpu->IsExecuting()) {
+                    // Formatting %@ may call a guest object's description, so
+                    // leave the callback before entering the host runtime.
+                    cpu->HaltExecution(LC32HaltReasonSVC);
+                    return;
+                }
+                u64 host_self = (u64)cpu->Regs()[0] |
+                    ((u64)cpu->Regs()[1] << 32);
+                u64 host_selector = (u64)cpu->Regs()[2] |
+                    ((u64)cpu->Regs()[3] << 32);
+                u32 stack = cpu->Regs()[Reg::SP];
+                u64 host_format =
+                    Dynarmic_current_user_callbacks()->MemoryRead64(stack);
+                u64 host_locale =
+                    Dynarmic_current_user_callbacks()->MemoryRead64(stack + 8);
+                u32 guest_arguments =
+                    Dynarmic_current_user_callbacks()->MemoryRead32(stack + 16);
+                u32 options =
+                    Dynarmic_current_user_callbacks()->MemoryRead32(stack + 20);
+                u64 result = LC32InvokeHostNSStringFormat(
+                    host_self, host_selector, host_format, host_locale,
+                    guest_arguments, options);
+                cpu->Regs()[0] = (u32)result;
+                cpu->Regs()[1] = (u32)(result >> 32);
+                break;
+            }
             default:
                 printf("Unhandled svc number: %d\n", NR);
                 DumpCrashReport(SIGSYS);
