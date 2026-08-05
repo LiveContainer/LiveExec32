@@ -679,6 +679,77 @@ static BOOL LC32ValidateSignaturesPlist(NSDictionary *frameworks,
     return YES;
 }
 
+static BOOL LC32ValidateFrameworkMap(NSDictionary *frameworkMap,
+                                     NSDictionary *frameworks,
+                                     NSError **error) {
+    for(id sourceKey in frameworkMap) {
+        id destinationFramework = frameworkMap[sourceKey];
+        if(![sourceKey isKindOfClass:NSString.class] ||
+           ![destinationFramework isKindOfClass:NSString.class]) {
+            return LC32SetValidationError(error,
+                @"Framework map keys and values must be strings");
+        }
+
+        NSArray<NSString *> *sourceComponents =
+            [(NSString *)sourceKey componentsSeparatedByString:@"/"];
+        if(sourceComponents.count != 2 ||
+           !LC32IsSafePathComponent(sourceComponents[0]) ||
+           !LC32IsSafePathComponent(sourceComponents[1])) {
+            return LC32SetValidationError(error,
+                [NSString stringWithFormat:
+                    @"Invalid framework map source: %@", sourceKey]);
+        }
+
+        NSString *sourceFramework = sourceComponents[0];
+        NSString *sourceClass = sourceComponents[1];
+        NSDictionary *classes = frameworks[sourceFramework];
+        if(![classes isKindOfClass:NSDictionary.class] ||
+           !classes[sourceClass]) {
+            return LC32SetValidationError(error,
+                [NSString stringWithFormat:
+                    @"Framework map source is not in the signatures plist: %@",
+                    sourceKey]);
+        }
+
+        if(![(NSString *)destinationFramework isEqualToString:@"-"] &&
+           !LC32IsSafePathComponent(destinationFramework)) {
+            return LC32SetValidationError(error,
+                [NSString stringWithFormat:
+                    @"Invalid destination framework for %@: %@",
+                    sourceKey, destinationFramework]);
+        }
+    }
+
+    // Resolve every class before creating the output directory so a routing
+    // collision fails without leaving a partially generated source tree.
+    NSMutableDictionary<NSString *, NSString *> *outputOwners =
+        [NSMutableDictionary new];
+    for(NSString *sourceFramework in frameworks) {
+        NSDictionary *classes = frameworks[sourceFramework];
+        for(NSString *sourceClass in classes) {
+            NSString *sourceKey = [NSString stringWithFormat:@"%@/%@",
+                                                              sourceFramework,
+                                                              sourceClass];
+            NSString *destinationFramework = frameworkMap[sourceKey];
+            if([destinationFramework isEqualToString:@"-"]) continue;
+            if(!destinationFramework) destinationFramework = sourceFramework;
+
+            NSString *outputKey = [NSString stringWithFormat:@"%@/%@",
+                                                              destinationFramework,
+                                                              sourceClass];
+            NSString *existingOwner = outputOwners[outputKey];
+            if(existingOwner) {
+                return LC32SetValidationError(error,
+                    [NSString stringWithFormat:
+                        @"Framework map collision at %@ between %@ and %@",
+                        outputKey, existingOwner, sourceKey]);
+            }
+            outputOwners[outputKey] = sourceKey;
+        }
+    }
+    return YES;
+}
+
 static BOOL LC32WriteClass(ClassBuilder *classBuilder,
                            NSString *outputPath,
                            NSError **error) {
@@ -759,11 +830,33 @@ LC32GenerateRuntimeUIKitExtras(NSString *outputRoot) {
 
 int main(int argc, char **argv) {
     @autoreleasepool {
-        if(argc < 3 || argc > 4 ||
-           (argc == 4 && strcmp(argv[3], "--runtime-uikit") != 0)) {
+        BOOL includeRuntimeUIKit = NO;
+        NSString *frameworkMapPath = nil;
+        BOOL invalidArguments = argc < 3;
+        for(int argumentIndex = 3;
+            !invalidArguments && argumentIndex < argc;
+            argumentIndex++) {
+            if(strcmp(argv[argumentIndex], "--runtime-uikit") == 0) {
+                if(includeRuntimeUIKit) {
+                    invalidArguments = YES;
+                } else {
+                    includeRuntimeUIKit = YES;
+                }
+            } else if(strcmp(argv[argumentIndex], "--framework-map") == 0) {
+                if(frameworkMapPath || argumentIndex + 1 >= argc) {
+                    invalidArguments = YES;
+                } else {
+                    frameworkMapPath =
+                        [@(argv[++argumentIndex]) stringByStandardizingPath];
+                }
+            } else {
+                invalidArguments = YES;
+            }
+        }
+        if(invalidArguments) {
             fprintf(stderr,
                     "Usage: %s INPUT_PLIST EMPTY_OUTPUT_DIRECTORY "
-                    "[--runtime-uikit]\n",
+                    "[--framework-map PATH] [--runtime-uikit]\n",
                     argv[0]);
             return 2;
         }
@@ -786,6 +879,24 @@ int main(int argc, char **argv) {
             return 1;
         }
 
+        NSDictionary *frameworkMap = @{};
+        if(frameworkMapPath) {
+            frameworkMap =
+                [NSDictionary dictionaryWithContentsOfFile:frameworkMapPath];
+            if(![frameworkMap isKindOfClass:NSDictionary.class]) {
+                fprintf(stderr, "Could not read framework map plist: %s\n",
+                        frameworkMapPath.UTF8String);
+                return 1;
+            }
+        }
+        if(!LC32ValidateFrameworkMap(frameworkMap, frameworks, &error)) {
+            fprintf(stderr, "Invalid framework map%s%s: %s\n",
+                    frameworkMapPath ? " " : "",
+                    frameworkMapPath ? frameworkMapPath.UTF8String : "",
+                    error.localizedDescription.UTF8String);
+            return 1;
+        }
+
         if(!LC32CreateEmptyOutputDirectory(outputRoot, &error)) {
             fprintf(stderr, "Could not use output directory %s: %s\n",
                     outputRoot.UTF8String,
@@ -799,6 +910,7 @@ int main(int argc, char **argv) {
         NSUInteger skippedIncompleteMethods = 0;
         NSUInteger skippedFilteredMethods = 0;
         NSUInteger writeFailureCount = 0;
+        NSMutableSet<NSString *> *createdFrameworks = [NSMutableSet new];
 
         NSArray<NSString *> *frameworkNames =
             [frameworks.allKeys sortedArrayUsingSelector:@selector(compare:)];
@@ -811,26 +923,41 @@ int main(int argc, char **argv) {
                 continue;
             }
 
-            NSString *outputPath =
-                [outputRoot stringByAppendingPathComponent:frameworkName];
-            error = nil;
-            if(![NSFileManager.defaultManager
-                    createDirectoryAtPath:outputPath
-              withIntermediateDirectories:YES
-                               attributes:nil
-                                    error:&error]) {
-                fprintf(stderr, "Could not create framework directory %s: %s\n",
-                        outputPath.UTF8String,
-                        error.localizedDescription.UTF8String);
-                writeFailureCount++;
-                continue;
-            }
-            frameworkCount++;
-
             NSArray<NSString *> *classNames =
                 [classes.allKeys sortedArrayUsingSelector:@selector(compare:)];
             for(NSString *className in classNames) {
                 @autoreleasepool {
+                    NSString *sourceKey =
+                        [NSString stringWithFormat:@"%@/%@",
+                                                   frameworkName, className];
+                    NSString *destinationFramework = frameworkMap[sourceKey];
+                    if([destinationFramework isEqualToString:@"-"]) continue;
+                    if(!destinationFramework) {
+                        destinationFramework = frameworkName;
+                    }
+
+                    NSString *outputPath = [outputRoot
+                        stringByAppendingPathComponent:destinationFramework];
+                    if(![createdFrameworks
+                            containsObject:destinationFramework]) {
+                        error = nil;
+                        if(![NSFileManager.defaultManager
+                                createDirectoryAtPath:outputPath
+                          withIntermediateDirectories:YES
+                                           attributes:nil
+                                                error:&error]) {
+                            fprintf(stderr,
+                                    "Could not create framework directory "
+                                    "%s: %s\n",
+                                    outputPath.UTF8String,
+                                    error.localizedDescription.UTF8String);
+                            writeFailureCount++;
+                            continue;
+                        }
+                        [createdFrameworks addObject:destinationFramework];
+                        frameworkCount++;
+                    }
+
                     NSDictionary *methodSignatures = classes[className];
                     if(![methodSignatures isKindOfClass:NSDictionary.class]) {
                         fprintf(stderr, "Invalid class entry: %s/%s\n",
@@ -852,9 +979,11 @@ int main(int argc, char **argv) {
 
                     error = nil;
                     if(!LC32WriteClass(classBuilder, outputPath, &error)) {
-                        fprintf(stderr, "Could not write %s/%s: %s\n",
+                        fprintf(stderr,
+                                "Could not write %s/%s to %s: %s\n",
                                 frameworkName.UTF8String,
                                 className.UTF8String,
+                                destinationFramework.UTF8String,
                                 error.localizedDescription.UTF8String);
                         writeFailureCount++;
                         continue;
@@ -865,7 +994,7 @@ int main(int argc, char **argv) {
         }
 
         LC32RuntimeGenerationResult runtimeResult = {0};
-        if(argc == 4) {
+        if(includeRuntimeUIKit) {
             runtimeResult = LC32GenerateRuntimeUIKitExtras(outputRoot);
         }
         printf("Generated %lu methods in %lu classes from %lu frameworks; "
@@ -875,7 +1004,7 @@ int main(int argc, char **argv) {
                (unsigned long)frameworkCount,
                (unsigned long)skippedIncompleteMethods,
                (unsigned long)skippedFilteredMethods);
-        if(argc == 4) {
+        if(includeRuntimeUIKit) {
             printf("; added %lu runtime UIKit classes, %lu unavailable",
                    (unsigned long)runtimeResult.generated,
                    (unsigned long)runtimeResult.unavailable);

@@ -21,6 +21,11 @@ xpwntool 058-75249-062.dmg ramdisk.dmg -k
 
 - Replace all of `/var/mobile/Documents/TrollExperiments` with your paths
 - Compile this project using theos
+- Generate the guest Objective-C shims, then build the guest frameworks:
+```bash
+gmake -C GuestMakefile generate-shims
+gmake -C GuestMakefile
+```
 - Launch a binary and profit. Please note that chroot is internally done otherwise you will hit bad memory access errors. I'm investigating it and will provide a fix.
 ```bash
 sudo .theos/out/LiveExec32 /var/mobile/ramdisk32/usr/bin/fdisk
@@ -33,6 +38,16 @@ sudo .theos/out/LiveExec32 /var/mobile/ramdisk32/usr/bin/fdisk
 - Has a crash reporter and symbolicator for guest code.
 - Can emulate bind mount points
 - More to be explored...
+
+### Guest framework sources
+
+Hand-written guest framework code lives in `GuestFrameworks/<Framework>` and
+is tracked. `GuestFrameworks/.generated/<Framework>` is recreated by
+`GuestMakefile/generate-shims.sh` and is intentionally ignored; do not commit
+files from it. The generator currently obtains 12 private UIKit fallback
+classes from the installed Catalyst runtime, so those particular shims remain
+host-dependent until their iOS 10 signatures are captured in the tracked
+templates.
 
 ## FAQ: can this be used to run 32-bit apps & integrate to LiveContainer?
 Although this can execute simple C/C++/Objective-C binaries, more work needs to be done. The most important thing is to figure out how to proxy Objective-C classes, objects and method calls between host (64-bit) and guest (32-bit).

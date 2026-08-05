@@ -8,3 +8,5 @@ tmp/
 Generator/GenerateShimAPI/GenerateShimObjC
 Generator/GenerateShimAPI/GenerateShimOpenGLES
 Generator/GenerateMethodSignatures/GenerateMethodSignatures
+/GuestFrameworks/.generated*/
+/Resources/RootFS

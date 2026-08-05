@@ -18,9 +18,23 @@ if [ ! -d "$IOS_SYSTEM_ROOT/System/Library" ]; then
 fi
 
 framework_count=0
-for source_dir in "$REPO_ROOT"/GuestFrameworks/*; do
+framework_names=
+for source_dir in \
+    "$REPO_ROOT"/GuestFrameworks/* \
+    "$REPO_ROOT"/GuestFrameworks/.generated/*; do
     [ -d "$source_dir" ] || continue
     framework_name=${source_dir##*/}
+    case " $framework_names " in
+        *" $framework_name "*) continue ;;
+    esac
+    framework_names="$framework_names $framework_name"
+done
+
+for framework_name in $framework_names; do
+    source_dir="$REPO_ROOT/GuestFrameworks/$framework_name"
+    if [ ! -d "$source_dir" ]; then
+        source_dir="$REPO_ROOT/GuestFrameworks/.generated/$framework_name"
+    fi
     source_binary="$BUILD_ROOT/$framework_name.framework/$framework_name"
 
     case "$framework_name" in
@@ -34,7 +48,7 @@ for source_dir in "$REPO_ROOT"/GuestFrameworks/*; do
             ;;
         LC32)
             relative_bundle=System/Library/Frameworks/LC32.framework
-            source_plist="$source_dir/Info.plist"
+            source_plist="$REPO_ROOT/GuestFrameworks/LC32/Info.plist"
             ;;
         *)
             relative_bundle="System/Library/Frameworks/$framework_name.framework"
