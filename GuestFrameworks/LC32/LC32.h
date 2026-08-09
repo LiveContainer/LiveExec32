@@ -43,6 +43,9 @@ id LC32DisposeFailedInit(id object);
 
 // Returns host SEL address
 uint64_t LC32GetHostSelector(SEL selector);
+uint64_t LC32CachedHostSelector(
+    uint64_t *cache __attribute__((align_value(8))), SEL selector,
+    BOOL returnsStruct);
 
 // Invoke host objc_msgSend. All arguments must be 64-bit aligned with an exception below:
 // If the most significant bit of selector is set, 2 additional uint32_t arguments are reserved for return struct pointer and size

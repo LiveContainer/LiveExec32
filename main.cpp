@@ -143,13 +143,18 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
         } else if (lc->cmd == LC_UNIXTHREAD) {
             thread_command *tc = (thread_command *)lc;
             arm_thread_state_t *state = (arm_thread_state_t *)((uint64_t)tc + sizeof(uint32_t)*4);
-            state->__pc += target;
             for (int i = 0; i < 13; i++) {
                 threadHandle.jit->Regs()[i] = state->__r[i];
             }
             threadHandle.jit->Regs()[Reg::SP] = state->__sp;
             threadHandle.jit->Regs()[Reg::LR] = state->__lr;
-            threadHandle.jit->Regs()[Reg::PC] = state->__pc;
+            /*
+             * The mapped header is also the header dyld consumes.  Sliding
+             * the LC_UNIXTHREAD command in place makes dyld apply the slide a
+             * second time and reject legacy executables as having no valid
+             * entry point.  Only slide the emulator's initial register.
+             */
+            threadHandle.jit->Regs()[Reg::PC] = state->__pc + target;
             threadHandle.jit->SetCpsr(state->__cpsr);
         }
     }
@@ -243,6 +248,7 @@ int main(int argc, char* argv[], char* envp[]) {
     // causing CFBundleGetMainBundle() to return NULL.
     char resolvedExecPath[PATH_MAX];
     const char *execPath = argv[1];
+    std::string guestHome = "/var/mobile";
     if (realpath(execPath, resolvedExecPath) != NULL) {
         execPath = resolvedExecPath;
         const char *lastSlash = strrchr(execPath, '/');
@@ -251,7 +257,19 @@ int main(int argc, char* argv[], char* envp[]) {
                 execPath, static_cast<size_t>(lastSlash - execPath));
             sharedHandle.fs->addMountpoint(execDirectory, execDirectory);
         }
+
+        const std::string executablePath(execPath);
+        const std::string documentsApplications = "/Documents/Applications/";
+        const size_t applicationsOffset =
+            executablePath.find(documentsApplications);
+        if (applicationsOffset != std::string::npos && applicationsOffset != 0) {
+            guestHome = executablePath.substr(0, applicationsOffset);
+            if (getuid() != 0) {
+                sharedHandle.fs->addMountpoint(guestHome, guestHome);
+            }
+        }
     }
+    setenv("LC32_GUEST_HOME", guestHome.c_str(), 1);
 
     // map the main executable first
     u32 execAddr = Dynarmic_map_file(false, 0x11000000, execPath);
@@ -302,6 +320,7 @@ int main(int argc, char* argv[], char* envp[]) {
     u32 guest_envp[] = {
         0, // separator
         // envp
+        prependString(dyldStackPtr, "HOME=%s", guestHome.c_str()),
         //prependString(dyldStackPtr, "OBJC_PRINT_LOAD_METHODS=1"),
         //prependString(dyldStackPtr, "OBJC_PRINT_RESOLVED_METHODS=1"),
         //prependString(dyldStackPtr, "OBJC_PRINT_CLASS_SETUP=1"),

@@ -3,6 +3,13 @@
 
 const CFAllocatorRef kCFAllocatorDefault = NULL;
 
+/*
+ * Older iOS binaries bind this Foundation spelling directly against
+ * CoreFoundation. Keep the compatibility export here as well as in the
+ * Foundation shim so two-level namespace lookup succeeds.
+ */
+NSString * const NSDefaultRunLoopMode = @"kCFRunLoopDefaultMode";
+
 // Set CF version to iOS 10.3.3
 double kCFCoreFoundationVersionNumber = (double)1349.7;
 

@@ -13,8 +13,8 @@ if [ ! -d "$RAMDISK_ROOT/System/Library" ]; then
     exit 1
 fi
 if [ ! -d "$IOS_SYSTEM_ROOT/System/Library" ]; then
-    echo "iOS system root is missing System/Library: $IOS_SYSTEM_ROOT" >&2
-    exit 1
+    echo "iOS system root is unavailable; reusing ramdisk metadata" >&2
+    IOS_SYSTEM_ROOT=$RAMDISK_ROOT
 fi
 
 framework_count=0
@@ -39,8 +39,11 @@ for framework_name in $framework_names; do
 
     case "$framework_name" in
         AVFAudio)
-            relative_bundle=System/Library/Frameworks/AVFoundation.framework/Frameworks/AVFAudio.framework
+            relative_bundle=System/Library/Frameworks/AVFAudio.framework
             source_plist="$IOS_SYSTEM_ROOT/$relative_bundle/Info.plist"
+            if [ ! -f "$source_plist" ]; then
+                source_plist="$IOS_SYSTEM_ROOT/System/Library/Frameworks/AVFoundation.framework/Frameworks/AVFAudio.framework/Info.plist"
+            fi
             ;;
         FileProvider)
             relative_bundle=System/Library/PrivateFrameworks/FileProvider.framework
@@ -80,7 +83,9 @@ for framework_name in $framework_names; do
     fi
 
     install -d -m 0755 "$destination_bundle"
-    install -m 0644 "$source_plist" "$destination_bundle/Info.plist"
+    if [ "$source_plist" != "$destination_bundle/Info.plist" ]; then
+        install -m 0644 "$source_plist" "$destination_bundle/Info.plist"
+    fi
     install -m 0755 "$source_binary" "$destination_binary"
     if ! cmp -s "$source_binary" "$destination_binary"; then
         echo "Installed framework differs from build: $framework_name" >&2
@@ -92,6 +97,10 @@ done
 
 avfaudio_link="$RAMDISK_ROOT/System/Library/Frameworks/AVFoundation.framework/libAVFAudio.dylib"
 avfaudio_target=Frameworks/AVFAudio.framework/AVFAudio
+avfaudio_compat_bundle="$RAMDISK_ROOT/System/Library/Frameworks/AVFoundation.framework/Frameworks/AVFAudio.framework"
+avfaudio_source="$BUILD_ROOT/AVFAudio.framework/AVFAudio"
+install -d -m 0755 "$avfaudio_compat_bundle"
+install -m 0755 "$avfaudio_source" "$avfaudio_compat_bundle/AVFAudio"
 if [ -L "$avfaudio_link" ]; then
     if [ "$(readlink "$avfaudio_link")" != "$avfaudio_target" ]; then
         echo "Unexpected AVFAudio compatibility symlink: $avfaudio_link" >&2

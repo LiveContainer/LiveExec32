@@ -1,5 +1,7 @@
 #import "bridge.h"
 
+#include <atomic>
+
 @interface LC32ObjCMethodResolver : NSObject
 + (void)registerClass:(Class)cls;
 @end
@@ -125,7 +127,37 @@ void LC32SetInvokeGuestFuncPtr(u32 dlsymFunc, u32 invokeFunc) {
 
 #pragma mark Host -> Guest functions
 
+static u32 LC32CachedGuestSymbol(std::atomic<u32> &cache,
+                                 const char *name) {
+    u32 value = cache.load(std::memory_order_acquire);
+    if(value) return value;
+    const u32 resolved = guest_dlsym(name);
+    if(!resolved) return 0;
+    if(cache.compare_exchange_strong(value, resolved,
+            std::memory_order_release, std::memory_order_acquire))
+        return resolved;
+    return value;
+}
+
+static u32 LC32CachedGuestSelector(std::atomic<u32> &cache,
+                                   const char *name) {
+    u32 value = cache.load(std::memory_order_acquire);
+    if(value) return value;
+    const u32 resolved = guest_sel_registerName(name);
+    if(!resolved) return 0;
+    if(cache.compare_exchange_strong(value, resolved,
+            std::memory_order_release, std::memory_order_acquire))
+        return resolved;
+    return value;
+}
+
 u64 LC32InvokeGuestC(u32 pc, bool ret64, int argc, u32 *args) {
+    if(threadHandle.jit == nullptr || threadHandle.cb == nullptr) {
+        fprintf(stderr,
+            "LC32: refusing guest callback on an unregistered host thread "
+            "(pc=0x%x)\n", pc);
+        return 0;
+    }
     std::array<std::uint32_t, 16> &regs = threadHandle.jit->Regs();
     struct context32 ctx;
     Dynarmic_context_1save(&ctx);
@@ -181,9 +213,10 @@ u64 LC32GuestToHostReturnType(char *type, u32 value) {
             return (CGFloat)value;
         case '@': {// id
             // don't call LC32GetHostObject here! the guest stores host pointer
-            static u32 guestPtr = 0;
-            if(!guestPtr) guestPtr = guest_sel_registerName("host_self");
-            u32 args[] = {value, guestPtr};
+            static std::atomic<u32> guestPtr{0};
+            const u32 selector = LC32CachedGuestSelector(
+                guestPtr, "host_self");
+            u32 args[] = {value, selector};
             return guest_objc_msgSend(sizeof(args)/sizeof(*args), args);
         }
         default:
@@ -240,8 +273,8 @@ u32 guest_dlsym(const char *host_name) {
 }
 
 u32 guest_free(u32 guest_ptr) {
-    static u32 guestPtr = 0;
-    if(!guestPtr) guestPtr = guest_dlsym("free");
+    static std::atomic<u32> cache{0};
+    const u32 guestPtr = LC32CachedGuestSymbol(cache, "free");
     u32 args[] = {guest_ptr};
     return LC32InvokeGuestC(guestPtr, false, sizeof(args)/sizeof(*args), args);
 }
@@ -249,8 +282,8 @@ u32 guest_free(u32 guest_ptr) {
 // These class_copy*List shims are pretty much the same
 u32 guest_class_copyIvarList(u32 guest_cls, unsigned int *outCount) {
     if(!threadHandle.jit) return false;
-    static u32 guestPtr = 0;
-    if(!guestPtr) guestPtr = guest_dlsym("class_copyIvarList");
+    static std::atomic<u32> cache{0};
+    const u32 guestPtr = LC32CachedGuestSymbol(cache, "class_copyIvarList");
     u32 guest_outCount = threadHandle.jit->Regs()[Reg::SP] -= sizeof(u32);
     u32 args[] = {guest_cls, guest_outCount};
     u32 result = LC32InvokeGuestC(guestPtr, false, sizeof(args)/sizeof(*args), args);
@@ -260,8 +293,8 @@ u32 guest_class_copyIvarList(u32 guest_cls, unsigned int *outCount) {
 }
 u32 guest_class_copyMethodList(u32 guest_cls, unsigned int *outCount) {
     if(!threadHandle.jit) return false;
-    static u32 guestPtr = 0;
-    if(!guestPtr) guestPtr = guest_dlsym("class_copyMethodList");
+    static std::atomic<u32> cache{0};
+    const u32 guestPtr = LC32CachedGuestSymbol(cache, "class_copyMethodList");
     u32 guest_outCount = threadHandle.jit->Regs()[Reg::SP] -= sizeof(u32);
     u32 args[] = {guest_cls, guest_outCount};
     u32 result = LC32InvokeGuestC(guestPtr, false, sizeof(args)/sizeof(*args), args);
@@ -271,8 +304,8 @@ u32 guest_class_copyMethodList(u32 guest_cls, unsigned int *outCount) {
 }
 u32 guest_class_copyProtocolList(u32 guest_cls, unsigned int *outCount) {
     if(!threadHandle.jit) return false;
-    static u32 guestPtr = 0;
-    if(!guestPtr) guestPtr = guest_dlsym("class_copyProtocolList");
+    static std::atomic<u32> cache{0};
+    const u32 guestPtr = LC32CachedGuestSymbol(cache, "class_copyProtocolList");
     u32 guest_outCount = threadHandle.jit->Regs()[Reg::SP] -= sizeof(u32);
     u32 args[] = {guest_cls, guest_outCount};
     u32 result = LC32InvokeGuestC(guestPtr, false, sizeof(args)/sizeof(*args), args);
@@ -283,32 +316,32 @@ u32 guest_class_copyProtocolList(u32 guest_cls, unsigned int *outCount) {
 
 u32 guest_class_createInstance(u32 guest_cls, u32 extraBytes) {
     if(!threadHandle.jit) return false;
-    static u32 guestPtr = 0;
-    if(!guestPtr) guestPtr = guest_dlsym("class_createInstance");
+    static std::atomic<u32> cache{0};
+    const u32 guestPtr = LC32CachedGuestSymbol(cache, "class_createInstance");
     u32 args[] = {guest_cls, extraBytes};
     return LC32InvokeGuestC(guestPtr, false, sizeof(args)/sizeof(*args), args);
 }
 
 u32 guest_class_getClassMethod(u32 guest_cls, u32 guest_sel) {
     if(!threadHandle.jit) return false;
-    static u32 guestPtr = 0;
-    if(!guestPtr) guestPtr = guest_dlsym("class_getClassMethod");
+    static std::atomic<u32> cache{0};
+    const u32 guestPtr = LC32CachedGuestSymbol(cache, "class_getClassMethod");
     u32 args[] = {guest_cls, guest_sel};
     return LC32InvokeGuestC(guestPtr, false, sizeof(args)/sizeof(*args), args);
 }
 
 u32 guest_class_getInstanceMethod(u32 guest_cls, u32 guest_sel) {
     if(!threadHandle.jit) return false;
-    static u32 guestPtr = 0;
-    if(!guestPtr) guestPtr = guest_dlsym("class_getInstanceMethod");
+    static std::atomic<u32> cache{0};
+    const u32 guestPtr = LC32CachedGuestSymbol(cache, "class_getInstanceMethod");
     u32 args[] = {guest_cls, guest_sel};
     return LC32InvokeGuestC(guestPtr, false, sizeof(args)/sizeof(*args), args);
 }
 
 u32 guest_class_getName(u32 guest_cls) {
     if(!threadHandle.jit) return false;
-    static u32 guestPtr = 0;
-    if(!guestPtr) guestPtr = guest_dlsym("class_getName");
+    static std::atomic<u32> cache{0};
+    const u32 guestPtr = LC32CachedGuestSymbol(cache, "class_getName");
     u32 args[] = {guest_cls};
     return LC32InvokeGuestC(guestPtr, false, sizeof(args)/sizeof(*args), args);
 }
@@ -332,8 +365,9 @@ u32 guest_object_getClass(u32 guest_obj) {
 }
 
 u32 guest_object_setInstanceVariable(u32 guest_obj, const char *host_name, u32 newValue) {
-    static u32 guestPtr = 0;
-    if(!guestPtr) guestPtr = guest_dlsym("object_setInstanceVariable");
+    static std::atomic<u32> cache{0};
+    const u32 guestPtr = LC32CachedGuestSymbol(
+        cache, "object_setInstanceVariable");
     DynarmicGuestStackString guest_name(host_name);
     u32 args[] = {guest_obj, guest_name.guestPtr, newValue};
     return LC32InvokeGuestC(guestPtr, false, sizeof(args)/sizeof(*args), args);
@@ -344,8 +378,8 @@ u32 guest_protocol_getName(u32 guest_protocol) {
 }
 
 u32 guest_sel_registerName(const char *host_name) {
-    static u32 guestPtr = 0;
-    if(!guestPtr) guestPtr = guest_dlsym("sel_registerName");
+    static std::atomic<u32> cache{0};
+    const u32 guestPtr = LC32CachedGuestSymbol(cache, "sel_registerName");
     DynarmicGuestStackString guest_name(host_name);
     u32 args[] = {guest_name.guestPtr};
     return LC32InvokeGuestC(guestPtr, false, sizeof(args)/sizeof(*args), args);
@@ -355,8 +389,8 @@ u32 guest_sel_registerName(const char *host_name) {
 //u32 args[] = {0x40404040, 0x41414141, 0x42424242, 0x43434343, 0x44444444, 0x45454545, 0x46464646, 0x47474747};
 u32 guest_objc_getClass(const char *name) {
     if(!threadHandle.jit) return 0;
-    static u32 guestPtr = 0;
-    if(!guestPtr) guestPtr = guest_dlsym("objc_getClass");
+    static std::atomic<u32> cache{0};
+    const u32 guestPtr = LC32CachedGuestSymbol(cache, "objc_getClass");
 
     DynarmicGuestStackString guest_name(name);
     u32 args[] = {guest_name.guestPtr};
@@ -390,8 +424,8 @@ Class guest_objc_getClass_retHostClass(const char *name) {
 }
 
 u64 guest_objc_msgSend(int argc, u32 *args) {
-    static u32 guestPtr = 0;
-    if(!guestPtr) guestPtr = guest_dlsym("objc_msgSend");
+    static std::atomic<u32> cache{0};
+    const u32 guestPtr = LC32CachedGuestSymbol(cache, "objc_msgSend");
     return LC32InvokeGuestC(guestPtr, true, argc, args);
 }
 
@@ -422,7 +456,10 @@ static const void *kGuestSelf = &kGuestSelf;
 // Called from guest's setHost_self if the object is created by guest code (eg creating AppDelegate, UIWindow, etc)
 - (void)setGuest_self:(u32)ptr {
     //assert(!self.guest_selfOrNull);
-    objc_setAssociatedObject(self, kGuestSelf, @(ptr), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    @synchronized(self) {
+        objc_setAssociatedObject(self, kGuestSelf, @(ptr),
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
 }
 
 - (u32)guest_selfOrNull {
@@ -433,16 +470,31 @@ static const void *kGuestSelf = &kGuestSelf;
     u32 ptr = self.guest_selfOrNull;
     if(ptr) return ptr;
 
-    const char *className = class_getName(self.class);
-    ptr = guest_objc_getClass(className);
+    @synchronized(self) {
+    ptr = self.guest_selfOrNull;
+    if(ptr) return ptr;
+
+    Class hostClass = self.class;
+    const char *className = class_getName(hostClass);
+    Class matchedHostClass = hostClass;
+    while(matchedHostClass != Nil) {
+        ptr = guest_objc_getClass(class_getName(matchedHostClass));
+        if(ptr) break;
+        matchedHostClass = class_getSuperclass(matchedHostClass);
+    }
     if(!ptr) {
         printf("LC32: Error: Host required missing guest class %s\n", className);
         return 0;
     }
+    if(matchedHostClass != hostClass) {
+        printf("LC32: mapping host class %s through guest superclass %s\n",
+            className, class_getName(matchedHostClass));
+    }
     if(object_isClass(self)) return self.guest_self = ptr;
 
-    static u32 guest_setHost_self;
-    if(!guest_setHost_self) guest_setHost_self = guest_sel_registerName("initWithHostSelf:");
+    static std::atomic<u32> guestSetHostSelfCache{0};
+    const u32 guest_setHost_self = LC32CachedGuestSelector(
+        guestSetHostSelfCache, "initWithHostSelf:");
     ptr = guest_class_createInstance(ptr, 0);
 
     //guest_objc_performSelector(ptr, guest_setHost_self, (u32)(u64)self, (u32)((u64)self >> 32));
@@ -452,6 +504,7 @@ static const void *kGuestSelf = &kGuestSelf;
     }
 
     return self.guest_self = ptr;
+    }
 }
 @end
 

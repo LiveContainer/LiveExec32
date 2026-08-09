@@ -1,6 +1,8 @@
 #define GLES_SILENCE_DEPRECATION 1
 
 #import <OpenGLES/EAGL.h>
+#import <OpenGLES/ES1/gl.h>
+#import <OpenGLES/ES1/glext.h>
 #import <OpenGLES/ES2/gl.h>
 
 #include <algorithm>
@@ -197,6 +199,21 @@ bool ReadGuestCString(uint32_t guestAddress, std::string &string) {
 
 size_t StateElementCount(GLenum pname) {
     switch(pname) {
+        case GL_MODELVIEW_MATRIX:
+        case GL_PROJECTION_MATRIX:
+        case GL_TEXTURE_MATRIX:
+            return 16;
+        case GL_CURRENT_NORMAL:
+        case GL_POINT_DISTANCE_ATTENUATION:
+            return 3;
+        case GL_CURRENT_COLOR:
+        case GL_CURRENT_TEXTURE_COORDS:
+        case GL_FOG_COLOR:
+        case GL_LIGHT_MODEL_AMBIENT:
+            return 4;
+        case GL_SMOOTH_LINE_WIDTH_RANGE:
+        case GL_SMOOTH_POINT_SIZE_RANGE:
+            return 2;
         case GL_ALIASED_LINE_WIDTH_RANGE:
         case GL_ALIASED_POINT_SIZE_RANGE:
         case GL_DEPTH_RANGE:
@@ -762,6 +779,27 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
         case LC32OpenGLESOpVertexAttrib3f: REQUIRE(4); glVertexAttrib3f(U(0), F(1), F(2), F(3)); return 0;
         case LC32OpenGLESOpVertexAttrib4f: REQUIRE(5); glVertexAttrib4f(U(0), F(1), F(2), F(3), F(4)); return 0;
         case LC32OpenGLESOpViewport: REQUIRE(4); glViewport(I(0), I(1), I(2), I(3)); return 0;
+        case LC32OpenGLESOpAlphaFunc: REQUIRE(2); glAlphaFunc(U(0), F(1)); return 0;
+        case LC32OpenGLESOpColor4f: REQUIRE(4); glColor4f(F(0), F(1), F(2), F(3)); return 0;
+        case LC32OpenGLESOpDisableClientState: REQUIRE(1); glDisableClientState(U(0)); return 0;
+        case LC32OpenGLESOpEnableClientState: REQUIRE(1); glEnableClientState(U(0)); return 0;
+        case LC32OpenGLESOpFogf: REQUIRE(2); glFogf(U(0), F(1)); return 0;
+        case LC32OpenGLESOpFogx: REQUIRE(2); glFogx(U(0), I(1)); return 0;
+        case LC32OpenGLESOpLoadIdentity: REQUIRE(0); glLoadIdentity(); return 0;
+        case LC32OpenGLESOpMatrixMode: REQUIRE(1); glMatrixMode(U(0)); return 0;
+        case LC32OpenGLESOpNormal3f: REQUIRE(3); glNormal3f(F(0), F(1), F(2)); return 0;
+        case LC32OpenGLESOpOrthof: REQUIRE(6); glOrthof(F(0), F(1), F(2), F(3), F(4), F(5)); return 0;
+        case LC32OpenGLESOpPopMatrix: REQUIRE(0); glPopMatrix(); return 0;
+        case LC32OpenGLESOpPushMatrix: REQUIRE(0); glPushMatrix(); return 0;
+        case LC32OpenGLESOpRotatef: REQUIRE(4); glRotatef(F(0), F(1), F(2), F(3)); return 0;
+        case LC32OpenGLESOpScalef: REQUIRE(3); glScalef(F(0), F(1), F(2)); return 0;
+        case LC32OpenGLESOpShadeModel: REQUIRE(1); glShadeModel(U(0)); return 0;
+        case LC32OpenGLESOpTranslatef: REQUIRE(3); glTranslatef(F(0), F(1), F(2)); return 0;
+        case LC32OpenGLESOpBindRenderbufferOES: REQUIRE(2); glBindRenderbufferOES(U(0), U(1)); return 0;
+        case LC32OpenGLESOpFramebufferRenderbufferOES: REQUIRE(4); glFramebufferRenderbufferOES(U(0), U(1), U(2), U(3)); return 0;
+        case LC32OpenGLESOpGenRenderbuffersOES:
+            return DispatchObjectOutputArray(call, [](GLsizei n, GLuint *v) { glGenRenderbuffersOES(n, v); });
+        case LC32OpenGLESOpRenderbufferStorageOES: REQUIRE(4); glRenderbufferStorageOES(U(0), U(1), I(2), I(3)); return 0;
         default:
             break;
     }
@@ -1215,6 +1253,51 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
                 case 3: glVertexAttrib3fv(U(0), values.data()); break;
                 case 4: glVertexAttrib4fv(U(0), values.data()); break;
             }
+            return 0;
+        }
+        case LC32OpenGLESOpFogfv: {
+            REQUIRE(2);
+            const size_t count = U(0) == GL_FOG_COLOR ? 4 : 1;
+            std::vector<GLfloat> values;
+            if(!ReadGuestArray(U(1), count, values)) return 0;
+            glFogfv(U(0), values.data());
+            return 0;
+        }
+        case LC32OpenGLESOpMultMatrixf: {
+            REQUIRE(1);
+            std::vector<GLfloat> matrix;
+            if(!ReadGuestArray(U(0), 16, matrix)) return 0;
+            glMultMatrixf(matrix.data());
+            return 0;
+        }
+        case LC32OpenGLESOpDiscardFramebufferEXT: {
+            REQUIRE(3);
+            size_t count;
+            if(!ReadCount(I(1), 1, count)) return 0;
+            std::vector<GLenum> attachments;
+            if(!ReadGuestArray(U(2), count, attachments)) return 0;
+            glDiscardFramebufferEXT(U(0), I(1), attachments.data());
+            return 0;
+        }
+        case LC32OpenGLESOpColorPointer:
+        case LC32OpenGLESOpTexCoordPointer:
+        case LC32OpenGLESOpVertexPointer: {
+            REQUIRE(4);
+            GLint binding = 0;
+            glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &binding);
+            if(!binding && U(3)) {
+                /* ES retains this pointer until a draw call. */
+                SetBridgeError(GL_INVALID_OPERATION);
+                return 0;
+            }
+            const GLvoid *pointer = reinterpret_cast<const GLvoid *>(
+                static_cast<uintptr_t>(U(3)));
+            if(opcode == LC32OpenGLESOpColorPointer)
+                glColorPointer(I(0), U(1), I(2), pointer);
+            else if(opcode == LC32OpenGLESOpTexCoordPointer)
+                glTexCoordPointer(I(0), U(1), I(2), pointer);
+            else
+                glVertexPointer(I(0), U(1), I(2), pointer);
             return 0;
         }
         default:

@@ -1,4 +1,41 @@
 #import <AudioToolbox/AudioToolbox.h>
+#import <LC32/LC32.h>
+
+#include <pthread.h>
+#include <stdint.h>
+#include <string.h>
+
+#import "LC32AudioToolboxBridge.h"
+
+static pthread_once_t LC32AudioToolboxDispatcherOnce = PTHREAD_ONCE_INIT;
+static uint64_t LC32AudioToolboxDispatcherAddress;
+
+static void LC32AudioToolboxResolveDispatcher(void) {
+    LC32AudioToolboxDispatcherAddress =
+        LC32Dlsym("LC32_AudioToolbox_Dispatch", YES);
+}
+
+static uint32_t LC32AudioToolboxDispatch(LC32AudioToolboxOpcode opcode,
+                                         const uint64_t *slots,
+                                         uint32_t slotCount) {
+    if(slotCount > LC32AudioToolboxMaxSlots) return (uint32_t)kAudio_ParamError;
+    pthread_once(&LC32AudioToolboxDispatcherOnce,
+        LC32AudioToolboxResolveDispatcher);
+    if(!LC32AudioToolboxDispatcherAddress) return (uint32_t)kAudio_ParamError;
+
+    LC32AudioToolboxCall call = {
+        .version = LC32AudioToolboxABIVersion,
+        .slotCount = slotCount,
+    };
+    if(slotCount) memcpy(call.slots, slots, slotCount * sizeof(*slots));
+    return LC32InvokeHostCRet32(LC32AudioToolboxDispatcherAddress,
+        (uint32_t)opcode, (uint32_t)(uintptr_t)&call);
+}
+
+#define LC32_AUDIO_CALL(opcode, ...) \
+    LC32AudioToolboxDispatch((opcode), (const uint64_t[]){__VA_ARGS__}, \
+        (uint32_t)(sizeof((const uint64_t[]){__VA_ARGS__}) / sizeof(uint64_t)))
+#define LC32_AUDIO_U32(value) ((uint64_t)(uint32_t)(value))
 
 // TODO: stub
 
@@ -69,4 +106,54 @@ OSStatus AudioSessionSetActive(Boolean active) {
 
 OSStatus AudioSessionSetProperty(AudioSessionPropertyID inID, UInt32 inDataSize, const void * inData) {
     return 0; // deprecated
+}
+
+#pragma mark Extended Audio File Services
+
+OSStatus ExtAudioFileOpenURL(CFURLRef url, ExtAudioFileRef *outFile) {
+    if(!url || !outFile) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpExtAudioFileOpenURL,
+        [(id)url host_self], LC32_AUDIO_U32((uintptr_t)outFile));
+}
+
+OSStatus ExtAudioFileDispose(ExtAudioFileRef file) {
+    if(!file) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpExtAudioFileDispose,
+        LC32_AUDIO_U32((uintptr_t)file));
+}
+
+OSStatus ExtAudioFileGetProperty(ExtAudioFileRef file,
+                                 ExtAudioFilePropertyID property,
+                                 UInt32 *ioDataSize,
+                                 void *outData) {
+    if(!file || !ioDataSize) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpExtAudioFileGetProperty,
+        LC32_AUDIO_U32((uintptr_t)file), LC32_AUDIO_U32(property),
+        LC32_AUDIO_U32((uintptr_t)ioDataSize),
+        LC32_AUDIO_U32((uintptr_t)outData));
+}
+
+OSStatus ExtAudioFileSetProperty(ExtAudioFileRef file,
+                                 ExtAudioFilePropertyID property,
+                                 UInt32 dataSize,
+                                 const void *data) {
+    if(!file || (dataSize && !data)) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpExtAudioFileSetProperty,
+        LC32_AUDIO_U32((uintptr_t)file), LC32_AUDIO_U32(property),
+        LC32_AUDIO_U32(dataSize), LC32_AUDIO_U32((uintptr_t)data));
+}
+
+OSStatus ExtAudioFileRead(ExtAudioFileRef file,
+                          UInt32 *ioNumberFrames,
+                          AudioBufferList *ioData) {
+    if(!file || !ioNumberFrames || !ioData) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpExtAudioFileRead,
+        LC32_AUDIO_U32((uintptr_t)file),
+        LC32_AUDIO_U32((uintptr_t)ioNumberFrames),
+        LC32_AUDIO_U32((uintptr_t)ioData));
 }

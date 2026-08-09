@@ -1,5 +1,8 @@
 #import <OpenGLES/EAGL.h>
+#import <OpenGLES/ES1/gl.h>
+#import <OpenGLES/ES1/glext.h>
 #import <OpenGLES/ES2/gl.h>
+#import <Foundation/Foundation+LC32.h>
 #import <LC32/LC32.h>
 
 #include <stdint.h>
@@ -8,6 +11,12 @@
 #include <string.h>
 
 #include "LC32OpenGLESBridge.h"
+
+NSString * const kEAGLColorFormatRGBA8 = @"EAGLColorFormatRGBA8";
+NSString * const kEAGLDrawablePropertyColorFormat =
+    @"EAGLDrawablePropertyColorFormat";
+NSString * const kEAGLDrawablePropertyRetainedBacking =
+    @"EAGLDrawablePropertyRetainedBacking";
 
 static pthread_once_t LC32OpenGLESDispatcherOnce = PTHREAD_ONCE_INIT;
 static uint64_t LC32OpenGLESDispatcherAddress;
@@ -827,4 +836,145 @@ void glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
     LC32_GL_CALL(LC32OpenGLESOpViewport,
         LC32_GL_I32(x), LC32_GL_I32(y),
         LC32_GL_I32(width), LC32_GL_I32(height));
+}
+
+#pragma mark OpenGL ES 1 fixed-function API
+
+void glAlphaFunc(GLenum function, GLclampf reference) {
+    LC32_GL_CALL(LC32OpenGLESOpAlphaFunc,
+        LC32_GL_U32(function), LC32_GL_F32(reference));
+}
+
+void glBindRenderbufferOES(GLenum target, GLuint renderbuffer) {
+    LC32_GL_CALL(LC32OpenGLESOpBindRenderbufferOES,
+        LC32_GL_U32(target), LC32_GL_U32(renderbuffer));
+}
+
+void glColor4f(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
+    LC32_GL_CALL(LC32OpenGLESOpColor4f,
+        LC32_GL_F32(red), LC32_GL_F32(green),
+        LC32_GL_F32(blue), LC32_GL_F32(alpha));
+}
+
+void glColorPointer(GLint size, GLenum type, GLsizei stride,
+                    const GLvoid *pointer) {
+    LC32_GL_CALL(LC32OpenGLESOpColorPointer,
+        LC32_GL_I32(size), LC32_GL_U32(type), LC32_GL_I32(stride),
+        LC32_GL_PTR(pointer));
+}
+
+void glDisableClientState(GLenum array) {
+    LC32_GL_CALL(LC32OpenGLESOpDisableClientState, LC32_GL_U32(array));
+}
+
+void glDiscardFramebufferEXT(GLenum target, GLsizei count,
+                             const GLenum *attachments) {
+    LC32_GL_CALL(LC32OpenGLESOpDiscardFramebufferEXT,
+        LC32_GL_U32(target), LC32_GL_I32(count), LC32_GL_PTR(attachments));
+}
+
+void glEnableClientState(GLenum array) {
+    LC32_GL_CALL(LC32OpenGLESOpEnableClientState, LC32_GL_U32(array));
+}
+
+void glFogf(GLenum pname, GLfloat param) {
+    LC32_GL_CALL(LC32OpenGLESOpFogf,
+        LC32_GL_U32(pname), LC32_GL_F32(param));
+}
+
+void glFogfv(GLenum pname, const GLfloat *params) {
+    LC32_GL_CALL(LC32OpenGLESOpFogfv,
+        LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glFogx(GLenum pname, GLfixed param) {
+    LC32_GL_CALL(LC32OpenGLESOpFogx,
+        LC32_GL_U32(pname), LC32_GL_I32(param));
+}
+
+void glFramebufferRenderbufferOES(GLenum target, GLenum attachment,
+                                  GLenum renderbufferTarget,
+                                  GLuint renderbuffer) {
+    LC32_GL_CALL(LC32OpenGLESOpFramebufferRenderbufferOES,
+        LC32_GL_U32(target), LC32_GL_U32(attachment),
+        LC32_GL_U32(renderbufferTarget), LC32_GL_U32(renderbuffer));
+}
+
+void glGenRenderbuffersOES(GLsizei count, GLuint *renderbuffers) {
+    LC32_GL_CALL(LC32OpenGLESOpGenRenderbuffersOES,
+        LC32_GL_I32(count), LC32_GL_PTR(renderbuffers));
+}
+
+void glLoadIdentity(void) {
+    LC32_GL_CALL0(LC32OpenGLESOpLoadIdentity);
+}
+
+void glMatrixMode(GLenum mode) {
+    LC32_GL_CALL(LC32OpenGLESOpMatrixMode, LC32_GL_U32(mode));
+}
+
+void glMultMatrixf(const GLfloat *matrix) {
+    LC32_GL_CALL(LC32OpenGLESOpMultMatrixf, LC32_GL_PTR(matrix));
+}
+
+void glNormal3f(GLfloat x, GLfloat y, GLfloat z) {
+    LC32_GL_CALL(LC32OpenGLESOpNormal3f,
+        LC32_GL_F32(x), LC32_GL_F32(y), LC32_GL_F32(z));
+}
+
+void glOrthof(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top,
+              GLfloat nearValue, GLfloat farValue) {
+    LC32_GL_CALL(LC32OpenGLESOpOrthof,
+        LC32_GL_F32(left), LC32_GL_F32(right),
+        LC32_GL_F32(bottom), LC32_GL_F32(top),
+        LC32_GL_F32(nearValue), LC32_GL_F32(farValue));
+}
+
+void glPopMatrix(void) {
+    LC32_GL_CALL0(LC32OpenGLESOpPopMatrix);
+}
+
+void glPushMatrix(void) {
+    LC32_GL_CALL0(LC32OpenGLESOpPushMatrix);
+}
+
+void glRenderbufferStorageOES(GLenum target, GLenum internalFormat,
+                              GLsizei width, GLsizei height) {
+    LC32_GL_CALL(LC32OpenGLESOpRenderbufferStorageOES,
+        LC32_GL_U32(target), LC32_GL_U32(internalFormat),
+        LC32_GL_I32(width), LC32_GL_I32(height));
+}
+
+void glRotatef(GLfloat angle, GLfloat x, GLfloat y, GLfloat z) {
+    LC32_GL_CALL(LC32OpenGLESOpRotatef,
+        LC32_GL_F32(angle), LC32_GL_F32(x),
+        LC32_GL_F32(y), LC32_GL_F32(z));
+}
+
+void glScalef(GLfloat x, GLfloat y, GLfloat z) {
+    LC32_GL_CALL(LC32OpenGLESOpScalef,
+        LC32_GL_F32(x), LC32_GL_F32(y), LC32_GL_F32(z));
+}
+
+void glShadeModel(GLenum mode) {
+    LC32_GL_CALL(LC32OpenGLESOpShadeModel, LC32_GL_U32(mode));
+}
+
+void glTexCoordPointer(GLint size, GLenum type, GLsizei stride,
+                       const GLvoid *pointer) {
+    LC32_GL_CALL(LC32OpenGLESOpTexCoordPointer,
+        LC32_GL_I32(size), LC32_GL_U32(type), LC32_GL_I32(stride),
+        LC32_GL_PTR(pointer));
+}
+
+void glTranslatef(GLfloat x, GLfloat y, GLfloat z) {
+    LC32_GL_CALL(LC32OpenGLESOpTranslatef,
+        LC32_GL_F32(x), LC32_GL_F32(y), LC32_GL_F32(z));
+}
+
+void glVertexPointer(GLint size, GLenum type, GLsizei stride,
+                     const GLvoid *pointer) {
+    LC32_GL_CALL(LC32OpenGLESOpVertexPointer,
+        LC32_GL_I32(size), LC32_GL_U32(type), LC32_GL_I32(stride),
+        LC32_GL_PTR(pointer));
 }

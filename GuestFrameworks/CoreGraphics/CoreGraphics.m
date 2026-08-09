@@ -2,6 +2,56 @@
 #import <LC32/LC32.h>
 #import <CoreFoundation/CoreFoundation+LC32.h>
 #import "CoreGraphics+LC32.h"
+#import "LC32CoreGraphicsBridge.h"
+
+#include <pthread.h>
+#include <string.h>
+
+static pthread_once_t LC32CoreGraphicsDispatcherOnce = PTHREAD_ONCE_INIT;
+static uint64_t LC32CoreGraphicsDispatcherAddress;
+
+static void LC32CoreGraphicsResolveDispatcher(void) {
+    LC32CoreGraphicsDispatcherAddress =
+        LC32Dlsym("LC32_CoreGraphics_Dispatch", YES);
+}
+
+static uint32_t LC32CoreGraphicsDispatch(LC32CoreGraphicsOpcode opcode,
+                                         const uint64_t *slots,
+                                         uint32_t slotCount) {
+    if(slotCount > LC32CoreGraphicsMaxSlots) return 0;
+    pthread_once(&LC32CoreGraphicsDispatcherOnce,
+        LC32CoreGraphicsResolveDispatcher);
+    if(!LC32CoreGraphicsDispatcherAddress) return 0;
+
+    LC32CoreGraphicsCall call = {
+        .version = LC32CoreGraphicsABIVersion,
+        .slotCount = slotCount,
+    };
+    if(slotCount) memcpy(call.slots, slots, slotCount * sizeof(*slots));
+    return LC32InvokeHostCRet32(LC32CoreGraphicsDispatcherAddress,
+        (uint32_t)opcode, (uint32_t)(uintptr_t)&call);
+}
+
+static uint64_t LC32CoreGraphicsFloat(CGFloat value) {
+    union {
+        float value;
+        uint32_t bits;
+    } converted = {.value = (float)value};
+    return converted.bits;
+}
+
+static uint64_t LC32CoreGraphicsHostObject(const void *object) {
+    return object ? [(id)object host_self] : 0;
+}
+
+#define LC32_CG_CALL0(opcode) \
+    LC32CoreGraphicsDispatch((opcode), NULL, 0)
+#define LC32_CG_CALL(opcode, ...) \
+    LC32CoreGraphicsDispatch((opcode), (const uint64_t[]){__VA_ARGS__}, \
+        (uint32_t)(sizeof((const uint64_t[]){__VA_ARGS__}) / sizeof(uint64_t)))
+#define LC32_CG_U32(value) ((uint64_t)(uint32_t)(value))
+#define LC32_CG_F32(value) LC32CoreGraphicsFloat((CGFloat)(value))
+#define LC32_CG_HOST(value) LC32CoreGraphicsHostObject((const void *)(value))
 
 #pragma mark CGColor TODO
 
@@ -12,10 +62,12 @@ void CGColorRelease(CGColorRef color) {
     
 }
 CGColorSpaceRef CGColorSpaceCreateDeviceRGB() {
-    return nil;
+    return (CGColorSpaceRef)LC32_CG_CALL0(
+        LC32CoreGraphicsOpColorSpaceCreateDeviceRGB);
 }
 void CGColorSpaceRelease(CGColorSpaceRef color) {
-    
+    if(!color) return;
+    CFRelease(color);
 }
 CGDataProviderRef CGDataProviderCreateWithURL(CFURLRef url) {
     return nil;
@@ -27,7 +79,65 @@ CGImageRef CGImageCreateWithJPEGDataProvider(CGDataProviderRef source, const CGF
     return nil;
 }
 void CGImageRelease(CGImageRef image) {
-    
+    if(!image) return;
+    CFRelease(image);
+}
+
+#pragma mark CGBitmapContext and CGImage
+
+CGContextRef CGBitmapContextCreate(void *data, size_t width, size_t height,
+                                   size_t bitsPerComponent,
+                                   size_t bytesPerRow,
+                                   CGColorSpaceRef space,
+                                   CGBitmapInfo bitmapInfo) {
+    return (CGContextRef)LC32_CG_CALL(
+        LC32CoreGraphicsOpBitmapContextCreate,
+        LC32_CG_U32((uintptr_t)data), LC32_CG_U32(width),
+        LC32_CG_U32(height), LC32_CG_U32(bitsPerComponent),
+        LC32_CG_U32(bytesPerRow), LC32_CG_HOST(space),
+        LC32_CG_U32(bitmapInfo));
+}
+
+void CGContextClearRect(CGContextRef context, CGRect rect) {
+    if(!context) return;
+    LC32_CG_CALL(LC32CoreGraphicsOpContextClearRect,
+        LC32_CG_HOST(context),
+        LC32_CG_F32(rect.origin.x), LC32_CG_F32(rect.origin.y),
+        LC32_CG_F32(rect.size.width), LC32_CG_F32(rect.size.height));
+}
+
+void CGContextDrawImage(CGContextRef context, CGRect rect,
+                        CGImageRef image) {
+    if(!context || !image) return;
+    LC32_CG_CALL(LC32CoreGraphicsOpContextDrawImage,
+        LC32_CG_HOST(context),
+        LC32_CG_F32(rect.origin.x), LC32_CG_F32(rect.origin.y),
+        LC32_CG_F32(rect.size.width), LC32_CG_F32(rect.size.height),
+        LC32_CG_HOST(image));
+}
+
+void CGContextRelease(CGContextRef context) {
+    if(!context) return;
+    // Copy host bitmap bytes back before the final host retain can disappear.
+    LC32_CG_CALL(LC32CoreGraphicsOpContextRelease,
+        LC32_CG_HOST(context));
+    CFRelease(context);
+}
+
+void CGContextTranslateCTM(CGContextRef context, CGFloat tx, CGFloat ty) {
+    if(!context) return;
+    LC32_CG_CALL(LC32CoreGraphicsOpContextTranslateCTM,
+        LC32_CG_HOST(context), LC32_CG_F32(tx), LC32_CG_F32(ty));
+}
+
+size_t CGImageGetHeight(CGImageRef image) {
+    return image ? LC32_CG_CALL(LC32CoreGraphicsOpImageGetHeight,
+        LC32_CG_HOST(image)) : 0;
+}
+
+size_t CGImageGetWidth(CGImageRef image) {
+    return image ? LC32_CG_CALL(LC32CoreGraphicsOpImageGetWidth,
+        LC32_CG_HOST(image)) : 0;
 }
 
 #pragma mark CGPath
@@ -173,4 +283,3 @@ bool CGRectContainsRect(CGRect a, CGRect b) {
             CGRectGetMinY(b) >= CGRectGetMinY(a) &&
             CGRectGetMaxY(b) <= CGRectGetMaxY(a));
 }
-

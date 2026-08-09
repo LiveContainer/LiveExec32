@@ -5,6 +5,22 @@
 
 #include <dlfcn.h>
 
+uint64_t LC32CachedHostSelector(
+    uint64_t *cache __attribute__((align_value(8))), SEL selector,
+                                BOOL returnsStruct) {
+    uint64_t value = __atomic_load_n(cache, __ATOMIC_ACQUIRE);
+    if(value) return value;
+
+    const uint64_t resolved = LC32GetHostSelector(selector) |
+        ((uint64_t)(returnsStruct != NO) << 63);
+    uint64_t expected = 0;
+    if(__atomic_compare_exchange_n(cache, &expected, resolved, false,
+            __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
+        return resolved;
+    }
+    return expected;
+}
+
 // Framework: LC32
 
 // Converts host class to guest class
@@ -18,8 +34,9 @@ Class LC32HostToGuestClass(uint64_t address) {
 // Get the guest object pointer from host. The host may call back to guest with initWithHostSelf: and return it.
 id LC32HostToGuestObject(uint64_t host_object) {
     static uint64_t hostPtr = 0;
-    if(!hostPtr) hostPtr = LC32GetHostSelector(@selector(guest_self));
-    return (id)LC32InvokeHostSelector(host_object, hostPtr);
+    uint64_t selector = LC32CachedHostSelector(
+        &hostPtr, @selector(guest_self), NO);
+    return (id)LC32InvokeHostSelector(host_object, selector);
 }
 
 id LC32DisposeFailedInit(id object) {
@@ -63,8 +80,9 @@ static const void *kHostSelf = &kHostSelf;
     self.host_self = ptr;
     // make a trip to host to set guest_self
     static uint64_t hostPtr = 0;
-    if(!hostPtr) hostPtr = LC32GetHostSelector(@selector(setGuest_self:));
-    LC32InvokeHostSelector(ptr, hostPtr, (uint64_t)self);
+    uint64_t selector = LC32CachedHostSelector(
+        &hostPtr, @selector(setGuest_self:), NO);
+    LC32InvokeHostSelector(ptr, selector, (uint64_t)self);
 }
 
 - (uint64_t)host_self {
@@ -79,29 +97,33 @@ static const void *kHostSelf = &kHostSelf;
 
 - (instancetype)LC32_autorelease {
     static uint64_t _host_cmd;
-    if(!_host_cmd) _host_cmd = LC32GetHostSelector(@selector(autorelease));
-    LC32InvokeHostSelector(self.host_self, _host_cmd);
+    uint64_t host_cmd = LC32CachedHostSelector(
+        &_host_cmd, @selector(autorelease), NO);
+    LC32InvokeHostSelector(self.host_self, host_cmd);
     return [self LC32_autorelease];
 }
 - (void)LC32_release {
     static uint64_t _host_cmd;
-    if(!_host_cmd) _host_cmd = LC32GetHostSelector(@selector(release));
-    LC32InvokeHostSelector(self.host_self, _host_cmd);
+    uint64_t host_cmd = LC32CachedHostSelector(
+        &_host_cmd, @selector(release), NO);
+    LC32InvokeHostSelector(self.host_self, host_cmd);
     [self LC32_release];
 }
 
 - (instancetype)LC32_retain {
     static uint64_t _host_cmd;
-    if(!_host_cmd) _host_cmd = LC32GetHostSelector(@selector(retain));
-    LC32InvokeHostSelector(self.host_self, _host_cmd);
+    uint64_t host_cmd = LC32CachedHostSelector(
+        &_host_cmd, @selector(retain), NO);
+    LC32InvokeHostSelector(self.host_self, host_cmd);
     return [self LC32_retain];
 }
 
 // FIXME: need to hook this?
 - (NSUInteger)LC32_retainCount {
     static uint64_t _host_cmd;
-    if(!_host_cmd) _host_cmd = LC32GetHostSelector(@selector(retainCount));
-    uint64_t host_ret = LC32InvokeHostSelector(self.host_self, _host_cmd);
+    uint64_t host_cmd = LC32CachedHostSelector(
+        &_host_cmd, @selector(retainCount), NO);
+    uint64_t host_ret = LC32InvokeHostSelector(self.host_self, host_cmd);
     return (NSUInteger)host_ret;
 }
 

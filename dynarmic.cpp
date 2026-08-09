@@ -315,10 +315,12 @@ static bool GuestWorkqueueActiveForCurrentThread();
 static void InvalidateAllGuestJits(u32 address, size_t size);
 static void HaltAllGuestJits(Dynarmic::HaltReason reason);
 static void InterruptDebuggerMachCalls();
+static void ScheduleMainGuestWorkqueueTransition();
 namespace {
 bool NativeDebuggerPauseHostWaitIfNeeded();
 void NotifyNativeDebuggerWaiters();
 void NotifyNativeDebuggerCoordinator();
+gdb_thread_id_t CurrentGuestThreadId();
 }
 static u32 GuestBsdthreadCreate(
     u32 function, u32 argument, u32 stack, u32 pthread, u32 flags);
@@ -1890,6 +1892,21 @@ int guest_workq_kernreturn(int options, u32 item, int arg2, int arg3) {
             }
             guestWorkqueueRequests.push_back(
                 {.remaining = arg2, .priority = static_cast<u32>(arg3)});
+            /*
+             * XNU may start the requested worker before this syscall returns.
+             * Prepare the cooperative overlay now so dispatch_async does not
+             * depend on the main thread eventually entering mach_msg.
+             */
+            const bool prepared = PumpGuestWorkqueue();
+            if (prepared && NativeGuestThreadIsCurrent() &&
+                    CurrentGuestThreadId() != 1) {
+                /*
+                 * Workqueue overlays run on the main JIT. A request can be
+                 * made by any native guest pthread, so wake the main runner
+                 * and let it install the prepared upcall at a safe boundary.
+                 */
+                ScheduleMainGuestWorkqueueTransition();
+            }
             return return_with_carry_direct(0, false);
         }
         case WQOPS_QUEUE_REQTHREADS2:
@@ -3412,19 +3429,47 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 cpu->Regs()[1] = (u32)(result >> 32);
             } break;
             // direct call with custom args
+            case 333: // __pthread_canceled
+                /*
+                 * Guest pthread cancellation requests are not modeled yet.
+                 * XNU accepts actions 1 and 2 (enable/disable) unconditionally;
+                 * action 0 reports EINVAL when there is no pending enabled
+                 * cancellation. Handle this at the guest ABI instead of
+                 * mutating cancellation state on the emulator's host thread.
+                 */
+                if (cpu->Regs()[0] == 1 || cpu->Regs()[0] == 2) {
+                    cpu->Regs()[0] =
+                        return_with_carry_direct(0, false);
+                } else {
+                    cpu->Regs()[0] =
+                        return_with_carry_direct(EINVAL, true);
+                }
+                break;
             case 334: // semwait_signal
             case 423: // semwait_signal_nocancel
-                cpu->Regs()[0] = debugger_aware_host_wait(
-                    [&] {
-                        return syscallRetCarry(
-                            NR, cpu->Regs()[0], cpu->Regs()[1],
-                            cpu->Regs()[2], cpu->Regs()[3],
-                            cpu->Regs()[4] |
-                                (static_cast<u64>(
-                                    cpu->Regs()[5]) << 32),
-                            cpu->Regs()[6]);
-                    },
-                    return_with_carry_direct(EINTR, true));
+                if (cpu->Regs()[1] == 0 && cpu->Regs()[2] == 0 &&
+                        GuestThreadYieldBeforeBlocking()) {
+                    /*
+                     * pthread_join uses an untimed wait without a paired
+                     * signal semaphore. Do not block the sole cooperative
+                     * JIT; libpthread retries after EINTR, by which time the
+                     * terminating guest thread can signal the host semaphore.
+                     */
+                    cpu->Regs()[0] =
+                        return_with_carry_direct(EINTR, true);
+                } else {
+                    cpu->Regs()[0] = debugger_aware_host_wait(
+                        [&] {
+                            return syscallRetCarry(
+                                NR, cpu->Regs()[0], cpu->Regs()[1],
+                                cpu->Regs()[2], cpu->Regs()[3],
+                                cpu->Regs()[4] |
+                                    (static_cast<u64>(
+                                        cpu->Regs()[5]) << 32),
+                                cpu->Regs()[6]);
+                        },
+                        return_with_carry_direct(EINTR, true));
+                }
                 break;
             case SYS_fsync: // 95
                 cpu->Regs()[0] = debugger_aware_host_wait(
@@ -3484,21 +3529,46 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                     semaphore_signal_trap(cpu->Regs()[0]);
                 break;
             case -36:
-                cpu->Regs()[0] = debugger_aware_host_wait(
-                    [&] {
-                        return semaphore_wait_trap(
-                            cpu->Regs()[0]);
-                    },
-                    static_cast<kern_return_t>(KERN_ABORTED));
+                if (GuestThreadCanYieldBeforeBlocking()) {
+                    const kern_return_t probe =
+                        semaphore_timedwait_trap(
+                            cpu->Regs()[0], 0, 0);
+                    if (probe == KERN_OPERATION_TIMED_OUT &&
+                            GuestThreadYieldBeforeBlocking()) {
+                        cpu->Regs()[0] = KERN_ABORTED;
+                    } else {
+                        cpu->Regs()[0] = probe;
+                    }
+                } else {
+                    cpu->Regs()[0] = debugger_aware_host_wait(
+                        [&] {
+                            return semaphore_wait_trap(
+                                cpu->Regs()[0]);
+                        },
+                        static_cast<kern_return_t>(KERN_ABORTED));
+                }
                 break;
             case -38:
-                cpu->Regs()[0] = debugger_aware_host_wait(
-                    [&] {
-                        return semaphore_timedwait_trap(
-                            cpu->Regs()[0], cpu->Regs()[1],
-                            cpu->Regs()[2]);
-                    },
-                    static_cast<kern_return_t>(KERN_ABORTED));
+                if (GuestThreadCanYieldBeforeBlocking()) {
+                    const kern_return_t probe =
+                        semaphore_timedwait_trap(
+                            cpu->Regs()[0], 0, 0);
+                    if (probe == KERN_OPERATION_TIMED_OUT &&
+                            (cpu->Regs()[1] != 0 || cpu->Regs()[2] != 0) &&
+                            GuestThreadYieldBeforeBlocking()) {
+                        cpu->Regs()[0] = KERN_ABORTED;
+                    } else {
+                        cpu->Regs()[0] = probe;
+                    }
+                } else {
+                    cpu->Regs()[0] = debugger_aware_host_wait(
+                        [&] {
+                            return semaphore_timedwait_trap(
+                                cpu->Regs()[0], cpu->Regs()[1],
+                                cpu->Regs()[2]);
+                        },
+                        static_cast<kern_return_t>(KERN_ABORTED));
+                }
                 break;
             case -41:
                 cpu->Regs()[0] = _kernelrpc_mach_port_guard_trap(
@@ -4994,6 +5064,17 @@ static void InvalidateAllGuestJits(
                 address, size);
         }
     }
+}
+
+static void ScheduleMainGuestWorkqueueTransition() {
+    Dynarmic::A32::Jit *mainJit =
+        sharedHandle.cb != nullptr
+        ? sharedHandle.cb->cpu
+        : nullptr;
+    if (mainJit != nullptr) {
+        mainJit->HaltExecution(LC32HaltReasonWorkqueue);
+    }
+    InterruptDebuggerMachCalls();
 }
 
 static void HaltAllGuestJits(
@@ -6700,10 +6781,6 @@ static bool HandleGuestContextTransition() {
 }
 
 static bool PumpGuestWorkqueue() {
-    if (NativeGuestThreadIsCurrent() &&
-            CurrentGuestThreadId() != 1) {
-        return false;
-    }
     std::lock_guard<std::recursive_mutex> lock(
         guestWorkqueueMutex);
     if (guestWorkqueueUpcallActive || !guest_workqueue_opened) {
@@ -6791,6 +6868,9 @@ static bool HandleGuestWorkqueueTransition() {
         lock.unlock();
         NativeDebuggerTransferStopOwner(
             2, 1);
+        if (PumpGuestWorkqueue()) {
+            jit->HaltExecution(LC32HaltReasonWorkqueue);
+        }
         return true;
     }
 

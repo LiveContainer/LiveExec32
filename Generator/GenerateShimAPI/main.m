@@ -301,8 +301,11 @@ static BOOL LC32MethodIsInInitFamily(LC32ObjCMethod *method) {
     [self.lines addObject:@"  printf(\"DBG: call [%s %s]\\n\", class_getName(self.class), sel_getName(_cmd));"];
 
     // pull host selector
-    [self.lines addObject:[NSString stringWithFormat:@"  static uint64_t _host_cmd;"]];
-    [self.lines addObject:[NSString stringWithFormat:@"  if(!_host_cmd) _host_cmd = LC32GetHostSelector(_cmd) | (uint64_t)%d << 63;", self.method.returnType[0] == '{']];
+    [self.lines addObject:
+        @"  static uint64_t _host_cmd __attribute__((aligned(8)));" ];
+    [self.lines addObject:[NSString stringWithFormat:
+        @"  uint64_t host_cmd = LC32CachedHostSelector(&_host_cmd, _cmd, %d);",
+        self.method.returnType[0] == '{']];
 
     // pull host objects
     for(MethodParameter *param in self.parameters) {
@@ -344,9 +347,9 @@ static BOOL LC32MethodIsInInitFamily(LC32ObjCMethod *method) {
 - (NSString *)callLine {
     NSMutableString *call = [NSMutableString new];
     if(self.method.returnType[0] == '{') {
-        [call appendFormat:@"%@_64 host_ret; LC32InvokeHostSelector(self.host_self, _host_cmd, &host_ret, sizeof(host_ret)", self.returnType];
+        [call appendFormat:@"%@_64 host_ret; LC32InvokeHostSelector(self.host_self, host_cmd, &host_ret, sizeof(host_ret)", self.returnType];
     } else {
-        [call appendString:@"uint64_t host_ret = LC32InvokeHostSelector(self.host_self, _host_cmd"];
+        [call appendString:@"uint64_t host_ret = LC32InvokeHostSelector(self.host_self, host_cmd"];
     }
     for(MethodParameter *param in self.parameters) {
         [call appendFormat:@", %@", param.parameterToBePassed];

@@ -51,10 +51,16 @@ ifneq ($(THEOS_CURRENT_INSTANCE),LC32)
 $(THEOS_CURRENT_INSTANCE)_FRAMEWORKS = LC32
 endif
 
-AVFAudio_INSTALL_PATH = /System/Library/Frameworks/AVFoundation.framework/Frameworks
+# TODO: symlink instead
+#AVFAudio_INSTALL_PATH = /System/Library/Frameworks/AVFoundation.framework/Frameworks
 FileProvider_INSTALL_PATH = /System/Library/PrivateFrameworks
 
 LC32_LIBRARIES = objc.A
+
+AVFoundation_LDFLAGS = \
+  -compatibility_version 1.0.0 \
+  -current_version 2.0.0 \
+  -Wl,-reexport_library,$(THEOS_OBJ_DIR)/AVFAudio.framework/AVFAudio
 
 CoreFoundation_FRAMEWORKS = LC32
 CoreFoundation_LDFLAGS = \
@@ -63,7 +69,9 @@ CoreFoundation_LDFLAGS = \
   -Wl,-reexport_library,$(abspath ../tmp/ramdisk/usr/lib/libobjc.A.dylib)
 
 Foundation_FRAMEWORKS = LC32
-Foundation_FILES = $(call framework_sources,Foundation)
+Foundation_FILES = $(filter-out \
+  $(GENERATED_FRAMEWORKS_ROOT)/Foundation/NSThread.m, \
+  $(call framework_sources,Foundation))
 Foundation_LDFLAGS = \
   -compatibility_version 678.24.0 \
   -current_version 678.24.0 \

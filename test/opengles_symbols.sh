@@ -25,7 +25,21 @@ diff -u "$MANIFEST" "$TEMP_DIR/bridge-symbols.txt"
 sed -E -n 's/^GL_API.*GL_APIENTRY (gl[A-Za-z0-9_]+) \(.*/\1/p' \
     "$SDKROOT/System/Library/Frameworks/OpenGLES.framework/Headers/ES2/gl.h" | \
     LC_ALL=C sort -u > "$TEMP_DIR/sdk-symbols.txt"
-sed '/^EAGLGetVersion$/d' "$MANIFEST" > "$TEMP_DIR/manifest-es2.txt"
-diff -u "$TEMP_DIR/sdk-symbols.txt" "$TEMP_DIR/manifest-es2.txt"
+comm -23 "$TEMP_DIR/sdk-symbols.txt" "$MANIFEST" > "$TEMP_DIR/missing-es2-symbols.txt"
+if [ -s "$TEMP_DIR/missing-es2-symbols.txt" ]; then
+    echo "OpenGLES bridge is missing ES2 core symbols:" >&2
+    cat "$TEMP_DIR/missing-es2-symbols.txt" >&2
+    exit 1
+fi
 
-echo "OpenGLES symbol audit: PASS (142/142 ES2 core + EAGLGetVersion)"
+for symbol in \
+    kEAGLColorFormatRGBA8 \
+    kEAGLDrawablePropertyColorFormat \
+    kEAGLDrawablePropertyRetainedBacking; do
+    if ! xcrun nm -gjU "$TEMP_DIR/OpenGLES.o" | grep -qx "_$symbol"; then
+        echo "OpenGLES bridge is missing data export: $symbol" >&2
+        exit 1
+    fi
+done
+
+echo "OpenGLES symbol audit: PASS (ES2 core, GLES1 compatibility, and EAGL globals)"
