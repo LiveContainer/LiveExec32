@@ -16,6 +16,47 @@ u32 LC32HostToGuestCopyClassName(u32 guest_output, size_t length, u64 host_objec
     return length;
 }
 
+u32 LC32CopyHostStringUTF8(u64 host_object, u32 guest_output,
+                           size_t capacity) {
+    const char *bytes = [(NSString *)(id)host_object UTF8String];
+    if(!bytes) return 0;
+
+    const size_t byteCount = strlen(bytes) + 1;
+    if(byteCount > UINT32_MAX) return 0;
+    if(guest_output && capacity) {
+        const size_t copyCount = MIN(byteCount, capacity);
+        if(Dynarmic_mem_1write(guest_output, copyCount, (char *)bytes) != 0) {
+            return 0;
+        }
+        if(copyCount < byteCount) {
+            const char terminator = '\0';
+            if(Dynarmic_mem_1write(guest_output + copyCount - 1, 1,
+                                   (char *)&terminator) != 0) {
+                return 0;
+            }
+        }
+    }
+    return (u32)byteCount;
+}
+
+u32 LC32CopyHostDataBytes(u64 host_object, u32 guest_output, u32 length,
+                          u32 offset) {
+    NSData *data = (NSData *)(id)host_object;
+    const NSUInteger dataLength = data.length;
+    if(offset > dataLength || length > dataLength - offset) {
+        return UINT32_MAX;
+    }
+    if(!length) return 0;
+
+    const void *bytes = data.bytes;
+    if(!bytes || !guest_output || Dynarmic_mem_1write(
+            guest_output, length,
+            (char *)bytes + offset) != 0) {
+        return UINT32_MAX;
+    }
+    return length;
+}
+
 u64 LC32Dlsym(u32 guest_name, bool isFunction) {
     DynarmicHostString host_name(guest_name);
     
@@ -85,37 +126,206 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
         Dynarmic_current_user_callbacks()->MemoryRead64(va_args += sizeof(u64))
     };
 
+    /*
+     * A guest pointer cannot be handed to an ARM64 Objective-C method. Shim
+     * sources tag pointers to 64-bit guest temporaries; substitute native
+     * stack storage for objc_msgSend and copy the result back afterwards.
+     * Looking at the method encoding prevents a negative scalar or floating
+     * bit pattern from ever being mistaken for an indirect argument.
+     */
+    constexpr u64 kGuestIndirectArgumentTag = UINT64_C(1) << 63;
+    u32 indirectGuestStorage[9] = {};
+    u64 indirectHostStorage[9] = {};
+    id receiver = (id)host_self;
+    SEL selector = (SEL)host_cmd;
+    Class dispatchClass = object_getClass(receiver);
+    const bool invokeSuper = [(id)dispatchClass isGuestClass];
+    if(invokeSuper) {
+        do {
+            dispatchClass = class_getSuperclass(dispatchClass);
+        } while(dispatchClass && [(id)dispatchClass isGuestClass]);
+    }
+    Method method = dispatchClass
+        ? class_getInstanceMethod(dispatchClass, selector)
+        : nullptr;
+    if(method) {
+        const unsigned int argumentCount =
+            MIN(method_getNumberOfArguments(method) - 2, 9u);
+        for(unsigned int index = 0; index < argumentCount; index++) {
+            char *argumentType =
+                method_copyArgumentType(method, index + 2);
+            if(!argumentType) continue;
+            const char *unqualifiedType = argumentType;
+            while(*unqualifiedType &&
+                    strchr("rnNoORVA", *unqualifiedType)) {
+                unqualifiedType++;
+            }
+            const bool isTaggedPointer =
+                *unqualifiedType == '^' &&
+                (args[index] & UINT64_C(0xffffffff00000000)) ==
+                    kGuestIndirectArgumentTag &&
+                (u32)args[index] != 0;
+            free(argumentType);
+            if(!isTaggedPointer) continue;
+
+            const u32 guestStorage = (u32)args[index];
+            args[index] = 0;
+            if(!guestStorage || Dynarmic_mem_1read(
+                    guestStorage, sizeof(indirectHostStorage[index]),
+                    reinterpret_cast<char *>(
+                        &indirectHostStorage[index])) != 0) {
+                continue;
+            }
+            indirectGuestStorage[index] = guestStorage;
+            args[index] = (u64)&indirectHostStorage[index];
+        }
+    } else {
+        for(size_t index = 0; index < 9; index++) {
+            if((args[index] & UINT64_C(0xffffffff00000000)) !=
+                    kGuestIndirectArgumentTag || !(u32)args[index]) {
+                continue;
+            }
+            printf("LC32: cannot marshal pointer argument %zu for "
+                   "unresolved selector %s\n", index,
+                   sel_getName(selector));
+            return 0;
+        }
+    }
+
+    auto finishIndirectArguments = [&](u64 result) -> u64 {
+        for(size_t index = 0; index < 9; index++) {
+            if(!indirectGuestStorage[index]) continue;
+            (void)Dynarmic_mem_1write(
+                indirectGuestStorage[index],
+                sizeof(indirectHostStorage[index]),
+                reinterpret_cast<char *>(
+                    &indirectHostStorage[index]));
+        }
+        return result;
+    };
+
     typedef u64(*objc_msgSendFunc)(u64 x0, u64 x1, u64 x2, u64 x3, u64 x4, u64 x5, u64 x6, u64 x7, ...);
-    // This is an alias of objc_msgSend_stret. For now we assume all structs return at most 4 double values. Anything else will be excluded by the shim generator
-    // TODO: check if we really need to call double setter-getter
-    typedef LC32_SixDoubles(*objc_msgSendStructFunc)(u64 x0, u64 x1, u64 x2, u64 x3, u64 x4, u64 x5, u64 x6, u64 x7, ...);
+    typedef float(*objc_msgSendFloatFunc)(u64 x0, u64 x1, u64 x2, u64 x3, u64 x4, u64 x5, u64 x6, u64 x7, ...);
+    typedef double(*objc_msgSendDoubleFunc)(u64 x0, u64 x1, u64 x2, u64 x3, u64 x4, u64 x5, u64 x6, u64 x7, ...);
+    struct LC32_TwoDoubles {
+        double d0, d1;
+    };
+    struct LC32_FourDoubles {
+        double d0, d1, d2, d3;
+    };
+    typedef LC32_TwoDoubles(*objc_msgSendTwoDoublesFunc)(u64 x0, u64 x1, u64 x2, u64 x3, u64 x4, u64 x5, u64 x6, u64 x7, ...);
+    typedef LC32_FourDoubles(*objc_msgSendFourDoublesFunc)(u64 x0, u64 x1, u64 x2, u64 x3, u64 x4, u64 x5, u64 x6, u64 x7, ...);
+    typedef LC32_SixDoubles(*objc_msgSendSixDoublesFunc)(u64 x0, u64 x1, u64 x2, u64 x3, u64 x4, u64 x5, u64 x6, u64 x7, ...);
+
+    enum class HostReturnKind {
+        Integer,
+        Float,
+        Double,
+    } returnKind = HostReturnKind::Integer;
+    if(method) {
+        char *returnType = method_copyReturnType(method);
+        if(returnType) {
+            const char *unqualifiedType = returnType;
+            while(*unqualifiedType &&
+                    strchr("rnNoORVA", *unqualifiedType)) {
+                unqualifiedType++;
+            }
+            if(*unqualifiedType == 'f') {
+                returnKind = HostReturnKind::Float;
+            } else if(*unqualifiedType == 'd') {
+                returnKind = HostReturnKind::Double;
+            }
+            free(returnType);
+        }
+    }
+
+    auto invokeScalar = [&](void *function, u64 target) -> u64 {
+        LC32SetDoubleRegisters(*(double*)&args[0], *(double*)&args[1],
+            *(double*)&args[2], *(double*)&args[3], *(double*)&args[4],
+            *(double*)&args[5]);
+        double floatingResult;
+        switch(returnKind) {
+            case HostReturnKind::Float:
+                floatingResult = ((objc_msgSendFloatFunc)function)(target,
+                    host_cmd, args[0], args[1], args[2], args[3],
+                    args[4], args[5], args[6], args[7], args[8]);
+                break;
+            case HostReturnKind::Double:
+                floatingResult = ((objc_msgSendDoubleFunc)function)(target,
+                    host_cmd, args[0], args[1], args[2], args[3],
+                    args[4], args[5], args[6], args[7], args[8]);
+                break;
+            case HostReturnKind::Integer:
+                return ((objc_msgSendFunc)function)(target, host_cmd,
+                    args[0], args[1], args[2], args[3], args[4],
+                    args[5], args[6], args[7], args[8]);
+        }
+        u64 resultBits;
+        memcpy(&resultBits, &floatingResult, sizeof(resultBits));
+        return resultBits;
+    };
+
+    auto invokeStruct = [&](void *function, u64 target) {
+        LC32SetDoubleRegisters(*(double*)&args[0], *(double*)&args[1],
+            *(double*)&args[2], *(double*)&args[3], *(double*)&args[4],
+            *(double*)&args[5]);
+        switch(structLen) {
+            case sizeof(LC32_TwoDoubles): {
+                const LC32_TwoDoubles result =
+                    ((objc_msgSendTwoDoublesFunc)function)(target,
+                        host_cmd, args[0], args[1], args[2], args[3],
+                        args[4], args[5], args[6], args[7], args[8]);
+                (void)Dynarmic_mem_1write(structPtr, sizeof(result),
+                    (char *)&result);
+                break;
+            }
+            case sizeof(LC32_FourDoubles): {
+                const LC32_FourDoubles result =
+                    ((objc_msgSendFourDoublesFunc)function)(target,
+                        host_cmd, args[0], args[1], args[2], args[3],
+                        args[4], args[5], args[6], args[7], args[8]);
+                (void)Dynarmic_mem_1write(structPtr, sizeof(result),
+                    (char *)&result);
+                break;
+            }
+            case sizeof(LC32_SixDoubles): {
+                const LC32_SixDoubles result =
+                    ((objc_msgSendSixDoublesFunc)function)(target,
+                        host_cmd, args[0], args[1], args[2], args[3],
+                        args[4], args[5], args[6], args[7], args[8]);
+                (void)Dynarmic_mem_1write(structPtr, sizeof(result),
+                    (char *)&result);
+                break;
+            }
+            default:
+                printf("LC32: unsupported host struct return size %u "
+                       "for selector %s\n", structLen,
+                       sel_getName(selector));
+                break;
+        }
+    };
 
     // If we're calling from guest within a guest subclass, call super
-    if([(id)object_getClass((id)host_self) isGuestClass]) {
-        Class superclass = [(id)host_self superclass];
-        while([(id)superclass isGuestClass]) {
-            superclass = [superclass superclass];
-        }
+    if(invokeSuper) {
         struct objc_super superInfo = {
             (id)host_self,
-            superclass
+            dispatchClass
         };
         if(structPtr) {
-            LC32_SixDoubles doubleRegs = ((objc_msgSendStructFunc)objc_msgSendSuper)((u64)&superInfo, host_cmd, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8]);
-            Dynarmic_mem_1write(structPtr, structLen, (char *)&doubleRegs);
-            return 0;
+            invokeStruct((void *)objc_msgSendSuper, (u64)&superInfo);
+            return finishIndirectArguments(0);
         } else {
-            LC32SetDoubleRegisters(*(double*)&args[0], *(double*)&args[1], *(double*)&args[2], *(double*)&args[3], *(double*)&args[4], *(double*)&args[5]);
-            return ((objc_msgSendFunc)objc_msgSendSuper)((u64)&superInfo, host_cmd, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8]);
+            return finishIndirectArguments(
+                invokeScalar((void *)objc_msgSendSuper,
+                             (u64)&superInfo));
         }
     } else {
         if(structPtr) {
-            LC32_SixDoubles doubleRegs = ((objc_msgSendStructFunc)objc_msgSend)(host_self, host_cmd, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8]);
-            Dynarmic_mem_1write(structPtr, structLen, (char *)&doubleRegs);
-            return 0;
+            invokeStruct((void *)objc_msgSend, host_self);
+            return finishIndirectArguments(0);
         } else {
-            LC32SetDoubleRegisters(*(double*)&args[0], *(double*)&args[1], *(double*)&args[2], *(double*)&args[3], *(double*)&args[4], *(double*)&args[5]);
-            return ((objc_msgSendFunc)objc_msgSend)(host_self, host_cmd, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8]);
+            return finishIndirectArguments(
+                invokeScalar((void *)objc_msgSend, host_self));
         }
     }
 }
@@ -192,6 +402,7 @@ u32 LC32HostToGuestArgument(char *type, u64 value) {
         case 'd':
             return (float)(CGFloat)value;
         case '@': // id
+        case '#': // Class
             return [(id)value guest_self];
         default:
             printf("LC32HostToGuestArgument: unhandled type %s\n", type);
@@ -211,7 +422,8 @@ u64 LC32GuestToHostReturnType(char *type, u32 value) {
             return (u64)value;
         case 'd':
             return (CGFloat)value;
-        case '@': {// id
+        case '@': // id
+        case '#': {// Class
             // don't call LC32GetHostObject here! the guest stores host pointer
             static std::atomic<u32> guestPtr{0};
             const u32 selector = LC32CachedGuestSelector(
@@ -223,6 +435,50 @@ u64 LC32GuestToHostReturnType(char *type, u32 value) {
             printf("LC32GuestToHostReturnType: unhandled type %s\n", type);
             abort();
     }
+}
+
+static u64 LC32InvokeGuestSelectorWords(id self, SEL _cmd,
+                                        const u32 *argumentWords,
+                                        size_t argumentWordCount) {
+    assert(argumentWordCount <= 18);
+
+    u32 guest_args[20];
+    size_t guest_argc = 0;
+    guest_args[guest_argc++] = (u32)(u64)[self guest_self];
+    guest_args[guest_argc++] = guest_sel_registerName(sel_getName(_cmd));
+    for(size_t index = 0; index < argumentWordCount; index++) {
+        guest_args[guest_argc++] = argumentWords[index];
+    }
+
+    const u32 guest_result = guest_objc_msgSend((int)guest_argc, guest_args);
+    Method method = object_isClass(self)
+        ? class_getClassMethod(self, _cmd)
+        : class_getInstanceMethod((Class)[self class], _cmd);
+    char *returnType = method_copyReturnType(method);
+    const u64 host_result = LC32GuestToHostReturnType(returnType, guest_result);
+    free(returnType);
+    return host_result;
+}
+
+static u32 LC32GuestFloatWord(CGFloat value) {
+    const float guestValue = (float)value;
+    u32 word;
+    memcpy(&word, &guestValue, sizeof(word));
+    return word;
+}
+
+// A CGRect is an HFA of four doubles in the arm64 host ABI, but four floats in
+// the ARMv7 guest ABI. A typed IMP is required so the host values are captured
+// from d0-d3 before they are narrowed and placed in the guest argument words.
+static u64 LC32InvokeGuestSelectorCGRect(id self, SEL _cmd, CGRect rect) {
+    const u32 words[] = {
+        LC32GuestFloatWord(rect.origin.x),
+        LC32GuestFloatWord(rect.origin.y),
+        LC32GuestFloatWord(rect.size.width),
+        LC32GuestFloatWord(rect.size.height),
+    };
+    return LC32InvokeGuestSelectorWords(
+        self, _cmd, words, sizeof(words) / sizeof(*words));
 }
 
 // can't use va_list at the beginning since arguments are passed to registers first
@@ -256,10 +512,27 @@ u64 LC32InvokeGuestSelector(id self, SEL _cmd, u64 arg2, u64 arg3, u64 arg4, u64
 }
 
 void LC32SetGuestScalarIvar(id self, SEL _cmd, u64 value) {
-    const char *name = sel_getName(_cmd);
+    const char *setterName = sel_getName(_cmd);
     char ivarName[0x50];
-    snprintf(ivarName, sizeof(ivarName)-1, "%c%s", tolower(name[3]), &name[4]);
-    guest_object_setInstanceVariable([self guest_self], name, (u32)value);
+    const bool hasLeadingUnderscore =
+        !strncmp(setterName, "_set", sizeof("_set") - 1);
+    const char *propertyName = setterName +
+        (hasLeadingUnderscore ? sizeof("_set") - 1 : sizeof("set") - 1);
+    const size_t propertyLength = strlen(propertyName);
+    if(propertyLength < 2 || propertyName[propertyLength - 1] != ':') {
+        printf("LC32: invalid synthetic ivar setter %s\n", setterName);
+        return;
+    }
+    const int written = snprintf(ivarName, sizeof(ivarName), "%s%c%.*s",
+        hasLeadingUnderscore ? "_" : "", tolower(propertyName[0]),
+        (int)propertyLength - 2, propertyName + 1);
+    if(written <= 0 || (size_t)written >= sizeof(ivarName)) {
+        printf("LC32: synthetic ivar setter name too long: %s\n",
+               setterName);
+        return;
+    }
+    guest_object_setInstanceVariable([self guest_self], ivarName,
+                                     (u32)value);
 }
 
 void LC32SetGuestNSObjectIvar(id self, SEL _cmd, id value) {
@@ -420,6 +693,7 @@ Class guest_objc_getClass_retHostClass(const char *name) {
     // register to objc
     objc_registerClassPair(outClass);
     [outClass setGuestClass:YES];
+    [(id)object_getClass(outClass) setGuestClass:YES];
     return outClass;
 }
 
@@ -464,6 +738,17 @@ static const void *kGuestSelf = &kGuestSelf;
 
 - (u32)guest_selfOrNull {
     return ((NSNumber *)objc_getAssociatedObject(self, kGuestSelf)).unsignedLongValue;
+}
+
+- (void)LC32_clearGuestSelfIfEqual:(u64)expectedGuestSelf {
+    @synchronized(self) {
+        NSNumber *mappedGuestSelf =
+            objc_getAssociatedObject(self, kGuestSelf);
+        if(mappedGuestSelf.unsignedLongLongValue == expectedGuestSelf) {
+            objc_setAssociatedObject(self, kGuestSelf, nil,
+                OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+    }
 }
 
 - (u32)guest_self {
@@ -566,7 +851,22 @@ static const void *kGuestSelf = &kGuestSelf;
         DynarmicHostString host_sel(host_method_32.method_name);
         sel = sel_registerName(host_sel.hostPtr);
     }
-    class_addMethod(cls, sel, (IMP)&LC32InvokeGuestSelector, host_method_types.hostPtr);
+
+    IMP implementation = (IMP)&LC32InvokeGuestSelector;
+    if(strstr(host_method_types.hostPtr, "{CGRect=")) {
+        NSMethodSignature *signature =
+            [NSMethodSignature signatureWithObjCTypes:host_method_types.hostPtr];
+        if(signature.numberOfArguments == 3) {
+            const char *argumentType = [signature getArgumentTypeAtIndex:2];
+            while(*argumentType && strchr("rnNoORVA", *argumentType)) {
+                argumentType++;
+            }
+            if(!strncmp(argumentType, "{CGRect=", sizeof("{CGRect=") - 1)) {
+                implementation = (IMP)&LC32InvokeGuestSelectorCGRect;
+            }
+        }
+    }
+    class_addMethod(cls, sel, implementation, host_method_types.hostPtr);
 }
 
 
@@ -598,13 +898,6 @@ static const void *kGuestSelf = &kGuestSelf;
     }
     //if(list) guest_free(list);
 
-    // Register instance variables by wrapping to getter/setter. Required for loading storyboard
-    list = guest_class_copyIvarList([clsObject guest_self], &count);
-    for(int i = 0; i < count; i++, list += sizeof(u32)) {
-        [self addGuestIvar:Dynarmic_current_user_callbacks()->MemoryRead32(list) toClass:clsObject];
-    }
-    //if(list) guest_free(list);
-
     // Register class methods. Pass metaclass (cls) here!
     list = guest_class_copyMethodList([cls guest_self], &count);
     for(int i = 0; i < count; i++, list += sizeof(u32)) {
@@ -616,6 +909,15 @@ static const void *kGuestSelf = &kGuestSelf;
     list = guest_class_copyMethodList([clsObject guest_self], &count);
     for(int i = 0; i < count; i++, list += sizeof(u32)) {
         [self addGuestMethod:Dynarmic_current_user_callbacks()->MemoryRead32(list) selector:nil toClass:clsObject];
+    }
+    //if(list) guest_free(list);
+
+    // Add synthetic ivar setters only after real guest methods. They are a
+    // fallback for nib/KVC assignment when the binary has no setter; adding
+    // them first would shadow an app's retaining property implementation.
+    list = guest_class_copyIvarList([clsObject guest_self], &count);
+    for(int i = 0; i < count; i++, list += sizeof(u32)) {
+        [self addGuestIvar:Dynarmic_current_user_callbacks()->MemoryRead32(list) toClass:clsObject];
     }
     //if(list) guest_free(list);
 }

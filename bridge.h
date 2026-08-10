@@ -34,6 +34,9 @@ LC32_SixDoubles LC32GetDoubleRegisters();
 void LC32SetDoubleRegisters(double d0, double d1, double d2, double d3, double d4, double d5);
 
 u32 LC32HostToGuestCopyClassName(u32 guest_output, size_t length, u64 host_object);
+u32 LC32CopyHostStringUTF8(u64 host_object, u32 guest_output, size_t capacity);
+u32 LC32CopyHostDataBytes(u64 host_object, u32 guest_output, u32 length,
+                          u32 offset);
 //u64 LC32Dlsym(u32 guest_name);
 u64 LC32GetHostObject(u32 guest_self, u32 guest_class, bool returnClass);
 u64 LC32GetHostSelector(u32 guest_selector);

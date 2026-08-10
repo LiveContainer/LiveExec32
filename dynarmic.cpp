@@ -2157,6 +2157,12 @@ int guest_access(u32 guest_path, int mode) {
     return syscallRetCarry(SYS_access, host_path, mode, 0,0,0,0,0);
 }
 
+int guest_mkdir(u32 guest_path, mode_t mode) {
+    char host_path[PATH_MAX];
+    sharedHandle.fs->pathGuestToHost(guest_path, host_path);
+    return syscallRetCarry(SYS_mkdir, host_path, mode, 0,0,0,0,0);
+}
+
 int guest_sigaction(int sig, u32 guest_act, u32 guest_oact) {
     static sigaction_32 host_actions[SIGUSR2 + 1];
     if (guest_oact) {
@@ -3759,6 +3765,10 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             case 133:
                 cpu->Regs()[0] = guest_sendto(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5]);
                 break;
+            case SYS_mkdir: // 136
+                cpu->Regs()[0] = guest_mkdir(
+                    cpu->Regs()[0], cpu->Regs()[1]);
+                break;
             case 153:
             case SYS_pread_nocancel:
                 cpu->Regs()[0] = guest_pread(
@@ -4086,6 +4096,31 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                     guest_arguments, options);
                 cpu->Regs()[0] = (u32)result;
                 cpu->Regs()[1] = (u32)(result >> 32);
+                break;
+            }
+            case 1011: { // LC32CopyHostStringUTF8
+                if(cpu->IsExecuting()) {
+                    cpu->HaltExecution(LC32HaltReasonSVC);
+                    return;
+                }
+                const u64 host_object = (u64)cpu->Regs()[0] |
+                    ((u64)cpu->Regs()[1] << 32);
+                cpu->Regs()[0] = LC32CopyHostStringUTF8(
+                    host_object, cpu->Regs()[2], cpu->Regs()[3]);
+                break;
+            }
+            case 1012: { // LC32CopyHostDataBytes
+                if(cpu->IsExecuting()) {
+                    cpu->HaltExecution(LC32HaltReasonSVC);
+                    return;
+                }
+                const u64 host_object = (u64)cpu->Regs()[0] |
+                    ((u64)cpu->Regs()[1] << 32);
+                const u32 offset =
+                    Dynarmic_current_user_callbacks()->MemoryRead32(
+                        cpu->Regs()[Reg::SP]);
+                cpu->Regs()[0] = LC32CopyHostDataBytes(
+                    host_object, cpu->Regs()[2], cpu->Regs()[3], offset);
                 break;
             }
             default:

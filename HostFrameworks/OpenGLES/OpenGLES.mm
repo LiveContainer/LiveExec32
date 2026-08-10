@@ -4,10 +4,15 @@
 #import <OpenGLES/ES1/gl.h>
 #import <OpenGLES/ES1/glext.h>
 #import <OpenGLES/ES2/gl.h>
+#import <QuartzCore/CAEAGLLayer.h>
+#import <UIKit/UIKit.h>
+#import <objc/runtime.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -19,12 +24,88 @@
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
+@interface EAGLContext (LC32EAGLCompatibility)
+- (BOOL)lc32_renderbufferStorage:(NSUInteger)target
+                    fromDrawable:(id<EAGLDrawable>)drawable;
+- (BOOL)lc32_trace_presentRenderbuffer:(NSUInteger)target;
+@end
+
 namespace {
 
 constexpr size_t kMaximumTransfer = 256u * 1024u * 1024u;
 constexpr size_t kMaximumString = 16u * 1024u * 1024u;
 
 thread_local GLenum bridgeError = GL_NO_ERROR;
+
+bool GLTraceEnabled() {
+    static const bool enabled = [] {
+        const char *value = getenv("LC32_GL_TRACE");
+        return value && *value && strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
+void TraceEAGLState(const char *event, EAGLContext *context,
+                    id<EAGLDrawable> drawable, BOOL result) {
+    if(!GLTraceEnabled()) return;
+
+    GLint framebuffer = 0;
+    GLint renderbuffer = 0;
+    GLint renderbufferWidth = 0;
+    GLint renderbufferHeight = 0;
+    GLint viewport[4] = {};
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
+    glGetIntegerv(GL_RENDERBUFFER_BINDING, &renderbuffer);
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    if(renderbuffer) {
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER,
+                                     GL_RENDERBUFFER_WIDTH,
+                                     &renderbufferWidth);
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER,
+                                     GL_RENDERBUFFER_HEIGHT,
+                                     &renderbufferHeight);
+    }
+
+    CALayer *layer = [(id)drawable isKindOfClass:
+        NSClassFromString(@"CALayer")] ? (CALayer *)(id)drawable : nil;
+    NSDictionary *drawableProperties = [(id)drawable respondsToSelector:
+        @selector(drawableProperties)] ? [(id)drawable drawableProperties] : nil;
+    UIView *view = [layer.delegate isKindOfClass:UIView.class]
+        ? (UIView *)layer.delegate : nil;
+    UIWindow *window = view.window;
+    UIViewController *root = window.rootViewController;
+    UIView *rootView = root.viewIfLoaded;
+    CGRect sceneBounds = window.windowScene
+        ? window.windowScene.coordinateSpace.bounds : CGRectZero;
+
+    fprintf(stderr,
+        "LC32 GL %s result=%d context=%p current=%p drawable=%s:%p "
+        "properties=%s native.keys={%s,%s} native.rgba8=%s "
+        "layer.bounds=%s layer.frame=%s layer.scale=%.4g "
+        "view=%p view.frame=%s view.bounds=%s view.scale=%.4g "
+        "window=%p window.frame=%s window.bounds=%s scene.bounds=%s "
+        "root=%s:%p root.view=%p root.bounds=%s "
+        "fb=%d rb=%d rb.size=%dx%d viewport=%d,%d,%d,%d\n",
+        event, result, context, EAGLContext.currentContext,
+        drawable ? object_getClassName((id)drawable) : "(nil)", drawable,
+        drawableProperties.description.UTF8String,
+        kEAGLDrawablePropertyRetainedBacking.UTF8String,
+        kEAGLDrawablePropertyColorFormat.UTF8String,
+        kEAGLColorFormatRGBA8.UTF8String,
+        NSStringFromCGRect(layer.bounds).UTF8String,
+        NSStringFromCGRect(layer.frame).UTF8String,
+        layer.contentsScale,
+        view, NSStringFromCGRect(view.frame).UTF8String,
+        NSStringFromCGRect(view.bounds).UTF8String,
+        view.contentScaleFactor,
+        window, NSStringFromCGRect(window.frame).UTF8String,
+        NSStringFromCGRect(window.bounds).UTF8String,
+        NSStringFromCGRect(sceneBounds).UTF8String,
+        root ? object_getClassName(root) : "(nil)", root,
+        rootView, NSStringFromCGRect(rootView.bounds).UTF8String,
+        framebuffer, renderbuffer, renderbufferWidth, renderbufferHeight,
+        viewport[0], viewport[1], viewport[2], viewport[3]);
+}
 
 void SetBridgeError(GLenum error) {
     if(bridgeError == GL_NO_ERROR) bridgeError = error;
@@ -629,6 +710,84 @@ size_t VertexAttribElementCount(GLenum pname) {
 }
 
 } // namespace
+
+@implementation EAGLContext (LC32EAGLCompatibility)
+
++ (void)load {
+    Class contextClass = self;
+    Method storage = class_getInstanceMethod(
+        contextClass, @selector(renderbufferStorage:fromDrawable:));
+    Method normalizedStorage = class_getInstanceMethod(
+        contextClass, @selector(lc32_renderbufferStorage:fromDrawable:));
+    Method present = class_getInstanceMethod(
+        contextClass, @selector(presentRenderbuffer:));
+    Method tracedPresent = class_getInstanceMethod(
+        contextClass, @selector(lc32_trace_presentRenderbuffer:));
+    if(storage && normalizedStorage) {
+        method_exchangeImplementations(storage, normalizedStorage);
+    }
+    if(GLTraceEnabled() && present && tracedPresent) {
+        method_exchangeImplementations(present, tracedPresent);
+    }
+}
+
+- (BOOL)lc32_renderbufferStorage:(NSUInteger)target
+                    fromDrawable:(id<EAGLDrawable>)drawable {
+    if([(id)drawable isKindOfClass:CAEAGLLayer.class]) {
+        CAEAGLLayer *layer = (CAEAGLLayer *)(id)drawable;
+        NSDictionary *properties = layer.drawableProperties;
+        NSMutableDictionary *normalized =
+            [NSMutableDictionary dictionaryWithCapacity:properties.count];
+        for(id key in properties) {
+            id value = properties[key];
+            const BOOL retainedBackingKey =
+                [key isEqual:kEAGLDrawablePropertyRetainedBacking] ||
+                [key isEqual:@"EAGLDrawablePropertyRetainedBacking"];
+            if(retainedBackingKey && ![value boolValue]) {
+                /*
+                 * Recent Simulator OpenGLES rejects the retained-backing key
+                 * even when its value is the native @NO singleton. Omitting
+                 * a false value is exactly equivalent and remains valid on
+                 * older hosts.
+                 */
+                continue;
+            }
+
+            id normalizedKey = key;
+            id normalizedValue = value;
+            if(retainedBackingKey) {
+                normalizedKey = kEAGLDrawablePropertyRetainedBacking;
+                normalizedValue = [value boolValue] ? @YES : @NO;
+            } else if([key isEqual:@"EAGLDrawablePropertyColorFormat"]) {
+                normalizedKey = kEAGLDrawablePropertyColorFormat;
+                if([value isEqual:@"EAGLColorFormat8888"] ||
+                        [value isEqual:@"EAGLColorFormatRGBA8"]) {
+                    normalizedValue = kEAGLColorFormatRGBA8;
+                } else if([value isEqual:@"EAGLColorFormatRGB565"]) {
+                    normalizedValue = kEAGLColorFormatRGB565;
+                }
+            }
+            normalized[normalizedKey] = normalizedValue;
+        }
+        layer.drawableProperties = normalized;
+    }
+
+    BOOL result = [self lc32_renderbufferStorage:target
+                                    fromDrawable:drawable];
+    TraceEAGLState("renderbufferStorage", self, drawable, result);
+    return result;
+}
+
+- (BOOL)lc32_trace_presentRenderbuffer:(NSUInteger)target {
+    BOOL result = [self lc32_trace_presentRenderbuffer:target];
+    static std::atomic<bool> traced{false};
+    if(!traced.exchange(true, std::memory_order_relaxed)) {
+        TraceEAGLState("first presentRenderbuffer", self, nil, result);
+    }
+    return result;
+}
+
+@end
 
 extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
                                             uint32_t guestCall,

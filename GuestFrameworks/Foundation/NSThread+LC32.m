@@ -22,7 +22,6 @@ typedef struct {
     NSQualityOfService qualityOfService;
     BOOL ownsTarget;
     BOOL selectorTakesObject;
-    BOOL detachedState;
     BOOL started;
     BOOL executing;
     BOOL finished;
@@ -121,14 +120,8 @@ static void LC32NSThreadFinish(void *opaque) {
     pthread_mutex_lock(&state->lock);
     state->executing = NO;
     state->finished = YES;
-    const BOOL detachedState = state->detachedState;
     pthread_mutex_unlock(&state->lock);
     pthread_setspecific(LC32NSThreadKey, NULL);
-
-    if(detachedState) {
-        thread->_lc32State = NULL;
-        LC32NSThreadDestroyState(state);
-    }
     [thread release];
 }
 
@@ -227,7 +220,6 @@ __attribute__((constructor)) static void LC32NSThreadInitialize(void) {
     if(!selector || !target) return;
     NSThread *thread = [[self alloc]
         initWithTarget:target selector:selector object:object];
-    thread->_lc32State->detachedState = YES;
     [thread start];
     [thread release];
 }
@@ -235,7 +227,6 @@ __attribute__((constructor)) static void LC32NSThreadInitialize(void) {
 + (void)detachNewThreadWithBlock:(void (^)(void))block {
     if(!block) return;
     NSThread *thread = [[self alloc] initWithBlock:block];
-    thread->_lc32State->detachedState = YES;
     [thread start];
     [thread release];
 }

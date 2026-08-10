@@ -310,6 +310,9 @@ u64 LC32InvokeHostNSStringFormat(u64 host_self,
                                  u32 guest_arguments,
                                  u32 options);
 u32 LC32HostToGuestCopyClassName(u32 guest_output, size_t length, u64 host_object);
+u32 LC32CopyHostStringUTF8(u64 host_object, u32 guest_output, size_t capacity);
+u32 LC32CopyHostDataBytes(u64 host_object, u32 guest_output, u32 length,
+                          u32 offset);
 
 __END_DECLS
 

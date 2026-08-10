@@ -2,6 +2,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 
 @interface NSString (LC32PrivateVariadicTest)
 + (instancetype)stringWithFormat:(NSString *)format locale:(id)locale, ...;
@@ -46,6 +47,12 @@ static NSString *formatWithLocaleArguments(NSString *format,
 
 int main(void) {
     int failed = 0;
+    const char *utf8 = [[NSString stringWithFormat:@"UTF8-%@-%d",
+                                                   @"bridge", 32]
+        UTF8String];
+    BOOL utf8Passed = utf8 && !strcmp(utf8, "UTF8-bridge-32");
+    printf("utf8-string: %s\n", utf8Passed ? "PASS" : "FAIL");
+    failed += !utf8Passed;
     failed += check("none", [NSString stringWithFormat:@"literal"],
                     @"literal");
     failed += check("object-r3", [NSString stringWithFormat:@"<%@>", @"object"],

@@ -12,11 +12,11 @@
 
 #include "LC32OpenGLESBridge.h"
 
-NSString * const kEAGLColorFormatRGBA8 = @"EAGLColorFormatRGBA8";
+NSString * const kEAGLColorFormatRGBA8 = @"EAGLColorFormat8888";
 NSString * const kEAGLDrawablePropertyColorFormat =
     @"EAGLDrawablePropertyColorFormat";
 NSString * const kEAGLDrawablePropertyRetainedBacking =
-    @"EAGLDrawablePropertyRetainedBacking";
+    @"EAGLDrawablePropertyRetained";
 
 static pthread_once_t LC32OpenGLESDispatcherOnce = PTHREAD_ONCE_INIT;
 static uint64_t LC32OpenGLESDispatcherAddress;

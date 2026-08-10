@@ -4,6 +4,9 @@
 #import "LC32.h"
 
 #include <dlfcn.h>
+#include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
 
 uint64_t LC32CachedHostSelector(
     uint64_t *cache __attribute__((align_value(8))), SEL selector,
@@ -19,6 +22,22 @@ uint64_t LC32CachedHostSelector(
         return resolved;
     }
     return expected;
+}
+
+static pthread_once_t LC32ObjCTraceOnce = PTHREAD_ONCE_INIT;
+static BOOL LC32ObjCTraceIsEnabled;
+
+static void LC32InitializeObjCTrace(void) {
+    const char *value = getenv("LC32_OBJC_TRACE");
+    LC32ObjCTraceIsEnabled =
+        value && value[0] && strcmp(value, "0") != 0;
+}
+
+BOOL LC32ObjCTraceEnabled(void) {
+    // pthread_once avoids the problematic inline ARMv7 CAS sequence clang
+    // emits for a local atomic while remaining safe with native guest threads.
+    pthread_once(&LC32ObjCTraceOnce, LC32InitializeObjCTrace);
+    return LC32ObjCTraceIsEnabled;
 }
 
 // Framework: LC32
@@ -55,6 +74,45 @@ id LC32DisposeFailedInit(id object) {
 }
 @end
 
+@interface LC32GuestBuffer : NSObject {
+@public
+    void *_bytes;
+    uint32_t _capacity;
+}
+@end
+
+@implementation LC32GuestBuffer
+- (void)dealloc {
+    free(_bytes);
+    [super dealloc];
+}
+@end
+
+static const void *kLC32GuestBuffer = &kLC32GuestBuffer;
+
+void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
+    if(!object || !requiredCapacity) return NULL;
+
+    @synchronized(object) {
+        LC32GuestBuffer *buffer =
+            objc_getAssociatedObject(object, kLC32GuestBuffer);
+        if(!buffer) {
+            buffer = [LC32GuestBuffer new];
+            objc_setAssociatedObject(object, kLC32GuestBuffer, buffer,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [buffer release];
+        }
+
+        if(buffer->_capacity < requiredCapacity) {
+            void *grown = realloc(buffer->_bytes, requiredCapacity);
+            if(!grown) return NULL;
+            buffer->_bytes = grown;
+            buffer->_capacity = requiredCapacity;
+        }
+        return buffer->_bytes;
+    }
+}
+
 @implementation NSObject(LC32)
 static const void *kHostSelf = &kHostSelf;
 
@@ -86,10 +144,22 @@ static const void *kHostSelf = &kHostSelf;
 }
 
 - (uint64_t)host_self {
-    printf("Calling from %s:0x%08x:0x%08x, isClass? = %d\n", class_getName(self.class), (uint32_t)self.class, (uint32_t)self, object_isClass(self));
+    if(LC32ObjCTraceEnabled()) {
+        printf("Calling from %s:0x%08x:0x%08x, isClass? = %d\n",
+            class_getName(self.class), (uint32_t)self.class,
+            (uint32_t)self, object_isClass(self));
+    }
     uint64_t ptr = ((LC32HostObjectPointer *)objc_getAssociatedObject(self, kHostSelf)).value;
     if(!ptr) {
-        self.host_self = ptr = LC32GetHostObject(self, class_getName(self.class), object_isClass(self));
+        @synchronized(self) {
+            ptr = ((LC32HostObjectPointer *)objc_getAssociatedObject(
+                self, kHostSelf)).value;
+            if(!ptr) {
+                ptr = LC32GetHostObject(self, class_getName(self.class),
+                                        object_isClass(self));
+                self.host_self = ptr;
+            }
+        }
     }
     assert(ptr != 0);
     return ptr;
@@ -103,10 +173,27 @@ static const void *kHostSelf = &kHostSelf;
     return [self LC32_autorelease];
 }
 - (void)LC32_release {
+    const uint64_t hostSelf = self.host_self;
+
+    /*
+     * The host can keep cached/singleton objects alive after the guest drops
+     * its last reference.  Clear its reverse mapping before the guest proxy is
+     * deallocated, otherwise a later host-to-guest conversion can return a
+     * dangling ARM pointer.  LC32_retainCount is the original guest
+     * implementation after method_exchangeImplementations below.
+     */
+    if([self LC32_retainCount] == 1) {
+        static uint64_t _clear_guest_cmd;
+        uint64_t clear_guest_cmd = LC32CachedHostSelector(
+            &_clear_guest_cmd, @selector(LC32_clearGuestSelfIfEqual:), NO);
+        LC32InvokeHostSelector(hostSelf, clear_guest_cmd,
+                               (uint64_t)(uintptr_t)self);
+    }
+
     static uint64_t _host_cmd;
     uint64_t host_cmd = LC32CachedHostSelector(
         &_host_cmd, @selector(release), NO);
-    LC32InvokeHostSelector(self.host_self, host_cmd);
+    LC32InvokeHostSelector(hostSelf, host_cmd);
     [self LC32_release];
 }
 
@@ -154,6 +241,14 @@ __attribute__((constructor)) void LC32FrameworkInit() {
     addMethodToClass(clsLC32HostObjectPointer, class_getInstanceMethod(clsNSObject, @selector(release)));
     addMethodToClass(clsLC32HostObjectPointer, class_getInstanceMethod(clsNSObject, @selector(retain)));
     addMethodToClass(clsLC32HostObjectPointer, class_getInstanceMethod(clsNSObject, @selector(retainCount)));
+
+    // Associated guest buffers are native guest-only objects as well. Keep
+    // their ownership traffic out of the host proxy retain/release bridge.
+    Class clsLC32GuestBuffer = objc_getClass("LC32GuestBuffer");
+    addMethodToClass(clsLC32GuestBuffer, class_getInstanceMethod(clsNSObject, @selector(autorelease)));
+    addMethodToClass(clsLC32GuestBuffer, class_getInstanceMethod(clsNSObject, @selector(release)));
+    addMethodToClass(clsLC32GuestBuffer, class_getInstanceMethod(clsNSObject, @selector(retain)));
+    addMethodToClass(clsLC32GuestBuffer, class_getInstanceMethod(clsNSObject, @selector(retainCount)));
 
     // Swizzle ARC methods
     swizzle(clsNSObject, @selector(autorelease), @selector(LC32_autorelease));

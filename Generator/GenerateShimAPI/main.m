@@ -143,8 +143,12 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
         case ':':
             return [NSString stringWithFormat:@"uint64_t host_arg%1$d = LC32GetHostSelector(guest_arg%1$d);", self.index];
         case '^':
-            if(self.signature[1] == '@' || [MethodParameter isDirectCastType:self.signature[1]]) {
-                return [NSString stringWithFormat:@"uint64_t host_arg%d; // %@", self.index, self.type];
+            if(self.signature[1] == '@' || self.signature[1] == '#') {
+                return [NSString stringWithFormat:
+                    @"uint64_t host_arg%d = 0;", self.index];
+            } else if([MethodParameter isDirectCastType:self.signature[1]]) {
+                return [NSString stringWithFormat:
+                    @"uint64_t host_arg%d = 0;", self.index];
             } else if ([self.type isEqualToString:@"_NSZone *"]) {
                 return [NSString stringWithFormat:@"uint64_t host_arg%d = 0;", self.index];
             }
@@ -177,7 +181,9 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
             returnDirect = YES;
             break;
         case '^':
-            returnPointer = self.signature[1] == '@' || [MethodParameter isDirectCastType:self.signature[1]];
+            returnPointer = self.signature[1] == '@' ||
+                            self.signature[1] == '#' ||
+                            [MethodParameter isDirectCastType:self.signature[1]];
             returnDirect |= [self.type isEqualToString:@"_NSZone *"];
             break;
         case 'r':
@@ -196,7 +202,9 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
     if(returnDirect) {
         return [NSString stringWithFormat:@"host_arg%d", self.index];
     } else if(returnPointer) {
-        return [NSString stringWithFormat:@"&host_arg%d", self.index];
+        return [NSString stringWithFormat:
+            @"LC32HostIndirectArgument(guest_arg%1$d ? &host_arg%1$d : NULL)",
+            self.index];
     }
     return [NSString stringWithFormat:@"/* %s: unhandled type %@ */", sel_getName(_cmd), self.type];
 }
@@ -227,7 +235,9 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
     switch(self.signature[1]) {
         case '@': // id **
         case '#': // class **
-            return [NSString stringWithFormat:@"*guest_arg%1$d = LC32HostToGuestObject(host_arg%1$d);", self.index];
+            return [NSString stringWithFormat:
+                @"if(guest_arg%1$d) *guest_arg%1$d = host_arg%1$d ? LC32HostToGuestObject(host_arg%1$d) : nil;",
+                self.index];
         default:
             // int*, float *, etc
             if([MethodParameter isDirectCastType:self.signature[1]] &&
@@ -235,7 +245,7 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
                 NSString *pointeeType =
                     [self.type substringToIndex:self.type.length - 2];
                 return [NSString stringWithFormat:
-                    @"*guest_arg%1$d = (%2$@)host_arg%1$d;",
+                    @"if(guest_arg%1$d) *guest_arg%1$d = (%2$@)host_arg%1$d;",
                     self.index, pointeeType];
             }
             break;
@@ -298,7 +308,7 @@ static BOOL LC32MethodIsInInitFamily(LC32ObjCMethod *method) {
     [self.lines addObject:[NSString stringWithFormat:@"%@ {", self.prettyName]];
 
     // debug: log calls
-    [self.lines addObject:@"  printf(\"DBG: call [%s %s]\\n\", class_getName(self.class), sel_getName(_cmd));"];
+    [self.lines addObject:@"  if(LC32ObjCTraceEnabled()) printf(\"DBG: call [%s %s]\\n\", class_getName(self.class), sel_getName(_cmd));"];
 
     // pull host selector
     [self.lines addObject:
@@ -355,7 +365,7 @@ static BOOL LC32MethodIsInInitFamily(LC32ObjCMethod *method) {
         [call appendFormat:@", %@", param.parameterToBePassed];
     }
     // Add a null last arg
-    [call appendString:@", 0);"];
+    [call appendString:@", (uint64_t)0);"];
     return call;
 }
 
@@ -382,13 +392,16 @@ static BOOL LC32MethodIsInInitFamily(LC32ObjCMethod *method) {
         case 'S':
         case 'b':
         case 'c':
-        case 'd':
-        case 'f':
         case 'i':
         case 'l':
         case 'q':
         case 's':
             return [NSString stringWithFormat:@"return (%@)host_ret;", self.returnType];
+        case 'd':
+        case 'f':
+            return [NSString stringWithFormat:
+                @"return (%@)LC32HostFloatingResult(host_ret);",
+                self.returnType];
     }
     
     if(LC32KnownStructForEncoding(self.method.returnType) != LC32KnownStructNone) {
@@ -412,25 +425,86 @@ static BOOL LC32MethodIsInInitFamily(LC32ObjCMethod *method) {
 @property(nonatomic) NSUInteger skippedFilteredMethods;
 @end
 
-static BOOL LC32MethodHasManualVariadicAdapter(NSString *className,
-                                               LC32ObjCMethod *method) {
+static BOOL LC32MethodHasManualAdapter(NSString *className,
+                                      LC32ObjCMethod *method) {
     NSString *selector = method.selectorString;
+    if([className isEqualToString:@"NSArray"]) {
+        return (!method.isInstanceMethod &&
+                [selector isEqualToString:@"arrayWithObjects:"]) ||
+               (method.isInstanceMethod &&
+                [selector isEqualToString:@"initWithObjects:"]);
+    }
+    if([className isEqualToString:@"NSSet"]) {
+        return (!method.isInstanceMethod &&
+                [selector isEqualToString:@"setWithObjects:"]) ||
+               (method.isInstanceMethod &&
+                [selector isEqualToString:@"initWithObjects:"]);
+    }
+    if([className isEqualToString:@"NSOrderedSet"]) {
+        return (!method.isInstanceMethod &&
+                [selector isEqualToString:@"orderedSetWithObjects:"]) ||
+               (method.isInstanceMethod &&
+                [selector isEqualToString:@"initWithObjects:"]);
+    }
+    if([className isEqualToString:@"NSDictionary"]) {
+        return (!method.isInstanceMethod && [selector
+                    isEqualToString:@"dictionaryWithObjectsAndKeys:"]) ||
+               (method.isInstanceMethod && [selector
+                    isEqualToString:@"initWithObjectsAndKeys:"]);
+    }
     if([className isEqualToString:@"NSString"]) {
         if(!method.isInstanceMethod) {
             return [selector isEqualToString:@"stringWithFormat:"] ||
                    [selector isEqualToString:@"stringWithFormat:locale:"] ||
                    [selector isEqualToString:@"localizedStringWithFormat:"];
         }
-        return [selector isEqualToString:@"initWithFormat:"] ||
+        return [selector isEqualToString:@"UTF8String"] ||
+               [selector isEqualToString:@"initWithFormat:"] ||
                [selector isEqualToString:@"initWithFormat:arguments:"] ||
                [selector isEqualToString:@"initWithFormat:locale:"] ||
                [selector isEqualToString:
                    @"initWithFormat:locale:arguments:"] ||
                [selector isEqualToString:@"stringByAppendingFormat:"];
     }
+    if([className isEqualToString:@"NSData"] && method.isInstanceMethod) {
+        return [selector isEqualToString:@"bytes"] ||
+               [selector isEqualToString:@"getBytes:"] ||
+               [selector isEqualToString:@"getBytes:length:"] ||
+               [selector isEqualToString:@"getBytes:range:"];
+    }
+    if(method.isInstanceMethod && [selector isEqualToString:
+            @"countByEnumeratingWithState:objects:count:"]) {
+        return [className isEqualToString:@"NSArray"] ||
+               [className isEqualToString:@"NSDictionary"] ||
+               [className isEqualToString:@"NSEnumerator"] ||
+               [className isEqualToString:@"NSOrderedSet"] ||
+               [className isEqualToString:@"NSSet"];
+    }
+    if([className isEqualToString:@"UIView"] &&
+       !method.isInstanceMethod &&
+       [selector isEqualToString:@"beginAnimations:context:"]) {
+        return YES;
+    }
     return [className isEqualToString:@"NSMutableString"] &&
            method.isInstanceMethod &&
            [selector isEqualToString:@"appendFormat:"];
+}
+
+static BOOL LC32MethodHasIndirectObjectBuffer(NSString *className,
+                                               LC32ObjCMethod *method) {
+    NSString *selector = method.selectorString;
+    if(method.isInstanceMethod &&
+       ([selector hasPrefix:@"getObjects:"] ||
+        [selector hasPrefix:@"getKeys:"])) {
+        return [className isEqualToString:@"NSArray"] ||
+               [className isEqualToString:@"NSCountedSet"] ||
+               [className isEqualToString:@"NSDictionary"] ||
+               [className isEqualToString:@"NSOrderedSet"] ||
+               [className isEqualToString:@"NSSet"];
+    }
+    return !method.isInstanceMethod &&
+           [className isEqualToString:@"NSManagedObject"] &&
+           [selector isEqualToString:@"allocBatch:withEntity:count:"];
 }
 
 @implementation ClassBuilder
@@ -504,10 +578,16 @@ static BOOL LC32MethodHasManualVariadicAdapter(NSString *className,
     }
 
     const char *selectorName = sel_getName(method.selector);
-    if(LC32MethodHasManualVariadicAdapter(self.className, method)) {
-        // Objective-C runtime encodings omit the ellipsis. These methods are
-        // emitted by a hand-written adapter that can capture the real ARMv7
-        // va_list before crossing into the host.
+    if(LC32MethodHasManualAdapter(self.className, method)) {
+        // These methods need ABI-aware hand-written adapters (for example an
+        // ARMv7 va_list, guest-owned buffer, or opaque pointer token).
+        self.skippedFilteredMethods++;
+        return;
+    } else if(LC32MethodHasIndirectObjectBuffer(self.className, method)) {
+        // Runtime type encodings only say `id *`; they do not distinguish a
+        // one-object out parameter from a caller-provided object array. The
+        // generic indirect bridge owns one native pointer cell, so buffer
+        // APIs need a manual adapter with an explicit element count.
         self.skippedFilteredMethods++;
         return;
     } else if(strchr(selectorName, '_') != NULL) {
@@ -566,6 +646,12 @@ static BOOL LC32MethodHasManualVariadicAdapter(NSString *className,
     [string appendFormat:@"#import <CoreGraphics/CoreGraphics+LC32.h>\n"];
     [string appendFormat:@"#import <UIKit/UIKit+LC32.h>\n"];
     [string appendFormat:@"@implementation %@\n", self.className];
+    if([self.className isEqualToString:@"NSData"]) {
+        // NSData.h declares bytes as a property. Once its generated method is
+        // filtered for the manual guest-copy adapter, Clang would otherwise
+        // synthesize a zero-filled guest ivar and a competing -bytes getter.
+        [string appendString:@"@dynamic bytes;\n"];
+    }
     NSArray<NSString *> *methodKeys =
         [self.methods.allKeys sortedArrayUsingSelector:@selector(compare:)];
     NSMutableArray<NSString *> *methodSources =

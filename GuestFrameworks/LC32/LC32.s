@@ -60,3 +60,15 @@ _LC32InvokeHostNSStringFormat:
     movw r12, #1010
     svc #0x80
     bx lr
+
+.global _LC32CopyHostStringUTF8
+_LC32CopyHostStringUTF8:
+    movw r12, #1011
+    svc #0x80
+    bx lr
+
+.global _LC32CopyHostDataBytes
+_LC32CopyHostDataBytes:
+    movw r12, #1012
+    svc #0x80
+    bx lr

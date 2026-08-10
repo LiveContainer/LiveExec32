@@ -40,3 +40,23 @@ static void LC32UIImageResolveCGImageSelector(void) {
 }
 
 @end
+
+@implementation UIView (LC32LegacyAnimationContext)
+
++ (void)beginAnimations:(NSString *)animationID context:(void *)context {
+    static uint64_t hostSelector;
+    if(!hostSelector) {
+        hostSelector = LC32GetHostSelector(_cmd);
+    }
+    /*
+     * The context is an opaque token, not a buffer for UIKit to dereference.
+     * Preserve its 32-bit guest value so an animation-delegate callback can
+     * receive the same token rather than exposing guest memory to the host.
+     */
+    LC32InvokeHostSelector(self.host_self, hostSelector,
+                           animationID.host_self,
+                           (uint64_t)(uint32_t)(uintptr_t)context,
+                           (uint64_t)0);
+}
+
+@end
