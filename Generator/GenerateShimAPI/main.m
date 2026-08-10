@@ -380,7 +380,7 @@ static BOOL LC32MethodIsInInitFamily(LC32ObjCMethod *method) {
         case '@':
         case '#':
             if(LC32MethodIsInInitFamily(self.method)) {
-                return @"if(!host_ret) return LC32DisposeFailedInit(self); self.host_self = host_ret; return self;";
+                return @"return LC32AdoptHostInitializerResult(self, host_ret);";
             } else {
                 return @"return LC32HostToGuestObject(host_ret);";
             }

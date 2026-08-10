@@ -26,11 +26,18 @@ uint64_t LC32CachedHostSelector(
 
 static pthread_once_t LC32ObjCTraceOnce = PTHREAD_ONCE_INIT;
 static BOOL LC32ObjCTraceIsEnabled;
+static pthread_once_t LC32AutoreleaseSchedulerOnce = PTHREAD_ONCE_INIT;
+static uint64_t LC32AutoreleaseScheduler;
 
 static void LC32InitializeObjCTrace(void) {
     const char *value = getenv("LC32_OBJC_TRACE");
     LC32ObjCTraceIsEnabled =
         value && value[0] && strcmp(value, "0") != 0;
+}
+
+static void LC32InitializeAutoreleaseScheduler(void) {
+    LC32AutoreleaseScheduler =
+        LC32Dlsym("LC32ScheduleGuestAutorelease", YES);
 }
 
 BOOL LC32ObjCTraceEnabled(void) {
@@ -60,6 +67,27 @@ id LC32HostToGuestObject(uint64_t host_object) {
 
 id LC32DisposeFailedInit(id object) {
     return object_dispose(object);
+}
+
+id LC32AdoptHostInitializerResult(id object, uint64_t hostResult) {
+    if(!hostResult) return LC32DisposeFailedInit(object);
+
+    /*
+     * Class-cluster alloc placeholders are shared objects. Passing the guest
+     * pointer explicitly avoids a race where another guest thread overwrites
+     * the placeholder's reverse association between alloc and init. Preserve
+     * an existing association for immutable singleton results. The helper's
+     * object return type leaves room to return that canonical guest proxy once
+     * its guest-only +1 ownership transfer is implemented.
+     */
+    static uint64_t bindGuestSelector __attribute__((aligned(8)));
+    const uint64_t selector = LC32CachedHostSelector(
+        &bindGuestSelector,
+        sel_registerName("LC32_bindGuestSelfIfAbsent:"), NO);
+    LC32InvokeHostSelector(hostResult, selector,
+        (uint64_t)(uint32_t)(uintptr_t)object, (uint64_t)0);
+    [object setHost_self:hostResult];
+    return object;
 }
 
 // We cannot use NSValue or NSInteger here since they're proxied aswell
@@ -166,11 +194,32 @@ static const void *kHostSelf = &kHostSelf;
 }
 
 - (instancetype)LC32_autorelease {
-    static uint64_t _host_cmd;
-    uint64_t host_cmd = LC32CachedHostSelector(
-        &_host_cmd, @selector(autorelease), NO);
-    LC32InvokeHostSelector(self.host_self, host_cmd);
-    return [self LC32_autorelease];
+    pthread_once(&LC32AutoreleaseSchedulerOnce,
+        LC32InitializeAutoreleaseScheduler);
+    assert(LC32AutoreleaseScheduler);
+
+    const uint64_t hostSelf = self.host_self;
+    LC32InvokeHostCRet32(LC32AutoreleaseScheduler,
+        (uint32_t)hostSelf, (uint32_t)(hostSelf >> 32),
+        (uint32_t)(uintptr_t)self);
+    return self;
+}
+
+- (void)LC32_releaseGuestOwnershipOnly {
+    const uint64_t hostSelf = self.host_self;
+
+    // Unlike the lifetime-pin release, this is an ordinary guest ownership
+    // decrement. Clear a surviving native mirror's reverse mapping if this is
+    // the guest object's final logical reference, but do not decrement the
+    // host here: the native autorelease token owns that paired operation.
+    if([self LC32_retainCount] == 1) {
+        static uint64_t _clear_guest_cmd;
+        uint64_t clear_guest_cmd = LC32CachedHostSelector(
+            &_clear_guest_cmd, @selector(LC32_clearGuestSelfIfEqual:), NO);
+        LC32InvokeHostSelector(hostSelf, clear_guest_cmd,
+                               (uint64_t)(uintptr_t)self);
+    }
+    [self LC32_release];
 }
 - (void)LC32_release {
     const uint64_t hostSelf = self.host_self;

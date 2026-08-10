@@ -1,10 +1,33 @@
 #import "bridge.h"
 
 #include <atomic>
+#include <mutex>
+#include <stdarg.h>
+#include <vector>
+
+// These Objective-C runtime entry points let the ARC-built host transfer an
+// existing +1 without introducing another ARC-managed strong local.
+extern "C" id objc_autorelease(id object);
+extern "C" void objc_release(id object);
+extern "C" id objc_retain(id object);
+
+#if __has_feature(objc_arc)
+static void LC32ObjCAutoreleaseWithoutARC(id object) {
+    (void)objc_autorelease(object);
+}
+#endif
+
+static void LC32ObjCRetainWithoutARC(id object) {
+    (void)objc_retain(object);
+}
 
 @interface LC32ObjCMethodResolver : NSObject
 + (void)registerClass:(Class)cls;
 @end
+
+static void LC32PinGuestObjectToHost(id hostObject, u32 guestObject,
+                                     bool retainGuestObject);
+static void LC32DrainDeferredGuestPinReleases();
 
 #pragma mark Guest -> Host functions
 
@@ -93,6 +116,11 @@ u64 LC32GetHostObject(u32 guest_self, u32 guest_className, bool returnClass) {
         obj = [cls alloc];
     }
     [obj setGuest_self:guest_self];
+    if([(id)cls isGuestClass]) {
+        // This guest object already has its caller's +1. Add one independent
+        // +1 which follows the lifetime of the native mirror.
+        LC32PinGuestObjectToHost(obj, guest_self, true);
+    }
     return (u64)obj;
 }
 
@@ -391,6 +419,7 @@ u64 LC32InvokeGuestC(u32 pc, bool ret64, int argc, u32 *args) {
 }
 
 u32 LC32HostToGuestArgument(char *type, u64 value) {
+    while(*type && strchr("rnNoORVA", *type)) type++;
     switch(*type) {
         case 'B': // bool
         case 'I':
@@ -410,25 +439,57 @@ u32 LC32HostToGuestArgument(char *type, u64 value) {
     }
 }
 
-u64 LC32GuestToHostReturnType(char *type, u32 value) {
+static float LC32GuestFloatReturn(u64 value) {
+    const u32 bits = (u32)value;
+    float result;
+    memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
+static double LC32GuestDoubleReturn(u64 value) {
+    double result;
+    memcpy(&result, &value, sizeof(result));
+    return result;
+}
+
+u64 LC32GuestToHostReturnType(char *type, u64 value) {
+    while(*type && strchr("rnNoORVA", *type)) type++;
     switch(*type) {
         case 'B': // bool
+        case 'C':
         case 'I':
-        case 'Q':
+        case 'L':
+        case 'S':
+        case 'b':
         case 'c':
         case 'i':
+        case 'l':
+        case 's':
+            return (u64)(u32)value;
+        case 'Q':
         case 'q':
+            return value;
         case 'v':
-            return (u64)value;
-        case 'd':
-            return (CGFloat)value;
+            return 0;
+        case 'f': {
+            const double hostValue = LC32GuestFloatReturn(value);
+            u64 result;
+            memcpy(&result, &hostValue, sizeof(result));
+            return result;
+        }
+        case 'd': {
+            const double hostValue = LC32GuestDoubleReturn(value);
+            u64 result;
+            memcpy(&result, &hostValue, sizeof(result));
+            return result;
+        }
         case '@': // id
         case '#': {// Class
             // don't call LC32GetHostObject here! the guest stores host pointer
             static std::atomic<u32> guestPtr{0};
             const u32 selector = LC32CachedGuestSelector(
                 guestPtr, "host_self");
-            u32 args[] = {value, selector};
+            u32 args[] = {(u32)value, selector};
             return guest_objc_msgSend(sizeof(args)/sizeof(*args), args);
         }
         default:
@@ -437,9 +498,9 @@ u64 LC32GuestToHostReturnType(char *type, u32 value) {
     }
 }
 
-static u64 LC32InvokeGuestSelectorWords(id self, SEL _cmd,
-                                        const u32 *argumentWords,
-                                        size_t argumentWordCount) {
+static u64 LC32InvokeGuestSelectorWordsRaw(id self, SEL _cmd,
+                                           const u32 *argumentWords,
+                                           size_t argumentWordCount) {
     assert(argumentWordCount <= 18);
 
     u32 guest_args[20];
@@ -450,7 +511,14 @@ static u64 LC32InvokeGuestSelectorWords(id self, SEL _cmd,
         guest_args[guest_argc++] = argumentWords[index];
     }
 
-    const u32 guest_result = guest_objc_msgSend((int)guest_argc, guest_args);
+    return guest_objc_msgSend((int)guest_argc, guest_args);
+}
+
+static u64 LC32InvokeGuestSelectorWords(id self, SEL _cmd,
+                                        const u32 *argumentWords,
+                                        size_t argumentWordCount) {
+    const u64 guest_result = LC32InvokeGuestSelectorWordsRaw(
+        self, _cmd, argumentWords, argumentWordCount);
     Method method = object_isClass(self)
         ? class_getClassMethod(self, _cmd)
         : class_getInstanceMethod((Class)[self class], _cmd);
@@ -467,6 +535,17 @@ static u32 LC32GuestFloatWord(CGFloat value) {
     return word;
 }
 
+static u64 LC32InvokeGuestSelectorCGRectRaw(id self, SEL _cmd, CGRect rect) {
+    const u32 words[] = {
+        LC32GuestFloatWord(rect.origin.x),
+        LC32GuestFloatWord(rect.origin.y),
+        LC32GuestFloatWord(rect.size.width),
+        LC32GuestFloatWord(rect.size.height),
+    };
+    return LC32InvokeGuestSelectorWordsRaw(
+        self, _cmd, words, sizeof(words) / sizeof(*words));
+}
+
 // A CGRect is an HFA of four doubles in the arm64 host ABI, but four floats in
 // the ARMv7 guest ABI. A typed IMP is required so the host values are captured
 // from d0-d3 before they are narrowed and placed in the guest argument words.
@@ -481,34 +560,167 @@ static u64 LC32InvokeGuestSelectorCGRect(id self, SEL _cmd, CGRect rect) {
         self, _cmd, words, sizeof(words) / sizeof(*words));
 }
 
-// can't use va_list at the beginning since arguments are passed to registers first
-u64 LC32InvokeGuestSelector(id self, SEL _cmd, u64 arg2, u64 arg3, u64 arg4, u64 arg5, u64 arg6, u64 arg7, ...) {
+static float LC32InvokeGuestSelectorCGRectGuestFloatHostFloat(
+        id self, SEL _cmd, CGRect rect) {
+    return LC32GuestFloatReturn(
+        LC32InvokeGuestSelectorCGRectRaw(self, _cmd, rect));
+}
+
+static double LC32InvokeGuestSelectorCGRectGuestFloatHostDouble(
+        id self, SEL _cmd, CGRect rect) {
+    return (double)LC32GuestFloatReturn(
+        LC32InvokeGuestSelectorCGRectRaw(self, _cmd, rect));
+}
+
+static float LC32InvokeGuestSelectorCGRectGuestDoubleHostFloat(
+        id self, SEL _cmd, CGRect rect) {
+    return (float)LC32GuestDoubleReturn(
+        LC32InvokeGuestSelectorCGRectRaw(self, _cmd, rect));
+}
+
+static double LC32InvokeGuestSelectorCGRectGuestDoubleHostDouble(
+        id self, SEL _cmd, CGRect rect) {
+    return LC32GuestDoubleReturn(
+        LC32InvokeGuestSelectorCGRectRaw(self, _cmd, rect));
+}
+
+// Keep x2-x7 as explicit parameters, then consume any arguments which the
+// arm64 caller placed on the stack through va_list.
+static u64 LC32InvokeGuestSelectorRaw(id self, SEL _cmd,
+                                     u64 arg2, u64 arg3, u64 arg4,
+                                     u64 arg5, u64 arg6, u64 arg7,
+                                     va_list *hostStackArguments,
+                                     Method *resolvedMethod) {
     // FIXME: fast path to get guest selector? cache to hash map?
     u32 guest_cmd = guest_sel_registerName(sel_getName(_cmd));
     Method method = object_isClass(self) ? class_getClassMethod(self, _cmd) : class_getInstanceMethod((Class)[self class], _cmd);
 
-    // now the most complicated part is parsing and dynamically converting arguments, perhaps we can make a JIT compiler to make this faster, or idk...
-    u64 host_args[] = {arg2, arg3, arg4, arg5, arg6, arg7};
-    u32 guest_argc = 0;
+    // Objective-C method metadata describes logical arguments, but an arm64
+    // NSRange occupies two general-purpose argument slots. Keep an independent
+    // raw-slot cursor so following arguments stay aligned.
+    const u64 hostRegisterArguments[] = {
+        arg2, arg3, arg4, arg5, arg6, arg7
+    };
+    constexpr size_t hostRegisterArgumentCount =
+        sizeof(hostRegisterArguments) / sizeof(*hostRegisterArguments);
+    size_t hostArgumentSlot = 0;
+    auto nextHostArgument = [&]() -> u64 {
+        if(hostArgumentSlot < hostRegisterArgumentCount) {
+            return hostRegisterArguments[hostArgumentSlot++];
+        }
+        hostArgumentSlot++;
+        return va_arg(*hostStackArguments, u64);
+    };
+
+    size_t guest_argc = 0;
     u32 guest_args[20];
     guest_args[guest_argc++] = (u32)(u64)[self guest_self];
     guest_args[guest_argc++] = guest_cmd;
 
     int nargs = method_getNumberOfArguments(method);
-    // TODO: we don't parse va_arg yet
+    // The generic trampoline has six logical host argument positions. Structs
+    // may expand those into extra raw GPR slots (and at most one supported
+    // stack argument); broader stack/FP signatures need typed trampolines.
     assert(nargs <= 8);
     for(int i = 2; i < nargs; i++) {
         char *argType = method_copyArgumentType(method, i);
-        guest_args[guest_argc++] = LC32HostToGuestArgument(argType, host_args[i-2]);
+        const char *unqualifiedType = argType;
+        while(*unqualifiedType && strchr("rnNoORVA", *unqualifiedType)) {
+            unqualifiedType++;
+        }
+
+        const bool isNSRange =
+            !strncmp(unqualifiedType, "{_NSRange=",
+                     sizeof("{_NSRange=") - 1) ||
+            !strncmp(unqualifiedType, "{NSRange=",
+                     sizeof("{NSRange=") - 1);
+        if(isNSRange) {
+            /*
+             * AAPCS64 never splits an aggregate between registers and the
+             * stack. If only x7 remains, it is unused and both NSUInteger
+             * fields begin on the stack.
+             */
+            if(hostArgumentSlot < hostRegisterArgumentCount &&
+                    hostRegisterArgumentCount - hostArgumentSlot < 2) {
+                hostArgumentSlot = hostRegisterArgumentCount;
+            }
+            assert(guest_argc + 2 <=
+                   sizeof(guest_args) / sizeof(*guest_args));
+            guest_args[guest_argc++] = (u32)nextHostArgument();
+            guest_args[guest_argc++] = (u32)nextHostArgument();
+        } else {
+            assert(guest_argc < sizeof(guest_args) / sizeof(*guest_args));
+            guest_args[guest_argc++] = LC32HostToGuestArgument(
+                argType, nextHostArgument());
+        }
         free(argType);
     }
+    if(resolvedMethod) *resolvedMethod = method;
+    return guest_objc_msgSend((int)guest_argc, guest_args);
+}
 
-    u32 guest_result = guest_objc_msgSend(guest_argc, guest_args);
+u64 LC32InvokeGuestSelector(id self, SEL _cmd, u64 arg2, u64 arg3,
+                            u64 arg4, u64 arg5, u64 arg6, u64 arg7, ...) {
+    va_list hostStackArguments;
+    va_start(hostStackArguments, arg7);
+    Method method = nullptr;
+    const u64 guest_result = LC32InvokeGuestSelectorRaw(
+        self, _cmd, arg2, arg3, arg4, arg5, arg6, arg7,
+        &hostStackArguments, &method);
+    va_end(hostStackArguments);
 
     char *returnType = method_copyReturnType(method);
     u64 host_result = LC32GuestToHostReturnType(returnType, guest_result);
     free(returnType);
     return host_result;
+}
+
+static float LC32InvokeGuestSelectorGuestFloatHostFloat(
+        id self, SEL _cmd, u64 arg2, u64 arg3, u64 arg4,
+        u64 arg5, u64 arg6, u64 arg7, ...) {
+    va_list hostStackArguments;
+    va_start(hostStackArguments, arg7);
+    const u64 guestResult = LC32InvokeGuestSelectorRaw(
+        self, _cmd, arg2, arg3, arg4, arg5, arg6, arg7,
+        &hostStackArguments, nullptr);
+    va_end(hostStackArguments);
+    return LC32GuestFloatReturn(guestResult);
+}
+
+static double LC32InvokeGuestSelectorGuestFloatHostDouble(
+        id self, SEL _cmd, u64 arg2, u64 arg3, u64 arg4,
+        u64 arg5, u64 arg6, u64 arg7, ...) {
+    va_list hostStackArguments;
+    va_start(hostStackArguments, arg7);
+    const u64 guestResult = LC32InvokeGuestSelectorRaw(
+        self, _cmd, arg2, arg3, arg4, arg5, arg6, arg7,
+        &hostStackArguments, nullptr);
+    va_end(hostStackArguments);
+    return (double)LC32GuestFloatReturn(guestResult);
+}
+
+static float LC32InvokeGuestSelectorGuestDoubleHostFloat(
+        id self, SEL _cmd, u64 arg2, u64 arg3, u64 arg4,
+        u64 arg5, u64 arg6, u64 arg7, ...) {
+    va_list hostStackArguments;
+    va_start(hostStackArguments, arg7);
+    const u64 guestResult = LC32InvokeGuestSelectorRaw(
+        self, _cmd, arg2, arg3, arg4, arg5, arg6, arg7,
+        &hostStackArguments, nullptr);
+    va_end(hostStackArguments);
+    return (float)LC32GuestDoubleReturn(guestResult);
+}
+
+static double LC32InvokeGuestSelectorGuestDoubleHostDouble(
+        id self, SEL _cmd, u64 arg2, u64 arg3, u64 arg4,
+        u64 arg5, u64 arg6, u64 arg7, ...) {
+    va_list hostStackArguments;
+    va_start(hostStackArguments, arg7);
+    const u64 guestResult = LC32InvokeGuestSelectorRaw(
+        self, _cmd, arg2, arg3, arg4, arg5, arg6, arg7,
+        &hostStackArguments, nullptr);
+    va_end(hostStackArguments);
+    return LC32GuestDoubleReturn(guestResult);
 }
 
 void LC32SetGuestScalarIvar(id self, SEL _cmd, u64 value) {
@@ -698,9 +910,223 @@ Class guest_objc_getClass_retHostClass(const char *name) {
 }
 
 u64 guest_objc_msgSend(int argc, u32 *args) {
+    LC32DrainDeferredGuestPinReleases();
     static std::atomic<u32> cache{0};
     const u32 guestPtr = LC32CachedGuestSymbol(cache, "objc_msgSend");
     return LC32InvokeGuestC(guestPtr, true, argc, args);
+}
+
+/*
+ * Native collections retain a dynamically mirrored host object without
+ * touching the ARM32 object's retain count. Keep one guest-only +1 alive for
+ * exactly as long as the host mirror rather than trying to mirror every host
+ * retain/release. Ordinary guest ownership operations continue to mirror
+ * their corresponding native ownership operations.
+ */
+enum class LC32GuestReleaseKind : uint8_t {
+    LifetimePin,
+    LogicalOwnership,
+};
+
+static void LC32AdjustGuestReferenceNow(
+        u32 guestObject, bool retaining,
+        LC32GuestReleaseKind releaseKind =
+            LC32GuestReleaseKind::LifetimePin) {
+    static std::atomic<u32> retainSelector{0};
+    static std::atomic<u32> releaseSelector{0};
+    static std::atomic<u32> logicalReleaseSelector{0};
+    u32 selector;
+    if(retaining) {
+        selector = LC32CachedGuestSelector(
+            retainSelector, "LC32_retain");
+    } else if(releaseKind == LC32GuestReleaseKind::LogicalOwnership) {
+        selector = LC32CachedGuestSelector(
+            logicalReleaseSelector,
+            "LC32_releaseGuestOwnershipOnly");
+    } else {
+        selector = LC32CachedGuestSelector(
+            releaseSelector, "LC32_release");
+    }
+    u32 args[] = {guestObject, selector};
+    guest_objc_msgSend(sizeof(args) / sizeof(*args), args);
+}
+
+struct LC32DeferredGuestRelease {
+    u32 guestObject;
+    LC32GuestReleaseKind kind;
+    u64 retainedHostObject;
+};
+
+static std::mutex& LC32DeferredGuestPinReleaseMutex() {
+    // Associated objects can be torn down during process shutdown. Intentionally
+    // keep this synchronization state alive until the process exits.
+    static std::mutex *mutex = new std::mutex;
+    return *mutex;
+}
+
+static std::vector<LC32DeferredGuestRelease>&
+LC32DeferredGuestPinReleases() {
+    static std::vector<LC32DeferredGuestRelease> *releases =
+        new std::vector<LC32DeferredGuestRelease>;
+    return *releases;
+}
+
+static thread_local bool LC32DrainingGuestPinReleases;
+
+static void LC32ReleaseGuestReference(
+        u32 guestObject, LC32GuestReleaseKind kind,
+        id hostObjectToKeepAlive = nil) {
+    if(threadHandle.jit && threadHandle.cb) {
+        LC32AdjustGuestReferenceNow(guestObject, false, kind);
+        return;
+    }
+
+    u64 retainedHostObject = 0;
+    if(hostObjectToKeepAlive) {
+        LC32ObjCRetainWithoutARC(hostObjectToKeepAlive);
+        retainedHostObject = (u64)hostObjectToKeepAlive;
+    }
+
+    // The guest reference remains held until a registered guest thread drains
+    // this entry. Logical ownership releases also keep the native mirror alive
+    // so they can safely clear its reverse mapping before releasing it.
+    std::lock_guard<std::mutex> lock(
+        LC32DeferredGuestPinReleaseMutex());
+    LC32DeferredGuestPinReleases().push_back({
+        guestObject, kind, retainedHostObject,
+    });
+}
+
+static void LC32ReleaseGuestPin(u32 guestObject) {
+    LC32ReleaseGuestReference(
+        guestObject, LC32GuestReleaseKind::LifetimePin);
+}
+
+static void LC32ReleaseGuestLogicalOwnership(
+        u32 guestObject, id hostObject) {
+    LC32ReleaseGuestReference(
+        guestObject, LC32GuestReleaseKind::LogicalOwnership,
+        hostObject);
+}
+
+static void LC32DrainDeferredGuestPinReleases() {
+    if(LC32DrainingGuestPinReleases ||
+            !threadHandle.jit || !threadHandle.cb) {
+        return;
+    }
+
+    std::vector<LC32DeferredGuestRelease> pending;
+    {
+        std::lock_guard<std::mutex> lock(
+            LC32DeferredGuestPinReleaseMutex());
+        pending.swap(LC32DeferredGuestPinReleases());
+    }
+    if(pending.empty()) return;
+
+    LC32DrainingGuestPinReleases = true;
+    for(const LC32DeferredGuestRelease &release : pending) {
+        LC32AdjustGuestReferenceNow(
+            release.guestObject, false, release.kind);
+        if(release.retainedHostObject) {
+            objc_release((id)release.retainedHostObject);
+        }
+    }
+    LC32DrainingGuestPinReleases = false;
+}
+
+@interface LC32GuestLifetimePin : NSObject {
+@public
+    u32 guestObject;
+}
+@end
+
+@implementation LC32GuestLifetimePin
+- (void)dealloc {
+    LC32ReleaseGuestPin(guestObject);
+#if !__has_feature(objc_arc)
+    [super dealloc];
+#endif
+}
+@end
+
+@interface LC32GuestAutoreleaseToken : NSObject {
+@public
+    u32 guestObject;
+    id hostObject;
+}
+@end
+
+@implementation LC32GuestAutoreleaseToken
+- (void)dealloc {
+    // Keep hostObject strongly held while the guest removes its corresponding
+    // logical +1 and, if final, clears the host's reverse mapping.
+    LC32ReleaseGuestLogicalOwnership(guestObject, hostObject);
+#if !__has_feature(objc_arc)
+    [hostObject release];
+    [super dealloc];
+#endif
+}
+@end
+
+extern "C" u32 LC32ScheduleGuestAutorelease(
+        u32 hostLow, u32 hostHigh, u32 guestStackPointer) {
+    const u64 hostAddress = hostLow | ((u64)hostHigh << 32);
+    id __unsafe_unretained hostObject = (id)hostAddress;
+    // SVC 1002 forwards r2/r3 directly and passes the guest SP as its third
+    // native argument. The next ARMv7 vararg (the guest object) is at [SP].
+    const u32 guestObject =
+        Dynarmic_current_user_callbacks()->MemoryRead32(guestStackPointer);
+    if(!hostObject || !guestObject) return 0;
+
+    LC32GuestAutoreleaseToken *token =
+        [LC32GuestAutoreleaseToken new];
+    token->guestObject = guestObject;
+#if __has_feature(objc_arc)
+    token->hostObject = hostObject;
+    // Transfer a dedicated +1 to the host autorelease pool. Clearing the ARC
+    // local first leaves exactly that transferred ownership outstanding.
+    void *retainedToken = (__bridge_retained void *)token;
+    token = nil;
+    LC32ObjCAutoreleaseWithoutARC((__bridge id)retainedToken);
+#else
+    token->hostObject = [hostObject retain];
+    [token autorelease];
+#endif
+
+    // The token now owns the mirror's existing guest-paired +1. Its eventual
+    // destruction releases guest logical ownership first, then this host +1.
+    objc_release(hostObject);
+    return 0;
+}
+
+static const void *LC32GuestLifetimePinKey =
+    &LC32GuestLifetimePinKey;
+
+static void LC32PinGuestObjectToHost(id hostObject, u32 guestObject,
+                                     bool retainGuestObject) {
+    if(!hostObject || !guestObject) return;
+
+    @synchronized(hostObject) {
+        LC32GuestLifetimePin *existing = objc_getAssociatedObject(
+            hostObject, LC32GuestLifetimePinKey);
+        if(existing) {
+            assert(existing->guestObject == guestObject);
+            return;
+        }
+
+        if(retainGuestObject) {
+            assert(threadHandle.jit && threadHandle.cb);
+            LC32AdjustGuestReferenceNow(guestObject, true);
+        }
+
+        LC32GuestLifetimePin *pin = [LC32GuestLifetimePin new];
+        pin->guestObject = guestObject;
+        objc_setAssociatedObject(hostObject, LC32GuestLifetimePinKey, pin,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+#if !__has_feature(objc_arc)
+        [pin release];
+#endif
+    }
 }
 
 objc_hook_getClass host_getClass;
@@ -738,6 +1164,16 @@ static const void *kGuestSelf = &kGuestSelf;
 
 - (u32)guest_selfOrNull {
     return ((NSNumber *)objc_getAssociatedObject(self, kGuestSelf)).unsignedLongValue;
+}
+
+- (u32)LC32_bindGuestSelfIfAbsent:(u32)ptr {
+    @synchronized(self) {
+        const u32 existing = self.guest_selfOrNull;
+        if(existing) return existing;
+        objc_setAssociatedObject(self, kGuestSelf, @(ptr),
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return ptr;
+    }
 }
 
 - (void)LC32_clearGuestSelfIfEqual:(u64)expectedGuestSelf {
@@ -788,10 +1224,111 @@ static const void *kGuestSelf = &kGuestSelf;
         ptr = guest_objc_msgSend(sizeof(args)/sizeof(*args), args);
     }
 
-    return self.guest_self = ptr;
+    self.guest_self = ptr;
+    if([(id)hostClass isGuestClass]) {
+        // class_createInstance returned the +1 which becomes this host
+        // mirror's lifetime pin; do not retain it a second time.
+        LC32PinGuestObjectToHost(self, ptr, false);
+    }
+    return ptr;
     }
 }
 @end
+
+static const char *LC32UnqualifiedType(const char *type) {
+    while(type && *type && strchr("rnNoORVA", *type)) type++;
+    return type;
+}
+
+static const char *LC32ProtocolMethodTypes(Protocol *protocol, SEL selector,
+                                           BOOL instanceMethod,
+                                           unsigned int depth) {
+    if(!protocol || depth > 16) return nullptr;
+
+    for(BOOL required : {YES, NO}) {
+        const struct objc_method_description description =
+            protocol_getMethodDescription(protocol, selector, required,
+                                          instanceMethod);
+        if(description.name && description.types) return description.types;
+    }
+
+    unsigned int adoptedCount = 0;
+    Protocol *__unsafe_unretained *adoptedProtocols =
+        protocol_copyProtocolList(protocol, &adoptedCount);
+    for(unsigned int index = 0; index < adoptedCount; index++) {
+        const char *types = LC32ProtocolMethodTypes(
+            adoptedProtocols[index], selector, instanceMethod, depth + 1);
+        if(types) {
+            free(adoptedProtocols);
+            return types;
+        }
+    }
+    free(adoptedProtocols);
+    return nullptr;
+}
+
+static const char *LC32ClassProtocolMethodTypes(Class cls, SEL selector,
+                                                BOOL instanceMethod) {
+    if(!cls) return nullptr;
+
+    unsigned int protocolCount = 0;
+    Protocol *__unsafe_unretained *protocols =
+        class_copyProtocolList(cls, &protocolCount);
+    for(unsigned int index = 0; index < protocolCount; index++) {
+        const char *types = LC32ProtocolMethodTypes(
+            protocols[index], selector, instanceMethod, 0);
+        if(types) {
+            free(protocols);
+            return types;
+        }
+    }
+    free(protocols);
+    return nullptr;
+}
+
+static const char *LC32ClassHierarchyProtocolMethodTypes(
+        Class cls, SEL selector, BOOL instanceMethod) {
+    for(Class current = cls; current;
+            current = class_getSuperclass(current)) {
+        const char *types = LC32ClassProtocolMethodTypes(
+            current, selector, instanceMethod);
+        if(types) return types;
+    }
+    return nullptr;
+}
+
+// Protocol adoption belongs to the ordinary class, but class methods are
+// installed on its metaclass. Keep the owner available while a newly
+// allocated class is still unregistered and cannot yet be found by name.
+static const void *LC32ProtocolOwnerClassKey =
+    &LC32ProtocolOwnerClassKey;
+
+static Class LC32ProtocolOwnerClass(Class cls) {
+    if(!class_isMetaClass(cls)) return cls;
+
+    Class owner = (Class)objc_getAssociatedObject(
+        (id)cls, LC32ProtocolOwnerClassKey);
+    if(owner) return owner;
+    return objc_lookUpClass(class_getName(cls));
+}
+
+/*
+ * A guest CGFloat is encoded as `f`, while the same public method is `d` in
+ * the ARM64 UIKit ABI.  Prefer the native declaration inherited by the mirror
+ * class, then a native protocol declaration adopted anywhere in its class
+ * hierarchy.
+ */
+static const char *LC32ExpectedHostMethodTypes(Class cls, SEL selector) {
+    Class superclass = class_getSuperclass(cls);
+    Method inheritedMethod = superclass
+        ? class_getInstanceMethod(superclass, selector)
+        : nullptr;
+    if(inheritedMethod) return method_getTypeEncoding(inheritedMethod);
+
+    const BOOL instanceMethod = !class_isMetaClass(cls);
+    return LC32ClassHierarchyProtocolMethodTypes(
+        LC32ProtocolOwnerClass(cls), selector, instanceMethod);
+}
 
 @implementation LC32ObjCMethodResolver
 + (void)addMethod:(Method)method toClass:(Class)cls {
@@ -805,9 +1342,16 @@ static const void *kGuestSelf = &kGuestSelf;
     // According to https://github.com/Quotation/LongestCocoa#longest-objective-c-property-names, the longest public property has 56 characters
     // still, we need to add an assert
     char setterName[0x50];
+    char literalIvarSetterName[0x50] = {};
     assert(strlen(name.hostPtr) + 4 < sizeof(setterName));
     if(name.hostPtr[0] == '_') {
         snprintf(setterName, sizeof(setterName)-1, "_set%c%s:", toupper(name.hostPtr[1]), &name.hostPtr[2]);
+        // Some older nibs archive the literal ivar name as their KVC key.
+        // KVC asks for set_btnGameMode: when the key is _btnGameMode, while
+        // _setBtnGameMode: above is the accessor for the logical key
+        // btnGameMode. Register both spellings against the same guest ivar.
+        snprintf(literalIvarSetterName, sizeof(literalIvarSetterName)-1,
+                 "set%s:", name.hostPtr);
     } else {
         snprintf(setterName, sizeof(setterName)-1, "set%c%s:", toupper(name.hostPtr[0]), &name.hostPtr[1]);
     }
@@ -815,10 +1359,11 @@ static const void *kGuestSelf = &kGuestSelf;
     char setterTypeEncoding[10];
     snprintf(setterTypeEncoding, sizeof(setterTypeEncoding)-1, "v@:%c", typeEncoding.hostPtr[0]);
 
+    IMP setterImplementation = nullptr;
     switch(typeEncoding.hostPtr[0]) {
         case '@':
         case '#':
-            class_addMethod(cls, sel_registerName(setterName), (IMP)&LC32SetGuestNSObjectIvar, (const char *)setterTypeEncoding);
+            setterImplementation = (IMP)&LC32SetGuestNSObjectIvar;
             break;
         case 'B':
         case 'C':
@@ -832,11 +1377,19 @@ static const void *kGuestSelf = &kGuestSelf;
         case 'l':
         case 'q':
         case 's':
-            class_addMethod(cls, sel_registerName(setterName), (IMP)&LC32SetGuestScalarIvar, (const char *)setterTypeEncoding);
+            setterImplementation = (IMP)&LC32SetGuestScalarIvar;
             break;
         default:
             printf("LC32: skipping ivar %s with unhandled type %s\n", name.hostPtr, typeEncoding.hostPtr);
             break;
+    }
+    if(setterImplementation) {
+        class_addMethod(cls, sel_registerName(setterName),
+                        setterImplementation, setterTypeEncoding);
+        if(literalIvarSetterName[0]) {
+            class_addMethod(cls, sel_registerName(literalIvarSetterName),
+                            setterImplementation, setterTypeEncoding);
+        }
     }
 
     // We currently don't bind setter, just leaving here for future references
@@ -852,21 +1405,80 @@ static const void *kGuestSelf = &kGuestSelf;
         sel = sel_registerName(host_sel.hostPtr);
     }
 
-    IMP implementation = (IMP)&LC32InvokeGuestSelector;
-    if(strstr(host_method_types.hostPtr, "{CGRect=")) {
+    // The Objective-C runtime calls these lifecycle hooks as id (*)(id) and
+    // void (*)(id), without a selector argument. Installing the generic
+    // (id, SEL, ...) trampoline therefore interprets garbage in x1 as _cmd.
+    // Guest C++ ivars belong to the guest object and are already managed by
+    // the guest runtime, so forwarding would also construct/destruct twice.
+    const char *selectorName = sel_getName(sel);
+    if(!strcmp(selectorName, ".cxx_construct") ||
+            !strcmp(selectorName, ".cxx_destruct") ||
+            !strcmp(selectorName, "dealloc")) {
+        return;
+    }
+
+    const char *guestMethodTypes = host_method_types.hostPtr;
+    const char *installedMethodTypes = guestMethodTypes;
+    const char guestReturnType = *LC32UnqualifiedType(guestMethodTypes);
+    char hostReturnType = guestReturnType;
+    IMP floatingImplementation = nullptr;
+    if(guestReturnType == 'f' || guestReturnType == 'd') {
+        const char *expectedHostTypes =
+            LC32ExpectedHostMethodTypes(cls, sel);
+        if(expectedHostTypes) {
+            const char expectedReturnType =
+                *LC32UnqualifiedType(expectedHostTypes);
+            if(expectedReturnType == 'f' || expectedReturnType == 'd') {
+                installedMethodTypes = expectedHostTypes;
+                hostReturnType = expectedReturnType;
+            }
+        }
+
+        if(guestReturnType == 'f') {
+            floatingImplementation = hostReturnType == 'd'
+                ? (IMP)&LC32InvokeGuestSelectorGuestFloatHostDouble
+                : (IMP)&LC32InvokeGuestSelectorGuestFloatHostFloat;
+        } else {
+            floatingImplementation = hostReturnType == 'f'
+                ? (IMP)&LC32InvokeGuestSelectorGuestDoubleHostFloat
+                : (IMP)&LC32InvokeGuestSelectorGuestDoubleHostDouble;
+        }
+        if(hostReturnType != guestReturnType) {
+            fprintf(stderr,
+                "LC32: floating return ABI for %s: guest %c -> host %c\n",
+                selectorName, guestReturnType, hostReturnType);
+        }
+    }
+
+    IMP implementation = floatingImplementation
+        ? floatingImplementation
+        : (IMP)&LC32InvokeGuestSelector;
+    if(strstr(installedMethodTypes, "{CGRect=")) {
         NSMethodSignature *signature =
-            [NSMethodSignature signatureWithObjCTypes:host_method_types.hostPtr];
+            [NSMethodSignature signatureWithObjCTypes:installedMethodTypes];
         if(signature.numberOfArguments == 3) {
             const char *argumentType = [signature getArgumentTypeAtIndex:2];
             while(*argumentType && strchr("rnNoORVA", *argumentType)) {
                 argumentType++;
             }
             if(!strncmp(argumentType, "{CGRect=", sizeof("{CGRect=") - 1)) {
-                implementation = (IMP)&LC32InvokeGuestSelectorCGRect;
+                if(floatingImplementation) {
+                    if(guestReturnType == 'f') {
+                        implementation = hostReturnType == 'd'
+                            ? (IMP)&LC32InvokeGuestSelectorCGRectGuestFloatHostDouble
+                            : (IMP)&LC32InvokeGuestSelectorCGRectGuestFloatHostFloat;
+                    } else {
+                        implementation = hostReturnType == 'f'
+                            ? (IMP)&LC32InvokeGuestSelectorCGRectGuestDoubleHostFloat
+                            : (IMP)&LC32InvokeGuestSelectorCGRectGuestDoubleHostDouble;
+                    }
+                } else {
+                    implementation = (IMP)&LC32InvokeGuestSelectorCGRect;
+                }
             }
         }
     }
-    class_addMethod(cls, sel, implementation, host_method_types.hostPtr);
+    class_addMethod(cls, sel, implementation, installedMethodTypes);
 }
 
 
@@ -885,6 +1497,8 @@ static const void *kGuestSelf = &kGuestSelf;
     u32 list;
 
     Class cls = object_getClass(clsObject);
+    objc_setAssociatedObject((id)cls, LC32ProtocolOwnerClassKey,
+                             (id)clsObject, OBJC_ASSOCIATION_ASSIGN);
     [self addMethod:class_getClassMethod(self, @selector(resolveClassMethod:)) toClass:cls];
     [self addMethod:class_getClassMethod(self, @selector(resolveInstanceMethod:)) toClass:cls];
     [cls resolveInstanceMethod:@selector(init)];
@@ -894,7 +1508,7 @@ static const void *kGuestSelf = &kGuestSelf;
     // Register protocols
     list = guest_class_copyProtocolList([clsObject guest_self], &count);
     for(int i = 0; i < count; i++, list += sizeof(u32)) {
-        [self addGuestProtocol:Dynarmic_current_user_callbacks()->MemoryRead32(list) toClass:cls];
+        [self addGuestProtocol:Dynarmic_current_user_callbacks()->MemoryRead32(list) toClass:clsObject];
     }
     //if(list) guest_free(list);
 

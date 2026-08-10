@@ -26,6 +26,8 @@ extern int __CFConstantStringClassReference[];
 - (void)setGuestClass:(BOOL)value;
 - (BOOL)isGuestClass;
 - (void)setGuest_self:(u32)ptr;
+- (u32)guest_selfOrNull;
+- (u32)LC32_bindGuestSelfIfAbsent:(u32)ptr;
 - (u32)guest_self;
 @end
 
@@ -50,7 +52,7 @@ u64 LC32InvokeHostNSStringFormat(u64 host_self,
 void LC32SetInvokeGuestFuncPtr(u32 dlsymFunc, u32 invokeFunc);
 u64 LC32InvokeGuestC(u32 pc, bool ret64, int argc, u32 *args);
 u32 LC32HostToGuestArgument(char *type, u64 value);
-u64 LC32GuestToHostReturnType(char *type, u32 value);
+u64 LC32GuestToHostReturnType(char *type, u64 value);
 u64 LC32InvokeGuestSelector(id self, SEL _cmd, u64 arg2, u64 arg3, u64 arg4, u64 arg5, u64 arg6, u64 arg7, ...);
 u32 guest_dlsym(const char *host_name);
 u32 guest_free(u32 guest_ptr);

@@ -61,6 +61,11 @@ id LC32HostToGuestObject(uint64_t host_object);
 // non-ARC shims can share the same failed-initializer path.
 id LC32DisposeFailedInit(id object);
 
+// Complete a host initializer using the explicit guest receiver. Foundation
+// alloc placeholders can be shared across threads, so the host result must not
+// infer its reverse mapping from the placeholder's mutable association.
+id LC32AdoptHostInitializerResult(id object, uint64_t hostResult);
+
 // Returns host SEL address
 uint64_t LC32GetHostSelector(SEL selector);
 uint64_t LC32CachedHostSelector(
