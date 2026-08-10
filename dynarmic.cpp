@@ -1969,6 +1969,462 @@ int guest_getentropy(u32 guest_buffer, u32 length) {
     return result;
 }
 
+int guest_bind(int socket, u32 guest_address, socklen_t address_len) {
+    if (guest_address == 0) {
+        return return_with_carry_direct(EDESTADDRREQ, true);
+    }
+    if (address_len > SOCK_MAXADDRLEN) {
+        return return_with_carry_direct(ENAMETOOLONG, true);
+    }
+    if (address_len < sizeof(__sockaddr_header)) {
+        return return_with_carry_direct(EINVAL, true);
+    }
+
+    std::array<char, SOCK_MAXADDRLEN> host_address = {};
+    if (Dynarmic_mem_1read(
+            guest_address, address_len, host_address.data()) != 0) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+
+    constexpr size_t pathOffset = offsetof(sockaddr_un, sun_path);
+    if (reinterpret_cast<const sockaddr *>(
+                host_address.data())->sa_family == AF_UNIX &&
+            address_len > pathOffset &&
+            host_address[pathOffset] != '\0') {
+        /*
+         * Unix-domain socket names participate in the same guest mount
+         * namespace as open/unlink.  SOCK_MAXADDRLEN is deliberately used
+         * instead of sizeof(sockaddr_un): Darwin accepts paths longer than
+         * the public 104-byte sun_path member when the supplied buffer and
+         * length contain them.
+         */
+        std::array<char, SOCK_MAXADDRLEN - pathOffset + 1> guest_path = {};
+        memcpy(
+            guest_path.data(), host_address.data() + pathOffset,
+            address_len - pathOffset);
+
+        char host_path[PATH_MAX];
+        sharedHandle.fs->pathGuestToHost(
+            guest_path.data(), host_path);
+        const size_t host_path_len = strlen(host_path);
+        if (host_path_len > SOCK_MAXADDRLEN - pathOffset) {
+            return return_with_carry_direct(ENAMETOOLONG, true);
+        }
+
+        memcpy(
+            host_address.data() + pathOffset,
+            host_path, host_path_len);
+        address_len = static_cast<socklen_t>(
+            pathOffset + host_path_len);
+        host_address[0] = static_cast<char>(address_len);
+    }
+
+    return syscallRetCarry(
+        SYS_bind, socket,
+        reinterpret_cast<const sockaddr *>(host_address.data()),
+        address_len, 0, 0, 0, 0);
+}
+
+int guest_setsockopt(int socket, int level, int option,
+        u32 guest_value, socklen_t value_len) {
+    if (guest_value == 0 && value_len != 0) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+    /*
+     * XNU's mbuf-backed socket-option path is limited to one cluster. Keep
+     * the guest from making the bridge allocate an arbitrary 32-bit length
+     * before the host kernel gets a chance to reject it.
+     */
+    if (value_len > MCLBYTES) {
+        return return_with_carry_direct(EINVAL, true);
+    }
+
+    char *value_storage = nullptr;
+    const void *host_value = nullptr;
+    socklen_t host_value_len = value_len;
+
+    if (value_len != 0) {
+        value_storage = static_cast<char *>(malloc(value_len));
+        if (value_storage == nullptr) {
+            return return_with_carry_direct(ENOMEM, true);
+        }
+        if (Dynarmic_mem_1read(
+                guest_value, value_len, value_storage) != 0) {
+            free(value_storage);
+            return return_with_carry_direct(EFAULT, true);
+        }
+        host_value = value_storage;
+    }
+
+    struct guest_timeval32 {
+        int32_t tv_sec;
+        int32_t tv_usec;
+    };
+    struct timeval host_timeval = {};
+    if (level == SOL_SOCKET &&
+            (option == SO_SNDTIMEO || option == SO_RCVTIMEO) &&
+            value_len >= sizeof(guest_timeval32)) {
+        /* XNU accepts a larger buffer but consumes one user32_timeval. */
+        const auto *guest_timeval =
+            reinterpret_cast<const guest_timeval32 *>(
+                value_storage);
+        host_timeval.tv_sec = guest_timeval->tv_sec;
+        host_timeval.tv_usec = guest_timeval->tv_usec;
+        host_value = &host_timeval;
+        host_value_len = sizeof(host_timeval);
+    }
+
+    const int result = syscallRetCarry(
+        SYS_setsockopt, socket, level, option,
+        host_value, host_value_len, 0, 0);
+    free(value_storage);
+    return result;
+}
+
+int guest_getsockopt(int socket, int level, int option,
+        u32 guest_value, u32 guest_value_len) {
+    u32 requested_len = 0;
+    if (guest_value != 0) {
+        /* XNU skips this copyin entirely when val is NULL. */
+        if (guest_value_len == 0 || Dynarmic_mem_1read(
+                guest_value_len, sizeof(requested_len),
+                reinterpret_cast<char *>(&requested_len)) != 0) {
+            return return_with_carry_direct(EFAULT, true);
+        }
+    }
+
+    const bool is_timeval = level == SOL_SOCKET &&
+        (option == SO_SNDTIMEO || option == SO_RCVTIMEO);
+    struct timeval host_timeval = {};
+    std::vector<char> host_storage;
+    void *host_value = nullptr;
+    socklen_t host_value_len = 0;
+
+    if (guest_value != 0) {
+        if (is_timeval) {
+            /*
+             * The host kernel sees this process as 64-bit and therefore
+             * returns two 64-bit timeval fields. Ask it for the complete
+             * host value, then apply the guest's 8-byte truncation below.
+             */
+            host_value = &host_timeval;
+            host_value_len = sizeof(host_timeval);
+        } else {
+            /*
+             * Socket-option results are mbuf-backed. Cap the intermediate
+             * host buffer while retaining getsockopt's normal behavior for
+             * callers that advertise an unnecessarily large capacity.
+             */
+            const size_t host_capacity = std::min(
+                static_cast<size_t>(requested_len),
+                static_cast<size_t>(MCLBYTES));
+            host_storage.resize(std::max<size_t>(host_capacity, 1));
+            host_value = host_storage.data();
+            host_value_len = static_cast<socklen_t>(host_capacity);
+        }
+    }
+
+    const int result = syscallRetCarry(
+        SYS_getsockopt, socket, level, option,
+        host_value, &host_value_len, 0, 0);
+    if (threadHandle.cpsr->hasCarry()) {
+        return result;
+    }
+
+    u32 returned_len = 0;
+    if (guest_value != 0 && is_timeval) {
+        timeval_32 guest_timeval = {
+            .tv_sec = static_cast<int32_t>(host_timeval.tv_sec),
+            .tv_usec = static_cast<int32_t>(host_timeval.tv_usec),
+        };
+        returned_len = static_cast<u32>(std::min(
+            static_cast<size_t>(requested_len),
+            sizeof(guest_timeval)));
+        if (returned_len != 0 && Dynarmic_mem_1write(
+                guest_value, returned_len,
+                reinterpret_cast<char *>(&guest_timeval)) != 0) {
+            return return_with_carry_direct(EFAULT, true);
+        }
+    } else if (guest_value != 0) {
+        returned_len = static_cast<u32>(std::min({
+            static_cast<size_t>(requested_len),
+            static_cast<size_t>(host_value_len),
+            host_storage.size()}));
+        if (returned_len != 0 && Dynarmic_mem_1write(
+                guest_value, returned_len,
+                host_storage.data()) != 0) {
+            return return_with_carry_direct(EFAULT, true);
+        }
+    }
+
+    if (Dynarmic_mem_1write(
+            guest_value_len, sizeof(returned_len),
+            reinterpret_cast<char *>(&returned_len)) != 0) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+    return return_with_carry_direct(0, false);
+}
+
+int guest_getsockname(int socket, u32 guest_address,
+        u32 guest_address_len) {
+    if (guest_address_len == 0) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+
+    u32 requested_len = 0;
+    if (Dynarmic_mem_1read(
+            guest_address_len, sizeof(requested_len),
+            reinterpret_cast<char *>(&requested_len)) != 0) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+
+    std::array<char, SOCK_MAXADDRLEN> host_address = {};
+    socklen_t host_address_len = host_address.size();
+    const int result = syscallRetCarry(
+        SYS_getsockname, socket,
+        reinterpret_cast<sockaddr *>(host_address.data()),
+        &host_address_len, 0, 0, 0, 0);
+    if (threadHandle.cpsr->hasCarry()) {
+        return result;
+    }
+
+    std::array<char, SOCK_MAXADDRLEN> guest_address_storage =
+        host_address;
+    u32 returned_len = host_address_len;
+    size_t stored_len = std::min(
+        static_cast<size_t>(host_address_len),
+        host_address.size());
+
+    constexpr size_t path_offset =
+        offsetof(sockaddr_un, sun_path);
+    if (stored_len >= sizeof(__sockaddr_header) &&
+            reinterpret_cast<const sockaddr *>(
+                host_address.data())->sa_family == AF_UNIX &&
+            stored_len > path_offset &&
+            host_address[path_offset] == '/') {
+        std::array<char,
+            SOCK_MAXADDRLEN - path_offset + 1> host_path = {};
+        memcpy(host_path.data(),
+            host_address.data() + path_offset,
+            stored_len - path_offset);
+
+        char guest_path[PATH_MAX] = {};
+        sharedHandle.fs->pathHostToGuest(
+            host_path.data(), guest_path);
+        const size_t guest_path_len = strlen(guest_path);
+        if (guest_path_len >
+                SOCK_MAXADDRLEN - path_offset) {
+            return return_with_carry_direct(
+                ENAMETOOLONG, true);
+        }
+
+        guest_address_storage.fill(0);
+        memcpy(guest_address_storage.data(),
+            host_address.data(), path_offset);
+        memcpy(guest_address_storage.data() + path_offset,
+            guest_path, guest_path_len);
+        returned_len = static_cast<u32>(
+            path_offset + guest_path_len);
+        stored_len = returned_len;
+        guest_address_storage[0] =
+            static_cast<char>(returned_len);
+    }
+
+    const size_t copy_len = std::min(
+        static_cast<size_t>(requested_len), stored_len);
+    if (copy_len != 0 &&
+            (guest_address == 0 ||
+             Dynarmic_mem_1write(
+                guest_address, copy_len,
+                guest_address_storage.data()) != 0)) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+    if (Dynarmic_mem_1write(
+            guest_address_len, sizeof(returned_len),
+            reinterpret_cast<char *>(&returned_len)) != 0) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+    return return_with_carry_direct(0, false);
+}
+
+ssize_t guest_recvfrom(int syscall_number, int socket,
+        u32 guest_buffer, size_t length, int flags,
+        u32 guest_from, u32 guest_from_len) {
+    u32 requested_from_len = 0;
+    if (guest_from_len != 0 &&
+            Dynarmic_mem_1read(
+                guest_from_len, sizeof(requested_from_len),
+                reinterpret_cast<char *>(
+                    &requested_from_len)) != 0) {
+        return static_cast<ssize_t>(
+            return_with_carry_direct(EFAULT, true));
+    }
+    if (length > static_cast<size_t>(INT32_MAX)) {
+        return static_cast<ssize_t>(
+            return_with_carry_direct(EINVAL, true));
+    }
+
+    char *host_buffer = nullptr;
+    if (length != 0) {
+        host_buffer = static_cast<char *>(malloc(length));
+        if (host_buffer == nullptr) {
+            return static_cast<ssize_t>(
+                return_with_carry_direct(ENOMEM, true));
+        }
+    }
+
+    std::array<char, SOCK_MAXADDRLEN> host_from = {};
+    const size_t host_from_capacity = host_from.size();
+    socklen_t host_from_len = host_from.size();
+
+    const auto receive = [&](int receive_flags) {
+        return debugger_aware_host_wait(
+            [&] {
+                return static_cast<ssize_t>(
+                    syscallRetCarry(
+                        syscall_number, socket, host_buffer,
+                        length, receive_flags,
+                        reinterpret_cast<sockaddr *>(
+                            host_from.data()),
+                        &host_from_len,
+                        0));
+            },
+            static_cast<ssize_t>(
+                return_with_carry_direct(EINTR, true)));
+    };
+
+    bool can_probe_without_blocking =
+        (flags & MSG_DONTWAIT) == 0 &&
+        GuestThreadCanYieldBeforeBlocking();
+    if (can_probe_without_blocking) {
+        const int socket_flags = ::fcntl(
+            socket, F_GETFL);
+        if (socket_flags >= 0 &&
+                (socket_flags & O_NONBLOCK) != 0) {
+            can_probe_without_blocking = false;
+        }
+    }
+    if (can_probe_without_blocking) {
+        int socket_type = 0;
+        socklen_t socket_type_len = sizeof(socket_type);
+        can_probe_without_blocking =
+            ::getsockopt(socket, SOL_SOCKET, SO_TYPE,
+                &socket_type, &socket_type_len) == 0 &&
+            socket_type == SOCK_DGRAM;
+    }
+
+    ssize_t result;
+    if (can_probe_without_blocking) {
+        result = receive(flags | MSG_DONTWAIT);
+        if (threadHandle.cpsr->hasCarry() &&
+                (result == EAGAIN || result == EWOULDBLOCK)) {
+            if (GuestThreadYieldBeforeBlocking()) {
+                free(host_buffer);
+                return static_cast<ssize_t>(
+                    return_with_carry_direct(EINTR, true));
+            }
+            host_from_len = static_cast<socklen_t>(
+                host_from_capacity);
+            result = receive(flags);
+        }
+    } else {
+        result = receive(flags);
+    }
+    if (threadHandle.cpsr->hasCarry()) {
+        free(host_buffer);
+        return result;
+    }
+
+    if (result > 0 &&
+            (guest_buffer == 0 ||
+             Dynarmic_mem_1write(
+                guest_buffer,
+                std::min(
+                    static_cast<size_t>(result), length),
+                host_buffer) != 0)) {
+        free(host_buffer);
+        return static_cast<ssize_t>(
+            return_with_carry_direct(EFAULT, true));
+    }
+    free(host_buffer);
+
+    /*
+     * XNU only copies out the source address and its actual, untruncated
+     * length when both the source buffer and length pointer are present.
+     */
+    if (guest_from == 0 || guest_from_len == 0) {
+        return return_with_carry_direct(
+            static_cast<int>(result), false);
+    }
+
+    std::array<char, SOCK_MAXADDRLEN> guest_from_storage =
+        host_from;
+    u32 returned_from_len = requested_from_len != 0
+        ? host_from_len
+        : 0;
+    size_t stored_from_len = std::min(
+        static_cast<size_t>(host_from_len),
+        host_from_capacity);
+
+    constexpr size_t path_offset =
+        offsetof(sockaddr_un, sun_path);
+    if (requested_from_len != 0 &&
+            host_from_len <= host_from_capacity &&
+            stored_from_len >= sizeof(__sockaddr_header) &&
+            reinterpret_cast<const sockaddr *>(
+                host_from.data())->sa_family == AF_UNIX &&
+            stored_from_len > path_offset &&
+            host_from[path_offset] == '/') {
+        std::array<char,
+            SOCK_MAXADDRLEN - path_offset + 1> host_path = {};
+        memcpy(host_path.data(),
+            host_from.data() + path_offset,
+            stored_from_len - path_offset);
+
+        char guest_path[PATH_MAX] = {};
+        sharedHandle.fs->pathHostToGuest(
+            host_path.data(), guest_path);
+        const size_t guest_path_len = strlen(guest_path);
+        if (guest_path_len >
+                SOCK_MAXADDRLEN - path_offset) {
+            return static_cast<ssize_t>(
+                return_with_carry_direct(
+                    ENAMETOOLONG, true));
+        }
+
+        guest_from_storage.fill(0);
+        memcpy(guest_from_storage.data(),
+            host_from.data(), path_offset);
+        memcpy(guest_from_storage.data() + path_offset,
+            guest_path, guest_path_len);
+        returned_from_len = static_cast<u32>(
+            path_offset + guest_path_len);
+        stored_from_len = returned_from_len;
+        guest_from_storage[0] =
+            static_cast<char>(returned_from_len);
+    }
+
+    const size_t copy_from_len = std::min(
+        static_cast<size_t>(requested_from_len),
+        stored_from_len);
+    if (copy_from_len != 0 &&
+            Dynarmic_mem_1write(
+                guest_from, copy_from_len,
+                guest_from_storage.data()) != 0) {
+        return static_cast<ssize_t>(
+            return_with_carry_direct(EFAULT, true));
+    }
+    if (Dynarmic_mem_1write(
+            guest_from_len, sizeof(returned_from_len),
+            reinterpret_cast<char *>(
+                &returned_from_len)) != 0) {
+        return static_cast<ssize_t>(
+            return_with_carry_direct(EFAULT, true));
+    }
+    return return_with_carry_direct(
+        static_cast<int>(result), false);
+}
+
 int guest_connect(int socket, u32 guest_address, socklen_t address_len) {
     // See https://developer.apple.com/forums/thread/756756?answerId=790507022#790507022
     // sockaddr_un.sun_path has an artificial limit is 104 bytes, however it allows up to 253 bytes
@@ -3716,6 +4172,26 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             case SYS_chown: // 16
                 cpu->Regs()[0] = guest_chown(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
                 break;
+            case SYS_recvfrom: // 29
+            case SYS_recvfrom_nocancel: // 403
+                /*
+                 * Match guest_read: native pthreads use the cancellable
+                 * syscall so debugger all-stop can abort a blocked receive;
+                 * cooperative mode retains the nocancel entry point.
+                 */
+                cpu->Regs()[0] = static_cast<u32>(guest_recvfrom(
+                    NativeGuestThreadsEnabled()
+                        ? SYS_recvfrom
+                        : SYS_recvfrom_nocancel,
+                    static_cast<int>(cpu->Regs()[0]),
+                    cpu->Regs()[1], cpu->Regs()[2],
+                    static_cast<int>(cpu->Regs()[3]),
+                    cpu->Regs()[4], cpu->Regs()[5]));
+                break;
+            case SYS_getsockname: // 32
+                cpu->Regs()[0] = guest_getsockname(
+                    cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                break;
             case 33:
                 cpu->Regs()[0] = guest_access(cpu->Regs()[0], cpu->Regs()[1]);
                 break;
@@ -3746,6 +4222,32 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 break;
             case 98:
                 cpu->Regs()[0] = guest_connect(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                break;
+            case SYS_bind: // 104
+                cpu->Regs()[0] = guest_bind(
+                    cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                break;
+            case SYS_setsockopt: // 105
+                /*
+                 * The armv7 libsystem_kernel wrapper moves the fifth
+                 * stack argument (optlen) into r4 before entering XNU.
+                 */
+                cpu->Regs()[0] = guest_setsockopt(
+                    static_cast<int>(cpu->Regs()[0]),
+                    static_cast<int>(cpu->Regs()[1]),
+                    static_cast<int>(cpu->Regs()[2]),
+                    cpu->Regs()[3], cpu->Regs()[4]);
+                break;
+            case SYS_getsockopt: // 118
+                /*
+                 * The fifth argument is a guest socklen_t pointer which the
+                 * armv7 wrapper has moved from its caller's stack into r4.
+                 */
+                cpu->Regs()[0] = guest_getsockopt(
+                    static_cast<int>(cpu->Regs()[0]),
+                    static_cast<int>(cpu->Regs()[1]),
+                    static_cast<int>(cpu->Regs()[2]),
+                    cpu->Regs()[3], cpu->Regs()[4]);
                 break;
             case 116:
                 cpu->Regs()[0] = guest_gettimeofday(cpu->Regs()[0], cpu->Regs()[1]);
@@ -3795,6 +4297,32 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             case 197:
                 cpu->Regs()[0] = guest_mmap(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5] | ((u64)cpu->Regs()[6] << 32));
                 break;
+            case SYS_lseek: { // 199
+                /*
+                 * Darwin's armv7 syscall ABI packs off_t into r1:r2 without
+                 * an AAPCS alignment hole.  Use the typed host API so the
+                 * combined value is passed as one arm64 off_t argument.
+                 */
+                const u64 offsetBits =
+                    static_cast<u64>(cpu->Regs()[1]) |
+                    (static_cast<u64>(cpu->Regs()[2]) << 32);
+                const off_t result = ::lseek(
+                    static_cast<int>(cpu->Regs()[0]),
+                    static_cast<off_t>(offsetBits),
+                    static_cast<int>(cpu->Regs()[3]));
+                if (result == static_cast<off_t>(-1)) {
+                    const int error = errno;
+                    cpu->Regs()[0] =
+                        return_with_carry_direct(error, true);
+                    cpu->Regs()[1] = 0;
+                } else {
+                    const u64 resultBits = static_cast<u64>(result);
+                    cpu->Regs()[0] = static_cast<u32>(resultBits);
+                    cpu->Regs()[1] = static_cast<u32>(resultBits >> 32);
+                    cpsr->setCarry(false);
+                }
+                break;
+            }
             case 202:
                 cpu->Regs()[0] = guest___sysctl(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5]);
                 break;
