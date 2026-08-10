@@ -26,7 +26,7 @@ xpwntool 058-75249-062.dmg ramdisk.dmg -k
 gmake -C GuestMakefile generate-shims
 gmake -C GuestMakefile
 ```
-- Launch a binary and profit. Please note that chroot is internally done otherwise you will hit bad memory access errors. I'm investigating it and will provide a fix.
+- Launch a binary and profit.
 ```bash
 sudo .theos/out/LiveExec32 /var/mobile/ramdisk32/usr/bin/fdisk
 ```

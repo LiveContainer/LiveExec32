@@ -45,6 +45,10 @@
 	<string>1.0</string>
 	<key>CFBundleSignature</key>
 	<string>????</string>
+        <key>CFBundleSupportedPlatforms</key>
+        <array>
+                <string>iPhoneOS</string>
+        </array>
 	<key>CFBundleURLTypes</key>
 	<array/>
 	<key>CFBundleVersion</key>
