@@ -70,6 +70,11 @@ int main(void) {
     CHECK(alcMakeContextCurrent(context) == ALC_TRUE,
           "make-context-current");
     CHECK(alcGetCurrentContext() == context, "current-context-token");
+    CHECK(alcMakeContextCurrent(
+              (ALCcontext *)(uintptr_t)UINT32_C(0x12345678)) == ALC_FALSE,
+          "reject-invalid-context-token");
+    CHECK(alcGetCurrentContext() == context,
+          "invalid-context-preserves-current");
     CHECK(alcGetContextsDevice(context) == device,
           "context-device-token");
 

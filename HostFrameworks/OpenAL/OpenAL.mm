@@ -5,6 +5,8 @@
 #include "../../OpenALBridge/LC32OpenALProtocol.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -41,6 +43,28 @@ std::mutex gHandleMutex;
 std::vector<HandleEntry> gHandles;
 std::unordered_map<void *, uint32_t> gDeviceTokens;
 std::unordered_map<void *, uint32_t> gContextTokens;
+std::atomic<uint32_t> gSilentCurrentContextToken{0};
+
+static bool UseSilentSimulatorContext() {
+    // Permit testing native Simulator audio after Apple fixes the RemoteIO
+    // failure, and permit forcing the crash-safe path on other host setups.
+    if (const char *overrideValue =
+            getenv("LC32_OPENAL_SILENT_CONTEXT")) {
+        return overrideValue[0] != '\0' &&
+               strcmp(overrideValue, "0") != 0;
+    }
+#if TARGET_OS_SIMULATOR
+    return true;
+#else
+    // LiveExec32 is built as an iPhoneOS binary and then converted to a dylib
+    // for LiveContainer, so TARGET_OS_SIMULATOR remains false in that path.
+    // CoreSimulator supplies these variables to every launched application.
+    static const bool isSimulator =
+        getenv("SIMULATOR_UDID") != nullptr ||
+        getenv("SIMULATOR_DEVICE_NAME") != nullptr;
+    return isSimulator;
+#endif
+}
 
 static std::unordered_map<void *, uint32_t> &ReverseHandles(HandleKind kind) {
     return kind == HandleKind::Device ? gDeviceTokens : gContextTokens;
@@ -789,18 +813,32 @@ uint32_t LC32_OpenAL_Dispatch(uint32_t opcode, uint32_t guestPacket,
             break;
         }
         case LC32_OPENAL_OP_alcMakeContextCurrent: {
-            ALCcontext *context = ContextForToken(w[0], &valid);
-            w[0] = valid ? alcMakeContextCurrent(context) : ALC_FALSE;
+            const uint32_t token = w[0];
+            ALCcontext *context = ContextForToken(token, &valid);
+            if (UseSilentSimulatorContext()) {
+                // Simulator RemoteIO can synchronously time out and abort while
+                // making Apple's OpenAL context current from LiveContainer.
+                // Keep guest-visible ALC bookkeeping coherent without
+                // activating the host audio device. This is deliberately a
+                // crash-avoidance fallback, not an audio backend: native AL
+                // calls have no current context and fail/no-op safely.
+                if (valid) gSilentCurrentContextToken.store(token);
+                w[0] = valid ? ALC_TRUE : ALC_FALSE;
+            } else {
+                w[0] = valid ? alcMakeContextCurrent(context) : ALC_FALSE;
+            }
             break;
         }
         case LC32_OPENAL_OP_alcProcessContext: {
             ALCcontext *context = ContextForToken(w[0], &valid);
-            if (valid && context != nullptr) alcProcessContext(context);
+            if (!UseSilentSimulatorContext() && valid && context != nullptr)
+                alcProcessContext(context);
             break;
         }
         case LC32_OPENAL_OP_alcSuspendContext: {
             ALCcontext *context = ContextForToken(w[0], &valid);
-            if (valid && context != nullptr) alcSuspendContext(context);
+            if (!UseSilentSimulatorContext() && valid && context != nullptr)
+                alcSuspendContext(context);
             break;
         }
         case LC32_OPENAL_OP_alcDestroyContext: {
@@ -809,11 +847,30 @@ uint32_t LC32_OpenAL_Dispatch(uint32_t opcode, uint32_t guestPacket,
             if (valid && context != nullptr) {
                 alcDestroyContext(context);
                 ForgetHandle(token, HandleKind::Context);
+                if (UseSilentSimulatorContext()) {
+                    uint32_t expected = token;
+                    gSilentCurrentContextToken.compare_exchange_strong(
+                        expected, 0);
+                }
             }
             break;
         }
         case LC32_OPENAL_OP_alcGetCurrentContext:
-            w[0] = RegisterHandle(alcGetCurrentContext(), HandleKind::Context);
+            if (UseSilentSimulatorContext()) {
+                const uint32_t token = gSilentCurrentContextToken.load();
+                ALCcontext *context = ContextForToken(token, &valid);
+                if (token != 0 && (!valid || context == nullptr)) {
+                    uint32_t expected = token;
+                    gSilentCurrentContextToken.compare_exchange_strong(
+                        expected, 0);
+                    w[0] = 0;
+                } else {
+                    w[0] = token;
+                }
+            } else {
+                w[0] = RegisterHandle(alcGetCurrentContext(),
+                                      HandleKind::Context);
+            }
             break;
         case LC32_OPENAL_OP_alcGetContextsDevice: {
             ALCcontext *context = ContextForToken(w[0], &valid);
