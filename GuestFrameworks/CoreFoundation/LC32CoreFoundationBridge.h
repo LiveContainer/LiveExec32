@@ -32,6 +32,7 @@ typedef enum : uint32_t {
     LC32CoreFoundationOpDictionaryGetValue = 15,
     LC32CoreFoundationOpDictionarySetValue = 16,
     LC32CoreFoundationOpDictionaryRemoveValue = 17,
+    LC32CoreFoundationOpURLCreateFromFileSystemRepresentation = 18,
 } LC32CoreFoundationOpcode;
 
 typedef enum : uint32_t {

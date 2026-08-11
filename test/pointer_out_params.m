@@ -124,6 +124,16 @@ static unsigned int LC32HostRetainedProbeDeallocCount;
 }
 @end
 
+@interface LC32MixedArgumentTimerProbe : NSObject
+- (void)lc32TimerDidFire:(NSTimer *)timer;
+@end
+
+@implementation LC32MixedArgumentTimerProbe
+- (void)lc32TimerDidFire:(NSTimer *)timer {
+    (void)timer;
+}
+@end
+
 int main(void) {
     NSScanner *integerScanner =
         [NSScanner scannerWithString:@"-123"];
@@ -171,6 +181,29 @@ int main(void) {
         fabs(doubleValue + 2.5) < 0.0001;
     printf("floating-returns: %s\n",
         floatingReturnPassed ? "PASS" : "FAIL");
+
+    /*
+     * ARM64 assigns the leading double to d0 while target, selector,
+     * userInfo, and repeats begin at x2. This used to duplicate the double's
+     * bits into x2 and make NSTimer retain 0x3ff... as an Objective-C object.
+     */
+    LC32MixedArgumentTimerProbe *timerProbe =
+        [LC32MixedArgumentTimerProbe new];
+    NSString *timerUserInfo = @"mixed-argument-sentinel";
+    NSTimer *mixedArgumentTimer =
+        [NSTimer scheduledTimerWithTimeInterval:3600.25
+            target:timerProbe
+            selector:@selector(lc32TimerDidFire:)
+            userInfo:timerUserInfo
+            repeats:YES];
+    const BOOL mixedArgumentTimerPassed =
+        mixedArgumentTimer != nil &&
+        fabs(mixedArgumentTimer.timeInterval - 3600.25) < 0.0001 &&
+        [mixedArgumentTimer.userInfo isEqual:timerUserInfo];
+    [mixedArgumentTimer invalidate];
+    [timerProbe release];
+    printf("host-mixed-fp-object-arguments: %s\n",
+        mixedArgumentTimerPassed ? "PASS" : "FAIL");
 
     LC32RealSetterProbe *setterProbe = [LC32RealSetterProbe new];
     NSString *setterValue = @"window";
@@ -269,10 +302,50 @@ int main(void) {
         hostRetainedLifetimePassed && hostRetainedLifetimeCleanupPassed
             ? "PASS" : "FAIL");
 
+    /*
+     * Framework-native proxies need the same lifetime guarantee as dynamic
+     * guest subclasses. NSMutableString also exercises an initializer which
+     * may replace its allocation placeholder with a class-cluster instance.
+     */
+    NSMutableString *nativeLifetimeProbe =
+        [[NSMutableString alloc] initWithString:@"native-pin"];
+    const uintptr_t originalNativeLifetimeProbe =
+        (uintptr_t)nativeLifetimeProbe;
+    [lifetimeArray addObject:nativeLifetimeProbe];
+    [nativeLifetimeProbe release];
+    nativeLifetimeProbe = nil;
+    NSMutableString *retrievedNativeLifetimeProbe =
+        [lifetimeArray objectAtIndex:0];
+    const BOOL hostRetainedNativeLifetimePassed =
+        (uintptr_t)retrievedNativeLifetimeProbe ==
+            originalNativeLifetimeProbe &&
+        [retrievedNativeLifetimeProbe isEqualToString:@"native-pin"];
+    [lifetimeArray removeAllObjects];
+    printf("host-retained-native-lifetime: %s\n",
+        hostRetainedNativeLifetimePassed ? "PASS" : "FAIL");
+
+    const UInt8 fileSystemPath[] = {
+        '/', 'p', 'r', 'i', 'v', 'a', 't', 'e', '/', 't', 'm', 'p', '/',
+        'l', 'c', '3', '2', '-', 'u', 'r', 'l', '.', 'b', 'i', 'n'
+    };
+    CFURLRef fileSystemURL = CFURLCreateFromFileSystemRepresentation(
+        kCFAllocatorDefault, fileSystemPath, sizeof(fileSystemPath), false);
+    const BOOL fileSystemURLPassed = fileSystemURL &&
+        [(NSURL *)fileSystemURL isFileURL] &&
+        [[(NSURL *)fileSystemURL path]
+            hasSuffix:@"/private/tmp/lc32-url.bin"];
+    if(fileSystemURL) CFRelease(fileSystemURL);
+    printf("cfurl-file-system-representation: %s\n",
+        fileSystemURLPassed ? "PASS" : "FAIL");
+
+    [lifetimeArray release];
+
     return !(integerPassed && nullIntegerPassed &&
              objectPassed && nullObjectPassed && classSuperPassed &&
-             floatingReturnPassed && realSetterPassed &&
+             floatingReturnPassed && mixedArgumentTimerPassed &&
+             realSetterPassed &&
              literalIvarKeyPassed && classClusterInitPassed &&
              rangeArgumentPassed && hostRetainedLifetimePassed &&
-             hostRetainedLifetimeCleanupPassed);
+             hostRetainedLifetimeCleanupPassed &&
+             hostRetainedNativeLifetimePassed && fileSystemURLPassed);
 }

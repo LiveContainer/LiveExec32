@@ -6,6 +6,7 @@
 
 #include <climits>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 #pragma clang diagnostic push
@@ -359,6 +360,39 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             const void *key = SlotHostObject<const void *>(call, 1);
             if(dictionary && key) CFDictionaryRemoveValue(dictionary, key);
             return 0;
+        }
+        case LC32CoreFoundationOpURLCreateFromFileSystemRepresentation: {
+            if(!RequireSlots(call, 3)) return 0;
+            const u32 guestBuffer = SlotU32(call, 0);
+            const u32 length = SlotU32(call, 1);
+            if(length >= PATH_MAX || (length && !guestBuffer) ||
+               (length && static_cast<uint64_t>(guestBuffer) + length >
+                    static_cast<uint64_t>(UINT32_MAX) + 1)) {
+                return 0;
+            }
+
+            std::vector<char> guestPath(static_cast<size_t>(length) + 1, 0);
+            if(length && Dynarmic_mem_1read(guestBuffer, length,
+                    guestPath.data()) != 0) {
+                return 0;
+            }
+            // File-system paths cannot contain an embedded NUL. Reject one
+            // instead of silently translating a different prefix.
+            if(memchr(guestPath.data(), '\0', length)) return 0;
+
+            char hostPath[PATH_MAX] = {};
+            if(!sharedHandle.fs ||
+               !sharedHandle.fs->pathGuestToHost(
+                    guestPath.data(), hostPath)) {
+                return 0;
+            }
+            const size_t hostLength = strlen(hostPath);
+            return GuestForCreatedObject(
+                CFURLCreateFromFileSystemRepresentation(
+                    kCFAllocatorDefault,
+                    reinterpret_cast<const UInt8 *>(hostPath),
+                    static_cast<CFIndex>(hostLength),
+                    SlotU32(call, 2) != 0));
         }
     }
     return 0;

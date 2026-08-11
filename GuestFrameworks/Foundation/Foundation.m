@@ -1,4 +1,5 @@
 #import <Foundation/Foundation+LC32.h>
+#import <CoreFoundation/CoreFoundation.h>
 
 #include <pthread.h>
 
@@ -24,6 +25,20 @@ NSString * const NSUserDefaultsDidChangeNotification =
 @end
 
 @implementation NSTaggedPointerString : NSString
+@end
+
+@implementation NSBundle (LC32GuestMainBundle)
+
++ (NSBundle *)mainBundle {
+    /*
+     * The native process belongs to LiveContainer, while the guest's main
+     * executable lives in the selected legacy application bundle.  Reuse
+     * the CoreFoundation bridge, which constructs an NSBundle beside that
+     * executable, rather than exposing the host process's main bundle.
+     */
+    return (NSBundle *)CFBundleGetMainBundle();
+}
+
 @end
 
 void NSLog(NSString *format, ...) {

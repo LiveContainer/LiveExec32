@@ -31,9 +31,10 @@ extern int __CFConstantStringClassReference[];
 - (u32)guest_self;
 @end
 
-// dummy function to get and set double registers. CGAffineTransform takes up to 6 doubles
+// Dummy calls used to read or seed the AAPCS64 floating-point registers.
 LC32_SixDoubles LC32GetDoubleRegisters();
-void LC32SetDoubleRegisters(double d0, double d1, double d2, double d3, double d4, double d5);
+void LC32SetDoubleRegisters(double d0, double d1, double d2, double d3,
+                            double d4, double d5, double d6, double d7);
 
 u32 LC32HostToGuestCopyClassName(u32 guest_output, size_t length, u64 host_object);
 u32 LC32CopyHostStringUTF8(u64 host_object, u32 guest_output, size_t capacity);

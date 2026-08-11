@@ -22,6 +22,11 @@ struct ExtAudioFileEntry {
     std::mutex mutex;
 };
 
+struct AudioFileEntry {
+    AudioFileID file = nullptr;
+    std::mutex mutex;
+};
+
 struct GuestAudioBuffer {
     u32 channels;
     u32 byteSize;
@@ -37,6 +42,10 @@ static_assert(sizeof(AudioStreamBasicDescription) == 40);
 std::mutex extAudioFilesMutex;
 std::unordered_map<u32, std::shared_ptr<ExtAudioFileEntry>> extAudioFiles;
 std::atomic<u32> nextExtAudioFileToken{1};
+
+std::mutex audioFilesMutex;
+std::unordered_map<u32, std::shared_ptr<AudioFileEntry>> audioFiles;
+std::atomic<u32> nextAudioFileToken{1};
 
 bool ReadAudioToolboxCall(u32 guestAddress, LC32AudioToolboxCall &call) {
     struct {
@@ -277,6 +286,107 @@ std::shared_ptr<ExtAudioFileEntry> TakeExtAudioFile(u32 token) {
     return entry;
 }
 
+std::shared_ptr<AudioFileEntry> FindAudioFile(u32 token) {
+    std::lock_guard<std::mutex> lock(audioFilesMutex);
+    const auto iterator = audioFiles.find(token);
+    return iterator == audioFiles.end() ? nullptr : iterator->second;
+}
+
+u32 InsertAudioFile(AudioFileID file) {
+    if(!file) return 0;
+    auto entry = std::make_shared<AudioFileEntry>();
+    entry->file = file;
+    std::lock_guard<std::mutex> lock(audioFilesMutex);
+    for(size_t attempt = 0; attempt < UINT32_MAX; ++attempt) {
+        u32 token = nextAudioFileToken.fetch_add(1,
+            std::memory_order_relaxed);
+        if(token == 0) continue;
+        if(audioFiles.emplace(token, entry).second) return token;
+    }
+    return 0;
+}
+
+std::shared_ptr<AudioFileEntry> TakeAudioFile(u32 token) {
+    std::lock_guard<std::mutex> lock(audioFilesMutex);
+    const auto iterator = audioFiles.find(token);
+    if(iterator == audioFiles.end()) return nullptr;
+    auto entry = iterator->second;
+    audioFiles.erase(iterator);
+    return entry;
+}
+
+OSStatus DispatchAudioFileGetProperty(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 4)) return kAudio_ParamError;
+    auto entry = FindAudioFile(SlotU32(call, 0));
+    if(!entry) return kAudio_ParamError;
+
+    u32 requestedSize = 0;
+    if(!ReadGuestU32(SlotU32(call, 2), requestedSize) ||
+       requestedSize > kMaximumPropertyBytes ||
+       (requestedSize && !SlotU32(call, 3))) {
+        return kAudio_ParamError;
+    }
+
+    std::vector<uint8_t> bytes(requestedSize ? requestedSize : 1);
+    UInt32 returnedSize = requestedSize;
+    OSStatus status;
+    {
+        std::lock_guard<std::mutex> lock(entry->mutex);
+        if(!entry->file) return kAudio_ParamError;
+        status = AudioFileGetProperty(entry->file, SlotU32(call, 1),
+            &returnedSize, requestedSize ? bytes.data() : nullptr);
+    }
+
+    if(!WriteGuestU32(SlotU32(call, 2), returnedSize))
+        return kAudio_ParamError;
+    if(status == noErr && returnedSize) {
+        if(returnedSize > requestedSize ||
+           Dynarmic_mem_1write(SlotU32(call, 3), returnedSize,
+               reinterpret_cast<char *>(bytes.data())) != 0) {
+            return kAudio_ParamError;
+        }
+    }
+    return status;
+}
+
+OSStatus DispatchAudioFileReadBytes(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 5)) return kAudio_ParamError;
+    auto entry = FindAudioFile(SlotU32(call, 0));
+    if(!entry) return kAudio_ParamError;
+
+    u32 requestedBytes = 0;
+    if(!ReadGuestU32(SlotU32(call, 3), requestedBytes) ||
+       requestedBytes > kMaximumAudioBytes ||
+       (requestedBytes && !SlotU32(call, 4))) {
+        return kAudio_ParamError;
+    }
+
+    std::vector<uint8_t> bytes(requestedBytes ? requestedBytes : 1);
+    UInt32 returnedBytes = requestedBytes;
+    OSStatus status;
+    {
+        std::lock_guard<std::mutex> lock(entry->mutex);
+        if(!entry->file) return kAudio_ParamError;
+        status = AudioFileReadBytes(entry->file,
+            static_cast<Boolean>(SlotU32(call, 1)),
+            static_cast<SInt64>(call.slots[2]), &returnedBytes,
+            requestedBytes ? bytes.data() : nullptr);
+    }
+
+    if(!WriteGuestU32(SlotU32(call, 3), returnedBytes))
+        return kAudio_ParamError;
+    if(status == noErr && returnedBytes) {
+        if(returnedBytes > requestedBytes ||
+           Dynarmic_mem_1write(SlotU32(call, 4), returnedBytes,
+               reinterpret_cast<char *>(bytes.data())) != 0) {
+            return kAudio_ParamError;
+        }
+    }
+    return status;
+}
+
 OSStatus DispatchExtAudioFileGetProperty(
         const LC32AudioToolboxCall &call) {
     if(!RequireSlots(call, 4)) return kAudio_ParamError;
@@ -470,6 +580,46 @@ extern "C" u32 LC32_AudioToolbox_Dispatch(u32 opcode, u32 guestCall, u32) {
         case LC32AudioToolboxOpAudioSessionGetProperty:
             return static_cast<u32>(
                 DispatchAudioSessionGetProperty(call));
+        case LC32AudioToolboxOpAudioFileOpenURL: {
+            if(!RequireSlots(call, 4) || !SlotU32(call, 3))
+                return static_cast<u32>(kAudio_ParamError);
+            AudioFileID file = nullptr;
+            const OSStatus status = AudioFileOpenURL(
+                SlotHostObject<CFURLRef>(call, 0),
+                static_cast<AudioFilePermissions>(SlotU32(call, 1)),
+                SlotU32(call, 2), &file);
+            if(status != noErr) return static_cast<u32>(status);
+            const u32 token = InsertAudioFile(file);
+            if(!token || !WriteGuestU32(SlotU32(call, 3), token)) {
+                auto entry = token ? TakeAudioFile(token) : nullptr;
+                if(entry) {
+                    std::lock_guard<std::mutex> lock(entry->mutex);
+                    if(entry->file) {
+                        AudioFileClose(entry->file);
+                        entry->file = nullptr;
+                    }
+                } else {
+                    AudioFileClose(file);
+                }
+                return static_cast<u32>(kAudio_ParamError);
+            }
+            return static_cast<u32>(noErr);
+        }
+        case LC32AudioToolboxOpAudioFileGetProperty:
+            return static_cast<u32>(DispatchAudioFileGetProperty(call));
+        case LC32AudioToolboxOpAudioFileReadBytes:
+            return static_cast<u32>(DispatchAudioFileReadBytes(call));
+        case LC32AudioToolboxOpAudioFileClose: {
+            if(!RequireSlots(call, 1))
+                return static_cast<u32>(kAudio_ParamError);
+            auto entry = TakeAudioFile(SlotU32(call, 0));
+            if(!entry) return static_cast<u32>(kAudio_ParamError);
+            std::lock_guard<std::mutex> lock(entry->mutex);
+            if(!entry->file) return static_cast<u32>(kAudio_ParamError);
+            const OSStatus status = AudioFileClose(entry->file);
+            entry->file = nullptr;
+            return static_cast<u32>(status);
+        }
     }
     return static_cast<u32>(kAudio_ParamError);
 }

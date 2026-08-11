@@ -119,6 +119,54 @@ OSStatus AudioSessionGetProperty(AudioSessionPropertyID property,
         LC32_AUDIO_U32((uintptr_t)outData));
 }
 
+#pragma mark Audio File Services
+
+OSStatus AudioFileOpenURL(CFURLRef fileURL,
+                          AudioFilePermissions permissions,
+                          AudioFileTypeID fileTypeHint,
+                          AudioFileID *outAudioFile) {
+    if(!fileURL || !outAudioFile) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioFileOpenURL,
+        [(id)fileURL host_self], LC32_AUDIO_U32(permissions),
+        LC32_AUDIO_U32(fileTypeHint),
+        LC32_AUDIO_U32((uintptr_t)outAudioFile));
+}
+
+OSStatus AudioFileGetProperty(AudioFileID audioFile,
+                              AudioFilePropertyID property,
+                              UInt32 *ioDataSize,
+                              void *outData) {
+    if(!audioFile || !ioDataSize) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioFileGetProperty,
+        LC32_AUDIO_U32((uintptr_t)audioFile),
+        LC32_AUDIO_U32(property),
+        LC32_AUDIO_U32((uintptr_t)ioDataSize),
+        LC32_AUDIO_U32((uintptr_t)outData));
+}
+
+OSStatus AudioFileReadBytes(AudioFileID audioFile,
+                            Boolean useCache,
+                            SInt64 startingByte,
+                            UInt32 *ioNumBytes,
+                            void *outBuffer) {
+    if(!audioFile || !ioNumBytes) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioFileReadBytes,
+        LC32_AUDIO_U32((uintptr_t)audioFile), LC32_AUDIO_U32(useCache),
+        (uint64_t)startingByte,
+        LC32_AUDIO_U32((uintptr_t)ioNumBytes),
+        LC32_AUDIO_U32((uintptr_t)outBuffer));
+}
+
+OSStatus AudioFileClose(AudioFileID audioFile) {
+    if(!audioFile) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioFileClose,
+        LC32_AUDIO_U32((uintptr_t)audioFile));
+}
+
 #pragma mark Extended Audio File Services
 
 OSStatus ExtAudioFileOpenURL(CFURLRef url, ExtAudioFileRef *outFile) {

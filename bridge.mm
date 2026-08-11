@@ -133,8 +133,11 @@ u64 LC32GetHostObject(u32 guest_self, u32 guest_className, bool returnClass) {
     }
 
     const bool isGuestClass = [(id)cls isGuestClass];
+    const bool isConstantStringClass =
+        object_getClass(cls) ==
+            object_getClass((Class)__CFConstantStringClassReference);
     id obj;
-    if(object_getClass(cls) == object_getClass((Class)__CFConstantStringClassReference)) {
+    if(isConstantStringClass) {
         obj = LC32GetHostConstString(guest_self);
     } else if(isGuestClass) {
         /*
@@ -149,8 +152,8 @@ u64 LC32GetHostObject(u32 guest_self, u32 guest_className, bool returnClass) {
     }
     [obj setGuest_self:guest_self];
     if(isGuestClass) {
-        // This guest object already has its caller's +1. Add one independent
-        // +1 which follows the lifetime of the native mirror.
+        // Dynamic guest classes have unique native allocations but no native
+        // initializer shim where the final mirror can be pinned.
         LC32PinGuestObjectToHost(obj, guest_self, true);
     }
     return (u64)obj;
@@ -354,6 +357,104 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
         return result;
     };
 
+    /*
+     * AAPCS64 allocates scalar floating-point arguments and integer/pointer
+     * arguments from independent register banks. The guest shim transports
+     * each logical scalar in one 64-bit stack slot, so compact those slots by
+     * host type before entering objc_msgSend. In particular, a leading
+     * double belongs in d0 and must not also consume x2.
+     *
+     * Generated float arguments are promoted to double by the variadic guest
+     * call. Convert them back to float and place their bits in the low half
+     * of the corresponding v register. Keep the old raw-slot behavior for
+     * aggregate arguments until their full AAPCS64 layout is described here.
+     */
+    u64 integerArguments[9] = {};
+    u64 floatingArguments[8] = {};
+    bool useTypedScalarArguments = method != nullptr;
+    if(method) {
+        const unsigned int argumentCount =
+            method_getNumberOfArguments(method) - 2;
+        size_t integerArgumentCount = 0;
+        size_t floatingArgumentCount = 0;
+        if(argumentCount > 9) useTypedScalarArguments = false;
+
+        for(unsigned int index = 0;
+                useTypedScalarArguments && index < argumentCount; index++) {
+            char *argumentType =
+                method_copyArgumentType(method, index + 2);
+            const char *unqualifiedType = argumentType;
+            while(unqualifiedType && *unqualifiedType &&
+                    strchr("rnNoORVA", *unqualifiedType)) {
+                unqualifiedType++;
+            }
+
+            switch(unqualifiedType ? *unqualifiedType : '\0') {
+                case 'f': {
+                    if(floatingArgumentCount >= 8) {
+                        useTypedScalarArguments = false;
+                        break;
+                    }
+                    double promotedValue;
+                    memcpy(&promotedValue, &args[index],
+                           sizeof(promotedValue));
+                    const float hostValue = (float)promotedValue;
+                    u32 hostBits;
+                    memcpy(&hostBits, &hostValue, sizeof(hostBits));
+                    floatingArguments[floatingArgumentCount++] = hostBits;
+                    break;
+                }
+                case 'd':
+                    if(floatingArgumentCount >= 8) {
+                        useTypedScalarArguments = false;
+                        break;
+                    }
+                    floatingArguments[floatingArgumentCount++] = args[index];
+                    break;
+                case '@':
+                case '#':
+                case ':':
+                case '*':
+                case '^':
+                case '?':
+                case 'B':
+                case 'C':
+                case 'I':
+                case 'L':
+                case 'Q':
+                case 'S':
+                case 'b':
+                case 'c':
+                case 'i':
+                case 'l':
+                case 'q':
+                case 's':
+                    integerArguments[integerArgumentCount++] = args[index];
+                    break;
+                default:
+                    useTypedScalarArguments = false;
+                    break;
+            }
+            free(argumentType);
+        }
+        if(useTypedScalarArguments) {
+            /*
+             * Objective-C metadata describes only the fixed portion of a
+             * variadic method. Unnamed AAPCS64 arguments use the integer
+             * vararg stream, so preserve the shim's remaining raw slots (and
+             * its explicit zero terminator) after the typed fixed arguments.
+             */
+            for(size_t index = argumentCount;
+                    index < 9 && integerArgumentCount < 9; index++) {
+                integerArguments[integerArgumentCount++] = args[index];
+            }
+        }
+    }
+    if(!useTypedScalarArguments) {
+        memcpy(integerArguments, args, sizeof(integerArguments));
+        memcpy(floatingArguments, args, sizeof(floatingArguments));
+    }
+
     typedef u64(*objc_msgSendFunc)(u64 x0, u64 x1, u64 x2, u64 x3, u64 x4, u64 x5, u64 x6, u64 x7, ...);
     typedef float(*objc_msgSendFloatFunc)(u64 x0, u64 x1, u64 x2, u64 x3, u64 x4, u64 x5, u64 x6, u64 x7, ...);
     typedef double(*objc_msgSendDoubleFunc)(u64 x0, u64 x1, u64 x2, u64 x3, u64 x4, u64 x5, u64 x6, u64 x7, ...);
@@ -389,26 +490,43 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
         }
     }
 
+    auto floatingArgument = [&](size_t index) {
+        double value;
+        memcpy(&value, &floatingArguments[index], sizeof(value));
+        return value;
+    };
+
     auto invokeScalar = [&](void *function, u64 target) -> u64 {
-        LC32SetDoubleRegisters(*(double*)&args[0], *(double*)&args[1],
-            *(double*)&args[2], *(double*)&args[3], *(double*)&args[4],
-            *(double*)&args[5]);
+        LC32SetDoubleRegisters(
+            floatingArgument(0), floatingArgument(1),
+            floatingArgument(2), floatingArgument(3),
+            floatingArgument(4), floatingArgument(5),
+            floatingArgument(6), floatingArgument(7));
         double floatingResult;
         switch(returnKind) {
             case HostReturnKind::Float:
                 floatingResult = ((objc_msgSendFloatFunc)function)(target,
-                    host_cmd, args[0], args[1], args[2], args[3],
-                    args[4], args[5], args[6], args[7], args[8]);
+                    host_cmd, integerArguments[0], integerArguments[1],
+                    integerArguments[2], integerArguments[3],
+                    integerArguments[4], integerArguments[5],
+                    integerArguments[6], integerArguments[7],
+                    integerArguments[8]);
                 break;
             case HostReturnKind::Double:
                 floatingResult = ((objc_msgSendDoubleFunc)function)(target,
-                    host_cmd, args[0], args[1], args[2], args[3],
-                    args[4], args[5], args[6], args[7], args[8]);
+                    host_cmd, integerArguments[0], integerArguments[1],
+                    integerArguments[2], integerArguments[3],
+                    integerArguments[4], integerArguments[5],
+                    integerArguments[6], integerArguments[7],
+                    integerArguments[8]);
                 break;
             case HostReturnKind::Integer:
                 return ((objc_msgSendFunc)function)(target, host_cmd,
-                    args[0], args[1], args[2], args[3], args[4],
-                    args[5], args[6], args[7], args[8]);
+                    integerArguments[0], integerArguments[1],
+                    integerArguments[2], integerArguments[3],
+                    integerArguments[4], integerArguments[5],
+                    integerArguments[6], integerArguments[7],
+                    integerArguments[8]);
         }
         u64 resultBits;
         memcpy(&resultBits, &floatingResult, sizeof(resultBits));
@@ -416,15 +534,20 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
     };
 
     auto invokeStruct = [&](void *function, u64 target) {
-        LC32SetDoubleRegisters(*(double*)&args[0], *(double*)&args[1],
-            *(double*)&args[2], *(double*)&args[3], *(double*)&args[4],
-            *(double*)&args[5]);
+        LC32SetDoubleRegisters(
+            floatingArgument(0), floatingArgument(1),
+            floatingArgument(2), floatingArgument(3),
+            floatingArgument(4), floatingArgument(5),
+            floatingArgument(6), floatingArgument(7));
         switch(structLen) {
             case sizeof(LC32_TwoDoubles): {
                 const LC32_TwoDoubles result =
                     ((objc_msgSendTwoDoublesFunc)function)(target,
-                        host_cmd, args[0], args[1], args[2], args[3],
-                        args[4], args[5], args[6], args[7], args[8]);
+                        host_cmd, integerArguments[0], integerArguments[1],
+                        integerArguments[2], integerArguments[3],
+                        integerArguments[4], integerArguments[5],
+                        integerArguments[6], integerArguments[7],
+                        integerArguments[8]);
                 (void)Dynarmic_mem_1write(structPtr, sizeof(result),
                     (char *)&result);
                 break;
@@ -432,8 +555,11 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
             case sizeof(LC32_FourDoubles): {
                 const LC32_FourDoubles result =
                     ((objc_msgSendFourDoublesFunc)function)(target,
-                        host_cmd, args[0], args[1], args[2], args[3],
-                        args[4], args[5], args[6], args[7], args[8]);
+                        host_cmd, integerArguments[0], integerArguments[1],
+                        integerArguments[2], integerArguments[3],
+                        integerArguments[4], integerArguments[5],
+                        integerArguments[6], integerArguments[7],
+                        integerArguments[8]);
                 (void)Dynarmic_mem_1write(structPtr, sizeof(result),
                     (char *)&result);
                 break;
@@ -441,8 +567,11 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
             case sizeof(LC32_SixDoubles): {
                 const LC32_SixDoubles result =
                     ((objc_msgSendSixDoublesFunc)function)(target,
-                        host_cmd, args[0], args[1], args[2], args[3],
-                        args[4], args[5], args[6], args[7], args[8]);
+                        host_cmd, integerArguments[0], integerArguments[1],
+                        integerArguments[2], integerArguments[3],
+                        integerArguments[4], integerArguments[5],
+                        integerArguments[6], integerArguments[7],
+                        integerArguments[8]);
                 (void)Dynarmic_mem_1write(structPtr, sizeof(result),
                     (char *)&result);
                 break;
@@ -556,6 +685,16 @@ u32 LC32HostToGuestArgument(char *type, u64 value) {
         case '#': // Class
             return [(id)value guest_self];
         case '^':
+            /*
+             * Legacy Cocoa callbacks use void * as an opaque context token.
+             * Guest shims pass those tokens to the host zero-extended, so
+             * values which still fit in 32 bits can safely make the return
+             * trip without exposing or dereferencing host memory. Reject a
+             * real ARM64 pointer instead of silently truncating it.
+             */
+            if(type[1] == 'v' && value == (u64)(u32)value) {
+                return (u32)value;
+            }
             /*
              * NSZone is an obsolete allocator hint.  A native zone pointer
              * cannot be exposed to the 32-bit address space, and Cocoa
@@ -1304,13 +1443,32 @@ static const void *kGuestSelf = &kGuestSelf;
 }
 
 - (u32)LC32_bindGuestSelfIfAbsent:(u32)ptr {
+    u32 boundGuestObject;
     @synchronized(self) {
         const u32 existing = self.guest_selfOrNull;
-        if(existing) return existing;
-        objc_setAssociatedObject(self, kGuestSelf, @(ptr),
-            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        return ptr;
+        if(existing) {
+            boundGuestObject = existing;
+        } else {
+            objc_setAssociatedObject(self, kGuestSelf, @(ptr),
+                OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            boundGuestObject = ptr;
+        }
     }
+    /*
+     * An initializer may replace its +alloc placeholder (class clusters do
+     * this routinely). Move the lifetime guarantee to the returned native
+     * object as soon as it acquires the reverse mapping. The placeholder's
+     * pin is released independently when that object is destroyed.
+     */
+    if(boundGuestObject == ptr) {
+        /*
+         * This is also needed when +alloc and -init return the same object:
+         * +alloc installed its reverse mapping but deliberately did not pin
+         * native class-cluster placeholders, which may be shared.
+         */
+        LC32PinGuestObjectToHost(self, ptr, true);
+    }
+    return boundGuestObject;
 }
 
 - (void)LC32_clearGuestSelfIfEqual:(u64)expectedGuestSelf {

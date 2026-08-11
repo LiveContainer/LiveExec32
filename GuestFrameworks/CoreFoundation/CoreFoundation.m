@@ -68,7 +68,19 @@ ___CFConstantStringClassReference = _OBJC_CLASS_$___NSCFConstantString \
 // For convenience, most CF functions are shims of Objective-C
 CFURLRef CFURLCreateWithFileSystemPath(CFAllocatorRef allocator, CFStringRef filePath, CFURLPathStyle pathStyle, Boolean isDirectory) {
     // unused: allocator, pathStyle
-    return (CFURLRef)[NSURL fileURLWithPath:(NSString *)filePath isDirectory:isDirectory];
+    return (CFURLRef)[[NSURL alloc]
+        initFileURLWithPath:(NSString *)filePath isDirectory:isDirectory];
+}
+
+CFURLRef CFURLCreateFromFileSystemRepresentation(
+        CFAllocatorRef allocator, const UInt8 *buffer,
+        CFIndex bufferLength, Boolean isDirectory) {
+    (void)allocator;
+    if(bufferLength < 0 || (bufferLength && !buffer)) return NULL;
+    return (CFURLRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCreateFromFileSystemRepresentation,
+        LC32_CF_U32((uintptr_t)buffer), LC32_CF_U32(bufferLength),
+        LC32_CF_U32(isDirectory));
 }
 
 void CFRelease(CFTypeRef ref) {

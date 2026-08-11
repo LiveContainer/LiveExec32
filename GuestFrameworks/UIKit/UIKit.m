@@ -69,6 +69,7 @@ static uint64_t LC32UIKitBeginImageContext;
 static uint64_t LC32UIKitEndImageContext;
 static uint64_t LC32UIKitGetCurrentContext;
 static uint64_t LC32UIKitGetImageFromCurrentImageContext;
+static uint64_t LC32UIKitCopyScreenGeometry;
 
 static void LC32UIImageResolveCGImageSelector(void) {
     LC32UIImageCGImageSelector = LC32GetHostSelector(@selector(CGImage));
@@ -87,6 +88,8 @@ static void LC32UIKitResolveGeometryFunctions(void) {
         LC32Dlsym("LC32_UIKit_UIGraphicsGetCurrentContext", YES);
     LC32UIKitGetImageFromCurrentImageContext = LC32Dlsym(
         "LC32_UIKit_UIGraphicsGetImageFromCurrentImageContext", YES);
+    LC32UIKitCopyScreenGeometry =
+        LC32Dlsym("LC32_UIKit_CopyScreenGeometry", YES);
 }
 
 static uint32_t LC32UIKitFloatBits(CGFloat value) {
@@ -155,7 +158,44 @@ UIImage *UIGraphicsGetImageFromCurrentImageContext(void) {
     return (__bridge UIImage *)(void *)(uintptr_t)guestImage;
 }
 
+static CGRect LC32UIKitScreenGeometry(UIScreen *screen, uint32_t kind) {
+    CGRect result = CGRectZero;
+    pthread_once(&LC32UIKitGeometryOnce,
+        LC32UIKitResolveGeometryFunctions);
+    if(!LC32UIKitCopyScreenGeometry || !screen) return result;
+
+    const uint32_t guestResult = (uint32_t)(uintptr_t)&result;
+    if(!LC32InvokeHostCRet32(LC32UIKitCopyScreenGeometry,
+            screen.host_self, kind, guestResult)) {
+        return CGRectZero;
+    }
+    return result;
+}
+
+@implementation UIScreen (LC32GuestGeometry)
+
+- (CGRect)bounds {
+    return LC32UIKitScreenGeometry(self, 0);
+}
+
+- (CGRect)applicationFrame {
+    return LC32UIKitScreenGeometry(self, 1);
+}
+
+@end
+
 @implementation UIImage (LC32CoreGraphics)
+
++ (UIImage *)imageNamed:(NSString *)name {
+    /*
+     * UIKit's native +imageNamed: searches LiveContainer's bundle.  Route
+     * the convenience API through its bundle-aware form so resources are
+     * loaded from the selected guest application instead.
+     */
+    return [self imageNamed:name
+                   inBundle:NSBundle.mainBundle
+compatibleWithTraitCollection:nil];
+}
 
 - (CGImageRef)CGImage {
     pthread_once(&LC32UIImageCGImageOnce,
