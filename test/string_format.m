@@ -45,6 +45,13 @@ static NSString *formatWithLocaleArguments(NSString *format,
     return result;
 }
 
+static void logWithArguments(NSString *format, ...) {
+    va_list arguments;
+    va_start(arguments, format);
+    NSLogv(format, arguments);
+    va_end(arguments);
+}
+
 int main(void) {
     int failed = 0;
     const char *utf8 = [[NSString stringWithFormat:@"UTF8-%@-%d",
@@ -127,5 +134,11 @@ int main(void) {
     [mutable appendFormat:@"/%@/%d", @"append", 14];
     failed += check("mutable-append-format", mutable,
                     @"mutable/append/14");
+
+    NSLog(@"LC32_NSLOG object=%@ signed=%d unsigned=%u hex=%x "
+           "float=%.2f width=%*.*f nil=%@",
+          @"object", -7, 9u, 0x2au, 3.5, 7, 2, 3.5, nil);
+    logWithArguments(@"LC32_NSLOGV object=%@ signed=%d float=%.1f",
+                     @"arguments", -8, 4.5);
     return failed;
 }

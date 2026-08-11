@@ -2,6 +2,8 @@
 #import <CoreFoundation/CoreFoundation.h>
 
 #include <pthread.h>
+#include <stdarg.h>
+#include <stdio.h>
 
 const NSErrorDomain NSCocoaErrorDomain = @"NSCocoaErrorDomain";
 const NSErrorDomain NSPOSIXErrorDomain = @"NSPOSIXErrorDomain";
@@ -41,8 +43,25 @@ NSString * const NSUserDefaultsDidChangeNotification =
 
 @end
 
+void NSLogv(NSString *format, va_list arguments) {
+    if(!format) return;
+
+    va_list argumentsCopy;
+    va_copy(argumentsCopy, arguments);
+    NSString *message = [[NSString alloc]
+        initWithFormat:format arguments:argumentsCopy];
+    va_end(argumentsCopy);
+
+    const char *utf8 = message.UTF8String;
+    if(utf8) fprintf(stderr, "%s\n", utf8);
+    [message release];
+}
+
 void NSLog(NSString *format, ...) {
-    printf("FIXME: NSLog called but unimplemented!\n");
+    va_list arguments;
+    va_start(arguments, format);
+    NSLogv(format, arguments);
+    va_end(arguments);
 }
 
 static pthread_once_t LC32FoundationFunctionsOnce = PTHREAD_ONCE_INIT;
