@@ -3,8 +3,6 @@
 #import <objc/runtime.h>
 #include "bridge.h"
 
-#include <cmath>
-
 /*
 symbol = r0 + r1 << 32
 r0 = r2
@@ -39,50 +37,6 @@ id LC32ObjectProperty(id object, const char *name) {
     } @catch(NSException *) {
         return nil;
     }
-}
-
-bool LC32ApproximatelyEqual(CGFloat lhs, CGFloat rhs) {
-    return std::fabs(lhs - rhs) <= 0.5;
-}
-
-bool LC32ScreenSizesMatch(CGSize lhs, CGSize rhs) {
-    const bool direct =
-        LC32ApproximatelyEqual(lhs.width, rhs.width) &&
-        LC32ApproximatelyEqual(lhs.height, rhs.height);
-    const bool rotated =
-        LC32ApproximatelyEqual(lhs.width, rhs.height) &&
-        LC32ApproximatelyEqual(lhs.height, rhs.width);
-    return direct || rotated;
-}
-
-UIWindow *LC32ActiveGuestWindow(UIScreen *screen) {
-    UIApplication *application = UIApplication.sharedApplication;
-
-    UIWindow *delegateWindow = LC32ObjectProperty(application.delegate,
-                                                   "window");
-    if([delegateWindow isKindOfClass:UIWindow.class] &&
-       delegateWindow.screen == screen) {
-        return delegateWindow;
-    }
-
-    for(UIScene *scene in application.connectedScenes) {
-        if(![scene isKindOfClass:UIWindowScene.class]) continue;
-        UIWindowScene *windowScene = (UIWindowScene *)scene;
-        if(windowScene.screen != screen) continue;
-        for(UIWindow *window in windowScene.windows) {
-            if(window.isKeyWindow) return window;
-        }
-    }
-
-    for(UIScene *scene in application.connectedScenes) {
-        if(![scene isKindOfClass:UIWindowScene.class]) continue;
-        UIWindowScene *windowScene = (UIWindowScene *)scene;
-        if(windowScene.screen != screen) continue;
-        for(UIWindow *window in windowScene.windows) {
-            if(!window.hidden && window.alpha > 0) return window;
-        }
-    }
-    return nil;
 }
 
 void LC32AdoptLegacyRootViewController(UIWindow *window) {
@@ -208,62 +162,6 @@ u32 LC32_UIKit_CGSizeFromString(u32 stringLow, u32 stringHigh, u32 sp) {
     };
     return Dynarmic_mem_1write(guestResult, sizeof(guestSize),
         const_cast<char *>(reinterpret_cast<const char *>(&guestSize))) == 0;
-}
-
-u32 LC32_UIKit_CopyScreenGeometry(u32 screenLow, u32 screenHigh, u32 sp) {
-    enum : u32 {
-        LC32UIScreenBounds = 0,
-        LC32UIScreenApplicationFrame = 1,
-    };
-
-    const u32 kind =
-        Dynarmic_current_user_callbacks()->MemoryRead32(sp);
-    const u32 guestResult =
-        Dynarmic_current_user_callbacks()->MemoryRead32(sp + sizeof(u32));
-    if(kind > LC32UIScreenApplicationFrame || !guestResult ||
-       guestResult > UINT32_MAX - (sizeof(float) * 4 - 1)) {
-        return 0;
-    }
-
-    UIScreen *screen = reinterpret_cast<UIScreen *>(
-        static_cast<uintptr_t>(screenLow |
-            (static_cast<u64>(screenHigh) << 32)));
-    if(!screen) screen = UIScreen.mainScreen;
-
-    const CGRect nativeBounds = screen.bounds;
-    CGRect result = kind == LC32UIScreenApplicationFrame
-        ? screen.applicationFrame
-        : nativeBounds;
-
-    /*
-     * LiveContainer's classic presentation can give the guest window a
-     * 320x480 coordinate space while the process-wide UIScreen continues to
-     * report the physical device dimensions.  Use that window coordinate
-     * space only for a genuine size mismatch.  Full-screen windows (including
-     * a width/height swap caused by rotation) retain native UIScreen behavior.
-     */
-    UIWindow *window = LC32ActiveGuestWindow(screen);
-    if(window) {
-        const CGRect windowBounds = window.bounds;
-        if(windowBounds.size.width > 0 && windowBounds.size.height > 0 &&
-           !LC32ScreenSizesMatch(windowBounds.size, nativeBounds.size)) {
-            result = windowBounds;
-        }
-    }
-
-    const struct {
-        float x;
-        float y;
-        float width;
-        float height;
-    } guestRect = {
-        static_cast<float>(result.origin.x),
-        static_cast<float>(result.origin.y),
-        static_cast<float>(result.size.width),
-        static_cast<float>(result.size.height),
-    };
-    return Dynarmic_mem_1write(guestResult, sizeof(guestRect),
-        const_cast<char *>(reinterpret_cast<const char *>(&guestRect))) == 0;
 }
 
 void LC32_UIKit_UIGraphicsBeginImageContext(
