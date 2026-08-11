@@ -4,13 +4,16 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdarg>
 #include <cstdio>
 #include <deque>
 #include <exception>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <assert.h>
@@ -92,7 +95,81 @@ static std::atomic<bool> debuggerAllStopRequested{false};
 static std::atomic<bool> nativeShutdownRequested{false};
 static std::atomic<bool> guestProcessExitRequested{false};
 static std::atomic<int> guestProcessExitCode{0};
+static std::atomic<bool> guestCrashTerminationStarted{false};
 static std::recursive_mutex guestVmMutex;
+static std::mutex guestMappingMutex;
+
+/*
+ * These interfaces are exported by libSystem on both iOS 10 and current
+ * iOS, but Apple does not ship their declarations in the public SDK.  The
+ * OS-reason string is deliberately compact; the complete report is retained
+ * through CrashReporter's application-specific-information annotation.
+ */
+extern "C" void abort_with_reason(
+    uint32_t reason_namespace, uint64_t reason_code,
+    const char *reason_string, uint64_t reason_flags)
+    __attribute__((noreturn, cold));
+extern "C" const char *__crashreporter_info__;
+
+constexpr uint32_t LC32_OS_REASON_LIBSYSTEM = 18;
+constexpr uint32_t LC32_OS_REASON_MAX_VALID_NAMESPACE = 47;
+constexpr uint64_t LC32_GUEST_CRASH_REASON_CODE = 2;
+constexpr size_t LC32_OS_REASON_STRING_MAX = 1023;
+constexpr size_t LC32_GUEST_ERROR_IN_COMPACT_REASON_MAX = 280;
+constexpr size_t LC32_FULL_CRASH_REPORT_MAX = 2 * 1024 * 1024;
+constexpr size_t LC32_CRASH_ANNOTATIONS_MAX = 16;
+constexpr size_t LC32_CRASH_ANNOTATION_BYTES_MAX = 64 * 1024;
+constexpr uint32_t LC32_CRASH_SYMBOLS_MAX = 256 * 1024;
+
+struct GuestAbortMetadata {
+    bool valid = false;
+    uint32_t reasonNamespace = 0;
+    uint64_t reasonCode = 0;
+    uint32_t payloadSize = 0;
+    uint64_t reasonFlags = 0;
+    std::string reason;
+};
+
+static thread_local GuestAbortMetadata pendingGuestAbortMetadata;
+static thread_local std::string pendingGuestCrashMessage;
+
+static std::string FormatString(const char *format, va_list arguments) {
+    va_list copiedArguments;
+    va_copy(copiedArguments, arguments);
+    const int length = vsnprintf(nullptr, 0, format, copiedArguments);
+    va_end(copiedArguments);
+    if (length <= 0) {
+        return {};
+    }
+
+    std::vector<char> buffer(static_cast<size_t>(length) + 1);
+    vsnprintf(buffer.data(), buffer.size(), format, arguments);
+    return std::string(buffer.data(), static_cast<size_t>(length));
+}
+
+static void SetPendingGuestCrashMessage(const char *format, ...) {
+    va_list arguments;
+    va_start(arguments, format);
+    pendingGuestCrashMessage = FormatString(format, arguments);
+    va_end(arguments);
+}
+
+static void SetPendingGuestCrashMessageIfEmpty(const char *format, ...) {
+    if (!pendingGuestCrashMessage.empty()) {
+        return;
+    }
+    va_list arguments;
+    va_start(arguments, format);
+    pendingGuestCrashMessage = FormatString(format, arguments);
+    va_end(arguments);
+}
+
+static bool read_guest_memory_with_permissions(
+    u64 address, void *destination, size_t size,
+    int requiredPermissions);
+static bool GuestAddressRangeIsValid32(u64 address, u64 size);
+static std::string CopyGuestCStringForCrash(
+    u64 guestAddress, size_t maximumLength);
 
 enum class NativeLifecycleState : uint8_t {
     Uninitialized,
@@ -457,6 +534,7 @@ static int FindGuestMapping(u32 loadAddress) {
 }
 
 static void RemoveGuestMapping(u32 loadAddress) {
+    std::lock_guard<std::mutex> lock(guestMappingMutex);
     const int index = FindGuestMapping(loadAddress);
     if (index < 0) {
         return;
@@ -471,10 +549,16 @@ static void RemoveGuestMapping(u32 loadAddress) {
 }
 
 struct symbolicated_call {
-    u32 address;
-    u32 symbolOffset;
-    const char *symbolName;
-    const char *imageName;
+    u32 address = 0;
+    u32 symbolOffset = 0;
+    std::string symbolName;
+    std::string imageName;
+};
+
+struct GuestImageSnapshot {
+    u32 start = 0;
+    u32 end = 0;
+    std::string name;
 };
 
 extern "C"
@@ -1067,6 +1151,8 @@ guest_mach_msg_trap(u32 guest_msg,
                 Mess->Out.RetCode = result;
             } else {
                 printf("LC32: Unhandled flavor %d\n", Mess->In.flavor);
+                SetPendingGuestCrashMessage(
+                    "Unhandled host_info flavor %d", Mess->In.flavor);
                 CurrentUserCallbacks()->ExceptionRaised(
                     0xDEADDEAD, Dynarmic::A32::Exception::Yield);
             }
@@ -1122,6 +1208,8 @@ guest_mach_msg_trap(u32 guest_msg,
             const dyld_process_info_notify_header *Mess = (dyld_process_info_notify_header *)host_header;
             const dyld_process_info_image_entry* entries = (dyld_process_info_image_entry*)((uintptr_t)Mess + Mess->imagesOffset);
             uintptr_t stringPool = (uintptr_t)Mess + Mess->stringsOffset;
+            std::lock_guard<std::mutex> mappingLock(
+                guestMappingMutex);
             for(unsigned i=0; i < Mess->imageCount; ++i) {
                 u32 imageAddress = entries[i].loadAddress;
                 char *imagePath = (char *)(stringPool + entries[i].pathStringOffset);
@@ -1508,6 +1596,9 @@ guest_mach_msg_trap(u32 guest_msg,
         }
         default:
             printf("LC32: Unhandled msgh_id %d\n",
+                host_header->msgh_id);
+            SetPendingGuestCrashMessage(
+                "Unhandled Mach message id %d",
                 host_header->msgh_id);
             CurrentUserCallbacks()->ExceptionRaised(
                 0xDEADDEAD, Dynarmic::A32::Exception::Yield);
@@ -2671,6 +2762,8 @@ int guest_ioctl(int fildes, u32 request, u32 guest_r2) {
             return -1;
     }
     printf("Unhandled ioctl request: %d (0x%x)\n", request, request);
+    SetPendingGuestCrashMessage(
+        "Unhandled ioctl request %u (0x%x)", request, request);
     CurrentUserCallbacks()->ExceptionRaised(
         0xDEADDEAD, Dynarmic::A32::Exception::Yield);
     return -1;
@@ -2783,6 +2876,8 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
         }
         default:
             printf("Unhandled fcntl command: %d\n", cmd);
+            SetPendingGuestCrashMessage(
+                "Unhandled fcntl command %d", cmd);
             CurrentUserCallbacks()->ExceptionRaised(
                 0xDEADDEAD, Dynarmic::A32::Exception::Yield);
             return syscallRetCarry(SYS_fcntl, fildes, cmd, guest_r2, 0,0,0,0);
@@ -2983,8 +3078,27 @@ kern_return_t guest__kernelrpc_mach_vm_deallocate_trap(u32 target, vm_address_t 
 }
 
 int guest_abort_with_payload(u32 reason_namespace, u64 reason_code, u32 guest_payload, u32 payload_size, u32 guest_reason_string, u64 reason_flags) {
-    DynarmicHostString host_reason_string(guest_reason_string);
-    printf("abort_with_payload called with namespace=0x%x, code=0x%llx, reason=%s\n", reason_namespace, reason_code, host_reason_string.hostPtr);
+    GuestAbortMetadata metadata;
+    metadata.valid = true;
+    metadata.reasonNamespace = reason_namespace;
+    metadata.reasonCode = reason_code;
+    metadata.payloadSize = payload_size;
+    metadata.reasonFlags = reason_flags;
+    metadata.reason = CopyGuestCStringForCrash(
+        guest_reason_string, 16 * 1024);
+    pendingGuestAbortMetadata = std::move(metadata);
+
+    fprintf(stderr,
+        "abort_with_payload called with namespace=0x%x, "
+        "code=0x%llx, payload=0x%08x/0x%x, flags=0x%llx, "
+        "reason=%s\n",
+        reason_namespace,
+        static_cast<unsigned long long>(reason_code),
+        guest_payload, payload_size,
+        static_cast<unsigned long long>(reason_flags),
+        pendingGuestAbortMetadata.reason.empty()
+            ? "(none)"
+            : pendingGuestAbortMetadata.reason.c_str());
     return 0;
 }
 
@@ -2993,103 +3107,306 @@ int guestMappingLen = 0;
 guest_file_mapping guestMappings[1000];
 size_t guestMappingGeneration = 0;
 
-static void load_symbols_for_image(guest_file_mapping *mapping, void(^iterator)(u32 address, const char *name)) {
-    const struct mach_header *header = (const struct mach_header *)mapping->hostAddr;
-    u32 slide = mapping->start;
-    uintptr_t loadCommand = (uintptr_t)header + sizeof(*header);
-    for (uint32_t i = 0; i < header->ncmds; ++i) {
-        const load_command *command = (const load_command *)loadCommand;
-        if (command->cmd == LC_SEGMENT) {
-            const segment_command *segment =
-                (const segment_command *)command;
-            if (strncmp(segment->segname, "__PAGEZERO",
-                    sizeof(segment->segname)) != 0) {
-                slide = mapping->start - segment->vmaddr;
-                break;
-            }
-        }
-        loadCommand += command->cmdsize;
+static std::vector<GuestImageSnapshot> SnapshotGuestImages() {
+    std::lock_guard<std::mutex> lock(guestMappingMutex);
+    std::vector<GuestImageSnapshot> images;
+    const int count = std::max(0, std::min(guestMappingLen, 1000));
+    images.reserve(static_cast<size_t>(count));
+    for (int index = 0; index < count; ++index) {
+        const guest_file_mapping &mapping = guestMappings[index];
+        images.push_back({
+            mapping.start,
+            mapping.end,
+            mapping.name != nullptr
+                ? std::string(mapping.name,
+                    strnlen(mapping.name, PATH_MAX))
+                : "(unknown image)",
+        });
     }
-    
-    u32 crashInfoSize;
-    u64 crash_info = (u32)(u64)getsectdatafromheader(header, SEG_DATA, "__crash_info", &crashInfoSize);
-    if (crash_info && crashInfoSize >= sizeof(crashreporter_annotations_t)) {
-        crash_info += slide;
-        crashreporter_annotations_t host_gCRAnnotations;
-        Dynarmic_mem_1read(crash_info, sizeof(crashreporter_annotations_t), (char *)&host_gCRAnnotations);
-        if (host_gCRAnnotations.message) {
-            char message[0x1000] = {};
-            Dynarmic_mem_1read(host_gCRAnnotations.message, sizeof(message), message);
-            message[sizeof(message) - 1] = '\0';
-            printf("Crash message from %s: %s (cause: 0x%llx)\n",
-                mapping->name, message, host_gCRAnnotations.abort_cause);
-        } else if (host_gCRAnnotations.message2) {
-            printf("gCRAnnotations has message2 but unhandled. Crashing to raise attention\n");
-        }
-    }
-    
-    segment_command *cur_seg_cmd;
-    struct symtab_command* symtab_cmd = NULL;
-    uintptr_t cur = (uintptr_t)header + sizeof(mach_header);
-    for (uint i = 0; i < header->ncmds; i++, cur += cur_seg_cmd->cmdsize) {
-        cur_seg_cmd = (segment_command *)cur;
-        if (cur_seg_cmd->cmd == LC_SYMTAB) {
-            symtab_cmd = (struct symtab_command*)cur_seg_cmd;
-        }
-    }
-    
-    if (!symtab_cmd) {
-        return;
-    }
-    
-    // Find base symbol/string table addresses
-    // FIXME: symbol resolution for dyld shared cache
-#if 1
-    struct nlist *symtab = (struct nlist *)((u64)mapping->start + symtab_cmd->symoff);
-    u32 strtab = (u32)(mapping->start + symtab_cmd->stroff);
-    iterator(mapping->start, "(unknown symbol)");
-    if(!get_memory(strtab)) {
-        return;
-    }
-    
-    for(int i=0; i < symtab_cmd->nsyms; i++) {
-        u32 addr = strtab +
-            CurrentUserCallbacks()->MemoryRead32(
-                static_cast<u32>(
-                    reinterpret_cast<uintptr_t>(
-                        &symtab[i].n_un.n_strx)));
-        if(!get_memory(addr)) continue;
-        u64 symbolAddr =
-            CurrentUserCallbacks()->MemoryRead32(
-                static_cast<u32>(
-                    reinterpret_cast<uintptr_t>(
-                        &symtab[i].n_value))) + slide;
-        DynarmicHostString host_sym(addr);
-        if(*host_sym.hostPtr) {
-            iterator(symbolAddr, (const char *)host_sym.hostPtr);
-        } else {
-            iterator(symbolAddr, (const char *)symbolAddr);
-        }
-    }
-#else
-    struct nlist *symtab = (struct nlist *)((uintptr_t)header + symtab_cmd->symoff);
-    char *strtab = (char *)((uintptr_t)header + symtab_cmd->stroff);
-    for(int i=0; i < symtab_cmd->nsyms; i++) {
-        iterator(symtab[i].n_value + slide, (const char *)(strtab + symtab[i].n_un.n_strx));
-    }
-#endif
+    return images;
 }
 
-void symbolicate_call_stack(symbolicated_call *callStack, int callStackLen) {
-    for (int n = 0; n < guestMappingLen; n++) {
-        load_symbols_for_image(&guestMappings[n], ^(u32 address, const char *name){
-            //printf("[0x%08x-0x%08x] %s`%s\n", address, guestMappings[n].name, name);
-            for (int i = 0; i < callStackLen; i++) {
-                if (callStack[i].address >= address && (!callStack[i].symbolName || callStack[i].address - address < callStack[i].symbolOffset)) {
-                    //printf("0x%08x [0x%08x-0x%08x]\n", callStack[i].address, start, end);
-                    callStack[i].imageName = guestMappings[n].name;
-                    callStack[i].symbolName = name;
-                    callStack[i].symbolOffset = callStack[i].address - address;
+static bool GuestImageLoadCommandsAreSane(
+        const mach_header *header) {
+    return header != nullptr && header->magic == MH_MAGIC &&
+        header->ncmds <= 4096 && header->sizeofcmds <= 1024 * 1024;
+}
+
+struct GuestMachOImage {
+    mach_header header{};
+    std::vector<uint8_t> loadCommands;
+};
+
+static bool ReadGuestMachOImage(
+        const GuestImageSnapshot &mapping,
+        GuestMachOImage &image) {
+    if (!read_guest_memory_with_permissions(
+            mapping.start, &image.header, sizeof(image.header),
+            PROT_READ) ||
+            !GuestImageLoadCommandsAreSane(&image.header)) {
+        return false;
+    }
+
+    image.loadCommands.resize(image.header.sizeofcmds);
+    return image.loadCommands.empty() ||
+        read_guest_memory_with_permissions(
+            static_cast<u64>(mapping.start) + sizeof(image.header),
+            image.loadCommands.data(), image.loadCommands.size(),
+            PROT_READ);
+}
+
+static u32 GuestImageSlide(
+        const GuestImageSnapshot &mapping,
+        const GuestMachOImage &image) {
+    size_t cursor = 0;
+    for (uint32_t index = 0; index < image.header.ncmds; ++index) {
+        if (cursor + sizeof(load_command) > image.loadCommands.size()) {
+            break;
+        }
+        load_command command{};
+        memcpy(&command, image.loadCommands.data() + cursor,
+            sizeof(command));
+        if (command.cmdsize < sizeof(load_command) ||
+                command.cmdsize > image.loadCommands.size() - cursor) {
+            break;
+        }
+        if (command.cmd == LC_SEGMENT &&
+                command.cmdsize >= sizeof(segment_command)) {
+            segment_command segment{};
+            memcpy(&segment, image.loadCommands.data() + cursor,
+                sizeof(segment));
+            if (strncmp(segment.segname, "__PAGEZERO",
+                    sizeof(segment.segname)) != 0) {
+                return mapping.start - segment.vmaddr;
+            }
+        }
+        cursor += command.cmdsize;
+    }
+    return mapping.start;
+}
+
+struct GuestCrashAnnotation {
+    std::string imageName;
+    std::string message;
+    uint64_t abortCause = 0;
+};
+
+static std::vector<GuestCrashAnnotation>
+CollectGuestCrashAnnotations(
+        const std::vector<GuestImageSnapshot> &images) {
+    std::vector<GuestCrashAnnotation> annotations;
+    std::unordered_set<std::string> seenMessages;
+    size_t annotationBytes = 0;
+    for (const GuestImageSnapshot &mapping : images) {
+        if (annotations.size() >= LC32_CRASH_ANNOTATIONS_MAX ||
+                annotationBytes >= LC32_CRASH_ANNOTATION_BYTES_MAX) {
+            break;
+        }
+        GuestMachOImage image;
+        if (!ReadGuestMachOImage(mapping, image)) {
+            continue;
+        }
+        const u32 slide = GuestImageSlide(mapping, image);
+        size_t cursor = 0;
+        u32 crashInfoAddress = 0;
+        uint32_t crashInfoSize = 0;
+        for (uint32_t index = 0; index < image.header.ncmds; ++index) {
+            if (cursor + sizeof(load_command) > image.loadCommands.size()) {
+                break;
+            }
+            load_command command{};
+            memcpy(&command, image.loadCommands.data() + cursor,
+                sizeof(command));
+            if (command.cmdsize < sizeof(load_command) ||
+                    command.cmdsize > image.loadCommands.size() - cursor) {
+                break;
+            }
+            if (command.cmd == LC_SEGMENT &&
+                    command.cmdsize >= sizeof(segment_command)) {
+                segment_command segment{};
+                memcpy(&segment, image.loadCommands.data() + cursor,
+                    sizeof(segment));
+                const size_t sectionsBytes =
+                    command.cmdsize - sizeof(segment_command);
+                if (segment.nsects <=
+                        sectionsBytes / sizeof(section)) {
+                    for (uint32_t sectionIndex = 0;
+                            sectionIndex < segment.nsects; ++sectionIndex) {
+                        section currentSection{};
+                        memcpy(&currentSection,
+                            image.loadCommands.data() + cursor +
+                                sizeof(segment_command) +
+                                static_cast<size_t>(sectionIndex) *
+                                    sizeof(section),
+                            sizeof(currentSection));
+                        if (strncmp(currentSection.sectname,
+                                "__crash_info",
+                                sizeof(currentSection.sectname)) == 0) {
+                            const u64 address = static_cast<u64>(slide) +
+                                currentSection.addr;
+                            if (address <= UINT32_MAX) {
+                                crashInfoAddress = static_cast<u32>(address);
+                                crashInfoSize = currentSection.size;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            if (crashInfoAddress != 0) {
+                break;
+            }
+            cursor += command.cmdsize;
+        }
+
+        if (crashInfoAddress == 0 ||
+                crashInfoSize < sizeof(crashreporter_annotations_t)) {
+            continue;
+        }
+        crashreporter_annotations_t annotation{};
+        if (!read_guest_memory_with_permissions(
+                crashInfoAddress, &annotation, sizeof(annotation),
+                PROT_READ)) {
+            continue;
+        }
+        const uint64_t messageAddresses[] = {
+            annotation.message,
+            annotation.message2,
+        };
+        for (const uint64_t messageAddress : messageAddresses) {
+            const size_t remainingBytes =
+                LC32_CRASH_ANNOTATION_BYTES_MAX - annotationBytes;
+            if (annotations.size() >= LC32_CRASH_ANNOTATIONS_MAX ||
+                    remainingBytes == 0) {
+                break;
+            }
+            std::string message = CopyGuestCStringForCrash(
+                messageAddress,
+                std::min<size_t>(16 * 1024, remainingBytes));
+            if (message.size() > remainingBytes) {
+                message.resize(remainingBytes);
+            }
+            if (message.empty() || !seenMessages.insert(message).second) {
+                continue;
+            }
+            annotationBytes += message.size();
+            annotations.push_back({
+                mapping.name,
+                std::move(message),
+                annotation.abort_cause,
+            });
+        }
+    }
+    return annotations;
+}
+
+static void load_symbols_for_image(
+        const GuestImageSnapshot &mapping,
+        void (^iterator)(u32 address, const char *name)) {
+    GuestMachOImage image;
+    if (!ReadGuestMachOImage(mapping, image)) {
+        return;
+    }
+    const u32 slide = GuestImageSlide(mapping, image);
+    symtab_command symbolTable{};
+    bool foundSymbolTable = false;
+    size_t cursor = 0;
+    for (uint32_t index = 0; index < image.header.ncmds; ++index) {
+        if (cursor + sizeof(load_command) > image.loadCommands.size()) {
+            break;
+        }
+        load_command command{};
+        memcpy(&command, image.loadCommands.data() + cursor,
+            sizeof(command));
+        if (command.cmdsize < sizeof(load_command) ||
+                command.cmdsize > image.loadCommands.size() - cursor) {
+            break;
+        }
+        if (command.cmd == LC_SYMTAB &&
+                command.cmdsize >= sizeof(symtab_command)) {
+            memcpy(&symbolTable, image.loadCommands.data() + cursor,
+                sizeof(symbolTable));
+            foundSymbolTable = true;
+            break;
+        }
+        cursor += command.cmdsize;
+    }
+
+    iterator(mapping.start, "(unknown symbol)");
+    if (!foundSymbolTable ||
+            symbolTable.nsyms > LC32_CRASH_SYMBOLS_MAX) {
+        return;
+    }
+
+    const u64 symbolTableAddress =
+        static_cast<u64>(mapping.start) + symbolTable.symoff;
+    const u64 stringTableAddress =
+        static_cast<u64>(mapping.start) + symbolTable.stroff;
+    if (!GuestAddressRangeIsValid32(symbolTableAddress,
+            static_cast<u64>(symbolTable.nsyms) * sizeof(struct nlist)) ||
+            !GuestAddressRangeIsValid32(
+                stringTableAddress, symbolTable.strsize)) {
+        return;
+    }
+    for (uint32_t index = 0; index < symbolTable.nsyms; ++index) {
+        const u64 entryAddress = symbolTableAddress +
+            static_cast<u64>(index) * sizeof(struct nlist);
+        struct nlist entry{};
+        if (!read_guest_memory_with_permissions(
+                entryAddress, &entry, sizeof(entry), PROT_READ)) {
+            break;
+        }
+        if (entry.n_un.n_strx == 0 ||
+                entry.n_un.n_strx >= symbolTable.strsize ||
+                entry.n_value == 0) {
+            continue;
+        }
+        const u64 resolvedAddress =
+            static_cast<u64>(entry.n_value) + slide;
+        if (resolvedAddress < mapping.start ||
+                resolvedAddress >= mapping.end) {
+            continue;
+        }
+        const size_t maximumNameLength = std::min<size_t>(
+            1024, symbolTable.strsize - entry.n_un.n_strx);
+        std::string name = CopyGuestCStringForCrash(
+            stringTableAddress + entry.n_un.n_strx,
+            maximumNameLength);
+        if (!name.empty()) {
+            iterator(static_cast<u32>(resolvedAddress), name.c_str());
+        }
+    }
+}
+
+static void symbolicate_call_stack(
+        symbolicated_call *callStack, int callStackLen,
+        const std::vector<GuestImageSnapshot> &images) {
+    for (const GuestImageSnapshot &mapping : images) {
+        bool containsFrame = false;
+        for (int index = 0; index < callStackLen; ++index) {
+            symbolicated_call &call = callStack[index];
+            if (call.address >= mapping.start && call.address < mapping.end) {
+                call.imageName = mapping.name;
+                call.symbolOffset = call.address - mapping.start;
+                containsFrame = true;
+            }
+        }
+        if (!containsFrame) {
+            continue;
+        }
+        load_symbols_for_image(mapping, ^(u32 address, const char *name) {
+            for (int index = 0; index < callStackLen; ++index) {
+                symbolicated_call &call = callStack[index];
+                if (call.address < mapping.start ||
+                        call.address >= mapping.end ||
+                        call.address < address) {
+                    continue;
+                }
+                const u32 offset = call.address - address;
+                if (call.symbolName.empty() || offset < call.symbolOffset) {
+                    call.imageName = mapping.name;
+                    call.symbolName = name;
+                    call.symbolOffset = offset;
                 }
             }
         });
@@ -3239,6 +3556,48 @@ static bool read_guest_memory_with_permissions(
         size -= chunk;
     }
     return true;
+}
+
+static std::string CopyGuestCStringForCrash(
+        u64 guestAddress, size_t maximumLength) {
+    if (guestAddress == 0 || maximumLength == 0 ||
+            guestAddress > UINT32_MAX) {
+        return {};
+    }
+
+    std::string result;
+    result.reserve(std::min<size_t>(maximumLength, 256));
+    while (result.size() < maximumLength) {
+        const u64 address = guestAddress + result.size();
+        if (address > UINT32_MAX) {
+            break;
+        }
+        const size_t pageRemaining =
+            DYN_PAGE_SIZE - (address & DYN_PAGE_MASK);
+        const size_t chunkLength = std::min(
+            maximumLength - result.size(), pageRemaining);
+        std::array<char, DYN_PAGE_SIZE> chunk{};
+        if (!read_guest_memory_with_permissions(
+                address, chunk.data(), chunkLength,
+                PROT_READ)) {
+            break;
+        }
+        const void *terminator =
+            memchr(chunk.data(), '\0', chunkLength);
+        const size_t copiedLength = terminator != nullptr
+            ? static_cast<const char *>(terminator) - chunk.data()
+            : chunkLength;
+        result.append(chunk.data(), copiedLength);
+        if (terminator != nullptr) {
+            return result;
+        }
+    }
+    if (result.size() == maximumLength) {
+        result.append(" [truncated]");
+    } else if (!result.empty()) {
+        result.append(" [unreadable]");
+    }
+    return result;
 }
 
 static bool write_guest_memory_with_permissions(
@@ -3392,6 +3751,154 @@ compare_exchange_guest_memory_with_permissions(
     return ExclusiveGuestWriteResult::Committed;
 }
 
+static void AppendCrashReportText(
+        std::string &report, const std::string &text) {
+    constexpr char truncatedMarker[] = "\n[report truncated]\n";
+    constexpr size_t markerLength = sizeof(truncatedMarker) - 1;
+    constexpr size_t payloadLimit =
+        LC32_FULL_CRASH_REPORT_MAX - markerLength;
+    if (text.empty()) {
+        return;
+    }
+    if (report.size() >= payloadLimit) {
+        if (report.size() == payloadLimit) {
+            report.append(truncatedMarker, markerLength);
+        }
+        return;
+    }
+    const size_t available = payloadLimit - report.size();
+    if (text.size() <= available) {
+        report.append(text);
+        return;
+    }
+    report.append(text.data(), available);
+    report.append(truncatedMarker, markerLength);
+}
+
+static void AppendCrashReportFormat(
+        std::string &report, const char *format, ...) {
+    va_list arguments;
+    va_start(arguments, format);
+    const std::string formatted = FormatString(format, arguments);
+    va_end(arguments);
+    AppendCrashReportText(report, formatted);
+}
+
+static const char *GuestSignalName(int signal) {
+    switch (signal) {
+        case SIGABRT: return "SIGABRT";
+        case SIGBUS: return "SIGBUS";
+        case SIGILL: return "SIGILL";
+        case SIGINT: return "SIGINT";
+        case SIGSEGV: return "SIGSEGV";
+        case SIGSYS: return "SIGSYS";
+        case SIGTRAP: return "SIGTRAP";
+        default: return "unknown";
+    }
+}
+
+static std::string GuestImageBasename(const std::string &path) {
+    const size_t separator = path.find_last_of('/');
+    return separator == std::string::npos
+        ? path
+        : path.substr(separator + 1);
+}
+
+static std::string SanitizeCompactCrashText(
+        const std::string &text, size_t maximumLength) {
+    std::string result;
+    result.reserve(std::min(text.size(), maximumLength));
+    bool previousWasSpace = false;
+    bool truncated = false;
+    for (const unsigned char character : text) {
+        const bool whitespace = character == '\n' || character == '\r' ||
+            character == '\t';
+        const unsigned char output = whitespace ? ' ' : character;
+        if (output == ' ' && previousWasSpace) {
+            continue;
+        }
+        if (output < 0x20 || output == 0x7f) {
+            continue;
+        }
+        if (result.size() == maximumLength) {
+            truncated = true;
+            break;
+        }
+        result.push_back(static_cast<char>(output));
+        previousWasSpace = output == ' ';
+    }
+    if (truncated && result.size() >= 3) {
+        result.replace(result.size() - 3, 3, "...");
+    }
+    return result;
+}
+
+static void PublishGuestCrashReport(const std::string &report) {
+    char *persistentReport = static_cast<char *>(
+        malloc(report.size() + 1));
+    if (persistentReport != nullptr) {
+        memcpy(persistentReport, report.c_str(), report.size() + 1);
+        __atomic_store_n(
+            &__crashreporter_info__, persistentReport,
+            __ATOMIC_RELEASE);
+    }
+
+    if (!report.empty()) {
+        fwrite(report.data(), 1, report.size(), stderr);
+        if (report.back() != '\n') {
+            fputc('\n', stderr);
+        }
+    }
+    fflush(stderr);
+}
+
+static bool GuestAbortReasonIsUsable(
+        const GuestAbortMetadata &metadata) {
+    return metadata.valid && metadata.reasonNamespace > 0 &&
+        metadata.reasonNamespace <=
+            LC32_OS_REASON_MAX_VALID_NAMESPACE;
+}
+
+static uint32_t GuestAbortReasonNamespace(
+        const GuestAbortMetadata &metadata) {
+    return GuestAbortReasonIsUsable(metadata)
+        ? metadata.reasonNamespace
+        : LC32_OS_REASON_LIBSYSTEM;
+}
+
+static uint64_t GuestAbortReasonCode(
+        const GuestAbortMetadata &metadata) {
+    return GuestAbortReasonIsUsable(metadata)
+        ? metadata.reasonCode
+        : LC32_GUEST_CRASH_REASON_CODE;
+}
+
+[[noreturn]] static void AbortHostWithGuestCrashReport(
+        const GuestAbortMetadata &metadata,
+        const std::string &fullReport,
+        std::string compactReason) {
+    PublishGuestCrashReport(fullReport);
+    if (compactReason.empty()) {
+        compactReason = "LiveExec32 guest process crashed";
+    }
+    if (compactReason.size() > LC32_OS_REASON_STRING_MAX) {
+        compactReason.resize(LC32_OS_REASON_STRING_MAX);
+    }
+
+    const uint32_t reasonNamespace =
+        GuestAbortReasonNamespace(metadata);
+    const uint64_t reasonCode =
+        GuestAbortReasonCode(metadata);
+
+    /*
+     * Do not propagate NO_CRASH_REPORT or private guest-era flags. Passing
+     * zero asks the host kernel for its normal abort report while retaining
+     * the guest namespace and code above.
+     */
+    abort_with_reason(
+        reasonNamespace, reasonCode, compactReason.c_str(), 0);
+}
+
 class DynarmicCallbacks32 final : public Dynarmic::A32::UserCallbacks {
 private:
     bool dumpingBacktrace = false;
@@ -3455,8 +3962,11 @@ public:
     }
 
 // FIXME: sometimes it will try to access 0x4, 0x8 and 0xc, I disassembled and found nothing, is there something to do with cpsr? For now let it do stuff in an empty page...
-    void HandleBadMemoryAccess() {
+    void HandleBadMemoryAccess(
+            const char *operation, u32 address) {
 #if !IGNORE_BAD_MEM_ACCESS
+        SetPendingGuestCrashMessage(
+            "%s at guest address 0x%08x", operation, address);
         // Diagnostic frame walking is not guest execution.  A failed unwind
         // read must not replace the original debugger stop with SIGSEGV.
         if (!dumpingBacktrace) {
@@ -3480,7 +3990,7 @@ public:
             return value;
         } else {
             fprintf(stderr, "MemoryRead8[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
-            HandleBadMemoryAccess();
+            HandleBadMemoryAccess("MemoryRead8", vaddr);
             return 0;
         }
     }
@@ -3498,8 +4008,10 @@ public:
             fprintf(stderr, "MemoryRead16[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
             // trace = tolerance bad mem access, else crash
             if(trace) {
-                HandleBadMemoryAccess();
+                HandleBadMemoryAccess("MemoryRead16", vaddr);
             } else {
+                SetPendingGuestCrashMessage(
+                    "MemoryRead16 at guest address 0x%08x", vaddr);
                 DumpCrashReport(SIGSEGV);
             }
             return 0;
@@ -3523,8 +4035,10 @@ public:
             fprintf(stderr, "MemoryRead32[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
             // trace = tolerance bad mem access, else crash
             if(trace) {
-                HandleBadMemoryAccess();
+                HandleBadMemoryAccess("MemoryRead32", vaddr);
             } else {
+                SetPendingGuestCrashMessage(
+                    "MemoryRead32 at guest address 0x%08x", vaddr);
                 DumpCrashReport(SIGSEGV);
             }
             return 0;
@@ -3544,7 +4058,7 @@ public:
             return value;
         } else {
             fprintf(stderr, "MemoryRead64[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
-            HandleBadMemoryAccess();
+            HandleBadMemoryAccess("MemoryRead64", vaddr);
             return 0;
         }
     }
@@ -3558,7 +4072,7 @@ public:
 #endif
         } else {
             fprintf(stderr, "MemoryWrite8[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
-            HandleBadMemoryAccess();
+            HandleBadMemoryAccess("MemoryWrite8", vaddr);
         }
     }
     void MemoryWrite16(u32 vaddr, u16 value) override {
@@ -3570,7 +4084,7 @@ public:
 #endif
         } else {
             fprintf(stderr, "MemoryWrite16[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
-            HandleBadMemoryAccess();
+            HandleBadMemoryAccess("MemoryWrite16", vaddr);
         }
     }
     void MemoryWrite32(u32 vaddr, u32 value) override {
@@ -3582,7 +4096,7 @@ public:
 #endif
         } else {
             fprintf(stderr, "MemoryWrite32[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
-            HandleBadMemoryAccess();
+            HandleBadMemoryAccess("MemoryWrite32", vaddr);
         }
     }
     void MemoryWrite64(u32 vaddr, u64 value) override {
@@ -3594,7 +4108,7 @@ public:
 #endif
         } else {
             fprintf(stderr, "MemoryWrite64[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
-            HandleBadMemoryAccess();
+            HandleBadMemoryAccess("MemoryWrite64", vaddr);
         }
     }
 
@@ -3604,7 +4118,7 @@ public:
                 vaddr, value, expected);
         if (result == ExclusiveGuestWriteResult::Fault) {
             fprintf(stderr, "MemoryWriteExclusive8[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
-            HandleBadMemoryAccess();
+            HandleBadMemoryAccess("MemoryWriteExclusive8", vaddr);
         }
         return result ==
             ExclusiveGuestWriteResult::Committed;
@@ -3615,7 +4129,7 @@ public:
                 vaddr, value, expected);
         if (result == ExclusiveGuestWriteResult::Fault) {
             fprintf(stderr, "MemoryWriteExclusive16[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
-            HandleBadMemoryAccess();
+            HandleBadMemoryAccess("MemoryWriteExclusive16", vaddr);
         }
         return result ==
             ExclusiveGuestWriteResult::Committed;
@@ -3626,7 +4140,7 @@ public:
                 vaddr, value, expected);
         if (result == ExclusiveGuestWriteResult::Fault) {
             fprintf(stderr, "MemoryWriteExclusive32[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
-            HandleBadMemoryAccess();
+            HandleBadMemoryAccess("MemoryWriteExclusive32", vaddr);
         }
         return result ==
             ExclusiveGuestWriteResult::Committed;
@@ -3637,7 +4151,7 @@ public:
                 vaddr, value, expected);
         if (result == ExclusiveGuestWriteResult::Fault) {
             fprintf(stderr, "MemoryWriteExclusive64[%s->%s:%d]: vaddr=0x%x\n", __FILE__, __func__, __LINE__, vaddr);
-            HandleBadMemoryAccess();
+            HandleBadMemoryAccess("MemoryWriteExclusive64", vaddr);
         }
         return result ==
             ExclusiveGuestWriteResult::Committed;
@@ -3646,6 +4160,10 @@ public:
     void InterpreterFallback(u32 pc, std::size_t num_instructions) override {
         cpu->HaltExecution();
         std::optional<std::uint32_t> code = MemoryReadCode(pc);
+        SetPendingGuestCrashMessage(
+            "Interpreter fallback at 0x%08x for %zu instruction(s)%s0x%08x",
+            pc, num_instructions, code ? ", instruction=" : ", unreadable instruction ",
+            code.value_or(0));
         if(code) {
             fprintf(stderr, "Unicorn fallback @ 0x%x for %lu instructions (instr = 0x%08X)", pc, num_instructions, *(cpsr->isThumb() ? MemoryReadThumbCode(pc) : MemoryReadCode(pc)));
         }
@@ -3716,15 +4234,23 @@ public:
                 StopForDebugger(SIGTRAP, false);
             } else {
                 printf("Breakpoint!\n");
+                SetPendingGuestCrashMessage(
+                    "Guest breakpoint at 0x%08x", pc);
                 DumpCrashReport(SIGTRAP, false);
             }
             return;
         }
 
         if ((code & 0xFFFF) == 0xDEFE) {
+            SetPendingGuestCrashMessageIfEmpty(
+                "Guest trap at pc=0x%08x, exception=%d, instruction=0x%08x",
+                pc, static_cast<int>(exception), code);
             printf("ExceptionRaised[%s->%s:%d]: pc=0x%x, exception=%d, code=TRAP\n", __FILE__, __func__, __LINE__, pc, exception);
             DumpCrashReport(signal);
         } else {
+            SetPendingGuestCrashMessageIfEmpty(
+                "Guest exception at pc=0x%08x, exception=%d, instruction=0x%08x",
+                pc, static_cast<int>(exception), code);
             printf("ExceptionRaised[%s->%s:%d]: pc=0x%x, exception=%d, code=0x%08X\n", __FILE__, __func__, __LINE__, pc, exception, code);
             DumpCrashReport(signal);
         }
@@ -3732,17 +4258,69 @@ public:
 
     void DumpCrashReport(int signal = SIGABRT, bool pendingSignal = true) {
         if (guestDebuggerEnabled.load(std::memory_order_acquire)) {
+            pendingGuestAbortMetadata = {};
+            pendingGuestCrashMessage.clear();
             StopForDebugger(signal, pendingSignal);
             return;
         }
-        DumpBacktrace(true, signal, pendingSignal);
+
+        const GuestAbortMetadata &metadata =
+            pendingGuestAbortMetadata;
+        const char *fallbackError = !metadata.reason.empty()
+            ? metadata.reason.c_str()
+            : (!pendingGuestCrashMessage.empty()
+                ? pendingGuestCrashMessage.c_str()
+                : "(no guest error text)");
+        const auto registers = cpu->Regs();
+        char fallbackReason[LC32_OS_REASON_STRING_MAX + 1];
+        snprintf(fallbackReason, sizeof(fallbackReason),
+            "LiveExec32 guest %s (%d); crash report construction failed\n"
+            "Error: %.*s\n"
+            "Registers: r0=%08x r1=%08x r2=%08x r3=%08x "
+            "r4=%08x r5=%08x r6=%08x r7=%08x "
+            "r8=%08x r9=%08x r10=%08x r11=%08x r12=%08x "
+            "sp=%08x lr=%08x pc=%08x cpsr=%08x",
+            GuestSignalName(signal), signal,
+            static_cast<int>(LC32_GUEST_ERROR_IN_COMPACT_REASON_MAX),
+            fallbackError,
+            registers[0], registers[1], registers[2], registers[3],
+            registers[4], registers[5], registers[6], registers[7],
+            registers[8], registers[9], registers[10], registers[11],
+            registers[12], registers[13], registers[14], registers[15],
+            cpu->Cpsr());
+        const uint32_t fallbackNamespace =
+            GuestAbortReasonNamespace(metadata);
+        const uint64_t fallbackCode =
+            GuestAbortReasonCode(metadata);
+
+        try {
+            DumpBacktrace(true, signal, pendingSignal);
+        } catch (const std::exception &exception) {
+            dumpingBacktrace = false;
+            HaltAllGuestJits(LC32HaltReasonTrap);
+            fprintf(stderr,
+                "LiveExec32 failed to construct guest crash report: %s\n%s\n",
+                exception.what(), fallbackReason);
+            fflush(stderr);
+            abort_with_reason(fallbackNamespace, fallbackCode,
+                fallbackReason, 0);
+        } catch (...) {
+            dumpingBacktrace = false;
+            HaltAllGuestJits(LC32HaltReasonTrap);
+            fprintf(stderr,
+                "LiveExec32 failed to construct guest crash report\n%s\n",
+                fallbackReason);
+            fflush(stderr);
+            abort_with_reason(fallbackNamespace, fallbackCode,
+                fallbackReason, 0);
+        }
     }
     
     void DumpBacktrace(bool crash,
                        int signal = SIGABRT,
                        bool pendingSignal = true) {
         if (dumpingBacktrace) {
-            printf("Caught error while dumping call stack\n");
+            fprintf(stderr, "Caught error while dumping call stack\n");
             if (crash) {
                 HaltAllGuestJits(LC32HaltReasonTrap);
             }
@@ -3750,54 +4328,296 @@ public:
         }
         if (crash) {
             CommitGuestStopSignal(signal, pendingSignal);
+            HaltAllGuestJits(LC32HaltReasonTrap);
+            if (guestCrashTerminationStarted.exchange(
+                    true, std::memory_order_acq_rel)) {
+                return;
+            }
         }
         dumpingBacktrace = true;
 
-        printf("# %s\n", crash ? "CRASHED" : "Branch");
-        printf("Registers: \n");
-        printf(" r0 0x%08x  r1 0x%08x  r2 0x%08x  r3 0x%08x\n", cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3]);
-        printf(" r4 0x%08x  r5 0x%08x  r6 0x%08x  r7 0x%08x\n", cpu->Regs()[4], cpu->Regs()[5], cpu->Regs()[6], cpu->Regs()[7]);
-        printf(" r8 0x%08x  r9 0x%08x r10 0x%08x r11 0x%08x\n", cpu->Regs()[8], cpu->Regs()[9], cpu->Regs()[10], cpu->Regs()[11]);
-        printf("r12 0x%08x  sp 0x%08x  lr 0x%08x  pc 0x%08x\n", cpu->Regs()[12], cpu->Regs()[13], cpu->Regs()[14], cpu->Regs()[15]);
-        printf("CPSR: 0x%08x thumb(%d) N(%d) Z(%d) C(%d) V(%d)\n", cpu->Cpsr(), threadHandle.cpsr->isThumb(), threadHandle.cpsr->isNegative(), threadHandle.cpsr->isZero(), threadHandle.cpsr->hasCarry(), threadHandle.cpsr->isOverflow());
-
-        u32 pc = cpu->Regs()[15];
-        u32 lr = cpu->Regs()[14];
-        u32 fp = cpu->Regs()[7];
-
-        struct symbolicated_call callStack[0x100] = {{0}};
-        int callStackLen = 0;
-        callStack[callStackLen++].address = pc - 2;
-        callStack[callStackLen++].address = lr - 2;
-        for (; callStackLen < 0x100; callStackLen++) {
-            pc = MemoryRead32(fp + 4, false) & ~1;
-            callStack[callStackLen].address = pc - 2;
-            fp = MemoryRead32(fp, false);
-            if(!fp) break;
+        GuestAbortMetadata abortMetadata;
+        std::string crashMessage;
+        if (crash) {
+            abortMetadata = std::move(pendingGuestAbortMetadata);
+            pendingGuestAbortMetadata = {};
+            crashMessage = std::move(pendingGuestCrashMessage);
+            pendingGuestCrashMessage.clear();
         }
-        symbolicate_call_stack(callStack, callStackLen);
 
-        printf("Call stack: \n");
-        for (int i = 0; i < 0x100; i++) {
-            if (!callStack[i].address) break;
-            printf("%3d: 0x%08x", i, callStack[i].address);
-            const char *symbolName = callStack[i].symbolName;
-            if (symbolName) {
-                printf(" %s`%s + 0x%x\n", callStack[i].imageName, &symbolName[symbolName[0] == '_'], callStack[i].symbolOffset);
-            } else {
-                printf("\n");
+        const auto registers = cpu->Regs();
+        const u32 cpsrValue = cpu->Cpsr();
+        const std::vector<GuestImageSnapshot> images =
+            SnapshotGuestImages();
+        const std::vector<GuestCrashAnnotation> annotations =
+            CollectGuestCrashAnnotations(images);
+
+        std::array<symbolicated_call, 0x100> callStack{};
+        int callStackLength = 0;
+        const auto appendAddress = [&](u32 address) {
+            if (address == 0 || callStackLength >=
+                    static_cast<int>(callStack.size())) {
+                return;
+            }
+            callStack[callStackLength++].address = address & ~1u;
+        };
+        const auto appendReturnAddress = [&](u32 returnAddress) {
+            if (returnAddress == 0) {
+                return;
+            }
+            const u32 instructionSize =
+                (returnAddress & 1u) != 0 ? 2u : 4u;
+            const u32 normalizedAddress = returnAddress & ~1u;
+            appendAddress(normalizedAddress >= instructionSize
+                ? normalizedAddress - instructionSize
+                : normalizedAddress);
+        };
+        // The register dump should agree with frame zero: PC is the current
+        // architectural location, while LR and frame-chain entries are
+        // return addresses and need to be moved back to their ARM/Thumb call.
+        appendAddress(registers[Reg::PC]);
+        appendReturnAddress(registers[Reg::LR]);
+
+        u32 framePointer = registers[7];
+        std::unordered_set<u32> visitedFramePointers;
+        std::string unwindMessage;
+        while (framePointer != 0 &&
+                callStackLength < static_cast<int>(callStack.size())) {
+            if ((framePointer & 3) != 0 ||
+                    framePointer > UINT32_MAX - 8) {
+                AppendCrashReportFormat(unwindMessage,
+                    "unwind stopped at invalid frame pointer 0x%08x",
+                    framePointer);
+                break;
+            }
+            if (!visitedFramePointers.insert(framePointer).second) {
+                AppendCrashReportFormat(unwindMessage,
+                    "unwind stopped at cyclic frame pointer 0x%08x",
+                    framePointer);
+                break;
+            }
+            u32 nextFramePointer = 0;
+            u32 returnAddress = 0;
+            if (!read_guest_memory_with_permissions(
+                    framePointer, &nextFramePointer,
+                    sizeof(nextFramePointer), PROT_READ) ||
+                    !read_guest_memory_with_permissions(
+                    framePointer + 4, &returnAddress,
+                    sizeof(returnAddress), PROT_READ)) {
+                AppendCrashReportFormat(unwindMessage,
+                    "unwind stopped at unreadable frame pointer 0x%08x",
+                    framePointer);
+                break;
+            }
+            appendReturnAddress(returnAddress);
+            framePointer = nextFramePointer;
+        }
+        if (framePointer != 0 &&
+                callStackLength == static_cast<int>(callStack.size()) &&
+                unwindMessage.empty()) {
+            unwindMessage = "unwind stopped at the 256-frame limit";
+        }
+        symbolicate_call_stack(
+            callStack.data(), callStackLength, images);
+
+        std::string report;
+        AppendCrashReportFormat(report,
+            "LiveExec32 guest %s report\n"
+            "Signal: %s (%d)\n",
+            crash ? "crash" : "branch",
+            GuestSignalName(signal), signal);
+        if (abortMetadata.valid) {
+            AppendCrashReportFormat(report,
+                "Guest abort: namespace=%u, code=0x%llx, "
+                "payload_size=0x%x, flags=0x%llx\n",
+                abortMetadata.reasonNamespace,
+                static_cast<unsigned long long>(
+                    abortMetadata.reasonCode),
+                abortMetadata.payloadSize,
+                static_cast<unsigned long long>(
+                    abortMetadata.reasonFlags));
+            if (!abortMetadata.reason.empty()) {
+                AppendCrashReportFormat(report,
+                    "Guest error: %s\n",
+                    abortMetadata.reason.c_str());
             }
         }
-
-        printf("Binary images: \n");
-        for (int i = 0; i < guestMappingLen; i++) {
-            printf("%3d: 0x%08x-0x%08x %s\n", i, guestMappings[i].start, guestMappings[i].end, guestMappings[i].name);
+        if (!crashMessage.empty()) {
+            AppendCrashReportFormat(report,
+                "Emulator error: %s\n", crashMessage.c_str());
         }
+        for (const GuestCrashAnnotation &annotation : annotations) {
+            if (annotation.message == abortMetadata.reason) {
+                continue;
+            }
+            AppendCrashReportFormat(report,
+                "Crash message from %s: %s (cause: 0x%llx)\n",
+                annotation.imageName.c_str(),
+                annotation.message.c_str(),
+                static_cast<unsigned long long>(annotation.abortCause));
+        }
+
+        AppendCrashReportFormat(report,
+            "Registers:\n"
+            " r0 0x%08x  r1 0x%08x  r2 0x%08x  r3 0x%08x\n"
+            " r4 0x%08x  r5 0x%08x  r6 0x%08x  r7 0x%08x\n"
+            " r8 0x%08x  r9 0x%08x r10 0x%08x r11 0x%08x\n"
+            "r12 0x%08x  sp 0x%08x  lr 0x%08x  pc 0x%08x\n"
+            "CPSR: 0x%08x thumb(%d) N(%d) Z(%d) C(%d) V(%d)\n",
+            registers[0], registers[1], registers[2], registers[3],
+            registers[4], registers[5], registers[6], registers[7],
+            registers[8], registers[9], registers[10], registers[11],
+            registers[12], registers[13], registers[14], registers[15],
+            cpsrValue, threadHandle.cpsr->isThumb(),
+            threadHandle.cpsr->isNegative(), threadHandle.cpsr->isZero(),
+            threadHandle.cpsr->hasCarry(), threadHandle.cpsr->isOverflow());
+
+        AppendCrashReportText(report, "Call stack:\n");
+        for (int index = 0; index < callStackLength; ++index) {
+            const symbolicated_call &call = callStack[index];
+            AppendCrashReportFormat(report,
+                "%3d: 0x%08x", index, call.address);
+            if (!call.imageName.empty()) {
+                const char *symbolName = call.symbolName.c_str();
+                if (symbolName[0] == '_') {
+                    ++symbolName;
+                }
+                AppendCrashReportFormat(report,
+                    " %s`%s + 0x%x",
+                    call.imageName.c_str(),
+                    call.symbolName.empty()
+                        ? "(unknown symbol)"
+                        : symbolName,
+                    call.symbolOffset);
+            }
+            AppendCrashReportText(report, "\n");
+        }
+        if (!unwindMessage.empty()) {
+            AppendCrashReportFormat(report,
+                "  [%s]\n", unwindMessage.c_str());
+        }
+
+        AppendCrashReportText(report, "Binary images:\n");
+        for (size_t index = 0; index < images.size(); ++index) {
+            AppendCrashReportFormat(report,
+                "%3zu: 0x%08x-0x%08x %s\n",
+                index, images[index].start, images[index].end,
+                images[index].name.c_str());
+        }
+
+        if (!crash) {
+            fwrite(report.data(), 1, report.size(), stderr);
+            fflush(stderr);
+            dumpingBacktrace = false;
+            return;
+        }
+
+        std::string compactError;
+        if (!abortMetadata.reason.empty()) {
+            compactError = abortMetadata.reason;
+        } else if (!annotations.empty()) {
+            compactError = annotations.front().message;
+            if (!crashMessage.empty() &&
+                    crashMessage != compactError) {
+                compactError += " | Emulator: ";
+                compactError += crashMessage;
+            }
+        } else if (!crashMessage.empty()) {
+            compactError = crashMessage;
+        }
+
+        std::string compactReason;
+        AppendCrashReportFormat(compactReason,
+            "LiveExec32 guest %s (%d)",
+            GuestSignalName(signal), signal);
+        if (abortMetadata.valid) {
+            AppendCrashReportFormat(compactReason,
+                "; abort ns=%u code=0x%llx",
+                abortMetadata.reasonNamespace,
+                static_cast<unsigned long long>(
+                    abortMetadata.reasonCode));
+        }
+        compactReason += '\n';
+        if (!compactError.empty()) {
+            compactReason += "Error: ";
+            compactReason += SanitizeCompactCrashText(
+                compactError,
+                LC32_GUEST_ERROR_IN_COMPACT_REASON_MAX);
+            compactReason += '\n';
+        }
+        AppendCrashReportFormat(compactReason,
+            "Registers: r0=%08x r1=%08x r2=%08x r3=%08x "
+            "r4=%08x r5=%08x r6=%08x r7=%08x\n"
+            "r8=%08x r9=%08x r10=%08x r11=%08x r12=%08x "
+            "sp=%08x lr=%08x pc=%08x cpsr=%08x\n",
+            registers[0], registers[1], registers[2], registers[3],
+            registers[4], registers[5], registers[6], registers[7],
+            registers[8], registers[9], registers[10], registers[11],
+            registers[12], registers[13], registers[14], registers[15],
+            cpsrValue);
+
+        std::string compactFrames = "Call stack:";
+        for (int index = 0; index < callStackLength; ++index) {
+            std::string entry;
+            AppendCrashReportFormat(entry, " %d=%08x", index,
+                callStack[index].address);
+            if (!callStack[index].imageName.empty()) {
+                entry += '@';
+                entry += SanitizeCompactCrashText(
+                    GuestImageBasename(callStack[index].imageName), 40);
+            }
+            if (compactFrames.size() + entry.size() > 180) {
+                compactFrames += " ...";
+                break;
+            }
+            compactFrames += entry;
+        }
+        compactReason += compactFrames;
+        compactReason += '\n';
+
+        std::string compactImages = "Binary images:";
+        std::unordered_set<std::string> emittedImageNames;
+        const auto appendCompactImage = [&](
+                const GuestImageSnapshot &image) {
+            if (emittedImageNames.count(image.name) != 0) {
+                return true;
+            }
+            std::string entry;
+            const std::string imageName = SanitizeCompactCrashText(
+                GuestImageBasename(image.name), 48);
+            AppendCrashReportFormat(entry,
+                " %08x-%08x=%s", image.start, image.end,
+                imageName.c_str());
+            if (compactImages.size() + entry.size() > 130) {
+                return false;
+            }
+            emittedImageNames.insert(image.name);
+            compactImages += entry;
+            return true;
+        };
+        bool imageSpaceAvailable = true;
+        if (!images.empty()) {
+            imageSpaceAvailable = appendCompactImage(images.front());
+        }
+        for (int frameIndex = 0;
+                frameIndex < callStackLength && imageSpaceAvailable;
+                ++frameIndex) {
+            const u32 address = callStack[frameIndex].address;
+            for (const GuestImageSnapshot &image : images) {
+                if (address >= image.start && address < image.end) {
+                    imageSpaceAvailable = appendCompactImage(image);
+                    break;
+                }
+            }
+        }
+        if (!imageSpaceAvailable) {
+            compactImages += " ...";
+        }
+        compactReason += compactImages;
 
         dumpingBacktrace = false;
-        if (crash) {
-            HaltAllGuestJits(LC32HaltReasonTrap);
-        }
+        AbortHostWithGuestCrashReport(
+            abortMetadata, report, std::move(compactReason));
     }
 
     void CallSVC(u32 swi) override {
@@ -3813,7 +4633,10 @@ public:
             backend.emu_stop();
 */
             printf("svc number: %d\n", number);
+            SetPendingGuestCrashMessage(
+                "Unhandled post-callback SVC number %d", number);
             DumpCrashReport();
+            return;
         }
         if (swi == 0 && cpu->Regs()[5] == PRE_CALLBACK_SYSCALL_NUMBER && cpu->Regs()[7] == 0) { // preCallback
             int number = cpu->Regs()[4];
@@ -3826,19 +4649,32 @@ public:
             backend.emu_stop();
 */
             printf("Unhandled svc number: %d\n", number);
+            SetPendingGuestCrashMessage(
+                "Unhandled pre-callback SVC number %d", number);
             DumpCrashReport();
+            return;
         }
         if (swi != DARWIN_SWI_SYSCALL) {
             if (swi == (cpsr->isThumb() ? 0xff : 0xffffff)) {
                 printf("LC32: throw: PopContextException\n");
+                SetPendingGuestCrashMessage(
+                    "Unhandled PopContextException SVC 0x%x", swi);
                 DumpCrashReport();
+                return;
             }
             if (swi == (cpsr->isThumb() ? 0xff : 0xffffff) - 1) {
                 printf("LC32: throw: ThreadContextSwitchException\n");
+                SetPendingGuestCrashMessage(
+                    "Unhandled ThreadContextSwitchException SVC 0x%x", swi);
                 DumpCrashReport();
+                return;
             }
             printf("Unhandled svc number: %d\n", swi);
+            SetPendingGuestCrashMessage(
+                "Unhandled non-Darwin SVC number %u (syscall r12=%d)",
+                swi, NR);
             DumpCrashReport();
+            return;
 /*
             Svc svc = svcMemory.getSvc(swi);
             if (svc != null) {
@@ -4388,7 +5224,11 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                         return_with_carry_direct(EINVAL, true);
                 } else {
                     cpu->Regs()[0] = 0;
+                    SetPendingGuestCrashMessage(
+                        "Guest pthread_kill requested signal %u",
+                        cpu->Regs()[1]);
                     DumpCrashReport(static_cast<int>(cpu->Regs()[1]));
+                    return;
                 }
                 break;
             case 329:
@@ -4521,7 +5361,7 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             case SYS_abort_with_payload:
                 cpu->Regs()[0] = guest_abort_with_payload(cpu->Regs()[0], cpu->Regs()[1] | ((u64)cpu->Regs()[2] << 32), cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5], cpu->Regs()[6] | ((u64)cpu->Regs()[8] << 32));
                 DumpCrashReport(SIGABRT);
-                break;
+                return;
             case (int)0x80000000:
                 NR = cpu->Regs()[3];
                 if(handleMachineDependentSyscall(NR)) {
@@ -4653,8 +5493,10 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             }
             default:
                 printf("Unhandled svc number: %d\n", NR);
+                SetPendingGuestCrashMessage(
+                    "Unhandled Darwin syscall number %d", NR);
                 DumpCrashReport(SIGSYS);
-                break;
+                return;
         }
 #if TRACE_SVC
         printf("CallSVC returned 0x%08x, carry %d\n", cpu->Regs()[0], cpsr->hasCarry());
