@@ -3,10 +3,10 @@
 
 /*
  * NSObject's guest-side -init is correct for ordinary guest-only classes, but
- * Foundation mutable class clusters need to initialize the native object
- * returned by LC32GetHostObject. Their generated method lists do not contain
- * plain -init, so without these class-specific overrides the native peer
- * remains an alloc placeholder and crashes on its first real operation.
+ * Foundation class clusters need to initialize the native object returned by
+ * LC32GetHostObject. Their generated method lists do not contain plain -init,
+ * so without these class-specific overrides the native peer remains an alloc
+ * placeholder and crashes on its first real operation.
  *
  * Immutable empty clusters are intentionally excluded: several return shared
  * singletons, which require the initializer shim to return an existing
@@ -37,5 +37,6 @@ LC32_IMPLEMENT_PLAIN_INIT(NSMutableSet)
 LC32_IMPLEMENT_PLAIN_INIT(NSMutableOrderedSet)
 LC32_IMPLEMENT_PLAIN_INIT(NSMutableData)
 LC32_IMPLEMENT_PLAIN_INIT(NSMutableString)
+LC32_IMPLEMENT_PLAIN_INIT(NSDate)
 
 #pragma clang diagnostic pop

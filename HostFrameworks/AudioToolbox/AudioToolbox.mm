@@ -4,6 +4,7 @@
 #include "../../bridge.h"
 #include "../../GuestFrameworks/AudioToolbox/LC32AudioToolboxBridge.h"
 
+#include <objc/message.h>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -105,6 +106,146 @@ bool IsRawExtAudioFileProperty(ExtAudioFilePropertyID property) {
         default:
             return false;
     }
+}
+
+bool IsAudioSessionObjectProperty(AudioSessionPropertyID property) {
+    switch(property) {
+        case kAudioSessionProperty_AudioRoute:
+        case kAudioSessionProperty_InputSources:
+        case kAudioSessionProperty_OutputDestinations:
+        case kAudioSessionProperty_InputSource:
+        case kAudioSessionProperty_OutputDestination:
+        case kAudioSessionProperty_AudioRouteDescription:
+            return true;
+        default:
+            return false;
+    }
+}
+
+OSStatus WriteAudioSessionValue(const LC32AudioToolboxCall &call,
+                                const void *value, u32 valueSize) {
+    u32 requestedSize = 0;
+    if(!ReadGuestU32(SlotU32(call, 1), requestedSize) ||
+       !WriteGuestU32(SlotU32(call, 1), valueSize)) {
+        return kAudio_ParamError;
+    }
+    if(requestedSize < valueSize || (valueSize && !SlotU32(call, 2)))
+        return kAudioSessionBadPropertySizeError;
+    if(valueSize && Dynarmic_mem_1write(SlotU32(call, 2), valueSize,
+            const_cast<char *>(reinterpret_cast<const char *>(value))) != 0) {
+        return kAudio_ParamError;
+    }
+    return noErr;
+}
+
+id SharedAVAudioSession() {
+    Class cls = NSClassFromString(@"AVAudioSession");
+    SEL selector = sel_registerName("sharedInstance");
+    if(!cls || ![cls respondsToSelector:selector]) return nil;
+    return reinterpret_cast<id (*)(id, SEL)>(objc_msgSend)(cls, selector);
+}
+
+NSString *LegacyAudioRouteFromAVAudioSession(id session) {
+    SEL currentRouteSelector = sel_registerName("currentRoute");
+    if(!session || ![session respondsToSelector:currentRouteSelector])
+        return nil;
+    id route = reinterpret_cast<id (*)(id, SEL)>(objc_msgSend)(
+        session, currentRouteSelector);
+    SEL outputsSelector = sel_registerName("outputs");
+    if(!route || ![route respondsToSelector:outputsSelector]) return nil;
+    NSArray *outputs = reinterpret_cast<id (*)(id, SEL)>(objc_msgSend)(
+        route, outputsSelector);
+    id output = outputs.firstObject;
+    SEL portTypeSelector = sel_registerName("portType");
+    if(!output || ![output respondsToSelector:portTypeSelector]) return nil;
+    NSString *portType = reinterpret_cast<id (*)(id, SEL)>(objc_msgSend)(
+        output, portTypeSelector);
+    if([portType isEqualToString:@"Headphones"]) return @"Headphone";
+    if([portType isEqualToString:@"HeadsetMic"]) return @"Headset";
+    return portType;
+}
+
+OSStatus DispatchObservedAudioSessionProperty(
+        const LC32AudioToolboxCall &call, bool &handled) {
+    handled = true;
+    id session = SharedAVAudioSession();
+    if(!session) {
+        handled = false;
+        return kAudioSessionNotInitialized;
+    }
+
+    switch(SlotU32(call, 0)) {
+        case kAudioSessionProperty_OtherAudioIsPlaying: {
+            SEL selector = sel_registerName("isOtherAudioPlaying");
+            if(![session respondsToSelector:selector]) break;
+            const u32 value = reinterpret_cast<BOOL (*)(id, SEL)>(
+                objc_msgSend)(session, selector) ? 1 : 0;
+            return WriteAudioSessionValue(call, &value, sizeof(value));
+        }
+        case kAudioSessionProperty_CurrentHardwareOutputVolume: {
+            SEL selector = sel_registerName("outputVolume");
+            if(![session respondsToSelector:selector]) break;
+            const float value = reinterpret_cast<float (*)(id, SEL)>(
+                objc_msgSend)(session, selector);
+            return WriteAudioSessionValue(call, &value, sizeof(value));
+        }
+        case kAudioSessionProperty_AudioRoute: {
+            NSString *route = LegacyAudioRouteFromAVAudioSession(session);
+            if(!route) break;
+            const u32 guestRoute = route.guest_self;
+            return WriteAudioSessionValue(
+                call, &guestRoute, sizeof(guestRoute));
+        }
+        default:
+            handled = false;
+            return kAudioSessionUnsupportedPropertyError;
+    }
+
+    handled = false;
+    return kAudioSessionUnsupportedPropertyError;
+}
+
+OSStatus DispatchAudioSessionGetProperty(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 3) || !SlotU32(call, 1))
+        return kAudio_ParamError;
+
+    bool handled = false;
+    const OSStatus observedStatus =
+        DispatchObservedAudioSessionProperty(call, handled);
+    if(handled) return observedStatus;
+
+    const AudioSessionPropertyID property = SlotU32(call, 0);
+    u32 requestedSize = 0;
+    if(!ReadGuestU32(SlotU32(call, 1), requestedSize) ||
+       requestedSize > kMaximumPropertyBytes)
+        return kAudio_ParamError;
+
+    if(IsAudioSessionObjectProperty(property)) {
+        CFTypeRef object = nullptr;
+        UInt32 hostSize = sizeof(object);
+        const OSStatus status =
+            AudioSessionGetProperty(property, &hostSize, &object);
+        if(status != noErr) return status;
+        const u32 guestObject = object ? [(id)object guest_self] : 0;
+        return WriteAudioSessionValue(
+            call, &guestObject, sizeof(guestObject));
+    }
+
+    std::vector<uint8_t> bytes(requestedSize ? requestedSize : 1);
+    UInt32 returnedSize = requestedSize;
+    const OSStatus status = AudioSessionGetProperty(property,
+        &returnedSize, requestedSize ? bytes.data() : nullptr);
+    if(!WriteGuestU32(SlotU32(call, 1), returnedSize))
+        return kAudio_ParamError;
+    if(status == noErr && returnedSize) {
+        if(returnedSize > requestedSize || !SlotU32(call, 2) ||
+           Dynarmic_mem_1write(SlotU32(call, 2), returnedSize,
+               reinterpret_cast<char *>(bytes.data())) != 0) {
+            return kAudio_ParamError;
+        }
+    }
+    return status;
 }
 
 std::shared_ptr<ExtAudioFileEntry> FindExtAudioFile(u32 token) {
@@ -315,6 +456,20 @@ extern "C" u32 LC32_AudioToolbox_Dispatch(u32 opcode, u32 guestCall, u32) {
             return static_cast<u32>(DispatchExtAudioFileSetProperty(call));
         case LC32AudioToolboxOpExtAudioFileRead:
             return static_cast<u32>(DispatchExtAudioFileRead(call));
+        case LC32AudioToolboxOpExtAudioFileSeek: {
+            if(!RequireSlots(call, 2))
+                return static_cast<u32>(kAudio_ParamError);
+            auto entry = FindExtAudioFile(SlotU32(call, 0));
+            if(!entry) return static_cast<u32>(kAudio_ParamError);
+            std::lock_guard<std::mutex> lock(entry->mutex);
+            if(!entry->file)
+                return static_cast<u32>(kAudio_ParamError);
+            return static_cast<u32>(ExtAudioFileSeek(entry->file,
+                static_cast<SInt64>(call.slots[1])));
+        }
+        case LC32AudioToolboxOpAudioSessionGetProperty:
+            return static_cast<u32>(
+                DispatchAudioSessionGetProperty(call));
     }
     return static_cast<u32>(kAudio_ParamError);
 }

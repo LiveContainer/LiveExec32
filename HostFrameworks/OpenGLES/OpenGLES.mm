@@ -15,7 +15,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "../../bridge.h"
@@ -497,6 +500,224 @@ size_t IndexElementSize(GLenum type) {
     }
 }
 
+enum class ClientArrayKind : uint8_t {
+    VertexAttrib,
+    Vertex,
+    Color,
+    TexCoord,
+};
+
+struct ClientArrayDescriptor {
+    ClientArrayKind kind = ClientArrayKind::VertexAttrib;
+    GLuint index = 0;
+    GLint size = 0;
+    GLenum type = 0;
+    GLboolean normalized = GL_FALSE;
+    GLsizei stride = 0;
+    uint32_t guestPointer = 0;
+    bool valid = false;
+};
+
+struct ClientArrayContextState {
+    std::unordered_map<GLuint, ClientArrayDescriptor> vertexAttribs;
+    std::unordered_set<GLuint> enabledVertexAttribs;
+    ClientArrayDescriptor vertex;
+    ClientArrayDescriptor color;
+    ClientArrayDescriptor texCoord;
+    bool vertexEnabled = false;
+    bool colorEnabled = false;
+    bool texCoordEnabled = false;
+};
+
+std::mutex clientArrayStateMutex;
+std::unordered_map<uintptr_t, ClientArrayContextState> clientArrayStates;
+
+uintptr_t CurrentGLContextKey() {
+    return reinterpret_cast<uintptr_t>(
+        (__bridge void *)EAGLContext.currentContext);
+}
+
+void SetVertexAttribArrayEnabled(GLuint index, bool enabled) {
+    std::lock_guard<std::mutex> lock(clientArrayStateMutex);
+    auto &state = clientArrayStates[CurrentGLContextKey()];
+    if(enabled) state.enabledVertexAttribs.insert(index);
+    else state.enabledVertexAttribs.erase(index);
+}
+
+void SetClientStateEnabled(GLenum array, bool enabled) {
+    std::lock_guard<std::mutex> lock(clientArrayStateMutex);
+    auto &state = clientArrayStates[CurrentGLContextKey()];
+    switch(array) {
+        case GL_VERTEX_ARRAY: state.vertexEnabled = enabled; break;
+        case GL_COLOR_ARRAY: state.colorEnabled = enabled; break;
+        case GL_TEXTURE_COORD_ARRAY: state.texCoordEnabled = enabled; break;
+        default: break;
+    }
+}
+
+void RememberVertexAttribPointer(const ClientArrayDescriptor *descriptor,
+                                 GLuint index) {
+    std::lock_guard<std::mutex> lock(clientArrayStateMutex);
+    auto &attributes =
+        clientArrayStates[CurrentGLContextKey()].vertexAttribs;
+    if(descriptor) attributes[index] = *descriptor;
+    else attributes.erase(index);
+}
+
+void RememberClientPointer(const ClientArrayDescriptor *descriptor,
+                           ClientArrayKind kind) {
+    std::lock_guard<std::mutex> lock(clientArrayStateMutex);
+    auto &state = clientArrayStates[CurrentGLContextKey()];
+    ClientArrayDescriptor *destination = nullptr;
+    switch(kind) {
+        case ClientArrayKind::Vertex: destination = &state.vertex; break;
+        case ClientArrayKind::Color: destination = &state.color; break;
+        case ClientArrayKind::TexCoord: destination = &state.texCoord; break;
+        case ClientArrayKind::VertexAttrib: return;
+    }
+    *destination = descriptor ? *descriptor : ClientArrayDescriptor{};
+}
+
+bool GuestVertexAttribPointer(GLuint index, uint32_t &guestPointer) {
+    std::lock_guard<std::mutex> lock(clientArrayStateMutex);
+    auto context = clientArrayStates.find(CurrentGLContextKey());
+    if(context == clientArrayStates.end()) return false;
+    auto attribute = context->second.vertexAttribs.find(index);
+    if(attribute == context->second.vertexAttribs.end()) return false;
+    guestPointer = attribute->second.guestPointer;
+    return true;
+}
+
+std::vector<ClientArrayDescriptor> EnabledClientArrays() {
+    std::vector<ClientArrayDescriptor> descriptors;
+    std::lock_guard<std::mutex> lock(clientArrayStateMutex);
+    auto context = clientArrayStates.find(CurrentGLContextKey());
+    if(context == clientArrayStates.end()) return descriptors;
+
+    const auto &state = context->second;
+    descriptors.reserve(state.enabledVertexAttribs.size() + 3);
+    for(GLuint index : state.enabledVertexAttribs) {
+        auto descriptor = state.vertexAttribs.find(index);
+        if(descriptor != state.vertexAttribs.end() &&
+           descriptor->second.valid) {
+            descriptors.push_back(descriptor->second);
+        }
+    }
+    if(state.vertexEnabled && state.vertex.valid)
+        descriptors.push_back(state.vertex);
+    if(state.colorEnabled && state.color.valid)
+        descriptors.push_back(state.color);
+    if(state.texCoordEnabled && state.texCoord.valid)
+        descriptors.push_back(state.texCoord);
+    return descriptors;
+}
+
+size_t ClientArrayScalarSize(GLenum type) {
+    switch(type) {
+        case GL_BYTE:
+        case GL_UNSIGNED_BYTE: return 1;
+        case GL_SHORT:
+        case GL_UNSIGNED_SHORT: return 2;
+        case GL_FIXED:
+        case GL_FLOAT: return 4;
+#ifdef GL_HALF_FLOAT_OES
+        case GL_HALF_FLOAT_OES: return 2;
+#endif
+        default: return 0;
+    }
+}
+
+bool ClientArrayByteCount(const ClientArrayDescriptor &descriptor,
+                          size_t maximumIndex, size_t &byteCount) {
+    const size_t scalarSize = ClientArrayScalarSize(descriptor.type);
+    if(!scalarSize || descriptor.size <= 0 || descriptor.size > 4 ||
+       descriptor.stride < 0) {
+        SetBridgeError(!scalarSize ? GL_INVALID_ENUM : GL_INVALID_VALUE);
+        return false;
+    }
+
+    size_t elementSize;
+    if(!CheckedByteCount(static_cast<size_t>(descriptor.size), scalarSize,
+                         elementSize)) {
+        SetBridgeError(GL_INVALID_VALUE);
+        return false;
+    }
+    const size_t stride = descriptor.stride
+        ? static_cast<size_t>(descriptor.stride) : elementSize;
+    if(maximumIndex > (kMaximumTransfer - elementSize) / stride) {
+        SetBridgeError(GL_INVALID_VALUE);
+        return false;
+    }
+    byteCount = maximumIndex * stride + elementSize;
+    return true;
+}
+
+struct StagedClientArray {
+    ClientArrayDescriptor descriptor;
+    std::vector<uint8_t> bytes;
+};
+
+bool StageClientArrays(size_t maximumIndex,
+                       std::vector<StagedClientArray> &staged) {
+    std::vector<ClientArrayDescriptor> descriptors = EnabledClientArrays();
+    staged.clear();
+    staged.reserve(descriptors.size());
+    for(const ClientArrayDescriptor &descriptor : descriptors) {
+        size_t byteCount;
+        if(!ClientArrayByteCount(descriptor, maximumIndex, byteCount))
+            return false;
+        staged.push_back({descriptor, {}});
+        if(!ReadGuestBytes(descriptor.guestPointer, byteCount,
+                           staged.back().bytes)) {
+            return false;
+        }
+    }
+
+    if(staged.empty()) return true;
+
+    GLint savedBinding = 0;
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &savedBinding);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    for(const StagedClientArray &array : staged) {
+        const ClientArrayDescriptor &descriptor = array.descriptor;
+        const GLvoid *pointer = array.bytes.data();
+        switch(descriptor.kind) {
+            case ClientArrayKind::VertexAttrib:
+                glVertexAttribPointer(descriptor.index, descriptor.size,
+                    descriptor.type, descriptor.normalized,
+                    descriptor.stride, pointer);
+                break;
+            case ClientArrayKind::Vertex:
+                glVertexPointer(descriptor.size, descriptor.type,
+                    descriptor.stride, pointer);
+                break;
+            case ClientArrayKind::Color:
+                glColorPointer(descriptor.size, descriptor.type,
+                    descriptor.stride, pointer);
+                break;
+            case ClientArrayKind::TexCoord:
+                glTexCoordPointer(descriptor.size, descriptor.type,
+                    descriptor.stride, pointer);
+                break;
+        }
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, static_cast<GLuint>(savedBinding));
+    return true;
+}
+
+bool MaximumIndex(GLenum type, const std::vector<uint8_t> &indices,
+                  size_t &maximumIndex) {
+    maximumIndex = 0;
+    const size_t elementSize = IndexElementSize(type);
+    if(!elementSize || indices.size() % elementSize) return false;
+    for(size_t offset = 0; offset < indices.size(); offset += elementSize) {
+        uint32_t index = 0;
+        memcpy(&index, indices.data() + offset, elementSize);
+        maximumIndex = std::max(maximumIndex, static_cast<size_t>(index));
+    }
+    return true;
+}
+
 bool ReadCount(int32_t signedCount, size_t multiplier, size_t &count) {
     if(signedCount < 0 || multiplier == 0 ||
        static_cast<size_t>(signedCount) >
@@ -881,10 +1102,36 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
         case LC32OpenGLESOpDepthRangef: REQUIRE(2); glDepthRangef(F(0), F(1)); return 0;
         case LC32OpenGLESOpDetachShader: REQUIRE(2); glDetachShader(U(0), U(1)); return 0;
         case LC32OpenGLESOpDisable: REQUIRE(1); glDisable(U(0)); return 0;
-        case LC32OpenGLESOpDisableVertexAttribArray: REQUIRE(1); glDisableVertexAttribArray(U(0)); return 0;
-        case LC32OpenGLESOpDrawArrays: REQUIRE(3); glDrawArrays(U(0), I(1), I(2)); return 0;
+        case LC32OpenGLESOpDisableVertexAttribArray:
+            REQUIRE(1);
+            glDisableVertexAttribArray(U(0));
+            SetVertexAttribArrayEnabled(U(0), false);
+            return 0;
+        case LC32OpenGLESOpDrawArrays: {
+            REQUIRE(3);
+            const int32_t first = I(1);
+            const int32_t count = I(2);
+            if(first < 0 || count < 0) {
+                SetBridgeError(GL_INVALID_VALUE);
+                return 0;
+            }
+            if(count == 0) {
+                glDrawArrays(U(0), first, count);
+                return 0;
+            }
+            const size_t maximumIndex = static_cast<size_t>(first) +
+                static_cast<size_t>(count) - 1;
+            std::vector<StagedClientArray> staged;
+            if(!StageClientArrays(maximumIndex, staged)) return 0;
+            glDrawArrays(U(0), first, count);
+            return 0;
+        }
         case LC32OpenGLESOpEnable: REQUIRE(1); glEnable(U(0)); return 0;
-        case LC32OpenGLESOpEnableVertexAttribArray: REQUIRE(1); glEnableVertexAttribArray(U(0)); return 0;
+        case LC32OpenGLESOpEnableVertexAttribArray:
+            REQUIRE(1);
+            glEnableVertexAttribArray(U(0));
+            SetVertexAttribArrayEnabled(U(0), true);
+            return 0;
         case LC32OpenGLESOpFinish: REQUIRE(0); glFinish(); return 0;
         case LC32OpenGLESOpFlush: REQUIRE(0); glFlush(); return 0;
         case LC32OpenGLESOpFramebufferRenderbuffer: REQUIRE(4); glFramebufferRenderbuffer(U(0), U(1), U(2), U(3)); return 0;
@@ -940,8 +1187,16 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
         case LC32OpenGLESOpViewport: REQUIRE(4); glViewport(I(0), I(1), I(2), I(3)); return 0;
         case LC32OpenGLESOpAlphaFunc: REQUIRE(2); glAlphaFunc(U(0), F(1)); return 0;
         case LC32OpenGLESOpColor4f: REQUIRE(4); glColor4f(F(0), F(1), F(2), F(3)); return 0;
-        case LC32OpenGLESOpDisableClientState: REQUIRE(1); glDisableClientState(U(0)); return 0;
-        case LC32OpenGLESOpEnableClientState: REQUIRE(1); glEnableClientState(U(0)); return 0;
+        case LC32OpenGLESOpDisableClientState:
+            REQUIRE(1);
+            glDisableClientState(U(0));
+            SetClientStateEnabled(U(0), false);
+            return 0;
+        case LC32OpenGLESOpEnableClientState:
+            REQUIRE(1);
+            glEnableClientState(U(0));
+            SetClientStateEnabled(U(0), true);
+            return 0;
         case LC32OpenGLESOpFogf: REQUIRE(2); glFogf(U(0), F(1)); return 0;
         case LC32OpenGLESOpFogx: REQUIRE(2); glFogx(U(0), I(1)); return 0;
         case LC32OpenGLESOpLoadIdentity: REQUIRE(0); glLoadIdentity(); return 0;
@@ -1180,6 +1435,13 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
         }
         case LC32OpenGLESOpGetVertexAttribPointerv: {
             REQUIRE(3);
+            if(U(1) == GL_VERTEX_ATTRIB_ARRAY_POINTER) {
+                uint32_t guestPointer;
+                if(GuestVertexAttribPointer(U(0), guestPointer)) {
+                    WriteGuestArray(U(2), &guestPointer, 1);
+                    return 0;
+                }
+            }
             GLvoid *pointer = nullptr;
             glGetVertexAttribPointerv(U(0), U(1), &pointer);
             GLint binding = 0;
@@ -1369,6 +1631,16 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
             GLint binding = 0;
             glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &binding);
             if(binding) {
+                if(!EnabledClientArrays().empty()) {
+                    /*
+                     * An element-buffer offset does not expose its indices to
+                     * the bridge, so there is no safe upper bound for copying
+                     * guest client arrays. Buffer-backed attributes still use
+                     * this path normally.
+                     */
+                    SetBridgeError(GL_INVALID_OPERATION);
+                    return 0;
+                }
                 glDrawElements(U(0), I(1), U(2),
                     reinterpret_cast<const void *>(static_cast<uintptr_t>(U(3))));
                 return 0;
@@ -1381,6 +1653,17 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
             }
             std::vector<uint8_t> indices;
             if(!ReadGuestBytes(U(3), count, indices)) return 0;
+            if(I(1) == 0) {
+                glDrawElements(U(0), I(1), U(2), nullptr);
+                return 0;
+            }
+            size_t maximumIndex;
+            if(!MaximumIndex(U(2), indices, maximumIndex)) {
+                SetBridgeError(GL_INVALID_ENUM);
+                return 0;
+            }
+            std::vector<StagedClientArray> staged;
+            if(!StageClientArrays(maximumIndex, staged)) return 0;
             glDrawElements(U(0), I(1), U(2), indices.data());
             return 0;
         }
@@ -1388,11 +1671,25 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
             REQUIRE(6);
             GLint binding = 0;
             glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &binding);
-            if(!binding && U(5)) {
-                /* The host retains this pointer beyond the call. */
-                SetBridgeError(GL_INVALID_OPERATION);
+            if(!binding) {
+                ClientArrayDescriptor descriptor;
+                descriptor.kind = ClientArrayKind::VertexAttrib;
+                descriptor.index = U(0);
+                descriptor.size = I(1);
+                descriptor.type = U(2);
+                descriptor.normalized = static_cast<GLboolean>(U(3));
+                descriptor.stride = I(4);
+                descriptor.guestPointer = U(5);
+                descriptor.valid = true;
+                RememberVertexAttribPointer(&descriptor, descriptor.index);
+                /* Preserve the host-side metadata without retaining a guest
+                 * address that is meaningless in the host address space. */
+                glVertexAttribPointer(descriptor.index, descriptor.size,
+                    descriptor.type, descriptor.normalized,
+                    descriptor.stride, nullptr);
                 return 0;
             }
+            RememberVertexAttribPointer(nullptr, U(0));
             glVertexAttribPointer(U(0), I(1), U(2), U(3), I(4),
                 reinterpret_cast<const void *>(static_cast<uintptr_t>(U(5))));
             return 0;
@@ -1444,16 +1741,33 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
             REQUIRE(4);
             GLint binding = 0;
             glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &binding);
-            if(!binding && U(3)) {
-                /* ES retains this pointer until a draw call. */
-                SetBridgeError(GL_INVALID_OPERATION);
+            ClientArrayKind kind = opcode == LC32OpenGLESOpColorPointer
+                ? ClientArrayKind::Color
+                : opcode == LC32OpenGLESOpTexCoordPointer
+                    ? ClientArrayKind::TexCoord : ClientArrayKind::Vertex;
+            if(!binding) {
+                ClientArrayDescriptor descriptor;
+                descriptor.kind = kind;
+                descriptor.size = I(0);
+                descriptor.type = U(1);
+                descriptor.stride = I(2);
+                descriptor.guestPointer = U(3);
+                descriptor.valid = true;
+                RememberClientPointer(&descriptor, kind);
+                if(kind == ClientArrayKind::Color)
+                    glColorPointer(I(0), U(1), I(2), nullptr);
+                else if(kind == ClientArrayKind::TexCoord)
+                    glTexCoordPointer(I(0), U(1), I(2), nullptr);
+                else
+                    glVertexPointer(I(0), U(1), I(2), nullptr);
                 return 0;
             }
+            RememberClientPointer(nullptr, kind);
             const GLvoid *pointer = reinterpret_cast<const GLvoid *>(
                 static_cast<uintptr_t>(U(3)));
-            if(opcode == LC32OpenGLESOpColorPointer)
+            if(kind == ClientArrayKind::Color)
                 glColorPointer(I(0), U(1), I(2), pointer);
-            else if(opcode == LC32OpenGLESOpTexCoordPointer)
+            else if(kind == ClientArrayKind::TexCoord)
                 glTexCoordPointer(I(0), U(1), I(2), pointer);
             else
                 glVertexPointer(I(0), U(1), I(2), pointer);

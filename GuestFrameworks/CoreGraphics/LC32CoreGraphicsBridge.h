@@ -25,6 +25,10 @@ typedef enum : uint32_t {
     LC32CoreGraphicsOpImageGetHeight = 8,
     LC32CoreGraphicsOpImageGetWidth = 9,
     LC32CoreGraphicsOpImageRelease = 10,
+    LC32CoreGraphicsOpColorGetColorSpace = 11,
+    LC32CoreGraphicsOpColorGetNumberOfComponents = 12,
+    LC32CoreGraphicsOpColorCopyComponents = 13,
+    LC32CoreGraphicsOpColorSpaceGetModel = 14,
 } LC32CoreGraphicsOpcode;
 
 #endif

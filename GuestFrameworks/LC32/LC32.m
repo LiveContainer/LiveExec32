@@ -47,6 +47,35 @@ BOOL LC32ObjCTraceEnabled(void) {
     return LC32ObjCTraceIsEnabled;
 }
 
+void *LC32CreateHostObjectArray(const id *objects, uint32_t count,
+                                uint32_t countArgumentIndex) {
+    if(!objects) {
+        if(count) abort();
+        return NULL;
+    }
+
+    const size_t headerSize = sizeof(LC32HostObjectArrayDescriptor);
+    if(count > LC32_HOST_OBJECT_ARRAY_MAX_COUNT ||
+       count > (SIZE_MAX - headerSize) / sizeof(uint64_t)) abort();
+
+    LC32HostObjectArrayDescriptor *descriptor =
+        malloc(headerSize + (size_t)count * sizeof(uint64_t));
+    if(!descriptor) abort();
+
+    descriptor->count = count;
+    descriptor->countArgumentIndex = countArgumentIndex;
+    descriptor->magic = LC32_HOST_OBJECT_ARRAY_MAGIC;
+    descriptor->reserved = 0;
+    for(uint32_t index = 0; index < count; index++) {
+        descriptor->objects[index] = [objects[index] host_self];
+    }
+    return descriptor;
+}
+
+void LC32DestroyHostObjectArray(void *storage) {
+    free(storage);
+}
+
 // Framework: LC32
 
 // Converts host class to guest class

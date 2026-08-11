@@ -22,6 +22,7 @@ endif
 export CLANG_MODULE_CACHE_PATH := $(CURDIR)/.theos/module-cache
 
 ADDITIONAL_CFLAGS = \
+  -I$(abspath ../include) \
   -I$(MANUAL_FRAMEWORKS_ROOT) \
   -F$(ISYSROOT)/System/Library/Frameworks/AVFoundation.framework/Frameworks
 ADDITIONAL_LDFLAGS = -fno-autolink -F$(THEOS_OBJ_DIR)
@@ -120,6 +121,13 @@ MapKit_CFLAGS = -fobjc-arc
 StoreKit_CFLAGS = -fobjc-arc
 WatchKit_CFLAGS = -fobjc-arc
 WebKit_CFLAGS = -fobjc-arc
+
+# Advertising identifiers are intentionally unavailable on current iOS.
+# Keep the old API usable without forwarding it to a host selector that has
+# been removed from recent simulator runtimes.
+AdSupport_FILES = $(filter-out \
+  $(GENERATED_FRAMEWORKS_ROOT)/AdSupport/ASIdentifierManager.m, \
+  $(call framework_sources,AdSupport))
 
 .PHONY: generate-shims
 generate-shims:

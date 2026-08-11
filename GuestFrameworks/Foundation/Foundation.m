@@ -81,6 +81,23 @@ NSString *NSStringFromClass(Class aClass) {
     return @(class_getName(aClass));
 }
 
+NSString *NSStringFromSelector(SEL aSelector) {
+    if(!aSelector) return nil;
+    const char *name = sel_getName(aSelector);
+    return name ? [NSString stringWithUTF8String:name] : nil;
+}
+
+NSString *NSStringFromProtocol(Protocol *protocol) {
+    if(!protocol) return nil;
+    const char *name = protocol_getName(protocol);
+    return name ? [NSString stringWithUTF8String:name] : nil;
+}
+
+id NSAllocateObject(Class aClass, NSUInteger extraBytes, NSZone *zone) {
+    (void)zone;
+    return aClass ? class_createInstance(aClass, extraBytes) : nil;
+}
+
 NSString *NSTemporaryDirectory() {
     pthread_once(&LC32FoundationFunctionsOnce,
         LC32FoundationResolveFunctions);

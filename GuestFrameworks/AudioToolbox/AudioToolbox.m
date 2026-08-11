@@ -108,6 +108,17 @@ OSStatus AudioSessionSetProperty(AudioSessionPropertyID inID, UInt32 inDataSize,
     return 0; // deprecated
 }
 
+OSStatus AudioSessionGetProperty(AudioSessionPropertyID property,
+                                 UInt32 *ioDataSize,
+                                 void *outData) {
+    if(!ioDataSize) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioSessionGetProperty,
+        LC32_AUDIO_U32(property),
+        LC32_AUDIO_U32((uintptr_t)ioDataSize),
+        LC32_AUDIO_U32((uintptr_t)outData));
+}
+
 #pragma mark Extended Audio File Services
 
 OSStatus ExtAudioFileOpenURL(CFURLRef url, ExtAudioFileRef *outFile) {
@@ -156,4 +167,12 @@ OSStatus ExtAudioFileRead(ExtAudioFileRef file,
         LC32_AUDIO_U32((uintptr_t)file),
         LC32_AUDIO_U32((uintptr_t)ioNumberFrames),
         LC32_AUDIO_U32((uintptr_t)ioData));
+}
+
+OSStatus ExtAudioFileSeek(ExtAudioFileRef file, SInt64 frameOffset) {
+    if(!file) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpExtAudioFileSeek,
+        LC32_AUDIO_U32((uintptr_t)file),
+        (uint64_t)frameOffset);
 }

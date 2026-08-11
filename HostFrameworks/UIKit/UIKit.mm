@@ -135,4 +135,56 @@ int LC32_UIKit_UIApplicationMain(u32 r2, u32 r3, u32 sp) {
     return UIApplicationMain(argc, host_argv, principalClassName, delegateClassName);
 }
 
+u32 LC32_UIKit_NSStringFromCGSize(u32 widthBits, u32 heightBits, u32) {
+    float width;
+    float height;
+    memcpy(&width, &widthBits, sizeof(width));
+    memcpy(&height, &heightBits, sizeof(height));
+    return NSStringFromCGSize(CGSizeMake(width, height)).guest_self;
+}
+
+u32 LC32_UIKit_CGSizeFromString(u32 stringLow, u32 stringHigh, u32 sp) {
+    NSString *string = reinterpret_cast<NSString *>(
+        static_cast<uintptr_t>(stringLow |
+            (static_cast<u64>(stringHigh) << 32)));
+    const u32 guestResult =
+        Dynarmic_current_user_callbacks()->MemoryRead32(sp);
+    if(!string || !guestResult || guestResult > UINT32_MAX - 7)
+        return 0;
+
+    const CGSize size = CGSizeFromString(string);
+    const struct {
+        float width;
+        float height;
+    } guestSize = {
+        static_cast<float>(size.width),
+        static_cast<float>(size.height),
+    };
+    return Dynarmic_mem_1write(guestResult, sizeof(guestSize),
+        const_cast<char *>(reinterpret_cast<const char *>(&guestSize))) == 0;
+}
+
+void LC32_UIKit_UIGraphicsBeginImageContext(
+        u32 widthBits, u32 heightBits, u32) {
+    float width;
+    float height;
+    memcpy(&width, &widthBits, sizeof(width));
+    memcpy(&height, &heightBits, sizeof(height));
+    UIGraphicsBeginImageContext(CGSizeMake(width, height));
+}
+
+void LC32_UIKit_UIGraphicsEndImageContext(u32, u32, u32) {
+    UIGraphicsEndImageContext();
+}
+
+u32 LC32_UIKit_UIGraphicsGetCurrentContext(u32, u32, u32) {
+    CGContextRef context = UIGraphicsGetCurrentContext();
+    return context ? [(id)context guest_self] : 0;
+}
+
+u32 LC32_UIKit_UIGraphicsGetImageFromCurrentImageContext(u32, u32, u32) {
+    UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
+    return image ? image.guest_self : 0;
+}
+
 __END_DECLS

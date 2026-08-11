@@ -46,6 +46,9 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
 @property(nonatomic, assign) const char *signature;
 // index from 0
 @property(nonatomic) int index;
+// Index of the explicit element-count argument for a const id input array.
+// A negative value means this is not a counted object-array parameter.
+@property(nonatomic) int objectArrayCountIndex;
 @end
 @implementation MethodParameter
 
@@ -120,7 +123,12 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
     self.name = name;
     self.type = type;
     self.signature = signature;
+    self.objectArrayCountIndex = -1;
     return self;
+}
+
+- (BOOL)isCountedObjectArray {
+    return self.objectArrayCountIndex >= 0;
 }
 
 - (NSString *)declarationInMethod {
@@ -131,6 +139,11 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
 }
 
 - (NSString *)declaration {
+    if(self.isCountedObjectArray) {
+        return [NSString stringWithFormat:
+            @"void *host_arg%1$d = LC32CreateHostObjectArray(guest_arg%1$d, (uint32_t)guest_arg%2$d, %2$d);",
+            self.index, self.objectArrayCountIndex];
+    }
     if([MethodParameter isDirectCastType:self.signature[0]]) {
         return [NSString stringWithFormat:@"uint64_t host_arg%1$d = (uint64_t)guest_arg%1$d;", self.index];
     } else if([MethodParameter isFloatingType:self.signature[0]]) {
@@ -172,6 +185,10 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
 }
 
 - (NSString *)parameterToBePassed {
+    if(self.isCountedObjectArray) {
+        return [NSString stringWithFormat:
+            @"LC32HostObjectArrayArgument(host_arg%d)", self.index];
+    }
     BOOL returnDirect = NO;
     BOOL returnPointer = NO;
     switch(self.signature[0]) {
@@ -210,6 +227,10 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
 }
 
 - (NSString *)postCall {
+    if(self.isCountedObjectArray) {
+        return [NSString stringWithFormat:
+            @"LC32DestroyHostObjectArray(host_arg%d);", self.index];
+    }
     switch(self.signature[0]) {
         case 'r':
             switch(self.signature[1]) {
@@ -301,6 +322,31 @@ static BOOL LC32MethodIsInInitFamily(LC32ObjCMethod *method) {
                      name:name
                      type:arg
                 signature:argType]];
+    }
+
+    /*
+     * Runtime encodings describe both a one-object out parameter and an
+     * object buffer as `id *`.  Only opt into array staging for a const input
+     * pointer whose selector also names an explicit integral `count`
+     * argument.  This covers Foundation's counted collection constructors
+     * and bulk mutators without changing NSError ** or getObjects: buffers.
+     */
+    MethodParameter *countParameter = nil;
+    for(MethodParameter *param in self.parameters) {
+        if([param.name isEqualToString:@"count"] &&
+           (param.signature[0] == 'I' || param.signature[0] == 'L')) {
+            countParameter = param;
+            break;
+        }
+    }
+    if(countParameter) {
+        for(MethodParameter *param in self.parameters) {
+            const char *signature = param.signature;
+            if(signature && signature[0] == 'r' &&
+               signature[1] == '^' && signature[2] == '@') {
+                param.objectArrayCountIndex = countParameter.index;
+            }
+        }
     }
 
     // declare method

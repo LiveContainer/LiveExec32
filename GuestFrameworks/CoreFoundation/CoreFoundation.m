@@ -19,6 +19,44 @@ double kCFCoreFoundationVersionNumber = (double)1349.7;
 @implementation __NSCFString
 @end
 @implementation __NSCFConstantString
+
+/*
+ * Compiler-emitted CF/NSString literals live in Mach-O __cfstring storage;
+ * they are not heap objects.  NSObject's LC32 ownership bridge must never
+ * forward a final release for one of them or the guest runtime will try to
+ * free an address inside the image.
+ */
+- (instancetype)retain {
+    return self;
+}
+
+- (oneway void)release {
+}
+
+- (instancetype)autorelease {
+    return self;
+}
+
+- (NSUInteger)retainCount {
+    return NSUIntegerMax;
+}
+
+- (BOOL)_tryRetain {
+    return YES;
+}
+
+- (BOOL)_isDeallocating {
+    return NO;
+}
+
+- (BOOL)allowsWeakReference {
+    return YES;
+}
+
+- (BOOL)retainWeakReference {
+    return YES;
+}
+
 @end
 // clang doesn't support alias on darwin, but we can use this truck
 __asm__(" \n \

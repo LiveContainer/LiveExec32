@@ -270,6 +270,7 @@ int main(int argc, char* argv[], char* envp[]) {
         }
     }
     setenv("LC32_GUEST_HOME", guestHome.c_str(), 1);
+    setenv("LC32_GUEST_EXECUTABLE", execPath, 1);
 
     // map the main executable first
     u32 execAddr = Dynarmic_map_file(false, 0x11000000, execPath);

@@ -6,10 +6,12 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 namespace {
 
 constexpr size_t kMaximumBitmapBytes = 256u * 1024u * 1024u;
+constexpr size_t kMaximumColorComponents = 1024;
 
 struct BitmapBacking {
     CGContextRef context = nullptr;
@@ -231,6 +233,53 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
         case LC32CoreGraphicsOpImageRelease: {
             if(!RequireCoreGraphicsSlots(call, 1)) return 0;
             return 0;
+        }
+        case LC32CoreGraphicsOpColorGetColorSpace: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGColorRef color = SlotHostObject<CGColorRef>(call, 0);
+            CGColorSpaceRef space = color
+                ? CGColorGetColorSpace(color) : nullptr;
+            return space ? [(id)space guest_self] : 0;
+        }
+        case LC32CoreGraphicsOpColorGetNumberOfComponents: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGColorRef color = SlotHostObject<CGColorRef>(call, 0);
+            if(!color) return 0;
+            const size_t count = CGColorGetNumberOfComponents(color);
+            return count <= kMaximumColorComponents
+                ? static_cast<u32>(count) : 0;
+        }
+        case LC32CoreGraphicsOpColorCopyComponents: {
+            if(!RequireCoreGraphicsSlots(call, 3)) return 0;
+            CGColorRef color = SlotHostObject<CGColorRef>(call, 0);
+            const u32 guestComponents = SlotU32(call, 1);
+            const size_t capacity = SlotU32(call, 2);
+            if(!color || !guestComponents ||
+               capacity > kMaximumColorComponents) return 0;
+
+            const size_t count = CGColorGetNumberOfComponents(color);
+            const CGFloat *components = CGColorGetComponents(color);
+            if(!components || count == 0 || count > capacity ||
+               count > kMaximumColorComponents ||
+               static_cast<uint64_t>(guestComponents) +
+                   count * sizeof(float) >
+                       static_cast<uint64_t>(UINT32_MAX) + 1) {
+                return 0;
+            }
+            std::vector<float> guestValues(count);
+            for(size_t index = 0; index < count; ++index)
+                guestValues[index] = static_cast<float>(components[index]);
+            return Dynarmic_mem_1write(guestComponents,
+                guestValues.size() * sizeof(guestValues[0]),
+                reinterpret_cast<char *>(guestValues.data())) == 0;
+        }
+        case LC32CoreGraphicsOpColorSpaceGetModel: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGColorSpaceRef space =
+                SlotHostObject<CGColorSpaceRef>(call, 0);
+            return static_cast<u32>(space
+                ? CGColorSpaceGetModel(space)
+                : kCGColorSpaceModelUnknown);
         }
     }
     return 0;

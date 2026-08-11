@@ -1,5 +1,8 @@
 @import Foundation;
 #import "bridge.h"
+#include "../../GuestFrameworks/Foundation/LC32FoundationBridge.h"
+
+#include <cstring>
 
 namespace {
 
@@ -85,6 +88,32 @@ u32 LC32_Foundation_NSSearchPathForDirectoriesInDomains(
                 directory, NSUserDomainMask, expandTilde)];
     }
     return paths.guest_self;
+}
+
+u32 LC32_Foundation_CreateDelayedTimer(u32 guestCall, u32, u32) {
+    LC32FoundationDelayedTimerCall call = {};
+    if(!guestCall ||
+       Dynarmic_mem_1read(guestCall, sizeof(call),
+           reinterpret_cast<char *>(&call)) != 0 ||
+       call.version != LC32FoundationDelayedTimerABIVersion ||
+       call.slotCount != LC32FoundationDelayedTimerSlotCount) {
+        return 0;
+    }
+
+    id target = reinterpret_cast<id>(static_cast<uintptr_t>(
+        call.slots[LC32FoundationDelayedTimerTargetSlot]));
+    SEL selector = reinterpret_cast<SEL>(static_cast<uintptr_t>(
+        call.slots[LC32FoundationDelayedTimerSelectorSlot]));
+    NSTimeInterval interval;
+    static_assert(sizeof(interval) == sizeof(uint64_t));
+    memcpy(&interval,
+        &call.slots[LC32FoundationDelayedTimerIntervalSlot],
+        sizeof(interval));
+    if(!target || !selector) return 0;
+
+    NSTimer *timer = [NSTimer timerWithTimeInterval:interval
+        target:target selector:selector userInfo:nil repeats:NO];
+    return timer.guest_self;
 }
 
 __END_DECLS

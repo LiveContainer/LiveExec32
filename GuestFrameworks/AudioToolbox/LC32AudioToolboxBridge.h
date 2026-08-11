@@ -20,6 +20,8 @@ typedef enum : uint32_t {
     LC32AudioToolboxOpExtAudioFileGetProperty = 3,
     LC32AudioToolboxOpExtAudioFileSetProperty = 4,
     LC32AudioToolboxOpExtAudioFileRead = 5,
+    LC32AudioToolboxOpExtAudioFileSeek = 6,
+    LC32AudioToolboxOpAudioSessionGetProperty = 7,
 } LC32AudioToolboxOpcode;
 
 #endif

@@ -5,6 +5,7 @@
 #import "LC32CoreGraphicsBridge.h"
 
 #include <pthread.h>
+#include <float.h>
 #include <string.h>
 
 static pthread_once_t LC32CoreGraphicsDispatcherOnce = PTHREAD_ONCE_INIT;
@@ -61,9 +62,40 @@ CGColorRef CGColorCreate(CGColorSpaceRef space, const CGFloat *components) {
 void CGColorRelease(CGColorRef color) {
     
 }
+
+CGColorSpaceRef CGColorGetColorSpace(CGColorRef color) {
+    return color ? (CGColorSpaceRef)LC32_CG_CALL(
+        LC32CoreGraphicsOpColorGetColorSpace,
+        LC32_CG_HOST(color)) : NULL;
+}
+
+size_t CGColorGetNumberOfComponents(CGColorRef color) {
+    return color ? (size_t)LC32_CG_CALL(
+        LC32CoreGraphicsOpColorGetNumberOfComponents,
+        LC32_CG_HOST(color)) : 0;
+}
+
+const CGFloat *CGColorGetComponents(CGColorRef color) {
+    if(!color) return NULL;
+    const size_t count = CGColorGetNumberOfComponents(color);
+    if(!count || count > UINT32_MAX / sizeof(CGFloat)) return NULL;
+
+    CGFloat *components = LC32GetAssociatedGuestBuffer(
+        (id)color, (uint32_t)(count * sizeof(CGFloat)));
+    if(!components) return NULL;
+    return LC32_CG_CALL(LC32CoreGraphicsOpColorCopyComponents,
+        LC32_CG_HOST(color), LC32_CG_U32((uintptr_t)components),
+        LC32_CG_U32(count)) ? components : NULL;
+}
 CGColorSpaceRef CGColorSpaceCreateDeviceRGB() {
     return (CGColorSpaceRef)LC32_CG_CALL0(
         LC32CoreGraphicsOpColorSpaceCreateDeviceRGB);
+}
+
+CGColorSpaceModel CGColorSpaceGetModel(CGColorSpaceRef space) {
+    return space ? (CGColorSpaceModel)(int32_t)LC32_CG_CALL(
+        LC32CoreGraphicsOpColorSpaceGetModel,
+        LC32_CG_HOST(space)) : kCGColorSpaceModelUnknown;
 }
 void CGColorSpaceRelease(CGColorSpaceRef color) {
     if(!color) return;
@@ -187,8 +219,11 @@ void CGPathRelease(CGPathRef cg_nullable path) {
 }
 
 const CGPoint CGPointZero = {0,0};
-const CGRect CGRectInfinite = {{INFINITY,INFINITY},{INFINITY,INFINITY}};
-const CGRect CGRectNull = {{NAN,NAN},{NAN,NAN}};
+const CGRect CGRectInfinite = {
+    {-FLT_MAX / 2.0f, -FLT_MAX / 2.0f},
+    {FLT_MAX, FLT_MAX},
+};
+const CGRect CGRectNull = {{INFINITY, INFINITY}, {0, 0}};
 const CGRect CGRectZero = {{0,0},{0,0}};
 const CGSize CGSizeZero = {0,0};
 
@@ -248,19 +283,23 @@ CGRect CGRectOffset(CGRect rect, CGFloat dx, CGFloat dy) {
 }
 
 bool CGRectIsEmpty(CGRect rect) {
-    return ((rect.size.width == 0) && (rect.size.height == 0));
+    return CGRectIsNull(rect) || rect.size.width <= 0 ||
+        rect.size.height <= 0;
 }
 
 bool CGRectIntersectsRect(CGRect a, CGRect b) {
-    if (b.origin.x > a.origin.x + a.size.width)
-        return false;
-    if (b.origin.y > a.origin.y + a.size.height)
-        return false;
-    if (a.origin.x > b.origin.x + b.size.width)
-        return false;
-    if (a.origin.y > b.origin.y + b.size.height)
-        return false;
-    return true;
+    return !CGRectIsNull(CGRectIntersection(a, b));
+}
+
+CGRect CGRectIntersection(CGRect a, CGRect b) {
+    if(CGRectIsEmpty(a) || CGRectIsEmpty(b)) return CGRectNull;
+
+    const CGFloat minX = MAX(CGRectGetMinX(a), CGRectGetMinX(b));
+    const CGFloat minY = MAX(CGRectGetMinY(a), CGRectGetMinY(b));
+    const CGFloat maxX = MIN(CGRectGetMaxX(a), CGRectGetMaxX(b));
+    const CGFloat maxY = MIN(CGRectGetMaxY(a), CGRectGetMaxY(b));
+    if(!(minX < maxX && minY < maxY)) return CGRectNull;
+    return CGRectMake(minX, minY, maxX - minX, maxY - minY);
 }
 
 bool CGRectEqualToRect(CGRect a, CGRect b) {
@@ -269,12 +308,11 @@ bool CGRectEqualToRect(CGRect a, CGRect b) {
 }
 
 bool CGRectIsInfinite(CGRect rect) {
-    return (isinf(rect.origin.x) || isinf(rect.origin.y) ||
-            isinf(rect.size.width) || isinf(rect.size.height));
+    return CGRectEqualToRect(rect, CGRectInfinite);
 }
 
 bool CGRectIsNull(CGRect rect) {
-    return CGRectEqualToRect(rect, CGRectNull);
+    return rect.origin.x == INFINITY || rect.origin.y == INFINITY;
 }
 
 bool CGRectContainsRect(CGRect a, CGRect b) {

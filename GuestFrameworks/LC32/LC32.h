@@ -2,6 +2,7 @@
 #import <Foundation/Foundation.h>
 
 #include <stdarg.h>
+#include <LC32ObjCBridgeABI.h>
 
 #define CRSetCrashLogMessage(msg) __assert_rtn(NULL, __FILE__, __LINE__, msg)
 #define HALT __builtin_trap()
@@ -81,7 +82,20 @@ uint64_t LC32InvokeHostSelector(uint64_t object, uint64_t selector, ...);
 // objc_msgSend, then copies the 64-bit temporary back into guest memory.
 static inline uint64_t LC32HostIndirectArgument(const void *storage) {
     return storage
-        ? (UINT64_C(1) << 63) |
+        ? LC32_GUEST_INDIRECT_ARGUMENT_TAG |
+            (uint64_t)(uint32_t)(uintptr_t)storage
+        : 0;
+}
+
+// Stage a counted ARM32 object-pointer array as native 64-bit object pointers.
+// The storage is valid for one synchronous LC32InvokeHostSelector call.
+void *LC32CreateHostObjectArray(const id *objects, uint32_t count,
+                                uint32_t countArgumentIndex);
+void LC32DestroyHostObjectArray(void *storage);
+
+static inline uint64_t LC32HostObjectArrayArgument(const void *storage) {
+    return storage
+        ? LC32_GUEST_OBJECT_ARRAY_ARGUMENT_TAG |
             (uint64_t)(uint32_t)(uintptr_t)storage
         : 0;
 }

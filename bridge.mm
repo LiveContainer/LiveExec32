@@ -1,7 +1,10 @@
 #import "bridge.h"
+#include "LC32ObjCBridgeABI.h"
 
 #include <atomic>
+#include <memory>
 #include <mutex>
+#include <new>
 #include <stdarg.h>
 #include <vector>
 
@@ -28,6 +31,26 @@ static void LC32ObjCRetainWithoutARC(id object) {
 static void LC32PinGuestObjectToHost(id hostObject, u32 guestObject,
                                      bool retainGuestObject);
 static void LC32DrainDeferredGuestPinReleases();
+
+static int LC32UniqueSelectorArgumentIndexNamed(SEL selector,
+                                                 const char *expectedName) {
+    const char *component = sel_getName(selector);
+    const size_t expectedLength = strlen(expectedName);
+    int matchingIndex = -1;
+    unsigned int argumentIndex = 0;
+    while(component) {
+        const char *colon = strchr(component, ':');
+        if(!colon) break;
+        if((size_t)(colon - component) == expectedLength &&
+           memcmp(component, expectedName, expectedLength) == 0) {
+            if(matchingIndex >= 0) return -1;
+            matchingIndex = (int)argumentIndex;
+        }
+        component = colon + 1;
+        argumentIndex++;
+    }
+    return matchingIndex;
+}
 
 #pragma mark Guest -> Host functions
 
@@ -109,14 +132,23 @@ u64 LC32GetHostObject(u32 guest_self, u32 guest_className, bool returnClass) {
         return (u64)cls;
     }
 
+    const bool isGuestClass = [(id)cls isGuestClass];
     id obj;
     if(object_getClass(cls) == object_getClass((Class)__CFConstantStringClassReference)) {
         obj = LC32GetHostConstString(guest_self);
+    } else if(isGuestClass) {
+        /*
+         * The guest has already allocated this object; we only need a native
+         * mirror with the same dynamic class.  Sending +alloc here can enter
+         * a guest singleton's overridden +allocWithZone:, which asks for the
+         * same host mirror again and recurses until the host stack overflows.
+         */
+        obj = class_createInstance(cls, 0);
     } else {
         obj = [cls alloc];
     }
     [obj setGuest_self:guest_self];
-    if([(id)cls isGuestClass]) {
+    if(isGuestClass) {
         // This guest object already has its caller's +1. Add one independent
         // +1 which follows the lifetime of the native mirror.
         LC32PinGuestObjectToHost(obj, guest_self, true);
@@ -161,9 +193,9 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
      * Looking at the method encoding prevents a negative scalar or floating
      * bit pattern from ever being mistaken for an indirect argument.
      */
-    constexpr u64 kGuestIndirectArgumentTag = UINT64_C(1) << 63;
     u32 indirectGuestStorage[9] = {};
     u64 indirectHostStorage[9] = {};
+    std::unique_ptr<u64[]> objectArrayHostStorage[9];
     id receiver = (id)host_self;
     SEL selector = (SEL)host_cmd;
     Class dispatchClass = object_getClass(receiver);
@@ -188,12 +220,99 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
                     strchr("rnNoORVA", *unqualifiedType)) {
                 unqualifiedType++;
             }
+            const u64 argumentTag =
+                args[index] & LC32_GUEST_ARGUMENT_TAG_MASK;
             const bool isTaggedPointer =
                 *unqualifiedType == '^' &&
-                (args[index] & UINT64_C(0xffffffff00000000)) ==
-                    kGuestIndirectArgumentTag &&
+                argumentTag == LC32_GUEST_INDIRECT_ARGUMENT_TAG &&
+                (u32)args[index] != 0;
+            const bool isTaggedObjectArray =
+                unqualifiedType[0] == '^' &&
+                unqualifiedType[1] == '@' &&
+                argumentTag == LC32_GUEST_OBJECT_ARRAY_ARGUMENT_TAG &&
                 (u32)args[index] != 0;
             free(argumentType);
+            if(argumentTag == LC32_GUEST_OBJECT_ARRAY_ARGUMENT_TAG &&
+               !isTaggedObjectArray) {
+                printf("LC32: refusing object-array argument %u for "
+                       "non-object-pointer selector %s\n", index,
+                       sel_getName(selector));
+                return 0;
+            }
+            if(isTaggedObjectArray) {
+                const u32 guestStorage = (u32)args[index];
+                LC32HostObjectArrayDescriptor descriptor = {};
+                const int selectorCountArgumentIndex =
+                    LC32UniqueSelectorArgumentIndexNamed(selector, "count");
+                if(Dynarmic_mem_1read(guestStorage, sizeof(descriptor),
+                        reinterpret_cast<char *>(&descriptor)) != 0 ||
+                   descriptor.magic != LC32_HOST_OBJECT_ARRAY_MAGIC ||
+                   descriptor.reserved != 0 ||
+                   descriptor.count > LC32_HOST_OBJECT_ARRAY_MAX_COUNT ||
+                   selectorCountArgumentIndex < 0 ||
+                   descriptor.countArgumentIndex !=
+                       (u32)selectorCountArgumentIndex ||
+                   descriptor.countArgumentIndex >= argumentCount ||
+                   descriptor.countArgumentIndex == index) {
+                    printf("LC32: invalid object-array descriptor for "
+                           "argument %u of %s\n", index,
+                           sel_getName(selector));
+                    return 0;
+                }
+
+                char *countType = method_copyArgumentType(
+                    method, descriptor.countArgumentIndex + 2);
+                const char *unqualifiedCountType = countType;
+                while(unqualifiedCountType && *unqualifiedCountType &&
+                        strchr("rnNoORVA", *unqualifiedCountType)) {
+                    unqualifiedCountType++;
+                }
+                const bool validCountType = unqualifiedCountType &&
+                    strchr("CILQS", *unqualifiedCountType) != nullptr;
+                free(countType);
+                if(!validCountType ||
+                   args[descriptor.countArgumentIndex] != descriptor.count) {
+                    printf("LC32: mismatched object-array count for "
+                           "argument %u of %s\n", index,
+                           sel_getName(selector));
+                    return 0;
+                }
+
+                const u64 objectBytes =
+                    (u64)descriptor.count * sizeof(u64);
+                const u64 objectAddress =
+                    (u64)guestStorage + sizeof(descriptor);
+                if(objectAddress + objectBytes > UINT64_C(0x100000000)) {
+                    printf("LC32: overflowing object-array descriptor for "
+                           "argument %u of %s\n", index,
+                           sel_getName(selector));
+                    return 0;
+                }
+
+                if(descriptor.count) {
+                    objectArrayHostStorage[index].reset(
+                        new(std::nothrow) u64[descriptor.count]);
+                    if(!objectArrayHostStorage[index]) {
+                        printf("LC32: cannot allocate object-array argument "
+                               "%u of %s\n", index,
+                               sel_getName(selector));
+                        return 0;
+                    }
+                }
+                if(objectBytes && Dynarmic_mem_1read(
+                        (u32)objectAddress, (size_t)objectBytes,
+                        reinterpret_cast<char *>(
+                            objectArrayHostStorage[index].get())) != 0) {
+                    printf("LC32: unreadable object-array descriptor for "
+                           "argument %u of %s\n", index,
+                           sel_getName(selector));
+                    return 0;
+                }
+                args[index] = descriptor.count
+                    ? (u64)objectArrayHostStorage[index].get()
+                    : 0;
+                continue;
+            }
             if(!isTaggedPointer) continue;
 
             const u32 guestStorage = (u32)args[index];
@@ -209,8 +328,11 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
         }
     } else {
         for(size_t index = 0; index < 9; index++) {
-            if((args[index] & UINT64_C(0xffffffff00000000)) !=
-                    kGuestIndirectArgumentTag || !(u32)args[index]) {
+            const u64 argumentTag =
+                args[index] & LC32_GUEST_ARGUMENT_TAG_MASK;
+            if((argumentTag != LC32_GUEST_INDIRECT_ARGUMENT_TAG &&
+                argumentTag != LC32_GUEST_OBJECT_ARRAY_ARGUMENT_TAG) ||
+               !(u32)args[index]) {
                 continue;
             }
             printf("LC32: cannot marshal pointer argument %zu for "
@@ -433,6 +555,21 @@ u32 LC32HostToGuestArgument(char *type, u64 value) {
         case '@': // id
         case '#': // Class
             return [(id)value guest_self];
+        case '^':
+            /*
+             * NSZone is an obsolete allocator hint.  A native zone pointer
+             * cannot be exposed to the 32-bit address space, and Cocoa
+             * treats a null zone as the default zone.  This is used by
+             * copyWithZone: while native collections copy guest-backed
+             * objects.
+             */
+            if(!strncmp(type, "^{_NSZone=",
+                        sizeof("^{_NSZone=") - 1) ||
+               !strncmp(type, "^{NSZone=",
+                        sizeof("^{NSZone=") - 1)) {
+                return 0;
+            }
+            [[fallthrough]];
         default:
             printf("LC32HostToGuestArgument: unhandled type %s\n", type);
             abort();
