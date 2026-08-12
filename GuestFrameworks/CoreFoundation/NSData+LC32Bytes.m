@@ -1,19 +1,178 @@
 #import <Foundation/Foundation.h>
+#import <CoreFoundation/CoreFoundation.h>
 #import <LC32/LC32.h>
+#import <objc/runtime.h>
+
+#import "LC32CoreFoundationBridge.h"
 
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+enum {
+    LC32MaximumDataGuestBufferBytes = 256u * 1024u * 1024u,
+};
+
+extern uint32_t LC32CoreFoundationDispatch(
+    LC32CoreFoundationOpcode opcode, const uint64_t *slots,
+    uint32_t slotCount);
+
+@interface LC32DataGuestBuffer : LC32GuestBuffer {
+@public
+    UInt8 *_baseline;
+    uint32_t _length;
+    BOOL _valid;
+    BOOL _mutableBytesExposed;
+    BOOL _synchronizing;
+}
+@end
+
+@implementation LC32DataGuestBuffer
+- (void)dealloc {
+    free(_baseline);
+    [super dealloc];
+}
+@end
+
+static const void *kLC32DataGuestBuffer = &kLC32DataGuestBuffer;
+
+static LC32DataGuestBuffer *LC32GetDataGuestBuffer(NSData *data,
+                                                    BOOL create) {
+    LC32DataGuestBuffer *buffer =
+        objc_getAssociatedObject(data, kLC32DataGuestBuffer);
+    if(!buffer && create) {
+        buffer = [LC32DataGuestBuffer new];
+        objc_setAssociatedObject(data, kLC32DataGuestBuffer, buffer,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [buffer release];
+    }
+    return buffer;
+}
+
+static BOOL LC32GrowDataGuestBuffer(LC32DataGuestBuffer *buffer,
+                                    uint32_t length) {
+    if(length > LC32MaximumDataGuestBufferBytes) return NO;
+    /* Keep a stable, dereferenceable pointer for zero-length mutable data. */
+    const uint32_t required = length ? length : 1;
+    if(buffer->_capacity >= required) return YES;
+    UInt8 *grown = realloc(buffer->_bytes, required);
+    if(!grown) return NO;
+    buffer->_bytes = grown;
+    UInt8 *grownBaseline = realloc(buffer->_baseline, required);
+    if(!grownBaseline) return NO;
+    buffer->_baseline = grownBaseline;
+    buffer->_capacity = required;
+    return YES;
+}
+
+void LC32InvalidateDataGuestBuffer(NSData *data) {
+    if(!data) return;
+    objc_sync_enter(data);
+    LC32DataGuestBuffer *buffer = LC32GetDataGuestBuffer(data, NO);
+    if(buffer) {
+        buffer->_valid = NO;
+        buffer->_mutableBytesExposed = NO;
+        buffer->_length = 0;
+    }
+    objc_sync_exit(data);
+}
+
+UInt8 *LC32GetMutableDataGuestBytes(NSMutableData *data) {
+    if(!data) return NULL;
+    (void)[data bytes];
+    objc_sync_enter(data);
+    LC32DataGuestBuffer *buffer = LC32GetDataGuestBuffer(data, NO);
+    UInt8 *bytes = NULL;
+    if(buffer && buffer->_valid) {
+        /*
+         * Raw writes cannot be observed, so this remains set for the pointer's
+         * lifetime. Every later guest-to-host conversion re-copies the current
+         * bytes; clearing it after one sync would miss writes made afterward.
+         */
+        buffer->_mutableBytesExposed = YES;
+        bytes = buffer->_bytes;
+    }
+    objc_sync_exit(data);
+    return bytes;
+}
+
+uint64_t LC32SynchronizeMutableDataGuestBytes(NSMutableData *data) {
+    const uint64_t rawHostSelf = [data LC32_rawHostSelf];
+    objc_sync_enter(data);
+    LC32DataGuestBuffer *buffer = LC32GetDataGuestBuffer(data, NO);
+    if(buffer && buffer->_valid && buffer->_mutableBytesExposed &&
+       !buffer->_synchronizing && buffer->_length != 0 &&
+       memcmp(buffer->_bytes, buffer->_baseline, buffer->_length) != 0) {
+        buffer->_synchronizing = YES;
+        const uint64_t slots[] = {
+            rawHostSelf,
+            0,
+            buffer->_length,
+            (uint32_t)(uintptr_t)buffer->_bytes,
+            buffer->_length,
+        };
+        const uint32_t synchronized = LC32CoreFoundationDispatch(
+            LC32CoreFoundationOpDataReplaceBytes, slots,
+            sizeof(slots) / sizeof(slots[0]));
+        if(synchronized) {
+            memcpy(buffer->_baseline, buffer->_bytes, buffer->_length);
+        } else {
+            CRSetCrashLogMessage(
+                "LC32: could not synchronize mutable CFData bytes");
+        }
+        buffer->_synchronizing = NO;
+    }
+    objc_sync_exit(data);
+    return rawHostSelf;
+}
 
 @implementation NSData (LC32Bytes)
 
-- (const void *)bytes {
-    NSUInteger length = self.length;
-    if(!length || length > UINT32_MAX) return NULL;
++ (instancetype)dataWithBytes:(const void *)bytes length:(NSUInteger)length {
+    if(length > LC32MaximumDataGuestBufferBytes || (length && !bytes))
+        return nil;
+    return [(id)CFDataCreate(kCFAllocatorDefault, bytes, (CFIndex)length)
+        autorelease];
+}
 
-    void *bytes = LC32GetAssociatedGuestBuffer(self, (uint32_t)length);
-    if(!bytes) return NULL;
-    return LC32CopyHostDataBytes(self.host_self, bytes, (uint32_t)length, 0)
-            == (uint32_t)length
-        ? bytes : NULL;
++ (instancetype)dataWithBytesNoCopy:(void *)bytes
+                              length:(NSUInteger)length {
+    return [self dataWithBytesNoCopy:bytes length:length freeWhenDone:YES];
+}
+
++ (instancetype)dataWithBytesNoCopy:(void *)bytes
+                              length:(NSUInteger)length
+                        freeWhenDone:(BOOL)freeWhenDone {
+    id data = [self dataWithBytes:bytes length:length];
+    if(freeWhenDone) free(bytes);
+    return data;
+}
+
+- (const void *)bytes {
+    objc_sync_enter(self);
+    LC32DataGuestBuffer *existing = LC32GetDataGuestBuffer(self, NO);
+    const void *bytes = existing && existing->_valid ? existing->_bytes : NULL;
+    objc_sync_exit(self);
+    if(bytes) return bytes;
+
+    const NSUInteger length = self.length;
+    if(length > LC32MaximumDataGuestBufferBytes) return NULL;
+
+    objc_sync_enter(self);
+    LC32DataGuestBuffer *buffer = LC32GetDataGuestBuffer(self, YES);
+    if(buffer && LC32GrowDataGuestBuffer(buffer, (uint32_t)length)) {
+        const BOOL copied = !length || LC32CopyHostDataBytes(
+            self.host_self, buffer->_bytes, (uint32_t)length, 0) ==
+                (uint32_t)length;
+        if(copied) {
+            if(length) memcpy(buffer->_baseline, buffer->_bytes, length);
+            buffer->_length = (uint32_t)length;
+            buffer->_valid = YES;
+            bytes = buffer->_bytes;
+        }
+    }
+    objc_sync_exit(self);
+    return bytes;
 }
 
 - (void)getBytes:(void *)buffer {

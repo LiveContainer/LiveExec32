@@ -31,25 +31,40 @@ static NSUInteger deallocCount;
 int main(void) {
     NSAutoreleasePool *pool = [NSAutoreleasePool new];
     NSMutableArray *hostBackedArray = [[NSMutableArray alloc] init];
+
+    LC32GuestProxyLifetimeProbe *guestOnlyProbe =
+        [[LC32GuestProxyLifetimeProbe alloc] init];
+    [guestOnlyProbe release];
+    const BOOL guestOnlyObjectStayedLocal = deallocCount == 1;
+    printf("guest-only-object-stays-local: %s\n",
+        guestOnlyObjectStayedLocal ? "PASS" : "FAIL");
+
     LC32GuestProxyLifetimeProbe *probe =
         [[LC32GuestProxyLifetimeProbe alloc] init];
 
+    // Retains which predate the first host_self lookup must be transferred to
+    // the lazily-created native peer. Otherwise the second release below can
+    // destroy that peer while hostBackedArray still holds it.
+    [probe retain];
     [hostBackedArray addObject:probe];
+    [probe release];
     [probe release];
 
     LC32GuestProxyLifetimeProbe *stored =
         [hostBackedArray objectAtIndex:0];
     const BOOL survivedHostOwnership =
         [stored marker] == 0x51a7;
-    printf("host-retains-guest-proxy: %s\n",
+    printf("host-retains-pre-retained-guest-proxy: %s\n",
         survivedHostOwnership ? "PASS" : "FAIL");
 
     [hostBackedArray removeAllObjects];
-    const BOOL releasedWithHostOwnership = deallocCount == 1;
+    const BOOL releasedWithHostOwnership = deallocCount == 2;
     printf("host-releases-guest-proxy: %s\n",
         releasedWithHostOwnership ? "PASS" : "FAIL");
 
     NSAutoreleasePool *innerPool = [NSAutoreleasePool new];
+    // Schedule autorelease while the object is still guest-only, then make
+    // addObject: perform its first host_self lookup before the pool drains.
     LC32GuestProxyLifetimeProbe *autoreleasedProbe =
         [[[LC32GuestProxyLifetimeProbe alloc] init] autorelease];
     [hostBackedArray addObject:autoreleasedProbe];
@@ -58,18 +73,20 @@ int main(void) {
     LC32GuestProxyLifetimeProbe *storedAutoreleased =
         [hostBackedArray objectAtIndex:0];
     const BOOL survivedGuestAutoreleasePool =
-        [storedAutoreleased marker] == 0x51a7 && deallocCount == 1;
+        [storedAutoreleased marker] == 0x51a7 && deallocCount == 2;
     printf("host-retains-autoreleased-guest-proxy: %s\n",
         survivedGuestAutoreleasePool ? "PASS" : "FAIL");
 
     [hostBackedArray removeAllObjects];
-    const BOOL autoreleasedProxyDeallocatedOnce = deallocCount == 2;
-    printf("host-releases-autoreleased-guest-proxy-once: %s\n",
-        autoreleasedProxyDeallocatedOnce ? "PASS" : "FAIL");
+    const BOOL autoreleasedProxyDeallocatedOnce = deallocCount == 3;
+    printf("host-releases-autoreleased-guest-proxy-once: %s (count=%lu)\n",
+        autoreleasedProxyDeallocatedOnce ? "PASS" : "FAIL",
+        (unsigned long)deallocCount);
 
     [hostBackedArray release];
     [pool drain];
-    return !(survivedHostOwnership && releasedWithHostOwnership &&
+    return !(guestOnlyObjectStayedLocal && survivedHostOwnership &&
+             releasedWithHostOwnership &&
              survivedGuestAutoreleasePool &&
              autoreleasedProxyDeallocatedOnce);
 }

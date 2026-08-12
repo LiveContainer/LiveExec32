@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <objc/message.h>
 #include <dlfcn.h>
+#include "LC32FoundationBridgeABI.h"
 #include "32bit.h"
 #include "dynarmic.h"
 
@@ -38,8 +39,16 @@ void LC32SetDoubleRegisters(double d0, double d1, double d2, double d3,
 
 u32 LC32HostToGuestCopyClassName(u32 guest_output, size_t length, u64 host_object);
 u32 LC32CopyHostStringUTF8(u64 host_object, u32 guest_output, size_t capacity);
+u32 LC32CopyHostStringBytes(u64 host_object, u32 encoding,
+                            u32 guest_output, u32 capacity);
+u64 LC32HostStringRangeOfString(
+    const LC32FoundationStringRangeRequest *request);
 u32 LC32CopyHostDataBytes(u64 host_object, u32 guest_output, u32 length,
                           u32 offset);
+// Converts a native +1 result (Create/Copy/alloc rule) to its guest proxy.
+// If the native object already has a proxy, this also creates the matching
+// guest-only +1; the native +1 is released later by the guest's public release.
+u32 LC32GuestObjectForOwnedHostObject(CFTypeRef object);
 //u64 LC32Dlsym(u32 guest_name);
 u64 LC32GetHostObject(u32 guest_self, u32 guest_class, bool returnClass);
 u64 LC32GetHostSelector(u32 guest_selector);

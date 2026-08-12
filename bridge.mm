@@ -85,6 +85,79 @@ u32 LC32CopyHostStringUTF8(u64 host_object, u32 guest_output,
     return (u32)byteCount;
 }
 
+u32 LC32CopyHostStringBytes(u64 host_object, u32 encoding,
+                            u32 guest_output, u32 capacity) {
+    NSString *string = (NSString *)(id)host_object;
+    const NSStringEncoding nativeEncoding = (NSStringEncoding)encoding;
+    const NSUInteger payloadCount =
+        [string lengthOfBytesUsingEncoding:nativeEncoding];
+    if(payloadCount >= UINT32_MAX) return 0;
+
+    const u32 byteCount = (u32)payloadCount + 1;
+    char *bytes = (char *)malloc(byteCount);
+    if(!bytes) return 0;
+    if(![string getCString:bytes maxLength:byteCount
+                  encoding:nativeEncoding]) {
+        free(bytes);
+        return 0;
+    }
+
+    if(guest_output && capacity >= byteCount &&
+            Dynarmic_mem_1write(guest_output, byteCount, bytes) != 0) {
+        free(bytes);
+        return 0;
+    }
+    free(bytes);
+    return byteCount;
+}
+
+u64 LC32HostStringRangeOfString(
+        const LC32FoundationStringRangeRequest *request) {
+    const u64 hostString = (u64)request->hostStringLow |
+        ((u64)request->hostStringHigh << 32);
+    const u64 hostNeedle = (u64)request->hostNeedleLow |
+        ((u64)request->hostNeedleHigh << 32);
+    const u64 hostLocale = (u64)request->hostLocaleLow |
+        ((u64)request->hostLocaleHigh << 32);
+    NSString *source = (NSString *)(id)hostString;
+    NSString *needle = (NSString *)(id)hostNeedle;
+    NSRange range;
+    switch(request->variant) {
+        case LC32FoundationStringRangePlain:
+            range = [source rangeOfString:needle];
+            break;
+        case LC32FoundationStringRangeWithOptions:
+            range = [source rangeOfString:needle
+                                  options:(NSStringCompareOptions)
+                                              request->options];
+            break;
+        case LC32FoundationStringRangeWithRange:
+            range = [source rangeOfString:needle
+                                  options:(NSStringCompareOptions)
+                                              request->options
+                                    range:NSMakeRange(request->rangeLocation,
+                                                      request->rangeLength)];
+            break;
+        case LC32FoundationStringRangeWithLocale:
+            range = [source rangeOfString:needle
+                                  options:(NSStringCompareOptions)
+                                              request->options
+                                    range:NSMakeRange(request->rangeLocation,
+                                                      request->rangeLength)
+                                   locale:(NSLocale *)(id)hostLocale];
+            break;
+        default:
+            return (u64)INT32_MAX;
+    }
+
+    /* NSNotFound is NSIntegerMax in each process, so it must be translated
+     * rather than merely truncating the ARM64 value to its low word. */
+    const u32 location = range.location == NSNotFound
+        ? (u32)INT32_MAX : (u32)range.location;
+    const u32 length = (u32)range.length;
+    return (u64)location | ((u64)length << 32);
+}
+
 u32 LC32CopyHostDataBytes(u64 host_object, u32 guest_output, u32 length,
                           u32 offset) {
     NSData *data = (NSData *)(id)host_object;
@@ -1202,6 +1275,7 @@ u64 guest_objc_msgSend(int argc, u32 *args) {
 enum class LC32GuestReleaseKind : uint8_t {
     LifetimePin,
     LogicalOwnership,
+    OrdinaryOwnership,
 };
 
 static void LC32AdjustGuestReferenceNow(
@@ -1211,6 +1285,7 @@ static void LC32AdjustGuestReferenceNow(
     static std::atomic<u32> retainSelector{0};
     static std::atomic<u32> releaseSelector{0};
     static std::atomic<u32> logicalReleaseSelector{0};
+    static std::atomic<u32> ordinaryReleaseSelector{0};
     u32 selector;
     if(retaining) {
         selector = LC32CachedGuestSelector(
@@ -1219,6 +1294,12 @@ static void LC32AdjustGuestReferenceNow(
         selector = LC32CachedGuestSelector(
             logicalReleaseSelector,
             "LC32_releaseGuestOwnershipOnly");
+    } else if(releaseKind == LC32GuestReleaseKind::OrdinaryOwnership) {
+        // Public release is the ownership-bridging implementation after the
+        // guest NSObject method exchange. It remains guest-only when no peer
+        // exists, and also decrements a peer acquired since scheduling.
+        selector = LC32CachedGuestSelector(
+            ordinaryReleaseSelector, "release");
     } else {
         selector = LC32CachedGuestSelector(
             releaseSelector, "LC32_release");
@@ -1285,6 +1366,11 @@ static void LC32ReleaseGuestLogicalOwnership(
         hostObject);
 }
 
+static void LC32ReleaseGuestOrdinaryOwnership(u32 guestObject) {
+    LC32ReleaseGuestReference(
+        guestObject, LC32GuestReleaseKind::OrdinaryOwnership);
+}
+
 static void LC32DrainDeferredGuestPinReleases() {
     if(LC32DrainingGuestPinReleases ||
             !threadHandle.jit || !threadHandle.cb) {
@@ -1334,9 +1420,19 @@ static void LC32DrainDeferredGuestPinReleases() {
 
 @implementation LC32GuestAutoreleaseToken
 - (void)dealloc {
-    // Keep hostObject strongly held while the guest removes its corresponding
-    // logical +1 and, if final, clears the host's reverse mapping.
-    LC32ReleaseGuestLogicalOwnership(guestObject, hostObject);
+    if(hostObject) {
+        // Keep hostObject strongly held while the guest removes its
+        // corresponding logical +1 and, if final, clears the host's reverse
+        // mapping. The token owns the paired native autorelease operation.
+        LC32ReleaseGuestLogicalOwnership(guestObject, hostObject);
+    } else {
+        /*
+         * The object was guest-only when autoreleased. Use an ordinary guest
+         * release: it remains local if the object was never bridged, or also
+         * decrements a peer created before this token drained.
+         */
+        LC32ReleaseGuestOrdinaryOwnership(guestObject);
+    }
 #if !__has_feature(objc_arc)
     [hostObject release];
     [super dealloc];
@@ -1352,7 +1448,7 @@ extern "C" u32 LC32ScheduleGuestAutorelease(
     // native argument. The next ARMv7 vararg (the guest object) is at [SP].
     const u32 guestObject =
         Dynarmic_current_user_callbacks()->MemoryRead32(guestStackPointer);
-    if(!hostObject || !guestObject) return 0;
+    if(!guestObject) return 0;
 
     LC32GuestAutoreleaseToken *token =
         [LC32GuestAutoreleaseToken new];
@@ -1369,9 +1465,12 @@ extern "C" u32 LC32ScheduleGuestAutorelease(
     [token autorelease];
 #endif
 
-    // The token now owns the mirror's existing guest-paired +1. Its eventual
-    // destruction releases guest logical ownership first, then this host +1.
-    objc_release(hostObject);
+    if(hostObject) {
+        // The token now owns the mirror's existing guest-paired +1. Its
+        // eventual destruction releases guest logical ownership first, then
+        // this host +1.
+        objc_release(hostObject);
+    }
     return 0;
 }
 
@@ -1529,6 +1628,36 @@ static const void *kGuestSelf = &kGuestSelf;
     }
 }
 @end
+
+extern "C" u32 LC32GuestObjectForOwnedHostObject(CFTypeRef object) {
+    if(!object) return 0;
+
+    id hostObject = (id)object;
+    u32 guestObject = 0;
+    bool reusedGuestProxy = false;
+    @synchronized(hostObject) {
+        /*
+         * -guest_self returns the proxy's existing ARM32 address without
+         * changing its local retain count.  A Create/Copy result nevertheless
+         * carries a new native +1.  When a native immutable object is reused
+         * (CFStringCreateCopy commonly does this), add the corresponding
+         * guest-only +1 so the two ownership counts remain paired.  The
+         * public guest release will later decrement both sides exactly once.
+         *
+         * Keep the existence check and conversion under the same object lock:
+         * another native guest thread may otherwise create the mapping in
+         * between them and make both callers believe they created it.
+         */
+        reusedGuestProxy = [hostObject guest_selfOrNull] != 0;
+        guestObject = [hostObject guest_self];
+        if(guestObject && reusedGuestProxy) {
+            LC32AdjustGuestReferenceNow(guestObject, true);
+        }
+    }
+
+    if(!guestObject) CFRelease(object);
+    return guestObject;
+}
 
 static const char *LC32UnqualifiedType(const char *type) {
     while(type && *type && strchr("rnNoORVA", *type)) type++;

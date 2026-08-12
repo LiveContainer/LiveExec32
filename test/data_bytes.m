@@ -4,6 +4,16 @@
 #include <string.h>
 
 int main(void) {
+    NSAutoreleasePool *pool = [NSAutoreleasePool new];
+
+    const char constructorSource[] = "constructor";
+    NSData *constructed = [NSData dataWithBytes:constructorSource
+                                         length:sizeof(constructorSource) - 1];
+    BOOL constructorPassed = constructed.length == 11 &&
+        !memcmp(constructed.bytes, constructorSource, 11);
+    printf("data-with-bytes: %s\n",
+        constructorPassed ? "PASS" : "FAIL");
+
     NSData *data = [@"guest-data" dataUsingEncoding:NSUTF8StringEncoding];
     const char *bytes = data.bytes;
     BOOL bytesPassed = data.length == 10 && bytes &&
@@ -19,5 +29,6 @@ int main(void) {
     [data getBytes:range range:NSMakeRange(6, sizeof(range))];
     BOOL rangePassed = !memcmp(range, "data", sizeof(range));
     printf("data-get-range: %s\n", rangePassed ? "PASS" : "FAIL");
-    return !(bytesPassed && wholePassed && rangePassed);
+    [pool drain];
+    return !(constructorPassed && bytesPassed && wholePassed && rangePassed);
 }

@@ -1,6 +1,18 @@
 #import <QuartzCore/QuartzCore.h>
 #import <Foundation/Foundation+LC32.h>
 
+#include <mach/mach_time.h>
+
+CFTimeInterval CACurrentMediaTime(void) {
+    mach_timebase_info_data_t timebase = {0};
+    if(mach_timebase_info(&timebase) != KERN_SUCCESS || !timebase.denom) {
+        return 0;
+    }
+    return (CFTimeInterval)mach_absolute_time() *
+        (CFTimeInterval)timebase.numer /
+        (CFTimeInterval)timebase.denom / 1000000000.0;
+}
+
 LC32_CONST_STR_DECL(NSString * const kCAFillModeBoth)
 LC32_CONST_STR_DECL(NSString * const kCAFillModeBackwards)
 LC32_CONST_STR_DECL(NSString * const kCAFillModeForwards)

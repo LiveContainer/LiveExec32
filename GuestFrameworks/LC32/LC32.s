@@ -72,3 +72,15 @@ _LC32CopyHostDataBytes:
     movw r12, #1012
     svc #0x80
     bx lr
+
+.global _LC32CopyHostStringBytes
+_LC32CopyHostStringBytes:
+    movw r12, #1013
+    svc #0x80
+    bx lr
+
+.global _LC32HostStringRangeOfString
+_LC32HostStringRangeOfString:
+    movw r12, #1014
+    svc #0x80
+    bx lr

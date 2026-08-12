@@ -14,6 +14,17 @@
         ? bytes : NULL;
 }
 
+- (const char *)cStringUsingEncoding:(NSStringEncoding)encoding {
+    uint32_t required = LC32CopyHostStringBytes(
+        self.host_self, (uint32_t)encoding, NULL, 0);
+    if(!required) return NULL;
+    char *bytes = LC32GetAssociatedGuestBuffer(self, required);
+    if(!bytes) return NULL;
+    return LC32CopyHostStringBytes(
+        self.host_self, (uint32_t)encoding, bytes, required) == required
+        ? bytes : NULL;
+}
+
 - (const char *)fileSystemRepresentation {
     /* Darwin paths are UTF-8.  Keep the bytes in guest-owned associated
      * storage so POSIX calls can safely consume the returned pointer. */

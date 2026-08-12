@@ -2,6 +2,7 @@
 #import <Foundation/Foundation.h>
 
 #include <stdarg.h>
+#include <LC32FoundationBridgeABI.h>
 #include <LC32ObjCBridgeABI.h>
 
 #define CRSetCrashLogMessage(msg) __assert_rtn(NULL, __FILE__, __LINE__, msg)
@@ -11,7 +12,20 @@
 - (instancetype)initWithHostSelf:(uint64_t)host_self;
 - (void)bindHostSelf:(uint64_t)ptr;
 - (uint64_t)host_self;
+- (uint64_t)LC32_rawHostSelf;
 - (void)setHost_self:(uint64_t)ptr;
+@end
+
+/*
+ * Base class for guest-only associated storage. LC32 installs the original
+ * NSObject ownership methods directly on this class before globally
+ * swizzling proxy ownership, so subclasses never acquire a host peer.
+ */
+@interface LC32GuestBuffer : NSObject {
+@public
+    void *_bytes;
+    uint32_t _capacity;
+}
 @end
 
 uint64_t LC32Dlsym(const char *name, BOOL isFunction);
@@ -40,6 +54,16 @@ uint32_t LC32HostToGuestCopyClassName(char *output, size_t length, uint64_t host
 // returns the required byte count, including its terminating NUL.
 uint32_t LC32CopyHostStringUTF8(uint64_t host_string, char *output,
                                uint32_t capacity);
+
+// Copies a native NSString in the requested NSStringEncoding into guest
+// storage. The returned size includes a terminating NUL.
+uint32_t LC32CopyHostStringBytes(uint64_t host_string, uint32_t encoding,
+                                char *output, uint32_t capacity);
+
+// Performs NSString rangeOfString: variants with explicit ARM32 ranges. The
+// low and high result words contain location and length, respectively.
+uint64_t LC32HostStringRangeOfString(
+    const LC32FoundationStringRangeRequest *request);
 
 // Returns guest-owned storage associated with an Objective-C proxy. The
 // storage is released with the proxy and grows as needed, so pointer-returning

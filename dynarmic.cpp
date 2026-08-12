@@ -398,6 +398,8 @@ bool NativeDebuggerPauseHostWaitIfNeeded();
 void NotifyNativeDebuggerWaiters();
 void NotifyNativeDebuggerCoordinator();
 gdb_thread_id_t CurrentGuestThreadId();
+static kern_return_t CopyGuestTaskThreadPorts(
+    u32 *guestAddress, mach_msg_type_number_t *count);
 }
 static u32 GuestBsdthreadCreate(
     u32 function, u32 argument, u32 stack, u32 pthread, u32 flags);
@@ -1380,6 +1382,56 @@ guest_mach_msg_trap(u32 guest_msg,
                     Mess->In.port_info,
                     Mess->In.port_infoCnt);
             }
+            break;
+        }
+        case 3402: { // task_threads
+            /*
+             * Do not forward this request to the host task. LiveExec32 can
+             * multiplex several logical guest pthreads onto one host thread,
+             * and native-thread mode still needs to hide emulator-only host
+             * threads. Return the ports from the guest thread registry in a
+             * 32-bit OOL descriptor instead.
+             */
+            struct __attribute__((packed, aligned(4))) TaskThreadsReply32 {
+                mach_msg_header_t Head;
+                mach_msg_body_t Body;
+                mach_msg_ool_ports_descriptor32_t act_list;
+                NDR_record_t NDR;
+                mach_msg_type_number_t act_listCnt;
+            };
+            static_assert(sizeof(TaskThreadsReply32) == 52,
+                "unexpected 32-bit task_threads reply layout");
+
+            u32 guestThreadPorts = 0;
+            mach_msg_type_number_t threadCount = 0;
+            const kern_return_t kr =
+                host_header->msgh_request_port == mach_task_self()
+                    ? CopyGuestTaskThreadPorts(
+                        &guestThreadPorts, &threadCount)
+                    : KERN_INVALID_ARGUMENT;
+            if (kr != KERN_SUCCESS) {
+                auto *error = reinterpret_cast<mig_reply_error_t *>(
+                    host_header);
+                host_header->msgh_size = sizeof(*error);
+                error->NDR = NDR_record;
+                error->RetCode = kr;
+                break;
+            }
+
+            auto *reply = reinterpret_cast<TaskThreadsReply32 *>(
+                host_header);
+            host_header->msgh_bits |= MACH_MSGH_BITS_COMPLEX;
+            host_header->msgh_size = sizeof(*reply);
+            reply->Body.msgh_descriptor_count = 1;
+            reply->act_list = {};
+            reply->act_list.address = guestThreadPorts;
+            reply->act_list.count = threadCount;
+            reply->act_list.deallocate = false;
+            reply->act_list.copy = MACH_MSG_VIRTUAL_COPY;
+            reply->act_list.disposition = MACH_MSG_TYPE_MOVE_SEND;
+            reply->act_list.type = MACH_MSG_OOL_PORTS_DESCRIPTOR;
+            reply->NDR = NDR_record;
+            reply->act_listCnt = threadCount;
             break;
         }
         case 3409: {
@@ -3074,7 +3126,30 @@ kern_return_t guest__kernelrpc_mach_vm_deallocate_trap(u32 target, vm_address_t 
     if (target != mach_task_self()) {
         return KERN_FAILURE;
     }
-    return Dynarmic_munmap(address, size) == 0 ? KERN_SUCCESS : KERN_FAILURE;
+    if (size == 0) {
+        return KERN_SUCCESS;
+    }
+    if (size > UINT64_MAX - address) {
+        return KERN_INVALID_ARGUMENT;
+    }
+    const u64 end = static_cast<u64>(address) + size;
+    if (end > (UINT64_C(1) << 32) ||
+            end > UINT64_MAX - DYN_PAGE_MASK) {
+        return KERN_INVALID_ADDRESS;
+    }
+    /*
+     * mach_vm_deallocate rounds an arbitrary byte range out to VM pages.
+     * This matters for OOL MIG arrays such as task_threads: callers release
+     * count * sizeof(mach_port_t), not the page-rounded backing allocation.
+     */
+    const u64 alignedAddress =
+        static_cast<u64>(address) & ~u64(DYN_PAGE_MASK);
+    const u64 alignedEnd =
+        (end + DYN_PAGE_MASK) & ~u64(DYN_PAGE_MASK);
+    return Dynarmic_munmap(
+        alignedAddress, alignedEnd - alignedAddress) == 0
+        ? KERN_SUCCESS
+        : KERN_FAILURE;
 }
 
 int guest_abort_with_payload(u32 reason_namespace, u64 reason_code, u32 guest_payload, u32 payload_size, u32 guest_reason_string, u64 reason_flags) {
@@ -5491,6 +5566,46 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                     host_object, cpu->Regs()[2], cpu->Regs()[3], offset);
                 break;
             }
+            case 1013: { // LC32CopyHostStringBytes
+                if(cpu->IsExecuting()) {
+                    cpu->HaltExecution(LC32HaltReasonSVC);
+                    return;
+                }
+                const u64 host_object = (u64)cpu->Regs()[0] |
+                    ((u64)cpu->Regs()[1] << 32);
+                const u32 guest_output = cpu->Regs()[3];
+                const u32 capacity =
+                    Dynarmic_current_user_callbacks()->MemoryRead32(
+                        cpu->Regs()[Reg::SP]);
+                cpu->Regs()[0] = LC32CopyHostStringBytes(
+                    host_object, cpu->Regs()[2], guest_output, capacity);
+                break;
+            }
+            case 1014: { // LC32HostStringRangeOfString
+                if(cpu->IsExecuting()) {
+                    cpu->HaltExecution(LC32HaltReasonSVC);
+                    return;
+                }
+                LC32FoundationStringRangeRequest request = {};
+                const u32 guestRequest = cpu->Regs()[0];
+                u64 result = (u64)INT32_MAX;
+                if(guestRequest && Dynarmic_mem_1read(
+                        guestRequest, sizeof(request),
+                        reinterpret_cast<char *>(&request)) == 0 &&
+                        request.version ==
+                            LC32FoundationStringRangeABIVersion &&
+                        request.byteSize == sizeof(request) &&
+                        request.variant <=
+                            LC32FoundationStringRangeWithLocale) {
+                    result = LC32HostStringRangeOfString(&request);
+                } else {
+                    fprintf(stderr,
+                            "LC32: invalid NSString range bridge request\n");
+                }
+                cpu->Regs()[0] = (u32)result;
+                cpu->Regs()[1] = (u32)(result >> 32);
+                break;
+            }
             default:
                 printf("Unhandled svc number: %d\n", NR);
                 SetPendingGuestCrashMessage(
@@ -6067,6 +6182,116 @@ mach_port_t AllocateGuestThreadPort() {
         return MACH_PORT_NULL;
     }
     return port;
+}
+
+static kern_return_t CopyGuestTaskThreadPorts(
+        u32 *guestAddress, mach_msg_type_number_t *count) {
+    if (guestAddress == nullptr || count == nullptr) {
+        return KERN_INVALID_ARGUMENT;
+    }
+    *guestAddress = 0;
+    *count = 0;
+    EnsureGuestThreadRegistry();
+
+    std::vector<mach_port_t> ports;
+    kern_return_t retainResult = KERN_SUCCESS;
+    const auto alreadyAdded = [&ports](mach_port_t port) {
+        return std::find(ports.begin(), ports.end(), port) !=
+            ports.end();
+    };
+    const auto retainExistingPort = [&](mach_port_t port) {
+        if (!MACH_PORT_VALID(port) || alreadyAdded(port)) {
+            return KERN_SUCCESS;
+        }
+        const kern_return_t result = mach_port_mod_refs(
+            mach_task_self(), port, MACH_PORT_RIGHT_SEND, 1);
+        if (result == KERN_SUCCESS) {
+            ports.push_back(port);
+        }
+        return result;
+    };
+
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestThreadMutex);
+        for (const GuestThreadContext &thread : guestThreads) {
+            if (!thread.alive) {
+                continue;
+            }
+            if (MACH_PORT_VALID(thread.threadPort)) {
+                retainResult = retainExistingPort(thread.threadPort);
+            } else if (thread.debuggerId == 1) {
+                /*
+                 * Cooperative mode does not keep a synthetic port for the
+                 * main thread: thread_self_trap normally falls through to
+                 * this host thread. mach_thread_self supplies exactly the
+                 * extra send-right reference transferred by task_threads.
+                 */
+                const mach_port_t mainPort = mach_thread_self();
+                if (!MACH_PORT_VALID(mainPort)) {
+                    retainResult = KERN_FAILURE;
+                } else if (alreadyAdded(mainPort)) {
+                    (void)mach_port_deallocate(
+                        mach_task_self(), mainPort);
+                } else {
+                    ports.push_back(mainPort);
+                }
+            }
+            if (retainResult != KERN_SUCCESS) {
+                break;
+            }
+        }
+    }
+    if (retainResult == KERN_SUCCESS) {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestWorkqueueMutex);
+        if (MACH_PORT_VALID(guestWorkqueueThreadPort)) {
+            retainResult = retainExistingPort(
+                guestWorkqueueThreadPort);
+        }
+    }
+
+    const auto releasePorts = [&ports] {
+        for (mach_port_t port : ports) {
+            (void)mach_port_deallocate(
+                mach_task_self(), port);
+        }
+    };
+    if (retainResult != KERN_SUCCESS || ports.empty()) {
+        releasePorts();
+        return retainResult != KERN_SUCCESS
+            ? retainResult
+            : KERN_FAILURE;
+    }
+    if (ports.size() > UINT32_MAX / sizeof(mach_port_t)) {
+        releasePorts();
+        return KERN_RESOURCE_SHORTAGE;
+    }
+
+    const size_t byteCount = ports.size() * sizeof(mach_port_t);
+    const size_t allocationSize =
+        (byteCount + DYN_PAGE_MASK) & ~size_t(DYN_PAGE_MASK);
+    const u32 allocation = Dynarmic_mmap(
+        0, allocationSize, PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (allocation == UINT32_MAX) {
+        releasePorts();
+        return KERN_RESOURCE_SHORTAGE;
+    }
+    if (Dynarmic_mem_1write(
+            allocation, byteCount,
+            reinterpret_cast<char *>(ports.data())) != 0) {
+        (void)Dynarmic_munmap(allocation, allocationSize);
+        releasePorts();
+        return KERN_MEMORY_ERROR;
+    }
+
+    *guestAddress = allocation;
+    *count = static_cast<mach_msg_type_number_t>(ports.size());
+    fprintf(stderr,
+        "LC32: task_threads returned %u guest threads at 0x%x\n",
+        *count, *guestAddress);
+    return KERN_SUCCESS;
 }
 
 bool ParkCurrentGuestThread(

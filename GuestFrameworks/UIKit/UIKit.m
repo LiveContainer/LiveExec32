@@ -6,12 +6,20 @@
 #include <stdio.h>
 
 const NSString *UIApplicationStatusBarHeightChangedNotification = @"UIApplicationStatusBarHeightChangedNotification";
+UIAccessibilityTraits UIAccessibilityTraitNone = 0;
+UIAccessibilityTraits UIAccessibilityTraitButton = UINT64_C(1);
+UIAccessibilityTraits UIAccessibilityTraitSelected = UINT64_C(8);
+
 NSNotificationName const UIApplicationDidBecomeActiveNotification =
     @"UIApplicationDidBecomeActiveNotification";
+NSNotificationName const UIApplicationDidChangeStatusBarOrientationNotification =
+    @"UIApplicationDidChangeStatusBarOrientationNotification";
 NSNotificationName const UIApplicationDidFinishLaunchingNotification =
     @"UIApplicationDidFinishLaunchingNotification";
 NSNotificationName const UIApplicationDidEnterBackgroundNotification =
     @"UIApplicationDidEnterBackgroundNotification";
+NSNotificationName const UIApplicationDidReceiveMemoryWarningNotification =
+    @"UIApplicationDidReceiveMemoryWarningNotification";
 NSNotificationName const UIApplicationSignificantTimeChangeNotification =
     @"UIApplicationSignificantTimeChangeNotification";
 NSNotificationName const UIApplicationWillResignActiveNotification =
@@ -20,10 +28,67 @@ NSNotificationName const UIApplicationWillEnterForegroundNotification =
     @"UIApplicationWillEnterForegroundNotification";
 NSNotificationName const UIApplicationWillTerminateNotification =
     @"UIApplicationWillTerminateNotification";
+NSNotificationName const UIDeviceOrientationDidChangeNotification =
+    @"UIDeviceOrientationDidChangeNotification";
+
+NSString *const UIImagePickerControllerEditedImage =
+    @"UIImagePickerControllerEditedImage";
+NSString *const UIImagePickerControllerOriginalImage =
+    @"UIImagePickerControllerOriginalImage";
+
+NSString *const UIKeyboardAnimationCurveUserInfoKey =
+    @"UIKeyboardAnimationCurveUserInfoKey";
+NSString *const UIKeyboardAnimationDurationUserInfoKey =
+    @"UIKeyboardAnimationDurationUserInfoKey";
+NSNotificationName const UIKeyboardDidHideNotification =
+    @"UIKeyboardDidHideNotification";
+NSNotificationName const UIKeyboardDidShowNotification =
+    @"UIKeyboardDidShowNotification";
+NSString *const UIKeyboardFrameBeginUserInfoKey =
+    @"UIKeyboardFrameBeginUserInfoKey";
+NSString *const UIKeyboardFrameEndUserInfoKey =
+    @"UIKeyboardFrameEndUserInfoKey";
+NSNotificationName const UIKeyboardWillHideNotification =
+    @"UIKeyboardWillHideNotification";
+NSNotificationName const UIKeyboardWillShowNotification =
+    @"UIKeyboardWillShowNotification";
+
+NSNotificationName const UIScreenDidConnectNotification =
+    @"UIScreenDidConnectNotification";
+NSNotificationName const UIScreenDidDisconnectNotification =
+    @"UIScreenDidDisconnectNotification";
+
+NSString *const UITextAttributeFont = @"NSFont";
+NSString *const UITextAttributeTextColor = @"NSColor";
+NSString *const UITextAttributeTextShadowColor = @"TextShadowColor";
+NSString *const UITextAttributeTextShadowOffset = @"TextShadowOffset";
+NSNotificationName const UITextFieldTextDidChangeNotification =
+    @"UITextFieldTextDidChangeNotification";
+NSNotificationName const UITextViewTextDidChangeNotification =
+    @"UITextViewTextDidChangeNotification";
+
+NSNotificationName const UIWindowDidBecomeVisibleNotification =
+    @"UIWindowDidBecomeVisibleNotification";
 
 const UIEdgeInsets UIEdgeInsetsZero = {0,0,0,0};
+const UIOffset UIOffsetZero = {0,0};
+const UIWindowLevel UIWindowLevelAlert = 2000.0f;
 
 static pthread_once_t LC32LegacyAdMobOnce = PTHREAD_ONCE_INIT;
+static pthread_once_t LC32VoiceOverOnce = PTHREAD_ONCE_INIT;
+static uint64_t LC32HostUIAccessibilityIsVoiceOverRunning;
+
+static void LC32ResolveVoiceOverFunction(void) {
+    LC32HostUIAccessibilityIsVoiceOverRunning =
+        LC32Dlsym("UIAccessibilityIsVoiceOverRunning", YES);
+}
+
+BOOL UIAccessibilityIsVoiceOverRunning(void) {
+    pthread_once(&LC32VoiceOverOnce, LC32ResolveVoiceOverFunction);
+    if(!LC32HostUIAccessibilityIsVoiceOverRunning) return NO;
+    return (BOOL)LC32InvokeHostCRet32(
+        LC32HostUIAccessibilityIsVoiceOverRunning);
+}
 
 static void LC32NoopLegacyGADBannerLoadRequest(id self, SEL _cmd,
                                                id request) {
@@ -166,6 +231,40 @@ UIImage *UIGraphicsGetImageFromCurrentImageContext(void) {
     return [self imageNamed:name
                    inBundle:NSBundle.mainBundle
 compatibleWithTraitCollection:nil];
+}
+
++ (UIImage *)imageWithCGImage:(CGImageRef)image {
+    if(!image) return nil;
+
+    static uint64_t hostSelector __attribute__((aligned(8)));
+    const uint64_t selector = LC32CachedHostSelector(
+        &hostSelector, _cmd, NO);
+    const uint64_t hostImage = [(__bridge id)image host_self];
+    const uint64_t hostResult = LC32InvokeHostSelector(
+        self.host_self, selector, hostImage, (uint64_t)0);
+    return LC32HostToGuestObject(hostResult);
+}
+
++ (UIImage *)imageWithCGImage:(CGImageRef)image
+                        scale:(CGFloat)scale
+                  orientation:(UIImageOrientation)orientation {
+    if(!image) return nil;
+
+    static uint64_t hostSelector __attribute__((aligned(8)));
+    const uint64_t selector = LC32CachedHostSelector(
+        &hostSelector, _cmd, NO);
+    const uint64_t hostImage = [(__bridge id)image host_self];
+    /*
+     * CGFloat is float in this ARM32 framework and double in the ARM64 host
+     * UIKit.  Variadic promotion stores this value as an IEEE-754 double;
+     * LC32InvokeHostSelector uses the host method encoding to place it in d0.
+     */
+    const double hostScale = (double)scale;
+    const uint64_t hostOrientation = (uint64_t)(int64_t)orientation;
+    const uint64_t hostResult = LC32InvokeHostSelector(
+        self.host_self, selector, hostImage, hostScale, hostOrientation,
+        (uint64_t)0);
+    return LC32HostToGuestObject(hostResult);
 }
 
 - (CGImageRef)CGImage {

@@ -131,12 +131,25 @@ id LC32AdoptHostInitializerResult(id object, uint64_t hostResult) {
 }
 @end
 
-@interface LC32GuestBuffer : NSObject {
-@public
-    void *_bytes;
-    uint32_t _capacity;
+static const void *kHostSelf = &kHostSelf;
+
+static uint64_t LC32ExistingHostSelf(id object) {
+    LC32HostObjectPointer *pointer =
+        objc_getAssociatedObject(object, kHostSelf);
+    return pointer.value;
 }
-@end
+
+static LC32HostObjectPointer *LC32HostObjectState(id object, BOOL create) {
+    LC32HostObjectPointer *pointer =
+        objc_getAssociatedObject(object, kHostSelf);
+    if(!pointer && create) {
+        pointer = [LC32HostObjectPointer new];
+        objc_setAssociatedObject(object, kHostSelf, pointer,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [pointer release];
+    }
+    return pointer;
+}
 
 @implementation LC32GuestBuffer
 - (void)dealloc {
@@ -171,7 +184,6 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
 }
 
 @implementation NSObject(LC32)
-static const void *kHostSelf = &kHostSelf;
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wobjc-designated-initializers"
@@ -187,7 +199,9 @@ static const void *kHostSelf = &kHostSelf;
 // Called from guest's initializer shim methods (eg initWithFrame:) -> LC32HostToGuestObject -> host's guest_self -> initWithHostSelf if the object has not been known by guest before
 // Only call this if host's guest_self has already been set
 - (void)setHost_self:(uint64_t)ptr {
-    objc_setAssociatedObject(self, kHostSelf, [LC32HostObjectPointer pointerWithValue:ptr], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    @synchronized(self) {
+        LC32HostObjectState(self, YES).value = ptr;
+    }
 }
 
 // Set the equivalent host pointer for statically-initialized object (eg NSString constants)
@@ -201,20 +215,49 @@ static const void *kHostSelf = &kHostSelf;
 }
 
 - (uint64_t)host_self {
+    return [self LC32_rawHostSelf];
+}
+
+- (uint64_t)LC32_rawHostSelf {
     if(LC32ObjCTraceEnabled()) {
         printf("Calling from %s:0x%08x:0x%08x, isClass? = %d\n",
             class_getName(self.class), (uint32_t)self.class,
             (uint32_t)self, object_isClass(self));
     }
-    uint64_t ptr = ((LC32HostObjectPointer *)objc_getAssociatedObject(self, kHostSelf)).value;
+    uint64_t ptr = LC32ExistingHostSelf(self);
     if(!ptr) {
         @synchronized(self) {
-            ptr = ((LC32HostObjectPointer *)objc_getAssociatedObject(
-                self, kHostSelf)).value;
+            LC32HostObjectPointer *state = LC32HostObjectState(self, YES);
+            ptr = state.value;
             if(!ptr) {
+                /*
+                 * Retains performed while an object is guest-only deliberately
+                 * stay local.  LC32GetHostObject returns the native peer at +1,
+                 * which accounts for one of those logical guest references.
+                 * Seed the remaining native references before ownership starts
+                 * being mirrored, otherwise releasing a pre-retained object can
+                 * destroy its peer while a native collection still owns it.
+                 *
+                 * Capture this before LC32GetHostObject: dynamic guest classes
+                 * acquire a separate guest lifetime pin while their peer is
+                 * created, and that pin must not be mirrored to the host.
+                 */
+                const NSUInteger guestRetainCount = object_isClass(self)
+                    ? 0 : [self LC32_retainCount];
                 ptr = LC32GetHostObject(self, class_getName(self.class),
                                         object_isClass(self));
-                self.host_self = ptr;
+                state.value = ptr;
+
+                if(guestRetainCount != NSUIntegerMax) {
+                    static uint64_t retainSelector;
+                    const uint64_t selector = LC32CachedHostSelector(
+                        &retainSelector, @selector(retain), NO);
+                    for(NSUInteger count = 1;
+                            count < guestRetainCount; count++) {
+                        LC32InvokeHostSelector(ptr, selector);
+                    }
+                }
+
             }
         }
     }
@@ -223,11 +266,12 @@ static const void *kHostSelf = &kHostSelf;
 }
 
 - (instancetype)LC32_autorelease {
+    const uint64_t hostSelf = LC32ExistingHostSelf(self);
+
     pthread_once(&LC32AutoreleaseSchedulerOnce,
         LC32InitializeAutoreleaseScheduler);
     assert(LC32AutoreleaseScheduler);
 
-    const uint64_t hostSelf = self.host_self;
     LC32InvokeHostCRet32(LC32AutoreleaseScheduler,
         (uint32_t)hostSelf, (uint32_t)(hostSelf >> 32),
         (uint32_t)(uintptr_t)self);
@@ -235,7 +279,11 @@ static const void *kHostSelf = &kHostSelf;
 }
 
 - (void)LC32_releaseGuestOwnershipOnly {
-    const uint64_t hostSelf = self.host_self;
+    const uint64_t hostSelf = LC32ExistingHostSelf(self);
+    if(!hostSelf) {
+        [self LC32_release];
+        return;
+    }
 
     // Unlike the lifetime-pin release, this is an ordinary guest ownership
     // decrement. Clear a surviving native mirror's reverse mapping if this is
@@ -251,7 +299,11 @@ static const void *kHostSelf = &kHostSelf;
     [self LC32_release];
 }
 - (void)LC32_release {
-    const uint64_t hostSelf = self.host_self;
+    const uint64_t hostSelf = LC32ExistingHostSelf(self);
+    if(!hostSelf) {
+        [self LC32_release];
+        return;
+    }
 
     /*
      * The host can keep cached/singleton objects alive after the guest drops
@@ -276,19 +328,25 @@ static const void *kHostSelf = &kHostSelf;
 }
 
 - (instancetype)LC32_retain {
+    const uint64_t hostSelf = LC32ExistingHostSelf(self);
+    if(!hostSelf) return [self LC32_retain];
+
     static uint64_t _host_cmd;
     uint64_t host_cmd = LC32CachedHostSelector(
         &_host_cmd, @selector(retain), NO);
-    LC32InvokeHostSelector(self.host_self, host_cmd);
+    LC32InvokeHostSelector(hostSelf, host_cmd);
     return [self LC32_retain];
 }
 
 // FIXME: need to hook this?
 - (NSUInteger)LC32_retainCount {
+    const uint64_t hostSelf = LC32ExistingHostSelf(self);
+    if(!hostSelf) return [self LC32_retainCount];
+
     static uint64_t _host_cmd;
     uint64_t host_cmd = LC32CachedHostSelector(
         &_host_cmd, @selector(retainCount), NO);
-    uint64_t host_ret = LC32InvokeHostSelector(self.host_self, host_cmd);
+    uint64_t host_ret = LC32InvokeHostSelector(hostSelf, host_cmd);
     return (NSUInteger)host_ret;
 }
 

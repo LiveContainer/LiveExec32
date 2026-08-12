@@ -81,6 +81,24 @@ CGRect SlotRect(const LC32CoreGraphicsCall &call, size_t first) {
         SlotCGFloat(call, first + 3));
 }
 
+bool SlotOptionalTransform(const LC32CoreGraphicsCall &call,
+                           size_t presenceIndex, size_t first,
+                           CGAffineTransform &storage,
+                           const CGAffineTransform *&transform) {
+    const u32 present = SlotU32(call, presenceIndex);
+    if(!present) {
+        transform = nullptr;
+        return true;
+    }
+    if(present != 1) return false;
+    storage = CGAffineTransformMake(
+        SlotCGFloat(call, first), SlotCGFloat(call, first + 1),
+        SlotCGFloat(call, first + 2), SlotCGFloat(call, first + 3),
+        SlotCGFloat(call, first + 4), SlotCGFloat(call, first + 5));
+    transform = &storage;
+    return true;
+}
+
 BitmapBacking *FindBitmapBacking(CGContextRef context) {
     std::lock_guard<std::mutex> lock(bitmapBackingsMutex);
     const auto iterator = bitmapBackings.find(context);
@@ -173,17 +191,13 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
                 std::lock_guard<std::mutex> lock(bitmapBackingsMutex);
                 bitmapBackings.emplace(context, backing);
             }
-            const u32 guestContext = [(id)context guest_self];
-            if(!guestContext) CGContextRelease(context);
-            return guestContext;
+            return LC32GuestObjectForOwnedHostObject(context);
         }
         case LC32CoreGraphicsOpColorSpaceCreateDeviceRGB: {
             if(!RequireCoreGraphicsSlots(call, 0)) return 0;
             CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
             if(!colorSpace) return 0;
-            const u32 guestColorSpace = [(id)colorSpace guest_self];
-            if(!guestColorSpace) CGColorSpaceRelease(colorSpace);
-            return guestColorSpace;
+            return LC32GuestObjectForOwnedHostObject(colorSpace);
         }
         case LC32CoreGraphicsOpColorSpaceRelease: {
             if(!RequireCoreGraphicsSlots(call, 1)) return 0;
@@ -281,53 +295,109 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
                 ? CGColorSpaceGetModel(space)
                 : kCGColorSpaceModelUnknown);
         }
+        case LC32CoreGraphicsOpDataProviderCreateWithFilename: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            const u32 guestFilename = SlotU32(call, 0);
+            const size_t length = SlotU32(call, 1);
+            if(!guestFilename ||
+               length > LC32CoreGraphicsMaximumFilenameBytes ||
+               static_cast<uint64_t>(guestFilename) + length + 1 >
+                   static_cast<uint64_t>(UINT32_MAX) + 1) {
+                return 0;
+            }
+
+            std::vector<char> filename(length + 1);
+            if(Dynarmic_mem_1read(guestFilename, filename.size(),
+                    filename.data()) != 0 || filename[length] != '\0' ||
+               memchr(filename.data(), '\0', length) != nullptr) {
+                return 0;
+            }
+
+            CGDataProviderRef provider =
+                CGDataProviderCreateWithFilename(filename.data());
+            if(!provider) return 0;
+            return LC32GuestObjectForOwnedHostObject(provider);
+        }
+        case LC32CoreGraphicsOpImageCreateWithJPEGDataProvider:
+        case LC32CoreGraphicsOpImageCreateWithPNGDataProvider: {
+            if(!RequireCoreGraphicsSlots(call, 4)) return 0;
+            CGDataProviderRef provider =
+                SlotHostObject<CGDataProviderRef>(call, 0);
+            /* A CGFloat decode array has no length in this API.  Never pass
+             * the guest address to CoreGraphics; reject it until the required
+             * component count can be established safely. */
+            if(!provider || SlotU32(call, 1) != 0) return 0;
+
+            const bool shouldInterpolate = SlotU32(call, 2) != 0;
+            const auto intent = static_cast<CGColorRenderingIntent>(
+                SlotU32(call, 3));
+            CGImageRef image =
+                static_cast<LC32CoreGraphicsOpcode>(opcode) ==
+                        LC32CoreGraphicsOpImageCreateWithJPEGDataProvider
+                    ? CGImageCreateWithJPEGDataProvider(provider, nullptr,
+                        shouldInterpolate, intent)
+                    : CGImageCreateWithPNGDataProvider(provider, nullptr,
+                        shouldInterpolate, intent);
+            if(!image) return 0;
+            return LC32GuestObjectForOwnedHostObject(image);
+        }
+        case LC32CoreGraphicsOpPathCreateMutable: {
+            if(!RequireCoreGraphicsSlots(call, 0)) return 0;
+            CGMutablePathRef path = CGPathCreateMutable();
+            if(!path) return 0;
+            /* CGPathCreateMutable returns +1. Keep that ownership paired with
+             * the +1 guest proxy returned by -guest_self. */
+            return LC32GuestObjectForOwnedHostObject(path);
+        }
+        case LC32CoreGraphicsOpPathAddLineToPoint:
+        case LC32CoreGraphicsOpPathMoveToPoint: {
+            if(!RequireCoreGraphicsSlots(call, 10)) return 0;
+            CGMutablePathRef path =
+                SlotHostObject<CGMutablePathRef>(call, 0);
+            if(!path) return 0;
+            CGAffineTransform transformStorage;
+            const CGAffineTransform *transform;
+            if(!SlotOptionalTransform(call, 1, 2, transformStorage,
+                    transform)) return 0;
+            if(static_cast<LC32CoreGraphicsOpcode>(opcode) ==
+                    LC32CoreGraphicsOpPathAddLineToPoint) {
+                CGPathAddLineToPoint(path, transform,
+                    SlotCGFloat(call, 8), SlotCGFloat(call, 9));
+            } else {
+                CGPathMoveToPoint(path, transform,
+                    SlotCGFloat(call, 8), SlotCGFloat(call, 9));
+            }
+            return 1;
+        }
+        case LC32CoreGraphicsOpPathContainsPoint: {
+            if(!RequireCoreGraphicsSlots(call, 11)) return 0;
+            CGPathRef path = SlotHostObject<CGPathRef>(call, 0);
+            if(!path) return 0;
+            CGAffineTransform transformStorage;
+            const CGAffineTransform *transform;
+            if(!SlotOptionalTransform(call, 1, 2, transformStorage,
+                    transform)) return 0;
+            const CGPoint point = CGPointMake(
+                SlotCGFloat(call, 8), SlotCGFloat(call, 9));
+            return CGPathContainsPoint(path, transform, point,
+                SlotU32(call, 10) != 0);
+        }
+        case LC32CoreGraphicsOpPathCloseSubpath: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGMutablePathRef path =
+                SlotHostObject<CGMutablePathRef>(call, 0);
+            if(!path) return 0;
+            CGPathCloseSubpath(path);
+            return 1;
+        }
+        case LC32CoreGraphicsOpPathRelease: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            /* Guest CFRelease performs the paired proxy/native decrement.
+             * This opcode deliberately validates without releasing again. */
+            return SlotHostObject<CGPathRef>(call, 0) != nullptr;
+        }
     }
     return 0;
-}
-
-u32 LC32_CoreGraphics_CGPathCreateMutable() {
-    return [(id)CGPathCreateMutable() guest_self];
-}
-
-void LC32_CoreGraphics_CGPathAddLineToPoint(u32 r2, u32 r3, u32 sp) {
-    CGMutablePathRef path = (CGMutablePathRef)(r2 | (u64)r3 << 32);
-
-    // TODO: improve DynarmicHostString to handle direct access of such type
-    u32 guest_m = (u32)Dynarmic_current_user_callbacks()->MemoryRead64(sp);
-    CGAffineTransform m;
-    Dynarmic_mem_1read(guest_m, sizeof(m), (char *)&m);
-
-    CGFloat x = (CGFloat)Dynarmic_current_user_callbacks()->MemoryRead64(sp += 8);
-    CGFloat y = (CGFloat)Dynarmic_current_user_callbacks()->MemoryRead64(sp += 8);
-    CGPathAddLineToPoint(path, (const CGAffineTransform *)&m, x, y);
-}
-
-bool LC32_CoreGraphics_CGPathContainsPoint(u32 r2, u32 r3, u32 sp) {
-    CGMutablePathRef path = (CGMutablePathRef)(r2 | (u64)r3 << 32);
-
-    // TODO: improve DynarmicHostString to handle direct access of such type
-    u32 guest_m = (u32)Dynarmic_current_user_callbacks()->MemoryRead64(sp);
-    CGAffineTransform m;
-    Dynarmic_mem_1read(guest_m, sizeof(m), (char *)&m);
-
-    CGPoint point;
-    Dynarmic_mem_1read(sp += 8, sizeof(m), (char *)&m);
-
-    bool eoFill = (bool)Dynarmic_current_user_callbacks()->MemoryRead64(sp += sizeof(point));
-    return CGPathContainsPoint(path, (const CGAffineTransform *)&m, point, eoFill);
-}
-
-void LC32_CoreGraphics_CGPathMoveToPoint(u32 r2, u32 r3, u32 sp) {
-    CGMutablePathRef path = (CGMutablePathRef)(r2 | (u64)r3 << 32);
-
-    // TODO: improve DynarmicHostString to handle direct access of such type
-    u32 guest_m = (u32)Dynarmic_current_user_callbacks()->MemoryRead64(sp);
-    CGAffineTransform m;
-    Dynarmic_mem_1read(guest_m, sizeof(m), (char *)&m);
-
-    CGFloat x = (CGFloat)Dynarmic_current_user_callbacks()->MemoryRead64(sp += 8);
-    CGFloat y = (CGFloat)Dynarmic_current_user_callbacks()->MemoryRead64(sp += 8);
-    CGPathMoveToPoint(path, (const CGAffineTransform *)&m, x, y);
 }
 
 __END_DECLS

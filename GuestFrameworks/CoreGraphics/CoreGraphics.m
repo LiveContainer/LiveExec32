@@ -104,12 +104,48 @@ void CGColorSpaceRelease(CGColorSpaceRef color) {
 CGDataProviderRef CGDataProviderCreateWithURL(CFURLRef url) {
     return nil;
 }
+
+CGDataProviderRef CGDataProviderCreateWithFilename(const char *filename) {
+    if(!filename) return NULL;
+    const size_t length = strnlen(
+        filename, LC32CoreGraphicsMaximumFilenameBytes + 1);
+    if(length > LC32CoreGraphicsMaximumFilenameBytes) return NULL;
+
+    /* The dispatcher copies these guest bytes before calling CoreGraphics;
+     * an ARM32 pointer must never escape into the native provider. */
+    return (CGDataProviderRef)LC32_CG_CALL(
+        LC32CoreGraphicsOpDataProviderCreateWithFilename,
+        LC32_CG_U32((uintptr_t)filename), LC32_CG_U32(length));
+}
+
 void CGDataProviderRelease(CGDataProviderRef provider) {
-    
+    if(!provider) return;
+    CFRelease(provider);
 }
-CGImageRef CGImageCreateWithJPEGDataProvider(CGDataProviderRef source, const CGFloat *decode, bool shouldInterpolate, CGColorRenderingIntent intent) {
-    return nil;
+
+CGImageRef CGImageCreateWithJPEGDataProvider(
+        CGDataProviderRef source, const CGFloat *decode,
+        bool shouldInterpolate, CGColorRenderingIntent intent) {
+    /* CoreGraphics does not expose the decode-array length.  Until it can be
+     * derived reliably, reject rather than let a native decoder dereference
+     * an ARM32 address. */
+    if(!source || decode) return NULL;
+    return (CGImageRef)LC32_CG_CALL(
+        LC32CoreGraphicsOpImageCreateWithJPEGDataProvider,
+        LC32_CG_HOST(source), LC32_CG_U32((uintptr_t)decode),
+        LC32_CG_U32(shouldInterpolate), LC32_CG_U32(intent));
 }
+
+CGImageRef CGImageCreateWithPNGDataProvider(
+        CGDataProviderRef source, const CGFloat *decode,
+        bool shouldInterpolate, CGColorRenderingIntent intent) {
+    if(!source || decode) return NULL;
+    return (CGImageRef)LC32_CG_CALL(
+        LC32CoreGraphicsOpImageCreateWithPNGDataProvider,
+        LC32_CG_HOST(source), LC32_CG_U32((uintptr_t)decode),
+        LC32_CG_U32(shouldInterpolate), LC32_CG_U32(intent));
+}
+
 void CGImageRelease(CGImageRef image) {
     if(!image) return;
     CFRelease(image);
@@ -175,50 +211,58 @@ size_t CGImageGetWidth(CGImageRef image) {
 #pragma mark CGPath
 
 CGMutablePathRef CGPathCreateMutable() {
-    static uint64_t hostPtr = 0;
-    if(!hostPtr) hostPtr = LC32Dlsym("LC32_CoreGraphics_CGPathCreateMutable", YES);
-    return (CGMutablePathRef)LC32InvokeHostCRet32(hostPtr);
+    return (CGMutablePathRef)LC32_CG_CALL0(
+        LC32CoreGraphicsOpPathCreateMutable);
 }
 
 void CGPathAddLineToPoint(CGMutablePathRef path, const CGAffineTransform *m, CGFloat x, CGFloat y) {
-    static uint64_t hostPtr = 0;
-    if(!hostPtr) hostPtr = LC32Dlsym("LC32_CoreGraphics_CGPathAddLineToPoint", YES);
-    CGAffineTransform_64 host_m = LC32HostCGAffineTransform(*m);
-    LC32InvokeHostCRet32(hostPtr, [(id)path host_self], (uint64_t)&host_m, (double)x, (double)y);
+    if(!path) return;
+    LC32_CG_CALL(LC32CoreGraphicsOpPathAddLineToPoint,
+        LC32_CG_HOST(path), LC32_CG_U32(m != NULL),
+        m ? LC32_CG_F32(m->a) : 0, m ? LC32_CG_F32(m->b) : 0,
+        m ? LC32_CG_F32(m->c) : 0, m ? LC32_CG_F32(m->d) : 0,
+        m ? LC32_CG_F32(m->tx) : 0, m ? LC32_CG_F32(m->ty) : 0,
+        LC32_CG_F32(x), LC32_CG_F32(y));
 }
 
 bool CGPathContainsPoint(CGPathRef path, const CGAffineTransform *m, CGPoint point, bool eoFill) {
-    static uint64_t hostPtr = 0;
-    if(!hostPtr) hostPtr = LC32Dlsym("LC32_CoreGraphics_CGPathContainsPoint", YES);
-    CGAffineTransform_64 host_m = LC32HostCGAffineTransform(*m);
-    CGPoint_64 host_point = {point.x, point.y};
-    return (bool)LC32InvokeHostCRet32(hostPtr, [(id)path host_self], (uint64_t)&host_m, host_point, (uint64_t)eoFill);
+    if(!path) return false;
+    return LC32_CG_CALL(LC32CoreGraphicsOpPathContainsPoint,
+        LC32_CG_HOST(path), LC32_CG_U32(m != NULL),
+        m ? LC32_CG_F32(m->a) : 0, m ? LC32_CG_F32(m->b) : 0,
+        m ? LC32_CG_F32(m->c) : 0, m ? LC32_CG_F32(m->d) : 0,
+        m ? LC32_CG_F32(m->tx) : 0, m ? LC32_CG_F32(m->ty) : 0,
+        LC32_CG_F32(point.x), LC32_CG_F32(point.y),
+        LC32_CG_U32(eoFill)) != 0;
 }
 
 void CGPathMoveToPoint(CGMutablePathRef path, const CGAffineTransform *m, CGFloat x, CGFloat y) {
-    static uint64_t hostPtr = 0;
-    if(!hostPtr) hostPtr = LC32Dlsym("LC32_CoreGraphics_CGPathMoveToPoint", YES);
-    CGAffineTransform_64 host_m = LC32HostCGAffineTransform(*m);
-    LC32InvokeHostCRet32(hostPtr, [(id)path host_self], (uint64_t)&host_m, (double)x, (double)y);
+    if(!path) return;
+    LC32_CG_CALL(LC32CoreGraphicsOpPathMoveToPoint,
+        LC32_CG_HOST(path), LC32_CG_U32(m != NULL),
+        m ? LC32_CG_F32(m->a) : 0, m ? LC32_CG_F32(m->b) : 0,
+        m ? LC32_CG_F32(m->c) : 0, m ? LC32_CG_F32(m->d) : 0,
+        m ? LC32_CG_F32(m->tx) : 0, m ? LC32_CG_F32(m->ty) : 0,
+        LC32_CG_F32(x), LC32_CG_F32(y));
 }
 
 void CGPathCloseSubpath(CGMutablePathRef path) {
     if(!path) return;
-    static uint64_t hostPtr = 0;
-    if(!hostPtr) hostPtr = LC32Dlsym("CGPathCloseSubpath", YES);
-    LC32InvokeHostCRet32(hostPtr, [(id)path host_self]);
+    LC32_CG_CALL(LC32CoreGraphicsOpPathCloseSubpath,
+        LC32_CG_HOST(path));
 }
 
 void CGPathRelease(CGPathRef cg_nullable path) {
     if(!path) return;
-    static uint64_t hostPtr = 0;
-    if(!hostPtr) hostPtr = LC32Dlsym("CGPathRelease", YES);
-    LC32InvokeHostCRet32(hostPtr, [(id)path host_self]);
-    // FIXME: does this cause double-free in host?
+    /* Validate the native peer through the typed bridge, but let CFRelease
+     * perform the one paired guest/native ownership decrement. Calling the
+     * native CGPathRelease here as well would release the peer twice. */
+    LC32_CG_CALL(LC32CoreGraphicsOpPathRelease, LC32_CG_HOST(path));
     CFRelease(path);
 }
 
 const CGPoint CGPointZero = {0,0};
+const CGAffineTransform CGAffineTransformIdentity = {1,0,0,1,0,0};
 const CGRect CGRectInfinite = {
     {-FLT_MAX / 2.0f, -FLT_MAX / 2.0f},
     {FLT_MAX, FLT_MAX},

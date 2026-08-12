@@ -19,9 +19,25 @@ const NSErrorDomain NSHelpAnchorErrorKey = @"NSHelpAnchor";
 const NSErrorDomain NSStringEncodingErrorKey = @"NSStringEncodingErrorKey";
 const NSErrorDomain NSURLErrorKey = @"NSURL";
 const NSErrorDomain NSFilePathErrorKey = @"NSFilePathErrorKey";
+const NSErrorDomain NSURLErrorDomain = @"NSURLErrorDomain";
+const NSFileAttributeKey NSFileModificationDate = @"NSFileModificationDate";
+const NSFileAttributeKey NSFileSize = @"NSFileSize";
+const NSKeyValueChangeKey NSKeyValueChangeNewKey = @"new";
+const NSKeyValueChangeKey NSKeyValueChangeOldKey = @"old";
+const NSExceptionName NSParseErrorException = @"NSParseErrorException";
 NSString * const NSDefaultRunLoopMode = @"kCFRunLoopDefaultMode";
 NSString * const NSUserDefaultsDidChangeNotification =
     @"NSUserDefaultsDidChangeNotification";
+
+/* Match Foundation shipped by iOS 10.3.3 rather than the host runtime. */
+double NSFoundationVersionNumber = 1350.0;
+
+NSRange NSIntersectionRange(NSRange range1, NSRange range2) {
+    const NSUInteger start = MAX(range1.location, range2.location);
+    const NSUInteger end = MIN(NSMaxRange(range1), NSMaxRange(range2));
+    if(end < start) return NSMakeRange(0, 0);
+    return NSMakeRange(start, end - start);
+}
 
 @implementation NSPlaceholderString : NSString
 @end
@@ -130,6 +146,18 @@ NSString *NSStringFromProtocol(Protocol *protocol) {
 id NSAllocateObject(Class aClass, NSUInteger extraBytes, NSZone *zone) {
     (void)zone;
     return aClass ? class_createInstance(aClass, extraBytes) : nil;
+}
+
+static uintptr_t LC32DefaultMallocZoneStorage;
+
+NSZone *NSDefaultMallocZone(void) {
+    /* Preserve the legacy non-null identity; allocation itself ignores it. */
+    return (NSZone *)&LC32DefaultMallocZoneStorage;
+}
+
+NSZone *NSZoneFromPointer(void *pointer) {
+    (void)pointer;
+    return NSDefaultMallocZone();
 }
 
 NSString *NSTemporaryDirectory() {

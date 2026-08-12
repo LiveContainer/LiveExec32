@@ -21,9 +21,61 @@ CFDictionaryRef CFBundleGetInfoDictionary(CFBundleRef bundle) {
         : NULL;
 }
 
+CFStringRef CFBundleGetIdentifier(CFBundleRef bundle) {
+    return bundle ? (CFStringRef)LC32_CF_CALL(
+        LC32CoreFoundationOpBundleGetIdentifier,
+        LC32_CF_HOST(bundle)) : NULL;
+}
+
+CFStringRef CFBundleCopyLocalizedString(
+        CFBundleRef bundle, CFStringRef key, CFStringRef value,
+        CFStringRef tableName) {
+    if(!bundle || !key) return value ? (CFStringRef)CFRetain(value) : NULL;
+    return (CFStringRef)LC32_CF_CALL(
+        LC32CoreFoundationOpBundleCopyLocalizedString,
+        LC32_CF_HOST(bundle), LC32_CF_HOST(key), LC32_CF_HOST(value),
+        LC32_CF_HOST(tableName));
+}
+
+CFURLRef CFBundleCopyResourceURL(
+        CFBundleRef bundle, CFStringRef resourceName,
+        CFStringRef resourceType, CFStringRef subDirName) {
+    if(!bundle || !resourceName) return NULL;
+    return (CFURLRef)LC32_CF_CALL(
+        LC32CoreFoundationOpBundleCopyResourceURL,
+        LC32_CF_HOST(bundle), LC32_CF_HOST(resourceName),
+        LC32_CF_HOST(resourceType), LC32_CF_HOST(subDirName));
+}
+
+CFBundleRef CFBundleCreate(CFAllocatorRef allocator, CFURLRef bundleURL) {
+    (void)allocator;
+    return bundleURL ? (CFBundleRef)LC32_CF_CALL(
+        LC32CoreFoundationOpBundleCreate,
+        LC32_CF_HOST(bundleURL)) : NULL;
+}
+
+CFBundleRef CFBundleGetBundleWithIdentifier(CFStringRef bundleID) {
+    return bundleID ? (CFBundleRef)LC32_CF_CALL(
+        LC32CoreFoundationOpBundleGetBundleWithIdentifier,
+        LC32_CF_HOST(bundleID)) : NULL;
+}
+
+void *CFBundleGetFunctionPointerForName(
+        CFBundleRef bundle, CFStringRef functionName) {
+    if(!bundle || !functionName) return NULL;
+    return (void *)(uintptr_t)LC32_CF_CALL(
+        LC32CoreFoundationOpBundleGetFunctionPointerForName,
+        LC32_CF_HOST(bundle), LC32_CF_HOST(functionName));
+}
+
 CFRunLoopRef CFRunLoopGetMain(void) {
     return (CFRunLoopRef)LC32_CF_CALL0(
         LC32CoreFoundationOpRunLoopGetMain);
+}
+
+CFRunLoopRef CFRunLoopGetCurrent(void) {
+    return (CFRunLoopRef)LC32_CF_CALL0(
+        LC32CoreFoundationOpRunLoopGetCurrent);
 }
 
 CFUUIDRef CFUUIDCreate(CFAllocatorRef allocator) {

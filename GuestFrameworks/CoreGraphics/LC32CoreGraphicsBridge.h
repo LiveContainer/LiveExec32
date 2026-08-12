@@ -5,7 +5,8 @@
 
 enum {
     LC32CoreGraphicsABIVersion = 1,
-    LC32CoreGraphicsMaxSlots = 8,
+    LC32CoreGraphicsMaxSlots = 12,
+    LC32CoreGraphicsMaximumFilenameBytes = 64 * 1024,
 };
 
 typedef struct {
@@ -29,6 +30,15 @@ typedef enum : uint32_t {
     LC32CoreGraphicsOpColorGetNumberOfComponents = 12,
     LC32CoreGraphicsOpColorCopyComponents = 13,
     LC32CoreGraphicsOpColorSpaceGetModel = 14,
+    LC32CoreGraphicsOpDataProviderCreateWithFilename = 15,
+    LC32CoreGraphicsOpImageCreateWithJPEGDataProvider = 16,
+    LC32CoreGraphicsOpImageCreateWithPNGDataProvider = 17,
+    LC32CoreGraphicsOpPathCreateMutable = 18,
+    LC32CoreGraphicsOpPathAddLineToPoint = 19,
+    LC32CoreGraphicsOpPathContainsPoint = 20,
+    LC32CoreGraphicsOpPathMoveToPoint = 21,
+    LC32CoreGraphicsOpPathCloseSubpath = 22,
+    LC32CoreGraphicsOpPathRelease = 23,
 } LC32CoreGraphicsOpcode;
 
 #endif

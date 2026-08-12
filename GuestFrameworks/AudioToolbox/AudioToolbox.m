@@ -7,6 +7,14 @@
 
 #import "LC32AudioToolboxBridge.h"
 
+/* Deprecated AudioSession route dictionary values retained for old apps. */
+const CFStringRef kAudioSessionInputRoute_BuiltInMic =
+    CFSTR("MicrophoneBuiltIn");
+const CFStringRef kAudioSession_AudioRouteKey_Inputs =
+    CFSTR("RouteDetailedDescription_Inputs");
+const CFStringRef kAudioSession_AudioRouteKey_Type =
+    CFSTR("RouteDetailedDescription_PortType");
+
 static pthread_once_t LC32AudioToolboxDispatcherOnce = PTHREAD_ONCE_INIT;
 static uint64_t LC32AudioToolboxDispatcherAddress;
 
@@ -106,6 +114,37 @@ OSStatus AudioSessionSetActive(Boolean active) {
 
 OSStatus AudioSessionSetProperty(AudioSessionPropertyID inID, UInt32 inDataSize, const void * inData) {
     return 0; // deprecated
+}
+
+OSStatus AudioSessionAddPropertyListener(
+        AudioSessionPropertyID inID,
+        AudioSessionPropertyListener inProc,
+        void *inClientData) {
+    /*
+     * Modern AVAudioSession notifications cover the properties used by old
+     * applications.  Keep registration source-compatible for now; forwarding
+     * the callback itself requires a host-to-guest trampoline and is added
+     * independently of the legacy API's basic availability.
+     */
+    (void)inID;
+    (void)inProc;
+    (void)inClientData;
+    return noErr;
+}
+
+OSStatus AudioSessionRemovePropertyListener(AudioSessionPropertyID inID) {
+    (void)inID;
+    return noErr;
+}
+
+OSStatus AudioSessionRemovePropertyListenerWithUserData(
+        AudioSessionPropertyID inID,
+        AudioSessionPropertyListener inProc,
+        void *inClientData) {
+    (void)inID;
+    (void)inProc;
+    (void)inClientData;
+    return noErr;
 }
 
 OSStatus AudioSessionGetProperty(AudioSessionPropertyID property,
