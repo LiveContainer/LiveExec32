@@ -197,6 +197,38 @@ uint64_t LC32SynchronizeMutableDataGuestBytes(NSMutableData *data) {
     }
 }
 
+- (instancetype)initWithBytes:(const void *)bytes
+                        length:(NSUInteger)length {
+    /*
+     * Native Foundation cannot dereference an ARM32 address.  NSData's
+     * manual class constructor copies the bytes through the guest-memory
+     * bridge; the generated initWithData: shim can then initialize this
+     * exact class-cluster placeholder and adopt its native result safely.
+     */
+    NSData *data = [NSData dataWithBytes:bytes length:length];
+    if(!data) return LC32DisposeFailedInit(self);
+    return [self initWithData:data];
+}
+
+- (instancetype)initWithBytesNoCopy:(void *)bytes
+                              length:(NSUInteger)length {
+    return [self initWithBytesNoCopy:bytes length:length
+                         freeWhenDone:NO];
+}
+
+- (instancetype)initWithBytesNoCopy:(void *)bytes
+                              length:(NSUInteger)length
+                        freeWhenDone:(BOOL)freeWhenDone {
+    /*
+     * A native NSData cannot retain an ARM32 allocation.  Copy the bytes
+     * synchronously through the existing safe initializer, then honor the
+     * ownership transfer in the guest address space.
+     */
+    id result = [self initWithBytes:bytes length:length];
+    if(freeWhenDone) free(bytes);
+    return result;
+}
+
 - (NSData *)subdataWithRange:(NSRange)range {
     /*
      * The generated shim cannot yet marshal aggregate arguments.  ARM64

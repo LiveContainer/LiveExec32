@@ -10030,7 +10030,12 @@ static bool TryGrantNativeGuestRwlockLocked(
         return false;
     }
 
-    std::vector<std::shared_ptr<NativeGuestWaiter>> candidates;
+    /* Mirror the kernel's find_seq_till gate: an unlock owes
+     * expectedWaiters grants, and only waiters whose generation is
+     * at-or-before the unlocker's lgen count toward that debt.  Waiters
+     * that raced ahead (newer generations) are not owed by this unlock,
+     * so they must not trigger it. */
+    size_t eligible = 0;
     for (const auto &waiter : nativeGuestWaiters) {
         if (!waiter->signaled &&
                 waiter->kind == GuestThreadWaitKind::Rwlock &&
@@ -10039,10 +10044,29 @@ static bool TryGrantNativeGuestRwlockLocked(
                     GuestRwlockWaitType::None &&
                 GuestPsynchSequenceLowerOrEqual(
                     waiter->rwlockSequence, unlockIt->lgen)) {
-            candidates.push_back(waiter);
+            eligible++;
         }
     }
-    if (candidates.size() < unlockIt->expectedWaiters) {
+    if (eligible < unlockIt->expectedWaiters) {
+        return false;
+    }
+
+    /* Once the unlock is owed and enough eligible waiters have arrived,
+     * every waiter at this address participates in the grant.  Mirror
+     * kwq_handle_unlock/ksyn_wakeupreaders: with no writer queued, wake
+     * ALL readers regardless of generation; a reader that raced ahead of
+     * the unlocker's lgen must still be released. */
+    std::vector<std::shared_ptr<NativeGuestWaiter>> waiters;
+    for (const auto &waiter : nativeGuestWaiters) {
+        if (!waiter->signaled &&
+                waiter->kind == GuestThreadWaitKind::Rwlock &&
+                waiter->address == address &&
+                waiter->rwlockWaitType !=
+                    GuestRwlockWaitType::None) {
+            waiters.push_back(waiter);
+        }
+    }
+    if (waiters.empty()) {
         return false;
     }
 
@@ -10054,9 +10078,9 @@ static bool TryGrantNativeGuestRwlockLocked(
         }), nativeGuestRwlockOverlaps.end());
 
     std::shared_ptr<NativeGuestWaiter> lowest =
-        candidates.front();
+        waiters.front();
     std::shared_ptr<NativeGuestWaiter> lowestWriter;
-    for (const auto &waiter : candidates) {
+    for (const auto &waiter : waiters) {
         if (GuestPsynchSequenceLower(
                 waiter->rwlockSequence,
                 lowest->rwlockSequence)) {
@@ -10076,7 +10100,7 @@ static bool TryGrantNativeGuestRwlockLocked(
             GuestRwlockWaitType::Write) {
         granted.push_back(lowest);
     } else {
-        for (const auto &waiter : candidates) {
+        for (const auto &waiter : waiters) {
             if (waiter->rwlockWaitType !=
                     GuestRwlockWaitType::Read) {
                 continue;
@@ -10162,7 +10186,30 @@ static u32 PostNativeGuestRwlockUnlockLocked(
     }
 
     u32 update = 0;
-    if (TryGrantNativeGuestRwlockLocked(address, &update)) {
+    const bool granted =
+        TryGrantNativeGuestRwlockLocked(address, &update);
+    if (getenv("LC32_DEBUG_RWLOCK")) {
+        size_t waiters = 0, writers = 0, readers = 0;
+        for (const auto &w : nativeGuestWaiters) {
+            if (!w->signaled && w->kind == GuestThreadWaitKind::Rwlock &&
+                    w->address == address) {
+                waiters++;
+                if (w->rwlockWaitType == GuestRwlockWaitType::Write) {
+                    writers++;
+                } else {
+                    readers++;
+                }
+            }
+        }
+        fprintf(stderr,
+            "LC32 rw debug: unlock addr=0x%x lgen=%x ugen=%x "
+            "rw=%x expected=%zu waiters=%zu(read=%zu wr=%zu) "
+            "granted=%d update=%x\n",
+            address, lgen, ugen, rwSequence, expected,
+            waiters, readers, writers, granted ? 1 : 0, update);
+        fflush(stderr);
+    }
+    if (granted) {
         return update;
     }
     /* Apple records the missing waiter generations as a prepost. */
@@ -10206,6 +10253,20 @@ static u32 WaitNativeGuestThread(
     nativeGuestWaiters.push_back(waiter);
     if (kind == GuestThreadWaitKind::Rwlock) {
         (void)TryGrantNativeGuestRwlockLocked(address);
+    }
+    if (getenv("LC32_DEBUG_RWLOCK") &&
+            kind == GuestThreadWaitKind::Rwlock) {
+        size_t pendingUnlocks = 0;
+        for (const auto &u : nativeGuestRwlockUnlocks) {
+            if (u.address == address) pendingUnlocks++;
+        }
+        fprintf(stderr,
+            "LC32 rw debug: wait addr=0x%x type=%d lgen=%x "
+            "rw=%x signaled=%d pendingUnlocks=%zu\n",
+            address, (int)rwlockWaitType, rwlockSequence,
+            rwlockStateSequence, waiter->signaled ? 1 : 0,
+            pendingUnlocks);
+        fflush(stderr);
     }
     if (!waiter->signaled) {
         lock.unlock();

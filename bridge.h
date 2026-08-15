@@ -92,6 +92,7 @@ u32 guest_ivar_getName(u32 guest_ivar);
 u32 guest_ivar_getTypeEncoding(u32 guest_ivar);
 u32 guest_object_getClass(u32 guest_obj);
 u32 guest_object_setInstanceVariable(u32 guest_obj, const char *host_name, u32 newValue);
+u32 guest_object_getInstanceVariable(u32 guest_obj, const char *host_name, u32 *outValue);
 u32 guest_protocol_getName(u32 guest_ivar);
 u32 guest_sel_registerName(const char *host_name);
 u32 guest_objc_getClass(const char *name);

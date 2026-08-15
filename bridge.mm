@@ -1007,6 +1007,23 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
     Method method = dispatchClass
         ? class_getInstanceMethod(dispatchClass, selector)
         : nullptr;
+    if(!method && invokeSuper) {
+        /*
+         * A guest-backed mirror forwarded this message to the host, but the
+         * host class chain has no implementation for it.  The guest framework
+         * shims (e.g. the iOS-10 UITableView) carry delegate-callback methods
+         * such as scrollViewDidEndDecelerating: which the newer host UIKit
+         * refactored away, so the mirror legitimately responds to them while
+         * the host dispatch finds nothing.  Real iOS would run the class's
+         * own inherited implementation; the correct emulation is a no-op, not
+         * raising "unrecognized selector" through the host forwarder.
+         */
+        printf("LC32: host dispatch for %s on guest-mirror %s has no "
+               "implementation; ignoring\n",
+               sel_getName(selector),
+               receiver ? class_getName(object_getClass(receiver)) : "<nil>");
+        return 0;
+    }
     if(method) {
         const unsigned int argumentCount =
             MIN(method_getNumberOfArguments(method) - 2, 9u);
@@ -2516,6 +2533,50 @@ void LC32SetGuestNSObjectIvar(id self, SEL _cmd, id value) {
     LC32SetGuestScalarIvar(self, _cmd, (u64)[value guest_self]);
 }
 
+/*
+ * A getter selector spelling does not always determine its guest ivar: the
+ * property-cased getter (pendingRequests) may back the underscored ivar
+ * (_pendingRequests).  Record the exact ivar name while addGuestIvar installs
+ * each synthetic getter.  Selectors are interned by the runtime and outlive
+ * the class, so the cstring key is stable.
+ */
+static std::mutex LC32GuestIvarGetterMutex;
+static std::unordered_map<const char *, std::string> LC32GuestIvarNameForGetter;
+
+static void LC32RegisterGuestIvarGetter(SEL getter, const char *ivarName) {
+    if(!getter || !ivarName || !*ivarName) return;
+    std::lock_guard<std::mutex> lock(LC32GuestIvarGetterMutex);
+    LC32GuestIvarNameForGetter[sel_getName(getter)] = ivarName;
+}
+
+static const char *LC32GuestIvarNameForGetterSelector(SEL getter) {
+    if(!getter) return nullptr;
+    std::lock_guard<std::mutex> lock(LC32GuestIvarGetterMutex);
+    auto iterator = LC32GuestIvarNameForGetter.find(sel_getName(getter));
+    return iterator == LC32GuestIvarNameForGetter.end()
+        ? nullptr : iterator->second.c_str();
+}
+
+id LC32GetGuestNSObjectIvar(id self, SEL _cmd) {
+    const char *ivarName = LC32GuestIvarNameForGetterSelector(_cmd);
+    if(!ivarName) return nil;
+    u32 guestValue = 0;
+    guest_object_getInstanceVariable([self guest_self], ivarName,
+                                     &guestValue);
+    if(!guestValue) return nil;
+    /* Resolve the guest object to its native peer (creating one if needed). */
+    return (id)LC32GuestToHostReturnType((char *)"@", guestValue);
+}
+
+u64 LC32GetGuestScalarIvar(id self, SEL _cmd) {
+    const char *ivarName = LC32GuestIvarNameForGetterSelector(_cmd);
+    if(!ivarName) return 0;
+    u32 guestValue = 0;
+    guest_object_getInstanceVariable([self guest_self], ivarName,
+                                     &guestValue);
+    return (u64)(u32)guestValue;
+}
+
 u32 guest_dlsym(const char *host_name) {
     DynarmicGuestStackString guest_name(host_name);
     u32 args[] = {(u32)(u64)RTLD_DEFAULT, guest_name.guestPtr};
@@ -2626,6 +2687,29 @@ u32 guest_object_setInstanceVariable(u32 guest_obj, const char *host_name, u32 n
     DynarmicGuestStackString guest_name(host_name);
     u32 args[] = {guest_obj, guest_name.guestPtr, newValue};
     return LC32InvokeGuestC(guestPtr, false, sizeof(args)/sizeof(*args), args);
+}
+
+u32 guest_object_getInstanceVariable(u32 guest_obj, const char *host_name, u32 *outValue) {
+    static std::atomic<u32> cache{0};
+    const u32 guestPtr = LC32CachedGuestSymbol(
+        cache, "object_getInstanceVariable");
+    DynarmicGuestStackString guest_name(host_name);
+    /* ARM32 object_getInstanceVariable writes one pointer-sized value; zero
+     * the whole slot so unread upper bytes never leak stack garbage. */
+    u32 guest_outValue = threadHandle.jit->Regs()[Reg::SP] -= sizeof(u64);
+    const u64 zero = 0;
+    Dynarmic_mem_1write(guest_outValue, sizeof(zero),
+                        const_cast<char *>(
+                            reinterpret_cast<const char *>(&zero)));
+    u32 args[] = {guest_obj, guest_name.guestPtr, guest_outValue};
+    const u32 result = LC32InvokeGuestC(
+        guestPtr, false, sizeof(args)/sizeof(*args), args);
+    if(outValue) {
+        *outValue = Dynarmic_current_user_callbacks()->MemoryRead32(
+            guest_outValue);
+    }
+    threadHandle.jit->Regs()[Reg::SP] += sizeof(u64);
+    return result;
 }
 
 u32 guest_protocol_getName(u32 guest_protocol) {
@@ -3410,6 +3494,65 @@ static const char *LC32ExpectedHostMethodTypes(Class cls, SEL selector) {
         if(literalIvarSetterName[0]) {
             class_addMethod(cls, sel_registerName(literalIvarSetterName),
                             setterImplementation, setterTypeEncoding);
+        }
+    }
+
+    /*
+     * Mirror the setters with KVC-compliant getters.  Without them the host
+     * proxy has no accessor for a guest ivar, so KVC falls into
+     * valueForUndefinedKey: and raises NSUnknownKeyException.  Register both
+     * the raw underscore spelling (the literal ivar name) and the
+     * property-cased spelling for underscored ivars, matching how KVC probes
+     * both when the key itself is underscored.
+     */
+    char getterName[0x50];
+    char propertyGetterName[0x50] = {};
+    if(name.hostPtr[0] == '_') {
+        snprintf(getterName, sizeof(getterName)-1, "%s", name.hostPtr);
+        snprintf(propertyGetterName, sizeof(propertyGetterName)-1,
+                 "%c%s", toupper(name.hostPtr[1]), &name.hostPtr[2]);
+    } else {
+        snprintf(getterName, sizeof(getterName)-1, "%s", name.hostPtr);
+    }
+
+    char getterTypeEncoding[10];
+    snprintf(getterTypeEncoding, sizeof(getterTypeEncoding)-1,
+             "%c@:", typeEncoding.hostPtr[0]);
+
+    IMP getterImplementation = nullptr;
+    switch(typeEncoding.hostPtr[0]) {
+        case '@':
+        case '#':
+            getterImplementation = (IMP)&LC32GetGuestNSObjectIvar;
+            break;
+        case 'B':
+        case 'C':
+        case 'I':
+        case 'L':
+        case 'Q':
+        case 'S':
+        case 'b':
+        case 'c':
+        case 'i':
+        case 'l':
+        case 'q':
+        case 's':
+            getterImplementation = (IMP)&LC32GetGuestScalarIvar;
+            break;
+        default:
+            break;
+    }
+    if(getterImplementation) {
+        SEL rawGetterSelector = sel_registerName(getterName);
+        class_addMethod(cls, rawGetterSelector, getterImplementation,
+                        getterTypeEncoding);
+        LC32RegisterGuestIvarGetter(rawGetterSelector, name.hostPtr);
+        if(propertyGetterName[0]) {
+            SEL propertyGetterSelector =
+                sel_registerName(propertyGetterName);
+            class_addMethod(cls, propertyGetterSelector, getterImplementation,
+                            getterTypeEncoding);
+            LC32RegisterGuestIvarGetter(propertyGetterSelector, name.hostPtr);
         }
     }
 

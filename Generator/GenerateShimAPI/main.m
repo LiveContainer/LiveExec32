@@ -686,7 +686,15 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
         return [selector isEqualToString:@"bytes"] ||
                [selector isEqualToString:@"getBytes:"] ||
                [selector isEqualToString:@"getBytes:length:"] ||
-               [selector isEqualToString:@"getBytes:range:"];
+               [selector isEqualToString:@"getBytes:range:"] ||
+               /* r^v/^v byte buffers: native Foundation cannot dereference
+                * an ARM32 address, so the guest adapter copies through the
+                * guest-memory bridge before initializing. */
+               [selector isEqualToString:@"initWithBytes:length:"] ||
+               [selector isEqualToString:
+                   @"initWithBytesNoCopy:length:"] ||
+               [selector isEqualToString:
+                   @"initWithBytesNoCopy:length:freeWhenDone:"];
     }
     if([className isEqualToString:@"NSValue"]) {
         if(!method.isInstanceMethod) {
