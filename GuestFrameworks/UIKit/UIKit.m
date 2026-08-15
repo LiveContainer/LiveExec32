@@ -131,10 +131,12 @@ static pthread_once_t LC32UIKitGeometryOnce = PTHREAD_ONCE_INIT;
 static uint64_t LC32UIKitNSStringFromCGSize;
 static uint64_t LC32UIKitCGSizeFromString;
 static uint64_t LC32UIKitBeginImageContext;
+static uint64_t LC32UIKitBeginImageContextWithOptions;
 static uint64_t LC32UIKitEndImageContext;
 static uint64_t LC32UIKitGetCurrentContext;
 static uint64_t LC32UIKitGetImageFromCurrentImageContext;
-
+static uint64_t LC32UIKitJPEGRepresentation;
+static uint64_t LC32UIKitSetWindowRootViewController;
 static void LC32UIImageResolveCGImageSelector(void) {
     LC32UIImageCGImageSelector = LC32GetHostSelector(@selector(CGImage));
 }
@@ -146,12 +148,18 @@ static void LC32UIKitResolveGeometryFunctions(void) {
         LC32Dlsym("LC32_UIKit_CGSizeFromString", YES);
     LC32UIKitBeginImageContext =
         LC32Dlsym("LC32_UIKit_UIGraphicsBeginImageContext", YES);
+    LC32UIKitBeginImageContextWithOptions = LC32Dlsym(
+        "LC32_UIKit_UIGraphicsBeginImageContextWithOptions", YES);
     LC32UIKitEndImageContext =
         LC32Dlsym("LC32_UIKit_UIGraphicsEndImageContext", YES);
     LC32UIKitGetCurrentContext =
         LC32Dlsym("LC32_UIKit_UIGraphicsGetCurrentContext", YES);
     LC32UIKitGetImageFromCurrentImageContext = LC32Dlsym(
         "LC32_UIKit_UIGraphicsGetImageFromCurrentImageContext", YES);
+    LC32UIKitJPEGRepresentation =
+        LC32Dlsym("LC32_UIKit_UIImageJPEGRepresentation", YES);
+    LC32UIKitSetWindowRootViewController = LC32Dlsym(
+        "LC32_UIKit_SetWindowRootViewController", YES);
 }
 
 static uint32_t LC32UIKitFloatBits(CGFloat value) {
@@ -196,6 +204,17 @@ void UIGraphicsBeginImageContext(CGSize size) {
         LC32UIKitFloatBits(size.height));
 }
 
+void UIGraphicsBeginImageContextWithOptions(CGSize size, BOOL opaque,
+                                             CGFloat scale) {
+    pthread_once(&LC32UIKitGeometryOnce,
+        LC32UIKitResolveGeometryFunctions);
+    if(!LC32UIKitBeginImageContextWithOptions) return;
+    LC32InvokeHostCRet32(LC32UIKitBeginImageContextWithOptions,
+        LC32UIKitFloatBits(size.width),
+        LC32UIKitFloatBits(size.height),
+        (uint32_t)opaque, LC32UIKitFloatBits(scale));
+}
+
 void UIGraphicsEndImageContext(void) {
     pthread_once(&LC32UIKitGeometryOnce,
         LC32UIKitResolveGeometryFunctions);
@@ -220,6 +239,30 @@ UIImage *UIGraphicsGetImageFromCurrentImageContext(void) {
     return (__bridge UIImage *)(void *)(uintptr_t)guestImage;
 }
 
+NSData *UIImageJPEGRepresentation(UIImage *image,
+                                  CGFloat compressionQuality) {
+    if(!image) return nil;
+    pthread_once(&LC32UIKitGeometryOnce,
+        LC32UIKitResolveGeometryFunctions);
+    if(!LC32UIKitJPEGRepresentation) return nil;
+    const uint32_t guestData = LC32InvokeHostCRet32(
+        LC32UIKitJPEGRepresentation, image.host_self,
+        LC32UIKitFloatBits(compressionQuality));
+    return (__bridge NSData *)(void *)(uintptr_t)guestData;
+}
+
+@implementation UIWindow (LC32MainThreadRootViewController)
+
+- (void)setRootViewController:(UIViewController *)rootViewController {
+    pthread_once(&LC32UIKitGeometryOnce,
+        LC32UIKitResolveGeometryFunctions);
+    if(!LC32UIKitSetWindowRootViewController) return;
+    LC32InvokeHostCRet32(LC32UIKitSetWindowRootViewController,
+        self.host_self, [rootViewController host_self]);
+}
+
+@end
+
 @implementation UIImage (LC32CoreGraphics)
 
 + (UIImage *)imageNamed:(NSString *)name {
@@ -240,9 +283,8 @@ compatibleWithTraitCollection:nil];
     const uint64_t selector = LC32CachedHostSelector(
         &hostSelector, _cmd, NO);
     const uint64_t hostImage = [(__bridge id)image host_self];
-    const uint64_t hostResult = LC32InvokeHostSelector(
+    return LC32InvokeHostObjectSelector(
         self.host_self, selector, hostImage, (uint64_t)0);
-    return LC32HostToGuestObject(hostResult);
 }
 
 + (UIImage *)imageWithCGImage:(CGImageRef)image
@@ -261,20 +303,16 @@ compatibleWithTraitCollection:nil];
      */
     const double hostScale = (double)scale;
     const uint64_t hostOrientation = (uint64_t)(int64_t)orientation;
-    const uint64_t hostResult = LC32InvokeHostSelector(
+    return LC32InvokeHostObjectSelector(
         self.host_self, selector, hostImage, hostScale, hostOrientation,
         (uint64_t)0);
-    return LC32HostToGuestObject(hostResult);
 }
 
 - (CGImageRef)CGImage {
     pthread_once(&LC32UIImageCGImageOnce,
         LC32UIImageResolveCGImageSelector);
-    uint64_t hostImage = LC32InvokeHostSelector(
+    return (__bridge CGImageRef)LC32InvokeHostObjectSelector(
         self.host_self, LC32UIImageCGImageSelector);
-    return hostImage
-        ? (__bridge CGImageRef)LC32HostToGuestObject(hostImage)
-        : NULL;
 }
 
 @end

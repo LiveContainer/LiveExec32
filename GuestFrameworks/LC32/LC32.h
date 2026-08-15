@@ -2,6 +2,7 @@
 #import <Foundation/Foundation.h>
 
 #include <stdarg.h>
+#include <LC32BlockBridgeABI.h>
 #include <LC32FoundationBridgeABI.h>
 #include <LC32ObjCBridgeABI.h>
 
@@ -39,6 +40,22 @@ uint32_t LC32InvokeHostCRet32(uint64_t hostPtr, ...);
 
 // Used to make guest call from host. r12 is guest function pointer. It then issues svc 1009 to halt itself to return execution back to the host
 uint64_t LC32InvokeGuestC();
+
+// Private native-thread callback dispatcher. The host blocks in Wait until a
+// native block invocation is available, then the guest acknowledges it after
+// running the block in ordinary emulated execution.
+uint32_t LC32GuestCallbackExecutorWait(
+    LC32GuestBlockCallbackDescriptor *descriptor);
+uint32_t LC32GuestCallbackExecutorComplete(uint32_t identifier);
+
+// Atomically acquire the native +1 paired with objc_loadWeakRetained's guest
+// +1. Implemented by private SVC 1019; see LC32HostWeakRetainStatus.
+LC32HostWeakRetainStatus LC32TryRetainHostWeakReference(
+    uint32_t guest_object);
+
+// Host lifetime pins call this guest-only root release and use the return
+// value to decide whether a retiring weak-registry tombstone can be removed.
+uint32_t LC32ReleaseGuestLifetimePin(id guest_object);
 
 // Returns an address pointing to either direct memory mapped to the guest, or copied in case its boundary exceeds a guest page
 // TODO: For now, this should be read-only. There is currently no mechanism to flush the copied buffer back
@@ -81,6 +98,10 @@ Class LC32HostToGuestClass(uint64_t address);
 // Get the guest object pointer from host
 id LC32HostToGuestObject(uint64_t host_object);
 
+// Convert an Objective-C +1 result (alloc/new/copy/mutableCopy family) and
+// transfer that ownership to the guest proxy.
+id LC32HostToGuestOwnedObject(uint64_t host_object) NS_RETURNS_RETAINED;
+
 // Dispose an allocated guest proxy when its corresponding host initializer
 // returns nil. This lives in the non-ARC LC32 framework so generated ARC and
 // non-ARC shims can share the same failed-initializer path.
@@ -101,12 +122,54 @@ uint64_t LC32CachedHostSelector(
 // If the most significant bit of selector is set, 2 additional uint32_t arguments are reserved for return struct pointer and size
 uint64_t LC32InvokeHostSelector(uint64_t object, uint64_t selector, ...);
 
+// Invoke a host Objective-C method whose borrowed (+0) object result must be
+// converted to its guest proxy before returning from the same SVC.  Keep this
+// entry point object-typed so ARC applies the callee's +0 ownership contract
+// instead of inferring ownership from an integer-to-object cast.
+id LC32InvokeHostObjectSelector(uint64_t object, uint64_t selector, ...)
+    NS_RETURNS_NOT_RETAINED;
+
+/*
+ * Borrowed host results already remain valid through the native method's
+ * autorelease lifetime, and their reverse mapping pins the guest proxy until
+ * that host object dies.  Returning the proxy directly is also the correct
+ * MRC-to-ARC boundary: without a return-value handshake an ARC caller falls
+ * back to an ordinary retain, which reaches the bridge's paired ownership
+ * implementation.
+ *
+ * Do not manufacture a guest retain/autorelease here.  Direct objc_retain can
+ * use libobjc's cached root-RR fast path and bypass the category method which
+ * mirrors ownership to the host.  The later guest autorelease token would then
+ * consume the native method's original +0 ownership and leave its original
+ * autorelease-pool entry pointing at a deallocated object.
+ */
+#define LC32ReturnBorrowedGuestObject(object) (object)
+
+// Mark a selector whose +0 Objective-C result must be converted to a guest
+// proxy atomically with its host invocation.
+static inline uint64_t LC32HostSelectorReturningGuestObject(
+        uint64_t selector) {
+    return selector | LC32_HOST_SELECTOR_RETURN_GUEST_OBJECT;
+}
+
 // Marks guest-owned temporary storage for a pointer argument. The host bridge
 // replaces the tagged ARM address with a native pointer for the duration of
 // objc_msgSend, then copies the 64-bit temporary back into guest memory.
 static inline uint64_t LC32HostIndirectArgument(const void *storage) {
     return storage
         ? LC32_GUEST_INDIRECT_ARGUMENT_TAG |
+            (uint64_t)(uint32_t)(uintptr_t)storage
+        : 0;
+}
+
+// Marks an eight-byte canonical floating-point cell. The host bridge uses the
+// native Objective-C method encoding to expose it as either float * or
+// double *, then widens the result back into the canonical double cell. This
+// is required when an ARM32 CGFloat * (`^f`) calls an ARM64 CGFloat * (`^d`).
+static inline uint64_t LC32HostFloatingIndirectArgument(
+        const void *storage) {
+    return storage
+        ? LC32_GUEST_FLOATING_INDIRECT_ARGUMENT_TAG |
             (uint64_t)(uint32_t)(uintptr_t)storage
         : 0;
 }
@@ -120,6 +183,63 @@ void LC32DestroyHostObjectArray(void *storage);
 static inline uint64_t LC32HostObjectArrayArgument(const void *storage) {
     return storage
         ? LC32_GUEST_OBJECT_ARRAY_ARGUMENT_TAG |
+            (uint64_t)(uint32_t)(uintptr_t)storage
+        : 0;
+}
+
+// Keep a converted ARM64 aggregate in guest-owned temporary storage and pass
+// one tagged logical argument through the variadic SVC transport. The host
+// consults the native method encoding to place the value in FP registers,
+// expand integer composites such as NSRange into GPRs, or, for aggregates
+// larger than 16 bytes, pass its native address indirectly.
+static inline uint64_t LC32HostAggregateArgument(const void *storage) {
+    return storage
+        ? LC32_GUEST_AGGREGATE_ARGUMENT_TAG |
+            (uint64_t)(uint32_t)(uintptr_t)storage
+        : 0;
+}
+
+/*
+ * NSRange changes width across this bridge: the ARM32 guest uses two
+ * uint32_t fields, while the native host uses two uint64_t fields. Keep the
+ * widened form in guest-owned storage so it can use the same tagged aggregate
+ * transport as CoreGraphics values. NSNotFound is NSIntegerMax in each ABI,
+ * so it needs an explicit width conversion in both directions.
+ */
+typedef struct LC32NSRange64 {
+    uint64_t location;
+    uint64_t length;
+} LC32NSRange64;
+
+static inline LC32NSRange64 LC32WidenNSRange(NSRange guest) {
+    const uint32_t guestNotFound = UINT32_C(0x7fffffff);
+    const uint64_t hostNotFound = UINT64_C(0x7fffffffffffffff);
+    LC32NSRange64 result = {
+        guest.location == guestNotFound ? hostNotFound : guest.location,
+        guest.length,
+    };
+    return result;
+}
+
+static inline NSRange LC32NarrowNSRange(LC32NSRange64 host) {
+    const uint64_t hostNotFound = UINT64_C(0x7fffffffffffffff);
+    if(host.location == hostNotFound) {
+        if(host.length > UINT32_MAX) return NSMakeRange(NSNotFound, 0);
+        return NSMakeRange(NSNotFound, (NSUInteger)host.length);
+    }
+    if(host.location > UINT32_MAX || host.length > UINT32_MAX) {
+        return NSMakeRange(NSNotFound, 0);
+    }
+    return NSMakeRange((NSUInteger)host.location, (NSUInteger)host.length);
+}
+
+// NSInvocation receives a pointer to raw ARM32 argument storage. Unlike an
+// ordinary indirect argument, the pointed-to value has not yet been widened
+// or translated for the ARM64 host ABI; LC32InvokeHostSelector performs that
+// conversion using the invocation's method signature.
+static inline uint64_t LC32HostInvocationArgument(const void *storage) {
+    return storage
+        ? LC32_GUEST_INVOCATION_ARGUMENT_TAG |
             (uint64_t)(uint32_t)(uintptr_t)storage
         : 0;
 }
@@ -138,6 +258,7 @@ static inline double LC32HostFloatingResult(uint64_t bits) {
 typedef NS_OPTIONS(uint32_t, LC32NSStringFormatOptions) {
     LC32NSStringFormatOptionHasLocale = 1 << 0,
     LC32NSStringFormatOptionArgumentsList = 1 << 1,
+    LC32NSStringFormatOptionReturnGuestObject = 1 << 2,
 };
 
 // Rebuild an ARM32 NSString format argument list for the ARM64 host. A guest
@@ -152,3 +273,10 @@ uint64_t LC32InvokeHostNSStringFormat(uint64_t object,
 
 // Get the host class pointer. If returnClass is false, it returns [clsss alloc]
 uint64_t LC32GetHostObject(id self, const char *name, bool returnClass);
+
+// Blocks must not use NSObject's cached host mirror: a native block owns a
+// copied guest block only for its own lifetime and may be invoked later.
+uint64_t LC32CreateHostBlock(id guestBlock);
+
+// Host bridge for LC32HostToGuestOwnedObject.
+uint32_t LC32GuestObjectForOwnedHostObjectAddress(uint64_t host_object);

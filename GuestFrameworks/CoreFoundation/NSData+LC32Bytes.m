@@ -197,4 +197,21 @@ uint64_t LC32SynchronizeMutableDataGuestBytes(NSMutableData *data) {
     }
 }
 
+- (NSData *)subdataWithRange:(NSRange)range {
+    /*
+     * The generated shim cannot yet marshal aggregate arguments.  ARM64
+     * passes the two NSUInteger members of NSRange in x2/x3, while the LC32
+     * selector trampoline consumes one widened stack slot per host register.
+     * Flatten the ARM32 range explicitly so NSMutableData inherits the same
+     * implementation without exposing a guest pointer to native Foundation.
+     */
+    static uint64_t hostSelector __attribute__((aligned(8)));
+    const uint64_t selector = LC32CachedHostSelector(
+        &hostSelector, _cmd, NO);
+    id result = LC32InvokeHostObjectSelector(
+        self.host_self, selector,
+        (uint64_t)range.location, (uint64_t)range.length, (uint64_t)0);
+    return LC32ReturnBorrowedGuestObject(result);
+}
+
 @end

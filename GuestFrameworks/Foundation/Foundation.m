@@ -22,8 +22,12 @@ const NSErrorDomain NSFilePathErrorKey = @"NSFilePathErrorKey";
 const NSErrorDomain NSURLErrorDomain = @"NSURLErrorDomain";
 const NSFileAttributeKey NSFileModificationDate = @"NSFileModificationDate";
 const NSFileAttributeKey NSFileSize = @"NSFileSize";
+const NSKeyValueChangeKey NSKeyValueChangeKindKey = @"kind";
 const NSKeyValueChangeKey NSKeyValueChangeNewKey = @"new";
 const NSKeyValueChangeKey NSKeyValueChangeOldKey = @"old";
+const NSKeyValueChangeKey NSKeyValueChangeIndexesKey = @"indexes";
+const NSKeyValueChangeKey NSKeyValueChangeNotificationIsPriorKey =
+    @"notificationIsPrior";
 const NSExceptionName NSParseErrorException = @"NSParseErrorException";
 NSString * const NSDefaultRunLoopMode = @"kCFRunLoopDefaultMode";
 NSString * const NSUserDefaultsDidChangeNotification =
@@ -78,6 +82,24 @@ void NSLog(NSString *format, ...) {
     va_start(arguments, format);
     NSLogv(format, arguments);
     va_end(arguments);
+}
+
+/*
+ * Keep the handler in the ARM32 process. Passing this function pointer to
+ * native Foundation would make an arm64 exception path branch into guest
+ * code directly. The legacy Foundation contract only requires process-wide
+ * set/get storage; guest exception machinery can retrieve and invoke it.
+ */
+static NSUncaughtExceptionHandler *LC32UncaughtExceptionHandler;
+
+NSUncaughtExceptionHandler *NSGetUncaughtExceptionHandler(void) {
+    return __atomic_load_n(
+        &LC32UncaughtExceptionHandler, __ATOMIC_ACQUIRE);
+}
+
+void NSSetUncaughtExceptionHandler(NSUncaughtExceptionHandler *handler) {
+    __atomic_store_n(
+        &LC32UncaughtExceptionHandler, handler, __ATOMIC_RELEASE);
 }
 
 static pthread_once_t LC32FoundationFunctionsOnce = PTHREAD_ONCE_INIT;

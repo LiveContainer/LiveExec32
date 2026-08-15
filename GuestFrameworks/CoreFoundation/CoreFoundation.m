@@ -83,6 +83,29 @@ CFURLRef CFURLCreateFromFileSystemRepresentation(
         LC32_CF_U32(isDirectory));
 }
 
+CFURLRef CFURLCreateWithString(CFAllocatorRef allocator,
+                               CFStringRef URLString,
+                               CFURLRef baseURL) {
+    (void)allocator;
+    if(!URLString) return NULL;
+    return (CFURLRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCreateWithString,
+        LC32_CF_HOST(URLString), LC32_CF_HOST(baseURL));
+}
+
+CFURLRef CFURLCreateWithBytes(CFAllocatorRef allocator,
+                              const UInt8 *URLBytes, CFIndex length,
+                              CFStringEncoding encoding,
+                              CFURLRef baseURL) {
+    (void)allocator;
+    if(length < 0 || (uint64_t)length > INT32_MAX ||
+       (length && !URLBytes)) return NULL;
+    return (CFURLRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCreateWithBytes,
+        LC32_CF_U32((uintptr_t)URLBytes), LC32_CF_U32(length),
+        LC32_CF_U32(encoding), LC32_CF_HOST(baseURL));
+}
+
 void CFRelease(CFTypeRef ref) {
     [(id)ref release];
 }

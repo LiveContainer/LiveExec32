@@ -14,7 +14,9 @@
 #include <dynarmic/exclusive_monitor.h>
 #endif
 #include "khash.h"
+#include "LC32BlockBridgeABI.h"
 #include "LC32FoundationBridgeABI.h"
+#include "LC32ObjCBridgeABI.h"
 #include "filesystem.h"
 #include "32bit.h"
 
@@ -252,6 +254,20 @@ extern __thread dynarmic_thread threadHandle;
 char *get_memory_page(u64 vaddr);
 void *get_memory(u64 vaddr);
 Dynarmic::A32::UserCallbacks *Dynarmic_current_user_callbacks();
+bool Dynarmic_guest_thread_is_registered();
+
+// Foreign native threads cannot borrow any guest JIT. In native-thread bridge
+// mode they synchronously hand block work to one serialized registered guest
+// pthread instead.
+bool Dynarmic_submit_guest_block_callback(
+    const LC32GuestBlockCallbackDescriptor *descriptor);
+bool Dynarmic_submit_guest_function_callback(
+    const LC32GuestBlockCallbackDescriptor *descriptor);
+bool Dynarmic_submit_guest_block_release(u32 guest_block);
+u32 LC32GuestCallbackExecutorSupported(u32 unused1, u32 unused2,
+                                       u32 unused3);
+u32 LC32GuestCallbackExecutorCreationResult(u32 error, u32 unused1,
+                                            u32 unused2);
 
 bool Dynarmic_nativeInitialize();
 void Dynarmic_nativeDestroy();
@@ -266,6 +282,9 @@ int Dynarmic_debugger_mem_write(u64 address, u64 size, char* src);
 bool Dynarmic_debugger_set_breakpoint(u64 address, size_t kind);
 bool Dynarmic_debugger_delete_breakpoint(u64 address, size_t kind);
 bool Dynarmic_debugger_has_breakpoint(u32 address);
+// Installs an opt-in, one-shot Thumb tracepoint.  Unlike debugger
+// breakpoints it logs and immediately replays the original instruction.
+bool Dynarmic_guest_tracepoint_set(u64 address);
 size_t Dynarmic_debugger_thread_ids(
     gdb_thread_id_t *ids, size_t capacity);
 gdb_thread_id_t Dynarmic_debugger_current_thread();
@@ -302,6 +321,9 @@ void Dynarmic_free(void *ctx);
 
 u64 LC32Dlsym(u32 guest_name, bool isFunction);
 u64 LC32GetHostObject(u32 guest_self, u32 guest_class, bool returnClass);
+u64 LC32CreateHostBlock(u32 guest_block);
+u32 LC32GuestObjectForOwnedHostObjectAddress(u64 object);
+LC32HostWeakRetainStatus LC32TryRetainHostWeakReference(u32 guest_object);
 u64 LC32GetHostSelector(u32 guest_selector);
 u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args);
 u64 LC32InvokeHostNSStringFormat(u64 host_self,
@@ -354,7 +376,15 @@ public:
     }
 
     // Initialize the wrapper with a given guest string pointer
-    DynarmicHostString(u32 guestPtr, u32 len = 0) : dirty{false}, guestPtr{guestPtr} {
+    DynarmicHostString(u32 guestPtr, u32 len = 0)
+        : shouldFree{false}, dirty{false}, totalLen{0}, guestPtr{guestPtr}, hostPtr{nullptr} {
+         // A null C string is a valid value at generated shim boundaries. Keep
+         // invalid non-null guest addresses fatal, but preserve nullptr rather
+         // than trying to translate guest address zero.
+         if(!guestPtr) {
+             return;
+         }
+
          char *dest = (char *)get_memory(guestPtr);
          if(!dest) {
              abort();

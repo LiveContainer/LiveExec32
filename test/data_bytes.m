@@ -29,6 +29,17 @@ int main(void) {
     [data getBytes:range range:NSMakeRange(6, sizeof(range))];
     BOOL rangePassed = !memcmp(range, "data", sizeof(range));
     printf("data-get-range: %s\n", rangePassed ? "PASS" : "FAIL");
+
+    const char mutableSource[] = "mutable-data";
+    NSMutableData *mutable = [NSMutableData dataWithCapacity:16];
+    [mutable appendBytes:mutableSource length:sizeof(mutableSource) - 1];
+    NSData *subdata = [mutable subdataWithRange:NSMakeRange(2, 4)];
+    BOOL subdataPassed = subdata.length == 4 && subdata.bytes &&
+        !memcmp(subdata.bytes, "tabl", 4);
+    printf("mutable-subdata-range: %s\n",
+        subdataPassed ? "PASS" : "FAIL");
+
     [pool drain];
-    return !(constructorPassed && bytesPassed && wholePassed && rangePassed);
+    return !(constructorPassed && bytesPassed && wholePassed && rangePassed &&
+             subdataPassed);
 }

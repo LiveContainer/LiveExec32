@@ -3,6 +3,8 @@
 #import <objc/runtime.h>
 #include "bridge.h"
 
+#include <dispatch/dispatch.h>
+
 /*
 symbol = r0 + r1 << 32
 r0 = r2
@@ -132,7 +134,12 @@ int LC32_UIKit_UIApplicationMain(u32 r2, u32 r3, u32 sp) {
     (void)launchObserver;
     char executableName[] = "exec";
     char *host_argv[] = {executableName, nullptr};
-    return UIApplicationMain(argc, host_argv, principalClassName, delegateClassName);
+    const int result = UIApplicationMain(
+        argc, host_argv, principalClassName, delegateClassName);
+    fprintf(stderr,
+        "LC32: host UIApplicationMain returned %d\n", result);
+    fflush(stderr);
+    return result;
 }
 
 u32 LC32_UIKit_NSStringFromCGSize(u32 widthBits, u32 heightBits, u32) {
@@ -173,6 +180,21 @@ void LC32_UIKit_UIGraphicsBeginImageContext(
     UIGraphicsBeginImageContext(CGSizeMake(width, height));
 }
 
+void LC32_UIKit_UIGraphicsBeginImageContextWithOptions(
+        u32 widthBits, u32 heightBits, u32 sp) {
+    float width;
+    float height;
+    float scale;
+    memcpy(&width, &widthBits, sizeof(width));
+    memcpy(&height, &heightBits, sizeof(height));
+    const BOOL opaque = Dynarmic_current_user_callbacks()->MemoryRead32(sp);
+    const u32 scaleBits =
+        Dynarmic_current_user_callbacks()->MemoryRead32(sp + sizeof(u32));
+    memcpy(&scale, &scaleBits, sizeof(scale));
+    UIGraphicsBeginImageContextWithOptions(
+        CGSizeMake(width, height), opaque, scale);
+}
+
 void LC32_UIKit_UIGraphicsEndImageContext(u32, u32, u32) {
     UIGraphicsEndImageContext();
 }
@@ -185,6 +207,60 @@ u32 LC32_UIKit_UIGraphicsGetCurrentContext(u32, u32, u32) {
 u32 LC32_UIKit_UIGraphicsGetImageFromCurrentImageContext(u32, u32, u32) {
     UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
     return image ? image.guest_self : 0;
+}
+
+u32 LC32_UIKit_UIImageJPEGRepresentation(
+        u32 imageLow, u32 imageHigh, u32 sp) {
+    UIImage *image = reinterpret_cast<UIImage *>(static_cast<uintptr_t>(
+        imageLow | (static_cast<u64>(imageHigh) << 32)));
+    const u32 qualityBits =
+        Dynarmic_current_user_callbacks()->MemoryRead32(sp);
+    float quality;
+    memcpy(&quality, &qualityBits, sizeof(quality));
+    NSData *data = image
+        ? UIImageJPEGRepresentation(image, static_cast<CGFloat>(quality))
+        : nil;
+    return data ? data.guest_self : 0;
+}
+
+void LC32_UIKit_SetWindowRootViewController(
+        u32 windowLow, u32 windowHigh, u32 sp) {
+    UIWindow *window = reinterpret_cast<UIWindow *>(static_cast<uintptr_t>(
+        windowLow | (static_cast<u64>(windowHigh) << 32)));
+    const u64 controllerAddress =
+        Dynarmic_current_user_callbacks()->MemoryRead64(sp);
+    UIViewController *controller = reinterpret_cast<UIViewController *>(
+        static_cast<uintptr_t>(controllerAddress));
+    if(!window) return;
+
+    dispatch_block_t setRoot = ^{
+        /* The host mirror may itself be a guest-defined UIWindow subclass.
+         * An ordinary objc_msgSend would re-enter that class's guest
+         * trampoline and eventually arrive back at this helper.  Start the
+         * lookup at the first native superclass, just as the generic selector
+         * bridge does for guest-super calls. */
+        Class dispatchClass = object_getClass(window);
+        while(dispatchClass && [(id)dispatchClass isGuestClass]) {
+            dispatchClass = class_getSuperclass(dispatchClass);
+        }
+        if(!dispatchClass) return;
+
+        struct objc_super superInfo = {window, dispatchClass};
+        using SetRootViewController =
+            void (*)(struct objc_super *, SEL, UIViewController *);
+        reinterpret_cast<SetRootViewController>(objc_msgSendSuper)(
+            &superInfo, @selector(setRootViewController:), controller);
+    };
+    if(pthread_main_np()) {
+        setRoot();
+    } else {
+        /* Guest network/operation callbacks execute on LC32's registered
+         * callback pthread. UIKit still requires window hierarchy mutations
+         * on the native main queue; dispatch_sync also preserves the legacy
+         * method's synchronous completion contract. Block captures retain
+         * both objects until the main-thread assignment has finished. */
+        dispatch_sync(dispatch_get_main_queue(), setRoot);
+    }
 }
 
 __END_DECLS

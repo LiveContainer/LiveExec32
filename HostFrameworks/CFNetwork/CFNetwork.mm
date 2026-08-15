@@ -5,8 +5,10 @@
 #include "../../GuestFrameworks/CFNetwork/LC32CFNetworkBridge.h"
 
 #include <climits>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
+#include <strings.h>
 #include <vector>
 
 #pragma clang diagnostic push
@@ -65,6 +67,57 @@ u32 GuestForCreatedObject(CFTypeRef object) {
 } // namespace
 
 __BEGIN_DECLS
+
+void LC32ConfigureLegacyAppTransportSecurity(
+        uint32_t guestSDKVersion) {
+    @autoreleasepool {
+        /*
+         * ATS was introduced for applications linked against the iOS 9 SDK.
+         * LiveContainer replaces the process's NSBundle/CFBundle main bundle
+         * with the selected guest bundle, while its SDK compatibility hook may
+         * report a newer SDK to modern UIKit. Consequently host CFNetwork sees
+         * a legacy guest's plist (with no ATS declaration) under modern linked
+         * semantics and rejects the cleartext traffic that app historically
+         * used.
+         *
+         * Restore only the pre-ATS default, in memory, and never override an
+         * app that supplied an explicit NSAppTransportSecurity policy. The
+         * environment override is useful for malformed/newer legacy binaries;
+         * setting it to 0 disables even the automatic pre-iOS-9 behavior.
+         */
+        const char *overrideValue = getenv("LC32_LEGACY_ATS");
+        const bool overridePresent =
+            overrideValue != nullptr && overrideValue[0] != '\0';
+        const bool overrideEnabled = overridePresent &&
+            strcmp(overrideValue, "0") != 0 &&
+            strcasecmp(overrideValue, "false") != 0 &&
+            strcasecmp(overrideValue, "no") != 0;
+        if((overridePresent && !overrideEnabled) ||
+           (!overrideEnabled &&
+            (guestSDKVersion == 0 || guestSDKVersion >= 0x00090000))) {
+            return;
+        }
+
+        CFBundleRef bundle = CFBundleGetMainBundle();
+        CFDictionaryRef immutableInfo = bundle
+            ? CFBundleGetInfoDictionary(bundle) : nullptr;
+        NSMutableDictionary *info =
+            (__bridge NSMutableDictionary *)immutableInfo;
+        if(![info isKindOfClass:NSMutableDictionary.class] ||
+           info[@"NSAppTransportSecurity"] != nil) {
+            return;
+        }
+
+        info[@"NSAppTransportSecurity"] = @{
+            @"NSAllowsArbitraryLoads": @YES
+        };
+        fprintf(stderr,
+            "LC32: enabled legacy ATS compatibility for guest SDK %u.%u.%u\n",
+            guestSDKVersion >> 16,
+            (guestSDKVersion >> 8) & 0xff,
+            guestSDKVersion & 0xff);
+    }
+}
 
 u32 LC32_CFNetwork_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
     LC32CFNetworkCall call;

@@ -5,7 +5,16 @@
 
 enum {
     LC32AudioToolboxABIVersion = 1,
-    LC32AudioToolboxMaxSlots = 6,
+    LC32AudioToolboxMaxSlots = 8,
+    LC32AudioQueueDisposeTerminalNone = 0,
+    LC32AudioQueueDisposeTerminalReleaseMirrors = 1,
+    /* The host has detached every native buffer mirror and will ask the
+     * guest cleanup thunk to release the guest allocations once callbacks
+     * and native disposal have both quiesced. */
+    LC32AudioQueueDisposeTerminalDeferredCleanup = 2,
+    /* Reserved for an inconsistent/failed host lifecycle where native code
+     * may still retain raw callback state and guest mirrors must stay alive. */
+    LC32AudioQueueDisposeTerminalQuarantineMirrors = 3,
 };
 
 typedef struct {
@@ -26,6 +35,32 @@ typedef enum : uint32_t {
     LC32AudioToolboxOpAudioFileGetProperty = 9,
     LC32AudioToolboxOpAudioFileReadBytes = 10,
     LC32AudioToolboxOpAudioFileClose = 11,
+    LC32AudioToolboxOpAudioFileCreateWithURL = 12,
+    LC32AudioToolboxOpAudioFileGetPropertyInfo = 13,
+    LC32AudioToolboxOpAudioFileReadPackets = 14,
+    LC32AudioToolboxOpAudioFileWriteBytes = 15,
+    LC32AudioToolboxOpAudioQueueNewInput = 16,
+    LC32AudioToolboxOpAudioQueueAllocateBuffer = 17,
+    LC32AudioToolboxOpAudioQueueEnqueueBuffer = 18,
+    LC32AudioToolboxOpAudioQueueFreeBuffer = 19,
+    LC32AudioToolboxOpAudioQueueGetProperty = 20,
+    LC32AudioToolboxOpAudioQueueSetProperty = 21,
+    LC32AudioToolboxOpAudioQueueDeviceGetCurrentTime = 22,
+    LC32AudioToolboxOpAudioQueueStart = 23,
+    LC32AudioToolboxOpAudioQueueStop = 24,
+    LC32AudioToolboxOpAudioQueuePause = 25,
+    LC32AudioToolboxOpAudioQueueDispose = 26,
+    LC32AudioToolboxOpAudioSessionSetActive = 27,
+    LC32AudioToolboxOpAudioSessionSetProperty = 28,
+    LC32AudioToolboxOpAudioQueueNewOutput = 29,
+    LC32AudioToolboxOpAudioQueueSetParameter = 30,
+    LC32AudioToolboxOpAudioQueueAddPropertyListener = 31,
+    LC32AudioToolboxOpAudioQueueRemovePropertyListener = 32,
+    LC32AudioToolboxOpAudioQueuePrime = 33,
+    /* Propagate logical callback scope across the serialized guest callback
+     * executor, whose host pthread differs from the native AudioQueue thread. */
+    LC32AudioToolboxOpAudioQueueCallbackEnter = 34,
+    LC32AudioToolboxOpAudioQueueCallbackLeave = 35,
 } LC32AudioToolboxOpcode;
 
 #endif

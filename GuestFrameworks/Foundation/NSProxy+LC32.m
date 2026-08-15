@@ -110,8 +110,11 @@ extern void _objc_rootDealloc(id object);
 }
 
 - (NSMethodSignature *)methodSignatureForSelector:(SEL)selector {
-    (void)selector;
-    return nil;
+    if(!selector) return nil;
+    const Method method = class_getInstanceMethod(
+        object_getClass(self), selector);
+    const char *types = method ? method_getTypeEncoding(method) : NULL;
+    return types ? [NSMethodSignature signatureWithObjCTypes:types] : nil;
 }
 
 - (void)doesNotRecognizeSelector:(SEL)selector {

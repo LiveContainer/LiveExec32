@@ -60,6 +60,12 @@ typedef enum : uint32_t {
     LC32CoreFoundationOpBundleGetFunctionPointerForName = 39,
     LC32CoreFoundationOpRunLoopGetCurrent = 40,
 
+    /* URL construction and percent-decoding operations used by YouTube. */
+    LC32CoreFoundationOpURLCreateWithString = 41,
+    LC32CoreFoundationOpURLCreateWithBytes = 42,
+    LC32CoreFoundationOpURLCreateStringByReplacingPercentEscapes = 43,
+    LC32CoreFoundationOpStringTrimWhitespace = 44,
+
     /* String operations use an isolated range so parallel bridge work can
      * add lower-valued opcode families without changing this guest ABI. */
     LC32CoreFoundationOpStringCreateWithBytes = 100,
@@ -99,6 +105,7 @@ typedef enum : uint32_t {
 
     /* Property-list serialization operations used by Security. */
     LC32CoreFoundationOpPropertyListCreateWithData = 217,
+    LC32CoreFoundationOpPropertyListCreateDeepCopy = 218,
 
     /* CFSet operations used by the guest Security framework. */
     LC32CoreFoundationOpSetCreate = 300,
@@ -113,6 +120,67 @@ typedef enum : uint32_t {
     LC32CoreFoundationOpSetSetValue = 309,
     LC32CoreFoundationOpSetRemoveValue = 310,
     LC32CoreFoundationOpSetRemoveAllValues = 311,
+
+    /* Attributed-string operations imported by the legacy YouTube client. */
+    LC32CoreFoundationOpAttributedStringCreate = 400,
+    LC32CoreFoundationOpAttributedStringCreateMutable = 401,
+    LC32CoreFoundationOpAttributedStringCreateWithSubstring = 402,
+    LC32CoreFoundationOpAttributedStringGetLength = 403,
+    LC32CoreFoundationOpAttributedStringReplaceAttributedString = 404,
+
+    /* CFReadStream operations used by the legacy YouTube Widevine client. */
+    LC32CoreFoundationOpReadStreamOpen = 500,
+    LC32CoreFoundationOpReadStreamClose = 501,
+    LC32CoreFoundationOpReadStreamGetStatus = 502,
+    LC32CoreFoundationOpReadStreamHasBytesAvailable = 503,
+    LC32CoreFoundationOpReadStreamRead = 504,
+    LC32CoreFoundationOpReadStreamCopyError = 505,
+    LC32CoreFoundationOpReadStreamCopyProperty = 506,
+    LC32CoreFoundationOpReadStreamSetProperty = 507,
+    LC32CoreFoundationOpReadStreamScheduleWithRunLoop = 508,
+    LC32CoreFoundationOpReadStreamUnscheduleFromRunLoop = 509,
+    LC32CoreFoundationOpReadStreamGetError = 510,
+    LC32CoreFoundationOpReadStreamSetClient = 511,
+
+    /* CFWriteStream and socket-pair operations used by YouTube networking. */
+    LC32CoreFoundationOpWriteStreamOpen = 512,
+    LC32CoreFoundationOpWriteStreamClose = 513,
+    LC32CoreFoundationOpWriteStreamGetStatus = 514,
+    LC32CoreFoundationOpWriteStreamCanAcceptBytes = 515,
+    LC32CoreFoundationOpWriteStreamWrite = 516,
+    LC32CoreFoundationOpWriteStreamCopyError = 517,
+    LC32CoreFoundationOpWriteStreamCopyProperty = 518,
+    LC32CoreFoundationOpWriteStreamSetProperty = 519,
+    LC32CoreFoundationOpWriteStreamScheduleWithRunLoop = 520,
+    LC32CoreFoundationOpWriteStreamUnscheduleFromRunLoop = 521,
+    LC32CoreFoundationOpWriteStreamGetError = 522,
+    LC32CoreFoundationOpWriteStreamSetClient = 523,
+    LC32CoreFoundationOpStreamCreatePairWithSocket = 524,
+
+    /* Non-callback CFRunLoop operations used by legacy YouTube.  The timer
+     * and source creators live in a separate callback-aware bridge. */
+    LC32CoreFoundationOpRunLoopAddSource = 600,
+    LC32CoreFoundationOpRunLoopAddTimer = 601,
+    LC32CoreFoundationOpRunLoopCopyAllModes = 602,
+    LC32CoreFoundationOpRunLoopRemoveSource = 603,
+    LC32CoreFoundationOpRunLoopRemoveTimer = 604,
+    LC32CoreFoundationOpRunLoopRun = 605,
+    LC32CoreFoundationOpRunLoopRunInMode = 606,
+    LC32CoreFoundationOpRunLoopSourceInvalidate = 607,
+    LC32CoreFoundationOpRunLoopSourceSignal = 608,
+    LC32CoreFoundationOpRunLoopStop = 609,
+    LC32CoreFoundationOpRunLoopTimerInvalidate = 610,
+    LC32CoreFoundationOpRunLoopTimerSetNextFireDate = 611,
+    LC32CoreFoundationOpRunLoopWakeUp = 612,
+    LC32CoreFoundationOpRunLoopTimerCreate = 613,
+    LC32CoreFoundationOpRunLoopSourceCreate = 614,
+
+    /* Callback-aware socket operations used by legacy YouTube. */
+    LC32CoreFoundationOpSocketCreate = 700,
+    LC32CoreFoundationOpSocketConnectToAddress = 701,
+    LC32CoreFoundationOpSocketCreateRunLoopSource = 702,
+    LC32CoreFoundationOpSocketGetNative = 703,
+    LC32CoreFoundationOpSocketInvalidate = 704,
 } LC32CoreFoundationOpcode;
 
 typedef enum : uint32_t {

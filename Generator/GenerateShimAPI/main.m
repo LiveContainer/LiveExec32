@@ -15,6 +15,7 @@ typedef NS_ENUM(NSUInteger, LC32KnownStruct) {
     LC32KnownStructCGPoint,
     LC32KnownStructCGRect,
     LC32KnownStructCGSize,
+    LC32KnownStructNSRange,
     LC32KnownStructUIEdgeInsets,
 };
 
@@ -33,6 +34,10 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
     }
     if(!strncmp(encoding, "{CGSize=", sizeof("{CGSize=") - 1)) {
         return LC32KnownStructCGSize;
+    }
+    if(!strncmp(encoding, "{_NSRange=", sizeof("{_NSRange=") - 1) ||
+       !strncmp(encoding, "{NSRange=", sizeof("{NSRange=") - 1)) {
+        return LC32KnownStructNSRange;
     }
     if(!strncmp(encoding, "{UIEdgeInsets=", sizeof("{UIEdgeInsets=") - 1)) {
         return LC32KnownStructUIEdgeInsets;
@@ -55,6 +60,9 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
 // FIXME: will need to parse header to return correctly. On 64bit, NS*Integer and CGFloat are not distinguishable from 32bit
 + (NSString *)readableTypeForSignature:(const char *)signature {
     if(!signature || !*signature) return @"?";
+    if(LC32KnownStructForEncoding(signature) == LC32KnownStructNSRange) {
+        return @"NSRange";
+    }
 
     // Correct some 32bit types
     if(signature[0] == '^' && signature[1]) {
@@ -117,6 +125,61 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
     return c == 'd'|| c == 'f';
 }
 
++ (const char *)unqualifiedType:(const char *)signature {
+    while(signature && *signature && strchr("rnNoORVA", *signature)) {
+        signature++;
+    }
+    return signature;
+}
+
+- (const char *)scalarPointerSignature {
+    const char *pointer = [MethodParameter unqualifiedType:self.signature];
+    if(!pointer || pointer[0] != '^') return NULL;
+
+    const char *pointee = [MethodParameter unqualifiedType:pointer + 1];
+    if(!pointee || !*pointee || *pointee == 'b') return NULL;
+    if(![MethodParameter isDirectCastType:*pointee] &&
+       ![MethodParameter isFloatingType:*pointee]) {
+        return NULL;
+    }
+    return pointer;
+}
+
+- (char)scalarPointerPointeeEncoding {
+    const char *pointer = self.scalarPointerSignature;
+    if(!pointer) return '\0';
+    const char *pointee = [MethodParameter unqualifiedType:pointer + 1];
+    return pointee ? *pointee : '\0';
+}
+
+- (NSString *)scalarPointerGuestPointeeType {
+    const char *pointer = self.scalarPointerSignature;
+    if(!pointer) return nil;
+
+    NSString *pointerType =
+        [MethodParameter readableTypeForSignature:pointer];
+    if(![pointerType hasSuffix:@" *"]) return nil;
+    return [pointerType substringToIndex:pointerType.length - 2];
+}
+
+- (BOOL)scalarPointerReadsGuestValue {
+    const char *signature = self.signature;
+    while(signature && *signature && strchr("rnNoORVA", *signature)) {
+        if(*signature == 'o') return NO;
+        signature++;
+    }
+    return YES;
+}
+
+- (BOOL)scalarPointerWritesGuestValue {
+    const char *signature = self.signature;
+    while(signature && *signature && strchr("rnNoORVA", *signature)) {
+        if(*signature == 'r' || *signature == 'n') return NO;
+        signature++;
+    }
+    return YES;
+}
+
 - (instancetype)initWithIndex:(int)index name:(NSString *)name type:(NSString *)type signature:(const char *)signature {
     self = [super init];
     self.index = index;
@@ -144,6 +207,27 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
             @"void *host_arg%1$d = LC32CreateHostObjectArray(guest_arg%1$d, (uint32_t)guest_arg%2$d, %2$d);",
             self.index, self.objectArrayCountIndex];
     }
+    /* Indirect bridge cells are always eight bytes. Match the generator's
+     * ordinary scalar widening: ARM32 integers use a uint64_t cell and an
+     * ARM32 `float` (notably CGFloat in captured iOS APIs) uses a native
+     * double cell. Initialize it before the call because an unqualified
+     * pointer may be input, output, or both. */
+    const char scalarPointerPointee =
+        self.scalarPointerPointeeEncoding;
+    if(scalarPointerPointee) {
+        const BOOL floating =
+            [MethodParameter isFloatingType:scalarPointerPointee];
+        NSString *hostType = floating ? @"double" : @"uint64_t";
+        NSString *zero = floating ? @"0.0" : @"0";
+        if(self.scalarPointerReadsGuestValue) {
+            return [NSString stringWithFormat:
+                @"%2$@ host_arg%1$d = guest_arg%1$d ? (%2$@)*guest_arg%1$d : %3$@;",
+                self.index, hostType, zero];
+        }
+        return [NSString stringWithFormat:
+            @"%2$@ host_arg%1$d = %3$@;",
+            self.index, hostType, zero];
+    }
     if([MethodParameter isDirectCastType:self.signature[0]]) {
         return [NSString stringWithFormat:@"uint64_t host_arg%1$d = (uint64_t)guest_arg%1$d;", self.index];
     } else if([MethodParameter isFloatingType:self.signature[0]]) {
@@ -157,9 +241,6 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
             return [NSString stringWithFormat:@"uint64_t host_arg%1$d = LC32GetHostSelector(guest_arg%1$d);", self.index];
         case '^':
             if(self.signature[1] == '@' || self.signature[1] == '#') {
-                return [NSString stringWithFormat:
-                    @"uint64_t host_arg%d = 0;", self.index];
-            } else if([MethodParameter isDirectCastType:self.signature[1]]) {
                 return [NSString stringWithFormat:
                     @"uint64_t host_arg%d = 0;", self.index];
             } else if ([self.type isEqualToString:@"_NSZone *"]) {
@@ -176,7 +257,14 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
             }
     }
 
-    if(LC32KnownStructForEncoding(self.signature) != LC32KnownStructNone) {
+    const LC32KnownStruct knownStruct =
+        LC32KnownStructForEncoding(self.signature);
+    if(knownStruct == LC32KnownStructNSRange) {
+        return [NSString stringWithFormat:
+            @"LC32NSRange64 host_arg%1$d = LC32WidenNSRange(guest_arg%1$d);",
+            self.index];
+    }
+    if(knownStruct != LC32KnownStructNone) {
         return [NSString stringWithFormat:@"%1$@_64 host_arg%2$d = LC32Host%1$@(guest_arg%2$d);", self.type, self.index];
         //return [NSString stringWithFormat:@"%1$@_64 host_arg%2$d_value = LC32Host%1$@(guest_arg%2$d); uint64_t host_arg%2$d = LC32GuestToHostCString((const char *)&host_arg%2$d_value, sizeof(host_arg%2$d_value));", self.type, self.index];
     }
@@ -189,6 +277,17 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
         return [NSString stringWithFormat:
             @"LC32HostObjectArrayArgument(host_arg%d)", self.index];
     }
+    if(self.scalarPointerSignature) {
+        const char scalarPointerPointee =
+            self.scalarPointerPointeeEncoding;
+        NSString *helper =
+            [MethodParameter isFloatingType:scalarPointerPointee]
+                ? @"LC32HostFloatingIndirectArgument"
+                : @"LC32HostIndirectArgument";
+        return [NSString stringWithFormat:
+            @"%2$@(guest_arg%1$d ? &host_arg%1$d : NULL)",
+            self.index, helper];
+    }
     BOOL returnDirect = NO;
     BOOL returnPointer = NO;
     switch(self.signature[0]) {
@@ -199,8 +298,7 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
             break;
         case '^':
             returnPointer = self.signature[1] == '@' ||
-                            self.signature[1] == '#' ||
-                            [MethodParameter isDirectCastType:self.signature[1]];
+                            self.signature[1] == '#';
             returnDirect |= [self.type isEqualToString:@"_NSZone *"];
             break;
         case 'r':
@@ -213,7 +311,8 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
     }
 
     if(LC32KnownStructForEncoding(self.signature) != LC32KnownStructNone) {
-        returnDirect = YES;
+        return [NSString stringWithFormat:
+            @"LC32HostAggregateArgument(&host_arg%d)", self.index];
     }
 
     if(returnDirect) {
@@ -230,6 +329,20 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
     if(self.isCountedObjectArray) {
         return [NSString stringWithFormat:
             @"LC32DestroyHostObjectArray(host_arg%d);", self.index];
+    }
+    if(self.scalarPointerSignature) {
+        if(!self.scalarPointerWritesGuestValue) {
+            return [NSString stringWithFormat:
+                @"// Input-only scalar pointer guest_arg%d needs no copyback",
+                self.index];
+        }
+        NSString *pointeeType =
+            self.scalarPointerGuestPointeeType;
+        if(pointeeType) {
+            return [NSString stringWithFormat:
+                @"if(guest_arg%1$d) *guest_arg%1$d = (%2$@)host_arg%1$d;",
+                self.index, pointeeType];
+        }
     }
     switch(self.signature[0]) {
         case 'r':
@@ -260,15 +373,6 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
                 @"if(guest_arg%1$d) *guest_arg%1$d = host_arg%1$d ? LC32HostToGuestObject(host_arg%1$d) : nil;",
                 self.index];
         default:
-            // int*, float *, etc
-            if([MethodParameter isDirectCastType:self.signature[1]] &&
-               [self.type hasSuffix:@" *"]) {
-                NSString *pointeeType =
-                    [self.type substringToIndex:self.type.length - 2];
-                return [NSString stringWithFormat:
-                    @"if(guest_arg%1$d) *guest_arg%1$d = (%2$@)host_arg%1$d;",
-                    self.index, pointeeType];
-            }
             break;
     }
     return [NSString stringWithFormat:@"/* %s: unhandled type %@ */", sel_getName(_cmd), self.type];
@@ -279,18 +383,42 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
 }
 @end
 
-static BOOL LC32MethodIsInInitFamily(LC32ObjCMethod *method) {
-    if(!method.isInstanceMethod) return NO;
+static BOOL LC32SelectorIsInMethodFamily(SEL selector,
+                                         const char *family) {
+    const char *name = selector ? sel_getName(selector) : NULL;
+    if(!name || !family) return NO;
+    while(*name == '_') name++;
 
-    const char *selectorName = sel_getName(method.selector);
-    if(!selectorName || strncmp(selectorName, "init", 4) != 0) return NO;
-
-    char next = selectorName[4];
+    const size_t length = strlen(family);
+    if(strncmp(name, family, length) != 0) return NO;
+    const unsigned char next = (unsigned char)name[length];
     return next == '\0' || next < 'a' || next > 'z';
+}
+
+static BOOL LC32MethodIsInInitFamily(LC32ObjCMethod *method) {
+    return method.isInstanceMethod &&
+        LC32SelectorIsInMethodFamily(method.selector, "init");
+}
+
+static BOOL LC32MethodReturnsOwnedResult(NSString *className,
+                                         LC32ObjCMethod *method) {
+    /* Runtime type encodings do not preserve objc_method_family(none).
+     * ABNewPersonViewController's delegate getter is the one public iOS 10
+     * SDK API whose family-looking selector explicitly opts out. */
+    if(method.isInstanceMethod &&
+       [className isEqualToString:@"ABNewPersonViewController"] &&
+       [method.selectorString isEqualToString:@"newPersonViewDelegate"]) {
+        return NO;
+    }
+    return LC32SelectorIsInMethodFamily(method.selector, "alloc") ||
+           LC32SelectorIsInMethodFamily(method.selector, "new") ||
+           LC32SelectorIsInMethodFamily(method.selector, "copy") ||
+           LC32SelectorIsInMethodFamily(method.selector, "mutableCopy");
 }
 
 @interface MethodBuilder : NSObject
 @property(nonatomic, retain) LC32ObjCMethod *method;
+@property(nonatomic, retain) NSString *className;
 @property(nonatomic, retain) NSString *returnType;
 @property(nonatomic, retain) NSMutableArray<MethodParameter *> *parameters;
 @property(nonatomic, retain) NSMutableArray<NSString *> *lines;
@@ -298,11 +426,13 @@ static BOOL LC32MethodIsInInitFamily(LC32ObjCMethod *method) {
 @end
 @implementation MethodBuilder
 
-- (instancetype)initWithMethod:(LC32ObjCMethod *)method {
+- (instancetype)initWithMethod:(LC32ObjCMethod *)method
+                      className:(NSString *)className {
     self = [super init];
     self.lines = [NSMutableArray new];
     self.parameters = [NSMutableArray new];
     self.method = method;
+    self.className = className;
     const char *returnType = self.method.returnType;
     self.returnType =
         [MethodParameter readableTypeForSignature:returnType ? returnType : ""];
@@ -402,10 +532,25 @@ static BOOL LC32MethodIsInInitFamily(LC32ObjCMethod *method) {
 
 - (NSString *)callLine {
     NSMutableString *call = [NSMutableString new];
+    const BOOL returnsBorrowedObject =
+        self.method.returnType[0] == '#' ||
+        (self.method.returnType[0] == '@' &&
+         !LC32MethodIsInInitFamily(self.method) &&
+         !LC32MethodReturnsOwnedResult(self.className, self.method));
     if(self.method.returnType[0] == '{') {
-        [call appendFormat:@"%@_64 host_ret; LC32InvokeHostSelector(self.host_self, host_cmd, &host_ret, sizeof(host_ret)", self.returnType];
+        if(LC32KnownStructForEncoding(self.method.returnType) ==
+                LC32KnownStructNSRange) {
+            [call appendString:
+                @"LC32NSRange64 host_ret; LC32InvokeHostSelector(self.host_self, host_cmd, &host_ret, sizeof(host_ret)"];
+        } else {
+            [call appendFormat:@"%@_64 host_ret; LC32InvokeHostSelector(self.host_self, host_cmd, &host_ret, sizeof(host_ret)", self.returnType];
+        }
+    } else if(returnsBorrowedObject) {
+        [call appendString:
+            @"id guest_ret = LC32InvokeHostObjectSelector(self.host_self, host_cmd"];
     } else {
-        [call appendString:@"uint64_t host_ret = LC32InvokeHostSelector(self.host_self, host_cmd"];
+        [call appendString:
+            @"uint64_t host_ret = LC32InvokeHostSelector(self.host_self, host_cmd"];
     }
     for(MethodParameter *param in self.parameters) {
         [call appendFormat:@", %@", param.parameterToBePassed];
@@ -424,12 +569,20 @@ static BOOL LC32MethodIsInInitFamily(LC32ObjCMethod *method) {
                 return @"// return void";
             }
         case '@':
-        case '#':
             if(LC32MethodIsInInitFamily(self.method)) {
                 return @"return LC32AdoptHostInitializerResult(self, host_ret);";
+            } else if(LC32MethodReturnsOwnedResult(
+                           self.className, self.method)) {
+                return @"return LC32HostToGuestOwnedObject(host_ret);";
+            } else if(self.method.returnType[1] == '?') {
+                /* Native blocks use their copied guest block's lifetime and
+                 * _Block_copy/_Block_release rather than NSObject custom RR. */
+                return @"return guest_ret;";
             } else {
-                return @"return LC32HostToGuestObject(host_ret);";
+                return @"return LC32ReturnBorrowedGuestObject(guest_ret);";
             }
+        case '#':
+            return @"return (Class)guest_ret;";
         case 'B':
         case 'C':
         case 'I':
@@ -450,7 +603,12 @@ static BOOL LC32MethodIsInInitFamily(LC32ObjCMethod *method) {
                 self.returnType];
     }
     
-    if(LC32KnownStructForEncoding(self.method.returnType) != LC32KnownStructNone) {
+    const LC32KnownStruct knownStruct =
+        LC32KnownStructForEncoding(self.method.returnType);
+    if(knownStruct == LC32KnownStructNSRange) {
+        return @"return LC32NarrowNSRange(host_ret);";
+    }
+    if(knownStruct != LC32KnownStructNone) {
         return [NSString stringWithFormat:@"return LC32Guest%@(host_ret);", self.returnType];
     }
 
@@ -502,9 +660,21 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
         if(!method.isInstanceMethod) {
             return [selector isEqualToString:@"stringWithFormat:"] ||
                    [selector isEqualToString:@"stringWithFormat:locale:"] ||
-                   [selector isEqualToString:@"localizedStringWithFormat:"];
+                   [selector isEqualToString:@"localizedStringWithFormat:"] ||
+                   [selector isEqualToString:
+                       @"stringWithBytes:length:encoding:"];
         }
         return [selector isEqualToString:@"UTF8String"] ||
+               [selector isEqualToString:@"getCharacters:"] ||
+               [selector isEqualToString:@"getCharacters:range:"] ||
+               [selector isEqualToString:
+                   @"getBytes:maxLength:filledLength:encoding:allowLossyConversion:range:remainingRange:"] ||
+               [selector isEqualToString:
+                   @"getBytes:maxLength:usedLength:encoding:options:range:remainingRange:"] ||
+               [selector isEqualToString:
+                   @"initWithBytes:length:encoding:"] ||
+               [selector isEqualToString:
+                   @"initWithBytesNoCopy:length:encoding:freeWhenDone:"] ||
                [selector isEqualToString:@"initWithFormat:"] ||
                [selector isEqualToString:@"initWithFormat:arguments:"] ||
                [selector isEqualToString:@"initWithFormat:locale:"] ||
@@ -517,6 +687,15 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
                [selector isEqualToString:@"getBytes:"] ||
                [selector isEqualToString:@"getBytes:length:"] ||
                [selector isEqualToString:@"getBytes:range:"];
+    }
+    if([className isEqualToString:@"NSValue"]) {
+        if(!method.isInstanceMethod) {
+            return [selector isEqualToString:
+                        @"valueWithBytes:objCType:"] ||
+                   [selector isEqualToString:@"value:withObjCType:"];
+        }
+        return [selector isEqualToString:@"getValue:"] ||
+               [selector isEqualToString:@"objCType"];
     }
     if(method.isInstanceMethod && [selector isEqualToString:
             @"countByEnumeratingWithState:objects:count:"]) {
@@ -532,8 +711,13 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
         return YES;
     }
     return [className isEqualToString:@"NSMutableString"] &&
-           method.isInstanceMethod &&
-           [selector isEqualToString:@"appendFormat:"];
+        method.isInstanceMethod &&
+        ([selector isEqualToString:@"appendFormat:"] ||
+            [selector isEqualToString:@"deleteCharactersInRange:"] ||
+            [selector isEqualToString:
+                @"replaceCharactersInRange:withString:"] ||
+            [selector isEqualToString:
+                @"replaceOccurrencesOfString:withString:options:range:"]);
 }
 
 static BOOL LC32MethodHasIndirectObjectBuffer(NSString *className,
@@ -674,7 +858,8 @@ static BOOL LC32MethodHasIndirectObjectBuffer(NSString *className,
         return;
     }
 
-    self.methods[methodKey] = [[MethodBuilder alloc] initWithMethod:method];
+    self.methods[methodKey] = [[MethodBuilder alloc]
+        initWithMethod:method className:self.className];
 }
 
 - (NSString *)description {
@@ -697,6 +882,12 @@ static BOOL LC32MethodHasIndirectObjectBuffer(NSString *className,
         // filtered for the manual guest-copy adapter, Clang would otherwise
         // synthesize a zero-filled guest ivar and a competing -bytes getter.
         [string appendString:@"@dynamic bytes;\n"];
+    }
+    if([self.className isEqualToString:@"NSValue"]) {
+        // The raw-value adapter supplies an ABI-aware getter.  Suppress the
+        // property-backed guest getter/ivar that would otherwise compete
+        // with the manual category implementation.
+        [string appendString:@"@dynamic objCType;\n"];
     }
     NSArray<NSString *> *methodKeys =
         [self.methods.allKeys sortedArrayUsingSelector:@selector(compare:)];

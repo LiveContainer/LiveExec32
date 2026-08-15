@@ -11,10 +11,26 @@ enum {
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t condition = PTHREAD_COND_INITIALIZER;
+static pthread_rwlock_t rwlock = PTHREAD_RWLOCK_INITIALIZER;
 static pthread_key_t key;
 static int started;
 static int released;
+static int sampling_ready;
+static int rwlock_waiters_started;
+/*
+ * Keep the spin loop in ordinary translated code. Clang's legacy armv7s
+ * lowering for an atomic increment emits the deprecated Thumb high-register
+ * CMP encoding with two low registers; Dynarmic deliberately diagnoses that
+ * encoding as UNPREDICTABLE. The volatile callback below also forces each
+ * spin iteration to return through the JIT dispatcher, which is the relevant
+ * contract here: HaltExecution is observed at translated-block boundaries,
+ * not inside a single self-linked block. A mutex publishes sampling_ready,
+ * while the barriers below provide ordering for sampling_done.
+ */
+static volatile int sampling_done;
+static int (*volatile sampling_complete)(void);
 static int counter;
+static int rwlock_value = 0x1234;
 static __thread uintptr_t tls_cookie;
 
 struct worker_state {
@@ -25,10 +41,51 @@ struct worker_state {
     mach_port_t mach_thread;
 };
 
+__attribute__((noinline))
+static int read_sampling_done(void) {
+    return sampling_done;
+}
+
 static void set_error(struct worker_state *state, int error) {
     if (state->error == 0) {
         state->error = error;
     }
+}
+
+static int sample_all_guest_threads(void) {
+    thread_act_array_t threads = NULL;
+    mach_msg_type_number_t thread_count = 0;
+    kern_return_t result = task_threads(
+        mach_task_self(), &threads, &thread_count);
+    if (result != KERN_SUCCESS || thread_count < WORKERS + 1) {
+        return 2000 + result;
+    }
+
+    int error = 0;
+    for (mach_msg_type_number_t index = 0;
+            index < thread_count; ++index) {
+        arm_thread_state_t state = {0};
+        mach_msg_type_number_t state_count =
+            ARM_THREAD_STATE_COUNT;
+        result = thread_get_state(
+            threads[index], ARM_THREAD_STATE,
+            (thread_state_t)&state, &state_count);
+        if (result != KERN_SUCCESS ||
+                state_count != ARM_THREAD_STATE_COUNT ||
+                state.__sp == 0 || state.__pc == 0) {
+            error = 2100 + result;
+            break;
+        }
+    }
+    for (mach_msg_type_number_t index = 0;
+            index < thread_count; ++index) {
+        (void)mach_port_deallocate(
+            mach_task_self(), threads[index]);
+    }
+    (void)vm_deallocate(
+        mach_task_self(), (vm_address_t)threads,
+        thread_count * sizeof(*threads));
+    return error;
 }
 
 static void *worker(void *opaque) {
@@ -51,6 +108,31 @@ static void *worker(void *opaque) {
             pthread_cond_wait(&condition, &lock));
     }
     set_error(state, pthread_mutex_unlock(&lock));
+
+    set_error(state, pthread_mutex_lock(&lock));
+    ++sampling_ready;
+    set_error(state, pthread_cond_broadcast(&condition));
+    set_error(state, pthread_mutex_unlock(&lock));
+    while (!sampling_complete()) {
+        __asm__ volatile("" ::: "memory");
+    }
+    __sync_synchronize();
+
+    if (state->index < WORKERS) {
+        set_error(state, pthread_mutex_lock(&lock));
+        ++rwlock_waiters_started;
+        set_error(state, pthread_cond_broadcast(&condition));
+        set_error(state, pthread_mutex_unlock(&lock));
+
+        const int lock_error = pthread_rwlock_rdlock(&rwlock);
+        set_error(state, lock_error);
+        if (lock_error == 0) {
+            if (rwlock_value != 0x1234) {
+                set_error(state, 1005);
+            }
+            set_error(state, pthread_rwlock_unlock(&rwlock));
+        }
+    }
 
     for (int i = 0;
             i < INCREMENTS && state->error == 0; ++i) {
@@ -81,10 +163,14 @@ int main(void) {
         {.index = 1},
     };
     tls_cookie = 0x55aa;
+    sampling_complete = read_sampling_done;
 
     int error = pthread_key_create(&key, NULL);
     if (error != 0) {
         return 10;
+    }
+    if ((error = pthread_rwlock_wrlock(&rwlock)) != 0) {
+        return 15 + error;
     }
     for (int i = 0; i < WORKERS; ++i) {
         error = pthread_create(
@@ -103,6 +189,12 @@ int main(void) {
             return 40 + error;
         }
     }
+
+    /* Exercise state capture while both foreign guest JITs are parked in a
+     * host-side pthread condition wait. */
+    if ((error = sample_all_guest_threads()) != 0) {
+        return error;
+    }
     released = 1;
     if ((error = pthread_cond_broadcast(
             &condition)) != 0) {
@@ -110,6 +202,62 @@ int main(void) {
     }
     if ((error = pthread_mutex_unlock(&lock)) != 0) {
         return 60 + error;
+    }
+
+
+    if ((error = pthread_mutex_lock(&lock)) != 0) {
+        return 65 + error;
+    }
+    while (sampling_ready != WORKERS) {
+        if ((error = pthread_cond_wait(
+                &condition, &lock)) != 0) {
+            return 66 + error;
+        }
+    }
+    if ((error = pthread_mutex_unlock(&lock)) != 0) {
+        return 67 + error;
+    }
+    /* Exercise the other half of the handshake while both workers are
+     * actively executing translated guest instructions. */
+    if ((error = sample_all_guest_threads()) != 0) {
+        return error;
+    }
+    __sync_synchronize();
+    sampling_done = 1;
+
+    if ((error = pthread_mutex_lock(&lock)) != 0) {
+        return 68 + error;
+    }
+    while (rwlock_waiters_started != WORKERS) {
+        if ((error = pthread_cond_wait(
+                &condition, &lock)) != 0) {
+            return 69 + error;
+        }
+    }
+    if ((error = pthread_mutex_unlock(&lock)) != 0) {
+        return 70 + error;
+    }
+    /* Give both readers a chance to cross the userspace generation update
+     * before the writer posts its psynch unlock. This exercises both the
+     * grouped-reader return value and the unlock-before-wait prepost race. */
+    for (int i = 0; i < 128; ++i) {
+        sched_yield();
+    }
+    if ((error = pthread_rwlock_unlock(&rwlock)) != 0) {
+        return 71 + error;
+    }
+    /* Re-enter immediately, before the awakened readers are guaranteed to
+     * have merged their psynch update into the shared L/S words. Darwin
+     * treats this as a reader overlap and returns INC|MBIT rather than
+     * parking the new reader behind an unlock which already happened. */
+    if ((error = pthread_rwlock_rdlock(&rwlock)) != 0) {
+        return 72 + error;
+    }
+    if (rwlock_value != 0x1234) {
+        return 73;
+    }
+    if ((error = pthread_rwlock_unlock(&rwlock)) != 0) {
+        return 74 + error;
     }
 
     for (int i = 0; i < WORKERS; ++i) {
@@ -126,6 +274,26 @@ int main(void) {
             states[0].thread_id == states[1].thread_id ||
             states[0].mach_thread == states[1].mach_thread) {
         return 90;
+    }
+
+    /* A zero psynch return can let the readers run while leaving K/W state
+     * behind in the guest lock. Reacquiring it exclusively catches that
+     * poisoned state instead of allowing the test to pass by accident. */
+    if ((error = pthread_rwlock_wrlock(&rwlock)) != 0) {
+        return 95 + error;
+    }
+    ++rwlock_value;
+    if ((error = pthread_rwlock_unlock(&rwlock)) != 0) {
+        return 96 + error;
+    }
+    if ((error = pthread_rwlock_rdlock(&rwlock)) != 0) {
+        return 97 + error;
+    }
+    if (rwlock_value != 0x1235) {
+        return 98;
+    }
+    if ((error = pthread_rwlock_unlock(&rwlock)) != 0) {
+        return 99 + error;
     }
 
     for (int i = 0; i < RECYCLES; ++i) {

@@ -11,12 +11,42 @@
 #define LC32_GUEST_ARGUMENT_TAG_MASK \
     UINT64_C(0xffffffff00000000)
 #define LC32_GUEST_INDIRECT_ARGUMENT_TAG \
-    UINT64_C(0x8000000000000000)
+    UINT64_C(0x4c43320000000000)
 #define LC32_GUEST_OBJECT_ARRAY_ARGUMENT_TAG \
-    UINT64_C(0x8000000100000000)
+    UINT64_C(0x4c43320100000000)
+#define LC32_GUEST_AGGREGATE_ARGUMENT_TAG \
+    UINT64_C(0x4c43320200000000)
+#define LC32_GUEST_INVOCATION_ARGUMENT_TAG \
+    UINT64_C(0x4c43320300000000)
+#define LC32_GUEST_FLOATING_INDIRECT_ARGUMENT_TAG \
+    UINT64_C(0x4c43320400000000)
+
+/*
+ * Selector flag consumed by LC32InvokeHostSelector.  An Objective-C object
+ * result is converted to its guest proxy before the SVC returns, while the
+ * autoreleased native result is still valid in the original call frame.
+ */
+#define LC32_HOST_SELECTOR_RETURN_GUEST_OBJECT \
+    UINT64_C(0x4000000000000000)
+#define LC32_HOST_SELECTOR_RETURN_STRUCT \
+    UINT64_C(0x8000000000000000)
+#define LC32_HOST_SELECTOR_FLAG_MASK \
+    UINT64_C(0xc000000000000000)
 
 #define LC32_HOST_OBJECT_ARRAY_MAGIC UINT32_C(0x4f413332) /* "OA32" */
 #define LC32_HOST_OBJECT_ARRAY_MAX_COUNT UINT32_C(1048576)
+
+/*
+ * Result of SVC 1019.  A mapped success transfers one native +1 to the
+ * guest's matching weak retain.  NoMapping means the object is guest-only;
+ * MappedDead means it had a native peer which can no longer be retained.
+ */
+typedef uint32_t LC32HostWeakRetainStatus;
+enum {
+    LC32HostWeakRetainNoMapping = 0,
+    LC32HostWeakRetainRetained = 1,
+    LC32HostWeakRetainMappedDead = 2,
+};
 
 typedef struct LC32HostObjectArrayDescriptor {
     uint32_t count;

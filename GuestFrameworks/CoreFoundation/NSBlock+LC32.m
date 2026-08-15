@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 
 #import <Block.h>
+#import <LC32/LC32.h>
 #import <objc/runtime.h>
 
 #include <stdbool.h>
@@ -77,6 +78,17 @@ enum {
 @end
 
 @implementation NSBlock
+
+- (uint64_t)host_self {
+    /*
+     * NSObject caches a native mirror, which is wrong for blocks: guest block
+     * reference counts are managed by libsystem_blocks and cannot mirror the
+     * native block's retain count.  Return a transient native block.  Its
+     * capture token copies this guest block and releases that copy when the
+     * native block finally dies.
+     */
+    return LC32CreateHostBlock(self);
+}
 
 + (id)alloc {
     return nil;

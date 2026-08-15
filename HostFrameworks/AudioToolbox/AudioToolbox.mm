@@ -6,8 +6,10 @@
 
 #include <objc/message.h>
 #include <atomic>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <unordered_map>
 #include <vector>
 
@@ -33,11 +35,110 @@ struct GuestAudioBuffer {
     u32 data;
 };
 
+struct GuestAudioStreamPacketDescription {
+    int64_t startOffset;
+    u32 variableFramesInPacket;
+    u32 dataByteSize;
+};
+
+struct GuestAudioQueueBuffer {
+    u32 audioDataBytesCapacity;
+    u32 audioData;
+    u32 audioDataByteSize;
+    u32 userData;
+    u32 packetDescriptionCapacity;
+    u32 packetDescriptions;
+    u32 packetDescriptionCount;
+};
+
+struct GuestAudioQueueInputCallbackStorage {
+    AudioTimeStamp timeStamp;
+    u32 packetCount;
+    u32 packetDescriptions;
+};
+
+struct AudioQueueBufferEntry {
+    AudioQueueBufferRef nativeBuffer = nullptr;
+    u32 guestBuffer = 0;
+    u32 guestAudioData = 0;
+    u32 audioDataCapacity = 0;
+    u32 guestPacketDescriptions = 0;
+    u32 packetDescriptionCapacity = 0;
+    u32 guestCallbackStorage = 0;
+    std::mutex stateMutex;
+    bool outputEnqueued = false;
+};
+
+enum class AudioQueueDirection : uint8_t {
+    Input,
+    Output,
+};
+
+struct AudioQueueEntry;
+
+struct AudioQueuePropertyListenerEntry {
+    std::weak_ptr<AudioQueueEntry> queueEntry;
+    uintptr_t nativeCookie = 0;
+    AudioQueuePropertyID property = 0;
+    u32 guestCallback = 0;
+    u32 guestCallbackThunk = 0;
+    u32 guestUserData = 0;
+    std::atomic<bool> enabled{true};
+    std::atomic<bool> removing{false};
+};
+
+struct AudioQueueEntry {
+    AudioQueueRef queue = nullptr;
+    u32 token = 0;
+    AudioQueueDirection direction = AudioQueueDirection::Input;
+    u32 guestCallback = 0;
+    u32 guestCallbackThunk = 0;
+    u32 guestUserData = 0;
+    std::atomic<bool> disposed{false};
+    std::mutex stateMutex;
+    std::condition_variable stateCondition;
+    u32 activeUsers = 0;
+    u32 activeCallbacks = 0;
+    bool disposing = false;
+    std::mutex buffersMutex;
+    std::unordered_map<u32, std::shared_ptr<AudioQueueBufferEntry>>
+        buffersByGuest;
+    std::unordered_map<AudioQueueBufferRef,
+        std::shared_ptr<AudioQueueBufferEntry>> buffersByNative;
+    std::mutex listenersMutex;
+    std::vector<std::shared_ptr<AudioQueuePropertyListenerEntry>> listeners;
+};
+
 static_assert(sizeof(GuestAudioBuffer) == 12);
 static_assert(offsetof(GuestAudioBuffer, channels) == 0);
 static_assert(offsetof(GuestAudioBuffer, byteSize) == 4);
 static_assert(offsetof(GuestAudioBuffer, data) == 8);
 static_assert(sizeof(AudioStreamBasicDescription) == 40);
+static_assert(sizeof(GuestAudioStreamPacketDescription) == 16);
+static_assert(sizeof(AudioStreamPacketDescription) == 16);
+static_assert(offsetof(GuestAudioStreamPacketDescription, startOffset) == 0);
+static_assert(offsetof(GuestAudioStreamPacketDescription,
+    variableFramesInPacket) == 8);
+static_assert(offsetof(GuestAudioStreamPacketDescription, dataByteSize) == 12);
+static_assert(offsetof(AudioStreamPacketDescription, mStartOffset) == 0);
+static_assert(offsetof(AudioStreamPacketDescription,
+    mVariableFramesInPacket) == 8);
+static_assert(offsetof(AudioStreamPacketDescription, mDataByteSize) == 12);
+static_assert(sizeof(GuestAudioQueueBuffer) == 28);
+static_assert(offsetof(GuestAudioQueueBuffer, audioDataBytesCapacity) == 0);
+static_assert(offsetof(GuestAudioQueueBuffer, audioData) == 4);
+static_assert(offsetof(GuestAudioQueueBuffer, audioDataByteSize) == 8);
+static_assert(offsetof(GuestAudioQueueBuffer, userData) == 12);
+static_assert(offsetof(GuestAudioQueueBuffer,
+    packetDescriptionCapacity) == 16);
+static_assert(offsetof(GuestAudioQueueBuffer, packetDescriptions) == 20);
+static_assert(offsetof(GuestAudioQueueBuffer, packetDescriptionCount) == 24);
+static_assert(sizeof(AudioTimeStamp) == 64);
+static_assert(offsetof(GuestAudioQueueInputCallbackStorage,
+    packetCount) == 64);
+static_assert(offsetof(GuestAudioQueueInputCallbackStorage,
+    packetDescriptions) == 68);
+static_assert(sizeof(GuestAudioQueueInputCallbackStorage) == 72);
 
 std::mutex extAudioFilesMutex;
 std::unordered_map<u32, std::shared_ptr<ExtAudioFileEntry>> extAudioFiles;
@@ -46,6 +147,18 @@ std::atomic<u32> nextExtAudioFileToken{1};
 std::mutex audioFilesMutex;
 std::unordered_map<u32, std::shared_ptr<AudioFileEntry>> audioFiles;
 std::atomic<u32> nextAudioFileToken{1};
+
+std::mutex audioQueuesMutex;
+std::unordered_map<u32, std::shared_ptr<AudioQueueEntry>> audioQueues;
+std::vector<std::shared_ptr<AudioQueueEntry>> quarantinedAudioQueues;
+std::atomic<u32> nextAudioQueueToken{1};
+std::mutex audioQueuePropertyListenersMutex;
+std::unordered_map<uintptr_t,
+    std::shared_ptr<AudioQueuePropertyListenerEntry>>
+    audioQueuePropertyListeners;
+uintptr_t nextAudioQueuePropertyListenerCookie = 1;
+thread_local std::unordered_map<u32, u32>
+    audioQueueGuestCallbacksOnCurrentThread;
 
 bool ReadAudioToolboxCall(u32 guestAddress, LC32AudioToolboxCall &call) {
     struct {
@@ -99,6 +212,467 @@ bool WriteGuestU32(u32 address, u32 value) {
         reinterpret_cast<char *>(&value)) == 0;
 }
 
+bool ReadGuestBytes(u32 address, size_t byteCount, void *bytes) {
+    if(!byteCount) return true;
+    return address && bytes &&
+        static_cast<uint64_t>(address) + byteCount <=
+            static_cast<uint64_t>(UINT32_MAX) + 1 &&
+        Dynarmic_mem_1read(address, byteCount,
+            reinterpret_cast<char *>(bytes)) == 0;
+}
+
+bool WriteGuestBytes(u32 address, size_t byteCount, const void *bytes) {
+    if(!byteCount) return true;
+    return address && bytes &&
+        static_cast<uint64_t>(address) + byteCount <=
+            static_cast<uint64_t>(UINT32_MAX) + 1 &&
+        Dynarmic_mem_1write(address, byteCount,
+            const_cast<char *>(reinterpret_cast<const char *>(bytes))) == 0;
+}
+
+bool InvokeGuestAudioQueueFunction(u32 function, const u32 *arguments,
+                                   size_t argumentCount) {
+    if(!function || !arguments || argumentCount == 0 ||
+       argumentCount > LC32_GUEST_BLOCK_CALLBACK_MAX_ARGUMENTS) {
+        return false;
+    }
+    if(Dynarmic_guest_thread_is_registered()) {
+        (void)LC32InvokeGuestC(function, false,
+            static_cast<int>(argumentCount),
+            const_cast<u32 *>(arguments));
+        return true;
+    }
+
+    LC32GuestBlockCallbackDescriptor descriptor = {};
+    descriptor.kind = LC32GuestBlockCallbackKindFunction;
+    descriptor.guestInvoke = function;
+    descriptor.argumentCount = static_cast<u32>(argumentCount);
+    descriptor.resultKind = LC32GuestBlockValueVoid;
+    for(size_t index = 0; index < argumentCount; ++index) {
+        descriptor.arguments[index].kind =
+            LC32GuestBlockValueUnsigned32;
+        descriptor.arguments[index].value = arguments[index];
+    }
+    return Dynarmic_submit_guest_function_callback(&descriptor);
+}
+
+std::shared_ptr<AudioQueueEntry> FindAudioQueue(u32 token) {
+    std::lock_guard<std::mutex> lock(audioQueuesMutex);
+    const auto iterator = audioQueues.find(token);
+    return iterator == audioQueues.end() ? nullptr : iterator->second;
+}
+
+std::shared_ptr<AudioQueueEntry> TakeAudioQueue(u32 token) {
+    std::lock_guard<std::mutex> lock(audioQueuesMutex);
+    const auto iterator = audioQueues.find(token);
+    if(iterator == audioQueues.end()) return nullptr;
+    auto entry = iterator->second;
+    audioQueues.erase(iterator);
+    return entry;
+}
+
+u32 AllocateAudioQueueToken() {
+    for(size_t attempt = 0; attempt < UINT32_MAX; ++attempt) {
+        const u32 token = nextAudioQueueToken.fetch_add(
+            1, std::memory_order_relaxed);
+        if(!token) continue;
+        std::lock_guard<std::mutex> lock(audioQueuesMutex);
+        if(audioQueues.find(token) == audioQueues.end()) return token;
+    }
+    return 0;
+}
+
+bool PublishAudioQueue(const std::shared_ptr<AudioQueueEntry> &entry) {
+    if(!entry || !entry->token || !entry->queue) return false;
+    std::lock_guard<std::mutex> lock(audioQueuesMutex);
+    return audioQueues.emplace(entry->token, entry).second;
+}
+
+void QuarantineAudioQueue(const std::shared_ptr<AudioQueueEntry> &entry) {
+    if(!entry) return;
+    std::lock_guard<std::mutex> lock(audioQueuesMutex);
+    /* A failed native disposal can retain the callback context. Preserve only
+     * those exceptional entries for process life; successful, quiescent
+     * disposals are released normally. */
+    quarantinedAudioQueues.push_back(entry);
+}
+
+bool PublishAudioQueuePropertyListener(
+        const std::shared_ptr<AudioQueuePropertyListenerEntry> &listener) {
+    if(!listener) return false;
+    std::lock_guard<std::mutex> lock(audioQueuePropertyListenersMutex);
+    /* Never reuse a cookie. A callback delayed past removal can therefore
+     * only miss this registry, never resolve to a newer listener (ABA). */
+    if(!nextAudioQueuePropertyListenerCookie) return false;
+    const uintptr_t cookie = nextAudioQueuePropertyListenerCookie++;
+    listener->nativeCookie = cookie;
+    if(audioQueuePropertyListeners.emplace(cookie, listener).second)
+        return true;
+    listener->nativeCookie = 0;
+    return false;
+}
+
+std::shared_ptr<AudioQueuePropertyListenerEntry>
+FindAudioQueuePropertyListener(uintptr_t cookie) {
+    if(!cookie) return nullptr;
+    std::lock_guard<std::mutex> lock(audioQueuePropertyListenersMutex);
+    const auto iterator = audioQueuePropertyListeners.find(cookie);
+    return iterator == audioQueuePropertyListeners.end()
+        ? nullptr : iterator->second;
+}
+
+void UnpublishAudioQueuePropertyListener(
+        const std::shared_ptr<AudioQueuePropertyListenerEntry> &listener) {
+    if(!listener || !listener->nativeCookie) return;
+    std::lock_guard<std::mutex> lock(audioQueuePropertyListenersMutex);
+    const auto iterator = audioQueuePropertyListeners.find(
+        listener->nativeCookie);
+    if(iterator != audioQueuePropertyListeners.end() &&
+       iterator->second == listener) {
+        audioQueuePropertyListeners.erase(iterator);
+    }
+}
+
+void ClearAudioQueuePropertyListeners(
+        const std::shared_ptr<AudioQueueEntry> &entry) {
+    if(!entry) return;
+    std::vector<std::shared_ptr<AudioQueuePropertyListenerEntry>> listeners;
+    {
+        std::lock_guard<std::mutex> lock(entry->listenersMutex);
+        listeners.swap(entry->listeners);
+    }
+    for(const auto &listener : listeners) {
+        if(!listener) continue;
+        listener->enabled.store(false, std::memory_order_release);
+        UnpublishAudioQueuePropertyListener(listener);
+    }
+}
+
+class AudioQueueUse {
+public:
+    explicit AudioQueueUse(const std::shared_ptr<AudioQueueEntry> &entry)
+        : entry_(entry) {
+        Begin();
+    }
+
+    ~AudioQueueUse() {
+        AudioQueueEntry *entry = entry_.get();
+        if(!active_ || !entry) return;
+        std::lock_guard<std::mutex> lock(entry->stateMutex);
+        if(entry->activeUsers) --entry->activeUsers;
+        if(entry->disposing || entry->activeUsers == 0)
+            entry->stateCondition.notify_all();
+    }
+
+    explicit operator bool() const { return active_; }
+    AudioQueueRef queue() const { return queue_; }
+
+private:
+    void Begin() {
+        AudioQueueEntry *entry = entry_.get();
+        if(!entry) return;
+        std::lock_guard<std::mutex> lock(entry->stateMutex);
+        if(entry->disposed.load(std::memory_order_relaxed) ||
+           entry->disposing || !entry->queue) return;
+        ++entry->activeUsers;
+        queue_ = entry->queue;
+        active_ = true;
+    }
+
+    std::shared_ptr<AudioQueueEntry> entry_;
+    AudioQueueRef queue_ = nullptr;
+    bool active_ = false;
+};
+
+class AudioQueueCallbackUse {
+public:
+    explicit AudioQueueCallbackUse(AudioQueueEntry *entry) : entry_(entry) {
+        if(!entry_) return;
+        std::lock_guard<std::mutex> lock(entry_->stateMutex);
+        if(entry_->disposed.load(std::memory_order_relaxed) ||
+           entry_->disposing || !entry_->queue) return;
+        ++entry_->activeCallbacks;
+        active_ = true;
+    }
+
+    ~AudioQueueCallbackUse() {
+        if(!active_ || !entry_) return;
+        std::lock_guard<std::mutex> lock(entry_->stateMutex);
+        if(entry_->activeCallbacks) --entry_->activeCallbacks;
+        entry_->stateCondition.notify_all();
+    }
+
+    explicit operator bool() const { return active_; }
+
+private:
+    AudioQueueEntry *entry_ = nullptr;
+    bool active_ = false;
+};
+
+bool AudioQueueGuestCallbackIsOnCurrentThread(u32 token) {
+    if(!token) return false;
+    const auto iterator =
+        audioQueueGuestCallbacksOnCurrentThread.find(token);
+    return iterator != audioQueueGuestCallbacksOnCurrentThread.end() &&
+        iterator->second != 0;
+}
+
+void ClearAudioQueueBuffers(const std::shared_ptr<AudioQueueEntry> &entry) {
+    if(!entry) return;
+    std::lock_guard<std::mutex> lock(entry->buffersMutex);
+    entry->buffersByGuest.clear();
+    entry->buffersByNative.clear();
+}
+
+void MarkOutputAudioQueueBuffersAvailable(
+        const std::shared_ptr<AudioQueueEntry> &entry) {
+    if(!entry || entry->direction != AudioQueueDirection::Output) return;
+    std::vector<std::shared_ptr<AudioQueueBufferEntry>> buffers;
+    {
+        std::lock_guard<std::mutex> lock(entry->buffersMutex);
+        buffers.reserve(entry->buffersByGuest.size());
+        for(const auto &item : entry->buffersByGuest)
+            buffers.push_back(item.second);
+    }
+    for(const auto &buffer : buffers) {
+        if(!buffer) continue;
+        std::lock_guard<std::mutex> lock(buffer->stateMutex);
+        buffer->outputEnqueued = false;
+    }
+}
+
+void ScheduleDeferredAudioQueueStop(
+        std::shared_ptr<AudioQueueEntry> entry,
+        Boolean immediate) {
+    dispatch_async(dispatch_get_global_queue(
+            DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        {
+            std::unique_lock<std::mutex> lock(entry->stateMutex);
+            entry->stateCondition.wait(lock, [&] {
+                return entry->activeCallbacks == 0 ||
+                    entry->disposed.load(std::memory_order_relaxed) ||
+                    entry->disposing;
+            });
+            if(entry->disposed.load(std::memory_order_relaxed) ||
+               entry->disposing) return;
+        }
+
+        AudioQueueUse queueUse(entry);
+        if(!queueUse) return;
+        const OSStatus status = AudioQueueStop(queueUse.queue(), immediate);
+        if(status == noErr && immediate)
+            MarkOutputAudioQueueBuffersAvailable(entry);
+        if(status != noErr) {
+            fprintf(stderr,
+                "LC32: deferred AudioQueueStop failed with status %d\n",
+                static_cast<int>(status));
+        }
+    });
+}
+
+void ScheduleDeferredAudioQueueDispose(
+        std::shared_ptr<AudioQueueEntry> entry,
+        Boolean immediate, u32 guestCleanupThunk) {
+    dispatch_async(dispatch_get_global_queue(
+            DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        AudioQueueRef queue = nullptr;
+        {
+            std::unique_lock<std::mutex> lock(entry->stateMutex);
+            entry->stateCondition.wait(lock, [&] {
+                return entry->activeCallbacks == 0 &&
+                    entry->activeUsers == 0;
+            });
+            queue = entry->queue;
+        }
+
+        ClearAudioQueuePropertyListeners(entry);
+        const OSStatus status = queue
+            ? AudioQueueDispose(queue, immediate)
+            : kAudio_ParamError;
+        {
+            std::lock_guard<std::mutex> lock(entry->stateMutex);
+            entry->queue = nullptr;
+        }
+        ClearAudioQueueBuffers(entry);
+        const u32 cleanupArguments[] = { entry->token };
+        if(!InvokeGuestAudioQueueFunction(guestCleanupThunk,
+                cleanupArguments,
+                sizeof(cleanupArguments) / sizeof(cleanupArguments[0]))) {
+            fprintf(stderr,
+                "LC32: could not release deferred guest AudioQueue "
+                "allocations for queue 0x%x\n", entry->token);
+        }
+        if(status != noErr) {
+            fprintf(stderr,
+                "LC32: deferred AudioQueueDispose failed with status %d\n",
+                static_cast<int>(status));
+            QuarantineAudioQueue(entry);
+        }
+    });
+}
+
+std::shared_ptr<AudioQueueBufferEntry> FindAudioQueueBuffer(
+        const std::shared_ptr<AudioQueueEntry> &entry, u32 guestBuffer) {
+    if(!entry) return nullptr;
+    std::lock_guard<std::mutex> lock(entry->buffersMutex);
+    const auto iterator = entry->buffersByGuest.find(guestBuffer);
+    return iterator == entry->buffersByGuest.end()
+        ? nullptr : iterator->second;
+}
+
+void AudioQueueInputCallbackBridge(
+        void *rawEntry, AudioQueueRef, AudioQueueBufferRef nativeBuffer,
+        const AudioTimeStamp *startTime, UInt32 packetCount,
+        const AudioStreamPacketDescription *packetDescriptions) {
+    AudioQueueEntry *entry = static_cast<AudioQueueEntry *>(rawEntry);
+    if(!entry || !nativeBuffer) return;
+    AudioQueueCallbackUse callbackUse(entry);
+    if(!callbackUse) return;
+
+    std::shared_ptr<AudioQueueBufferEntry> buffer;
+    {
+        std::lock_guard<std::mutex> lock(entry->buffersMutex);
+        const auto iterator = entry->buffersByNative.find(nativeBuffer);
+        if(iterator == entry->buffersByNative.end()) return;
+        buffer = iterator->second;
+    }
+    if(!buffer || nativeBuffer->mAudioDataByteSize >
+            buffer->audioDataCapacity) {
+        fprintf(stderr,
+            "LC32: AudioQueue input callback exceeded guest buffer "
+            "capacity (bytes=%u/%u)\n",
+            nativeBuffer->mAudioDataByteSize, buffer->audioDataCapacity);
+        return;
+    }
+
+    if(nativeBuffer->mAudioDataByteSize &&
+       !WriteGuestBytes(buffer->guestAudioData,
+            nativeBuffer->mAudioDataByteSize, nativeBuffer->mAudioData)) {
+        fprintf(stderr,
+            "LC32: could not copy AudioQueue input data to guest buffer "
+            "0x%x\n", buffer->guestBuffer);
+        return;
+    }
+    const AudioStreamPacketDescription *descriptions = packetDescriptions
+        ? packetDescriptions : nativeBuffer->mPacketDescriptions;
+    if(descriptions && packetCount > buffer->packetDescriptionCapacity) {
+        fprintf(stderr,
+            "LC32: AudioQueue input callback exceeded guest packet "
+            "capacity (packets=%u/%u)\n", packetCount,
+            buffer->packetDescriptionCapacity);
+        return;
+    }
+    if(descriptions && packetCount &&
+       !WriteGuestBytes(buffer->guestPacketDescriptions,
+            static_cast<size_t>(packetCount) *
+                sizeof(AudioStreamPacketDescription), descriptions)) {
+        fprintf(stderr,
+            "LC32: could not copy AudioQueue packet descriptions to "
+            "guest buffer 0x%x\n", buffer->guestBuffer);
+        return;
+    }
+    if(!WriteGuestU32(buffer->guestBuffer +
+            offsetof(GuestAudioQueueBuffer, audioDataByteSize),
+            nativeBuffer->mAudioDataByteSize) ||
+       !WriteGuestU32(buffer->guestBuffer +
+            offsetof(GuestAudioQueueBuffer, packetDescriptionCount),
+            descriptions ? packetCount : 0)) {
+        return;
+    }
+
+    GuestAudioQueueInputCallbackStorage storage = {};
+    if(startTime) storage.timeStamp = *startTime;
+    storage.packetCount = packetCount;
+    storage.packetDescriptions = descriptions && packetCount
+        ? buffer->guestPacketDescriptions : 0;
+    if(!WriteGuestBytes(buffer->guestCallbackStorage,
+            sizeof(storage), &storage)) {
+        return;
+    }
+
+    const u32 arguments[] = {
+        entry->guestCallback,
+        entry->guestUserData,
+        entry->token,
+        buffer->guestBuffer,
+        buffer->guestCallbackStorage,
+    };
+    if(!InvokeGuestAudioQueueFunction(
+            entry->guestCallbackThunk, arguments,
+            sizeof(arguments) / sizeof(arguments[0]))) {
+        fprintf(stderr,
+            "LC32: could not deliver AudioQueue input callback 0x%x\n",
+            entry->guestCallback);
+    }
+}
+
+void AudioQueueOutputCallbackBridge(
+        void *rawEntry, AudioQueueRef, AudioQueueBufferRef nativeBuffer) {
+    AudioQueueEntry *entry = static_cast<AudioQueueEntry *>(rawEntry);
+    if(!entry || !nativeBuffer) return;
+    AudioQueueCallbackUse callbackUse(entry);
+    if(!callbackUse) return;
+
+    std::shared_ptr<AudioQueueBufferEntry> buffer;
+    {
+        std::lock_guard<std::mutex> lock(entry->buffersMutex);
+        const auto iterator = entry->buffersByNative.find(nativeBuffer);
+        if(iterator == entry->buffersByNative.end()) return;
+        buffer = iterator->second;
+    }
+    if(!buffer) return;
+    {
+        std::lock_guard<std::mutex> lock(buffer->stateMutex);
+        buffer->outputEnqueued = false;
+    }
+
+    const u32 arguments[] = {
+        entry->guestCallback,
+        entry->guestUserData,
+        entry->token,
+        buffer->guestBuffer,
+    };
+    if(!InvokeGuestAudioQueueFunction(
+            entry->guestCallbackThunk, arguments,
+            sizeof(arguments) / sizeof(arguments[0]))) {
+        fprintf(stderr,
+            "LC32: could not deliver AudioQueue output callback 0x%x\n",
+            entry->guestCallback);
+    }
+}
+
+void AudioQueuePropertyListenerBridge(
+        void *rawListener, AudioQueueRef,
+        AudioQueuePropertyID property) {
+    auto listener = FindAudioQueuePropertyListener(
+        reinterpret_cast<uintptr_t>(rawListener));
+    if(!listener || !listener->enabled.load(std::memory_order_acquire) ||
+       property != listener->property) {
+        return;
+    }
+
+    auto entry = listener->queueEntry.lock();
+    AudioQueueCallbackUse callbackUse(entry.get());
+    if(!callbackUse ||
+       !listener->enabled.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    const u32 arguments[] = {
+        listener->guestCallback,
+        listener->guestUserData,
+        entry->token,
+        property,
+    };
+    if(!InvokeGuestAudioQueueFunction(
+            listener->guestCallbackThunk, arguments,
+            sizeof(arguments) / sizeof(arguments[0]))) {
+        fprintf(stderr,
+            "LC32: could not deliver AudioQueue property callback 0x%x\n",
+            listener->guestCallback);
+    }
+}
+
 bool IsRawExtAudioFileProperty(ExtAudioFilePropertyID property) {
     switch(property) {
         case kExtAudioFileProperty_FileDataFormat:
@@ -129,6 +703,84 @@ bool IsAudioSessionObjectProperty(AudioSessionPropertyID property) {
         default:
             return false;
     }
+}
+
+std::once_flag nativeAudioSessionInitializationOnce;
+OSStatus nativeAudioSessionInitializationStatus =
+    kAudioSessionInitializationError;
+
+OSStatus EnsureNativeAudioSessionInitialized() {
+    std::call_once(nativeAudioSessionInitializationOnce, [] {
+        OSStatus status = AudioSessionInitialize(
+            nullptr, nullptr, nullptr, nullptr);
+        /*
+         * LiveContainer or an Objective-C AVAudioSession user may have already
+         * initialized the process-wide legacy session. It is still usable by
+         * the forwarded C API in that case.
+         */
+        if(status == kAudioSessionAlreadyInitialized) status = noErr;
+        nativeAudioSessionInitializationStatus = status;
+    });
+    return nativeAudioSessionInitializationStatus;
+}
+
+id SharedAVAudioSession();
+
+OSStatus SetNativeAudioSessionActive(BOOL active) {
+    id session = SharedAVAudioSession();
+    SEL selector = sel_registerName("setActive:error:");
+    if(session && [session respondsToSelector:selector]) {
+        NSError *error = nil;
+        const BOOL succeeded =
+            reinterpret_cast<BOOL (*)(id, SEL, BOOL, NSError **)>(
+                objc_msgSend)(session, selector, active, &error);
+        if(succeeded) return noErr;
+        return error ? static_cast<OSStatus>(error.code)
+                     : kAudioSessionUnspecifiedError;
+    }
+
+    return AudioSessionSetActive(active);
+}
+
+OSStatus DispatchAudioSessionSetActive(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 1)) return kAudio_ParamError;
+    const OSStatus initializationStatus =
+        EnsureNativeAudioSessionInitialized();
+    if(initializationStatus != noErr) return initializationStatus;
+
+    return SetNativeAudioSessionActive(SlotU32(call, 0) != 0);
+}
+
+OSStatus DispatchAudioSessionSetProperty(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 3)) return kAudio_ParamError;
+
+    const AudioSessionPropertyID property = SlotU32(call, 0);
+    const u32 dataSize = SlotU32(call, 1);
+    const u32 guestData = SlotU32(call, 2);
+    if(dataSize > kMaximumPropertyBytes || (dataSize && !guestData))
+        return kAudio_ParamError;
+
+    /*
+     * ARM32 object-valued properties contain a four-byte guest proxy, not a
+     * native CFTypeRef. The YouTube properties handled here are scalar; reject
+     * object properties explicitly until they receive typed conversion.
+     */
+    if(IsAudioSessionObjectProperty(property) ||
+       property == kAudioSessionProperty_AudioRouteChange) {
+        return kAudioSessionUnsupportedPropertyError;
+    }
+
+    std::vector<uint8_t> bytes(dataSize ? dataSize : 1);
+    if(dataSize && !ReadGuestBytes(guestData, dataSize, bytes.data()))
+        return kAudio_ParamError;
+
+    const OSStatus initializationStatus =
+        EnsureNativeAudioSessionInitialized();
+    if(initializationStatus != noErr) return initializationStatus;
+    return AudioSessionSetProperty(property, dataSize,
+        dataSize ? bytes.data() : nullptr);
 }
 
 OSStatus WriteAudioSessionValue(const LC32AudioToolboxCall &call,
@@ -224,6 +876,10 @@ OSStatus DispatchAudioSessionGetProperty(
         DispatchObservedAudioSessionProperty(call, handled);
     if(handled) return observedStatus;
 
+    const OSStatus initializationStatus =
+        EnsureNativeAudioSessionInitialized();
+    if(initializationStatus != noErr) return initializationStatus;
+
     const AudioSessionPropertyID property = SlotU32(call, 0);
     u32 requestedSize = 0;
     if(!ReadGuestU32(SlotU32(call, 1), requestedSize) ||
@@ -315,6 +971,48 @@ std::shared_ptr<AudioFileEntry> TakeAudioFile(u32 token) {
     return entry;
 }
 
+OSStatus PublishAudioFile(AudioFileID file, u32 guestOutAudioFile) {
+    const u32 token = InsertAudioFile(file);
+    if(token && WriteGuestU32(guestOutAudioFile, token)) return noErr;
+
+    auto entry = token ? TakeAudioFile(token) : nullptr;
+    if(entry) {
+        std::lock_guard<std::mutex> lock(entry->mutex);
+        if(entry->file) {
+            AudioFileClose(entry->file);
+            entry->file = nullptr;
+        }
+    } else if(file) {
+        AudioFileClose(file);
+    }
+    return kAudio_ParamError;
+}
+
+OSStatus DispatchAudioFileGetPropertyInfo(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 4)) return kAudio_ParamError;
+    auto entry = FindAudioFile(SlotU32(call, 0));
+    if(!entry) return kAudio_ParamError;
+
+    UInt32 dataSize = 0;
+    UInt32 isWritable = 0;
+    OSStatus status;
+    {
+        std::lock_guard<std::mutex> lock(entry->mutex);
+        if(!entry->file) return kAudio_ParamError;
+        status = AudioFileGetPropertyInfo(entry->file, SlotU32(call, 1),
+            &dataSize, &isWritable);
+    }
+    if(status != noErr) return status;
+    if((SlotU32(call, 2) &&
+            !WriteGuestU32(SlotU32(call, 2), dataSize)) ||
+       (SlotU32(call, 3) &&
+            !WriteGuestU32(SlotU32(call, 3), isWritable))) {
+        return kAudio_ParamError;
+    }
+    return noErr;
+}
+
 OSStatus DispatchAudioFileGetProperty(
         const LC32AudioToolboxCall &call) {
     if(!RequireSlots(call, 4)) return kAudio_ParamError;
@@ -383,6 +1081,138 @@ OSStatus DispatchAudioFileReadBytes(
                reinterpret_cast<char *>(bytes.data())) != 0) {
             return kAudio_ParamError;
         }
+    }
+    return status;
+}
+
+OSStatus AudioFilePacketSizeUpperBound(
+        const std::shared_ptr<AudioFileEntry> &entry,
+        UInt32 &packetSize) {
+    UInt32 propertySize = sizeof(packetSize);
+    OSStatus status = AudioFileGetProperty(entry->file,
+        kAudioFilePropertyPacketSizeUpperBound, &propertySize, &packetSize);
+    if(status == noErr && propertySize == sizeof(packetSize)) return noErr;
+
+    packetSize = 0;
+    propertySize = sizeof(packetSize);
+    status = AudioFileGetProperty(entry->file,
+        kAudioFilePropertyMaximumPacketSize, &propertySize, &packetSize);
+    if(status == noErr && propertySize != sizeof(packetSize))
+        return kAudio_ParamError;
+    return status;
+}
+
+OSStatus DispatchAudioFileReadPackets(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 7) || !SlotU32(call, 2) ||
+       !SlotU32(call, 5)) return kAudio_ParamError;
+    auto entry = FindAudioFile(SlotU32(call, 0));
+    if(!entry) return kAudio_ParamError;
+
+    u32 requestedPackets = 0;
+    if(!ReadGuestU32(SlotU32(call, 5), requestedPackets))
+        return kAudio_ParamError;
+
+    UInt32 packetSize = 0;
+    bool returnsPacketDescriptions = false;
+    OSStatus status;
+    {
+        std::lock_guard<std::mutex> lock(entry->mutex);
+        if(!entry->file) return kAudio_ParamError;
+        status = AudioFilePacketSizeUpperBound(entry, packetSize);
+        if(status == noErr && SlotU32(call, 3)) {
+            AudioStreamBasicDescription format = {};
+            UInt32 formatSize = sizeof(format);
+            status = AudioFileGetProperty(entry->file,
+                kAudioFilePropertyDataFormat, &formatSize, &format);
+            if(status == noErr && formatSize != sizeof(format))
+                status = kAudio_ParamError;
+            returnsPacketDescriptions = status == noErr &&
+                format.mBytesPerPacket == 0;
+        }
+    }
+    if(status != noErr) return status;
+    if(requestedPackets && packetSize == 0) return kAudio_ParamError;
+    if(packetSize && requestedPackets > kMaximumAudioBytes / packetSize)
+        return kAudio_ParamError;
+    const size_t bufferCapacity =
+        static_cast<size_t>(packetSize) * requestedPackets;
+    if(bufferCapacity && !SlotU32(call, 6)) return kAudio_ParamError;
+
+    std::vector<uint8_t> bytes(bufferCapacity ? bufferCapacity : 1);
+    std::vector<AudioStreamPacketDescription> packetDescriptions;
+    if(returnsPacketDescriptions) {
+        if(requestedPackets >
+            kMaximumAudioBytes / sizeof(AudioStreamPacketDescription)) {
+            return kAudio_ParamError;
+        }
+        packetDescriptions.resize(requestedPackets);
+    }
+
+    UInt32 returnedBytes = 0;
+    UInt32 returnedPackets = requestedPackets;
+    {
+        std::lock_guard<std::mutex> lock(entry->mutex);
+        if(!entry->file) return kAudio_ParamError;
+        status = AudioFileReadPackets(entry->file,
+            static_cast<Boolean>(SlotU32(call, 1)), &returnedBytes,
+            packetDescriptions.empty() ? nullptr : packetDescriptions.data(),
+            static_cast<SInt64>(call.slots[4]), &returnedPackets,
+            bufferCapacity ? bytes.data() : nullptr);
+    }
+
+    if(returnedBytes > bufferCapacity || returnedPackets > requestedPackets ||
+       !WriteGuestU32(SlotU32(call, 2), returnedBytes) ||
+       !WriteGuestU32(SlotU32(call, 5), returnedPackets)) {
+        return kAudio_ParamError;
+    }
+    if(returnedBytes && Dynarmic_mem_1write(SlotU32(call, 6), returnedBytes,
+            reinterpret_cast<char *>(bytes.data())) != 0) {
+        return kAudio_ParamError;
+    }
+    if(!packetDescriptions.empty() && returnedPackets) {
+        const size_t descriptorBytes = static_cast<size_t>(returnedPackets) *
+            sizeof(GuestAudioStreamPacketDescription);
+        if(Dynarmic_mem_1write(SlotU32(call, 3), descriptorBytes,
+                reinterpret_cast<char *>(packetDescriptions.data())) != 0) {
+            return kAudio_ParamError;
+        }
+    }
+    return status;
+}
+
+OSStatus DispatchAudioFileWriteBytes(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 5) || !SlotU32(call, 3))
+        return kAudio_ParamError;
+    auto entry = FindAudioFile(SlotU32(call, 0));
+    if(!entry) return kAudio_ParamError;
+
+    u32 requestedBytes = 0;
+    if(!ReadGuestU32(SlotU32(call, 3), requestedBytes) ||
+       requestedBytes > kMaximumAudioBytes ||
+       (requestedBytes && !SlotU32(call, 4))) {
+        return kAudio_ParamError;
+    }
+    std::vector<uint8_t> bytes(requestedBytes);
+    if(requestedBytes && Dynarmic_mem_1read(SlotU32(call, 4),
+            requestedBytes, reinterpret_cast<char *>(bytes.data())) != 0) {
+        return kAudio_ParamError;
+    }
+
+    UInt32 writtenBytes = requestedBytes;
+    OSStatus status;
+    {
+        std::lock_guard<std::mutex> lock(entry->mutex);
+        if(!entry->file) return kAudio_ParamError;
+        status = AudioFileWriteBytes(entry->file,
+            static_cast<Boolean>(SlotU32(call, 1)),
+            static_cast<SInt64>(call.slots[2]), &writtenBytes,
+            requestedBytes ? bytes.data() : nullptr);
+    }
+    if(writtenBytes > requestedBytes ||
+       !WriteGuestU32(SlotU32(call, 3), writtenBytes)) {
+        return kAudio_ParamError;
     }
     return status;
 }
@@ -518,6 +1348,693 @@ OSStatus DispatchExtAudioFileRead(const LC32AudioToolboxCall &call) {
     return status;
 }
 
+bool IsRawAudioQueueProperty(AudioQueuePropertyID property) {
+    switch(property) {
+        case kAudioQueueProperty_IsRunning:
+        case kAudioQueueProperty_MagicCookie:
+        case kAudioQueueProperty_MaximumOutputPacketSize:
+        case kAudioQueueProperty_StreamDescription:
+        case kAudioQueueProperty_ChannelLayout:
+        case kAudioQueueProperty_EnableLevelMetering:
+        case kAudioQueueProperty_CurrentLevelMeter:
+        case kAudioQueueProperty_CurrentLevelMeterDB:
+            return true;
+        default:
+            return false;
+    }
+}
+
+OSStatus DispatchAudioQueueNew(
+        const LC32AudioToolboxCall &call,
+        AudioQueueDirection direction) {
+    if(!RequireSlots(call, 8) || !SlotU32(call, 0) ||
+       !SlotU32(call, 1) || !SlotU32(call, 2) ||
+       !SlotU32(call, 7) || !WriteGuestU32(SlotU32(call, 7), 0)) {
+        return kAudio_ParamError;
+    }
+
+    AudioStreamBasicDescription format = {};
+    if(!ReadGuestBytes(SlotU32(call, 0), sizeof(format), &format))
+        return kAudio_ParamError;
+
+    /*
+     * Older iOS AudioQueue implementations ignored mReserved, and some old
+     * clients (including this YouTube build) did not initialize it.  Modern
+     * simulator AudioToolbox preserves the garbage value until RemoteIO is
+     * started, where it fails with the private status -66628.  Reserved ASBD
+     * fields are required to be zero at an API boundary.
+     */
+    format.mReserved = 0;
+
+    auto entry = std::make_shared<AudioQueueEntry>();
+    entry->token = AllocateAudioQueueToken();
+    entry->direction = direction;
+    entry->guestCallback = SlotU32(call, 1);
+    entry->guestCallbackThunk = SlotU32(call, 2);
+    entry->guestUserData = SlotU32(call, 3);
+    if(!entry->token) return kAudio_MemFullError;
+
+    AudioQueueRef queue = nullptr;
+    OSStatus status = noErr;
+    if(direction == AudioQueueDirection::Input) {
+        status = AudioQueueNewInput(&format,
+            AudioQueueInputCallbackBridge, entry.get(),
+            SlotHostObject<CFRunLoopRef>(call, 4),
+            SlotHostObject<CFStringRef>(call, 5), SlotU32(call, 6),
+            &queue);
+    } else {
+        status = AudioQueueNewOutput(&format,
+            AudioQueueOutputCallbackBridge, entry.get(),
+            SlotHostObject<CFRunLoopRef>(call, 4),
+            SlotHostObject<CFStringRef>(call, 5), SlotU32(call, 6),
+            &queue);
+    }
+    if(status != noErr) return status;
+    entry->queue = queue;
+
+    const bool published = PublishAudioQueue(entry);
+    if(!published || !WriteGuestU32(SlotU32(call, 7), entry->token)) {
+        if(published) (void)TakeAudioQueue(entry->token);
+        {
+            std::lock_guard<std::mutex> lock(entry->stateMutex);
+            entry->disposing = true;
+            entry->disposed.store(true, std::memory_order_release);
+        }
+        const OSStatus disposeStatus = AudioQueueDispose(queue, true);
+        {
+            std::lock_guard<std::mutex> lock(entry->stateMutex);
+            entry->queue = nullptr;
+        }
+        if(disposeStatus != noErr) QuarantineAudioQueue(entry);
+        return kAudio_ParamError;
+    }
+    return noErr;
+}
+
+OSStatus DispatchAudioQueueNewInput(
+        const LC32AudioToolboxCall &call) {
+    return DispatchAudioQueueNew(call, AudioQueueDirection::Input);
+}
+
+OSStatus DispatchAudioQueueNewOutput(
+        const LC32AudioToolboxCall &call) {
+    return DispatchAudioQueueNew(call, AudioQueueDirection::Output);
+}
+
+OSStatus DispatchAudioQueueAllocateBuffer(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 7)) return kAudio_ParamError;
+    auto entry = FindAudioQueue(SlotU32(call, 0));
+    AudioQueueUse queueUse(entry);
+    if(!queueUse) return kAudio_ParamError;
+    AudioQueueRef queue = queueUse.queue();
+
+    const u32 byteCapacity = SlotU32(call, 1);
+    const u32 packetCapacity = SlotU32(call, 2);
+    const u32 guestBuffer = SlotU32(call, 3);
+    const u32 guestAudioData = SlotU32(call, 4);
+    const u32 guestPacketDescriptions = SlotU32(call, 5);
+    const u32 guestCallbackStorage = SlotU32(call, 6);
+    if(byteCapacity > kMaximumAudioBytes ||
+       packetCapacity > kMaximumAudioBytes /
+            sizeof(AudioStreamPacketDescription) ||
+       !guestBuffer || (byteCapacity && !guestAudioData) ||
+       (packetCapacity && !guestPacketDescriptions) ||
+       !guestCallbackStorage) {
+        return kAudio_ParamError;
+    }
+
+    GuestAudioQueueBuffer mirror = {};
+    if(!ReadGuestBytes(guestBuffer, sizeof(mirror), &mirror) ||
+       mirror.audioDataBytesCapacity != byteCapacity ||
+       mirror.audioData != guestAudioData ||
+       mirror.audioDataByteSize != 0 ||
+       mirror.packetDescriptionCapacity != packetCapacity ||
+       mirror.packetDescriptions != guestPacketDescriptions ||
+       mirror.packetDescriptionCount != 0) {
+        return kAudioQueueErr_InvalidBuffer;
+    }
+
+    AudioQueueBufferRef nativeBuffer = nullptr;
+    const OSStatus status = packetCapacity
+        ? AudioQueueAllocateBufferWithPacketDescriptions(queue,
+            byteCapacity, packetCapacity, &nativeBuffer)
+        : AudioQueueAllocateBuffer(queue, byteCapacity, &nativeBuffer);
+    if(status != noErr) return status;
+
+    auto buffer = std::make_shared<AudioQueueBufferEntry>();
+    buffer->nativeBuffer = nativeBuffer;
+    buffer->guestBuffer = guestBuffer;
+    buffer->guestAudioData = guestAudioData;
+    buffer->audioDataCapacity = byteCapacity;
+    buffer->guestPacketDescriptions = guestPacketDescriptions;
+    buffer->packetDescriptionCapacity = packetCapacity;
+    buffer->guestCallbackStorage = guestCallbackStorage;
+    bool inserted = false;
+    {
+        std::lock_guard<std::mutex> lock(entry->buffersMutex);
+        if(!entry->disposed.load(std::memory_order_acquire)) {
+            const auto guestResult =
+                entry->buffersByGuest.emplace(guestBuffer, buffer);
+            if(guestResult.second) {
+                const auto nativeResult =
+                    entry->buffersByNative.emplace(nativeBuffer, buffer);
+                if(nativeResult.second) {
+                    inserted = true;
+                } else {
+                    entry->buffersByGuest.erase(guestResult.first);
+                }
+            }
+        }
+    }
+    if(!inserted) {
+        (void)AudioQueueFreeBuffer(queue, nativeBuffer);
+        return kAudioQueueErr_InvalidBuffer;
+    }
+    return noErr;
+}
+
+OSStatus DispatchAudioQueueEnqueueBuffer(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 4)) return kAudio_ParamError;
+    auto entry = FindAudioQueue(SlotU32(call, 0));
+    AudioQueueUse queueUse(entry);
+    auto buffer = FindAudioQueueBuffer(entry, SlotU32(call, 1));
+    if(!queueUse || !buffer) {
+        fprintf(stderr,
+            "LC32: AudioQueueEnqueueBuffer rejected unknown queue/buffer "
+            "(queue=0x%x buffer=0x%x queue-found=%d buffer-found=%d)\n",
+            SlotU32(call, 0), SlotU32(call, 1), entry != nullptr,
+            buffer != nullptr);
+        return kAudioQueueErr_InvalidBuffer;
+    }
+    AudioQueueRef queue = queueUse.queue();
+
+    GuestAudioQueueBuffer mirror = {};
+    if(!ReadGuestBytes(buffer->guestBuffer, sizeof(mirror), &mirror) ||
+       mirror.audioDataBytesCapacity != buffer->audioDataCapacity ||
+       mirror.audioData != buffer->guestAudioData ||
+       mirror.audioDataByteSize > buffer->audioDataCapacity ||
+       mirror.packetDescriptionCapacity !=
+            buffer->packetDescriptionCapacity ||
+       mirror.packetDescriptions != buffer->guestPacketDescriptions) {
+        fprintf(stderr,
+            "LC32: AudioQueueEnqueueBuffer rejected guest mirror "
+            "0x%x (bytes-capacity=%u/%u data=0x%x/0x%x bytes=%u "
+            "packet-capacity=%u/%u descriptions=0x%x/0x%x "
+            "packet-count=%u)\n",
+            buffer->guestBuffer,
+            mirror.audioDataBytesCapacity, buffer->audioDataCapacity,
+            mirror.audioData, buffer->guestAudioData,
+            mirror.audioDataByteSize,
+            mirror.packetDescriptionCapacity,
+            buffer->packetDescriptionCapacity,
+            mirror.packetDescriptions,
+            buffer->guestPacketDescriptions,
+            mirror.packetDescriptionCount);
+        return kAudioQueueErr_InvalidBuffer;
+    }
+
+    if(entry->direction == AudioQueueDirection::Input) {
+        if(SlotU32(call, 2) || SlotU32(call, 3))
+            return kAudio_ParamError;
+        /* Input queues treat enqueued buffers as empty writable capacity. The
+         * guest mirror retains the previous capture until the next callback.
+         */
+        buffer->nativeBuffer->mAudioDataByteSize = 0;
+        buffer->nativeBuffer->mPacketDescriptionCount = 0;
+        return AudioQueueEnqueueBuffer(
+            queue, buffer->nativeBuffer, 0, nullptr);
+    }
+
+    std::unique_lock<std::mutex> bufferLock(buffer->stateMutex);
+    if(buffer->outputEnqueued) {
+        return kAudioQueueErr_BufferInQueue;
+    }
+    buffer->outputEnqueued = true;
+
+    const u32 packetCount = SlotU32(call, 2);
+    const u32 guestPacketDescriptions = SlotU32(call, 3);
+    const bool hasEmbeddedStorage =
+        buffer->packetDescriptionCapacity != 0 &&
+        buffer->guestPacketDescriptions != 0 &&
+        buffer->nativeBuffer->mPacketDescriptions != nullptr;
+    const bool externalReferencesEmbedded = hasEmbeddedStorage &&
+        packetCount != 0 &&
+        guestPacketDescriptions == buffer->guestPacketDescriptions;
+    const bool useEmbeddedDescriptions = hasEmbeddedStorage &&
+        (packetCount == 0 || externalReferencesEmbedded);
+    const u32 embeddedPacketCount = useEmbeddedDescriptions
+        ? (externalReferencesEmbedded
+            ? packetCount : mirror.packetDescriptionCount)
+        : 0;
+    const u32 externalPacketCount = useEmbeddedDescriptions
+        ? 0 : packetCount;
+    if((packetCount && !guestPacketDescriptions) ||
+       packetCount > kMaximumPropertyBytes /
+            sizeof(AudioStreamPacketDescription) ||
+       embeddedPacketCount > buffer->packetDescriptionCapacity) {
+        buffer->outputEnqueued = false;
+        return kAudio_ParamError;
+    }
+
+    std::unique_ptr<AudioStreamPacketDescription[]> packetDescriptions;
+    if(externalPacketCount) {
+        packetDescriptions.reset(new(std::nothrow)
+            AudioStreamPacketDescription[externalPacketCount]);
+        if(!packetDescriptions) {
+            buffer->outputEnqueued = false;
+            return kAudio_MemFullError;
+        }
+    }
+    if((mirror.audioDataByteSize &&
+        !ReadGuestBytes(buffer->guestAudioData,
+            mirror.audioDataByteSize, buffer->nativeBuffer->mAudioData)) ||
+       (externalPacketCount &&
+        !ReadGuestBytes(guestPacketDescriptions,
+            static_cast<size_t>(externalPacketCount) *
+                sizeof(AudioStreamPacketDescription),
+            packetDescriptions.get())) ||
+       (embeddedPacketCount &&
+        (!buffer->nativeBuffer->mPacketDescriptions ||
+         !ReadGuestBytes(buffer->guestPacketDescriptions,
+            static_cast<size_t>(embeddedPacketCount) *
+                sizeof(AudioStreamPacketDescription),
+            buffer->nativeBuffer->mPacketDescriptions)))) {
+        buffer->outputEnqueued = false;
+        return kAudio_ParamError;
+    }
+
+    buffer->nativeBuffer->mAudioDataByteSize = mirror.audioDataByteSize;
+    buffer->nativeBuffer->mPacketDescriptionCount = embeddedPacketCount;
+    const OSStatus status = AudioQueueEnqueueBuffer(queue,
+        buffer->nativeBuffer, externalPacketCount,
+        packetDescriptions.get());
+    if(status != noErr) buffer->outputEnqueued = false;
+    return status;
+}
+
+OSStatus DispatchAudioQueueFreeBuffer(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 2)) return kAudio_ParamError;
+    auto entry = FindAudioQueue(SlotU32(call, 0));
+    AudioQueueUse queueUse(entry);
+    auto buffer = FindAudioQueueBuffer(entry, SlotU32(call, 1));
+    if(!queueUse || !buffer) return kAudioQueueErr_InvalidBuffer;
+    AudioQueueRef queue = queueUse.queue();
+    std::unique_lock<std::mutex> bufferLock(buffer->stateMutex);
+    if(entry->direction == AudioQueueDirection::Output &&
+       buffer->outputEnqueued) {
+        return kAudioQueueErr_BufferInQueue;
+    }
+
+    const OSStatus status = AudioQueueFreeBuffer(
+        queue, buffer->nativeBuffer);
+    if(status != noErr) return status;
+    std::lock_guard<std::mutex> lock(entry->buffersMutex);
+    const auto guestIterator =
+        entry->buffersByGuest.find(buffer->guestBuffer);
+    if(guestIterator != entry->buffersByGuest.end() &&
+       guestIterator->second == buffer) {
+        entry->buffersByGuest.erase(guestIterator);
+    }
+    const auto nativeIterator =
+        entry->buffersByNative.find(buffer->nativeBuffer);
+    if(nativeIterator != entry->buffersByNative.end() &&
+       nativeIterator->second == buffer) {
+        entry->buffersByNative.erase(nativeIterator);
+    }
+    return noErr;
+}
+
+OSStatus DispatchAudioQueueGetProperty(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 4) || !SlotU32(call, 3))
+        return kAudio_ParamError;
+    const AudioQueuePropertyID property = SlotU32(call, 1);
+    if(!IsRawAudioQueueProperty(property))
+        return kAudioQueueErr_InvalidProperty;
+    auto entry = FindAudioQueue(SlotU32(call, 0));
+    AudioQueueUse queueUse(entry);
+    if(!queueUse) return kAudio_ParamError;
+    AudioQueueRef queue = queueUse.queue();
+
+    u32 requestedSize = 0;
+    if(!ReadGuestU32(SlotU32(call, 3), requestedSize) ||
+       requestedSize > kMaximumPropertyBytes ||
+       (requestedSize && !SlotU32(call, 2))) {
+        return kAudio_ParamError;
+    }
+    std::vector<uint8_t> bytes(requestedSize ? requestedSize : 1);
+    UInt32 returnedSize = requestedSize;
+    const OSStatus status = AudioQueueGetProperty(queue, property,
+        requestedSize ? bytes.data() : nullptr, &returnedSize);
+    if(!WriteGuestU32(SlotU32(call, 3), returnedSize))
+        return kAudio_ParamError;
+    if(status == noErr && returnedSize &&
+       (returnedSize > requestedSize ||
+        !WriteGuestBytes(SlotU32(call, 2), returnedSize, bytes.data()))) {
+        return kAudio_ParamError;
+    }
+    return status;
+}
+
+OSStatus DispatchAudioQueueSetProperty(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 4)) return kAudio_ParamError;
+    const AudioQueuePropertyID property = SlotU32(call, 1);
+    if(!IsRawAudioQueueProperty(property))
+        return kAudioQueueErr_InvalidProperty;
+    auto entry = FindAudioQueue(SlotU32(call, 0));
+    AudioQueueUse queueUse(entry);
+    if(!queueUse) return kAudio_ParamError;
+    AudioQueueRef queue = queueUse.queue();
+
+    const u32 byteCount = SlotU32(call, 3);
+    if(byteCount > kMaximumPropertyBytes ||
+       (byteCount && !SlotU32(call, 2))) return kAudio_ParamError;
+    std::vector<uint8_t> bytes(byteCount);
+    if(byteCount && !ReadGuestBytes(
+            SlotU32(call, 2), byteCount, bytes.data())) {
+        return kAudio_ParamError;
+    }
+    return AudioQueueSetProperty(queue, property, byteCount
+        ? bytes.data() : nullptr, byteCount);
+}
+
+OSStatus DispatchAudioQueueSetParameter(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 3)) return kAudio_ParamError;
+    auto entry = FindAudioQueue(SlotU32(call, 0));
+    AudioQueueUse queueUse(entry);
+    if(!queueUse) return kAudio_ParamError;
+
+    static_assert(sizeof(AudioQueueParameterValue) == sizeof(u32));
+    const u32 valueBits = SlotU32(call, 2);
+    AudioQueueParameterValue value = 0;
+    memcpy(&value, &valueBits, sizeof(value));
+    return AudioQueueSetParameter(
+        queueUse.queue(), SlotU32(call, 1), value);
+}
+
+OSStatus DispatchAudioQueueCallbackScope(
+        const LC32AudioToolboxCall &call, bool entering) {
+    if(!RequireSlots(call, 1) || !SlotU32(call, 0))
+        return kAudio_ParamError;
+    const u32 token = SlotU32(call, 0);
+    if(entering) {
+        ++audioQueueGuestCallbacksOnCurrentThread[token];
+        return noErr;
+    }
+
+    const auto iterator =
+        audioQueueGuestCallbacksOnCurrentThread.find(token);
+    if(iterator == audioQueueGuestCallbacksOnCurrentThread.end() ||
+       iterator->second == 0) {
+        return kAudio_ParamError;
+    }
+    if(iterator->second > 1) {
+        --iterator->second;
+    } else {
+        audioQueueGuestCallbacksOnCurrentThread.erase(iterator);
+    }
+    return noErr;
+}
+
+OSStatus DispatchAudioQueueAddPropertyListener(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 5) || !SlotU32(call, 2) ||
+       !SlotU32(call, 3)) {
+        return kAudio_ParamError;
+    }
+    auto entry = FindAudioQueue(SlotU32(call, 0));
+    AudioQueueUse queueUse(entry);
+    if(!queueUse) return kAudio_ParamError;
+
+    auto listener = std::make_shared<AudioQueuePropertyListenerEntry>();
+    listener->queueEntry = entry;
+    listener->property = SlotU32(call, 1);
+    listener->guestCallback = SlotU32(call, 2);
+    listener->guestCallbackThunk = SlotU32(call, 3);
+    listener->guestUserData = SlotU32(call, 4);
+    if(!PublishAudioQueuePropertyListener(listener))
+        return kAudio_MemFullError;
+
+    const OSStatus status = AudioQueueAddPropertyListener(
+        queueUse.queue(), listener->property,
+        AudioQueuePropertyListenerBridge,
+        reinterpret_cast<void *>(listener->nativeCookie));
+    if(status == noErr) {
+        std::lock_guard<std::mutex> lock(entry->listenersMutex);
+        entry->listeners.push_back(listener);
+    } else {
+        listener->enabled.store(false, std::memory_order_release);
+        UnpublishAudioQueuePropertyListener(listener);
+    }
+    return status;
+}
+
+OSStatus DispatchAudioQueueRemovePropertyListener(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 4) || !SlotU32(call, 2))
+        return kAudio_ParamError;
+    auto entry = FindAudioQueue(SlotU32(call, 0));
+    AudioQueueUse queueUse(entry);
+    if(!queueUse) return kAudio_ParamError;
+
+    std::shared_ptr<AudioQueuePropertyListenerEntry> listener;
+    {
+        std::lock_guard<std::mutex> lock(entry->listenersMutex);
+        for(const auto &candidate : entry->listeners) {
+            if(!candidate ||
+               !candidate->enabled.load(std::memory_order_acquire) ||
+               candidate->property != SlotU32(call, 1) ||
+               candidate->guestCallback != SlotU32(call, 2) ||
+               candidate->guestUserData != SlotU32(call, 3)) {
+                continue;
+            }
+            bool expected = false;
+            if(!candidate->removing.compare_exchange_strong(expected, true,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                return kAudio_ParamError;
+            }
+            listener = candidate;
+            break;
+        }
+    }
+    if(!listener) return kAudio_ParamError;
+
+    const OSStatus status = AudioQueueRemovePropertyListener(
+        queueUse.queue(), listener->property,
+        AudioQueuePropertyListenerBridge,
+        reinterpret_cast<void *>(listener->nativeCookie));
+    if(status != noErr) {
+        listener->removing.store(false, std::memory_order_release);
+        return status;
+    }
+
+    listener->enabled.store(false, std::memory_order_release);
+    UnpublishAudioQueuePropertyListener(listener);
+    {
+        std::lock_guard<std::mutex> lock(entry->listenersMutex);
+        for(auto iterator = entry->listeners.begin();
+                iterator != entry->listeners.end(); ++iterator) {
+            if(*iterator == listener) {
+                entry->listeners.erase(iterator);
+                break;
+            }
+        }
+    }
+    return noErr;
+}
+
+OSStatus DispatchAudioQueuePrime(const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 3)) return kAudio_ParamError;
+    auto entry = FindAudioQueue(SlotU32(call, 0));
+    AudioQueueUse queueUse(entry);
+    if(!queueUse) return kAudio_ParamError;
+
+    UInt32 preparedFrames = 0;
+    const u32 guestPreparedFrames = SlotU32(call, 2);
+    if(guestPreparedFrames &&
+       !WriteGuestU32(guestPreparedFrames, preparedFrames)) {
+        return kAudio_ParamError;
+    }
+    const OSStatus status = AudioQueuePrime(queueUse.queue(),
+        SlotU32(call, 1), guestPreparedFrames ? &preparedFrames : nullptr);
+    if(guestPreparedFrames &&
+       !WriteGuestU32(guestPreparedFrames, preparedFrames)) {
+        return kAudio_ParamError;
+    }
+    return status;
+}
+
+OSStatus DispatchAudioQueueDeviceGetCurrentTime(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 2) || !SlotU32(call, 1))
+        return kAudio_ParamError;
+    auto entry = FindAudioQueue(SlotU32(call, 0));
+    AudioQueueUse queueUse(entry);
+    if(!queueUse) return kAudio_ParamError;
+    AudioQueueRef queue = queueUse.queue();
+    AudioTimeStamp timeStamp = {};
+    const OSStatus status =
+        AudioQueueDeviceGetCurrentTime(queue, &timeStamp);
+    if(status == noErr && !WriteGuestBytes(
+            SlotU32(call, 1), sizeof(timeStamp), &timeStamp)) {
+        return kAudio_ParamError;
+    }
+    return status;
+}
+
+OSStatus DispatchAudioQueueStart(const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 2)) return kAudio_ParamError;
+    auto entry = FindAudioQueue(SlotU32(call, 0));
+    AudioQueueUse queueUse(entry);
+    if(!queueUse) return kAudio_ParamError;
+    AudioQueueRef queue = queueUse.queue();
+    AudioTimeStamp timeStamp = {};
+    const AudioTimeStamp *startTime = nullptr;
+    if(SlotU32(call, 1)) {
+        if(!ReadGuestBytes(SlotU32(call, 1), sizeof(timeStamp), &timeStamp))
+            return kAudio_ParamError;
+        startTime = &timeStamp;
+    }
+    /*
+     * Some pre-AVAudioSession clients relied on the old input AudioQueue path
+     * to reactivate a session after configuring its legacy category.  Current
+     * simulator AudioToolbox instead returns the private status -66628 while
+     * the session remains inactive.  Starting an input queue is itself an
+     * explicit request to record, so restore the legacy behavior immediately
+     * before asking the native queue to start.
+     */
+    if(entry->direction == AudioQueueDirection::Input) {
+        const OSStatus initializationStatus =
+            EnsureNativeAudioSessionInitialized();
+        if(initializationStatus != noErr) return initializationStatus;
+        const OSStatus activationStatus = SetNativeAudioSessionActive(YES);
+        if(activationStatus != noErr) {
+            fprintf(stderr,
+                "LC32: could not activate audio session before input "
+                "AudioQueueStart: status=%d\n",
+                static_cast<int>(activationStatus));
+            return activationStatus;
+        }
+    }
+
+    const OSStatus status = AudioQueueStart(queue, startTime);
+    if(status != noErr) {
+        OSStatus converterError = noErr;
+        UInt32 converterErrorSize = sizeof(converterError);
+        const OSStatus converterPropertyStatus = AudioQueueGetProperty(
+            queue, kAudioQueueProperty_ConverterError,
+            &converterError, &converterErrorSize);
+        fprintf(stderr,
+            "LC32: AudioQueueStart failed: status=%d "
+            "converter-property=%d converter-error=%d\n",
+            static_cast<int>(status),
+            static_cast<int>(converterPropertyStatus),
+            static_cast<int>(converterError));
+    }
+    return status;
+}
+
+OSStatus DispatchAudioQueueStop(const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 2)) return kAudio_ParamError;
+    auto entry = FindAudioQueue(SlotU32(call, 0));
+    if(!entry) return kAudio_ParamError;
+    const Boolean immediate = static_cast<Boolean>(SlotU32(call, 1));
+    {
+        std::lock_guard<std::mutex> lock(entry->stateMutex);
+        if(entry->disposed.load(std::memory_order_relaxed) ||
+           entry->disposing || !entry->queue) return kAudio_ParamError;
+        if(entry->activeCallbacks &&
+           AudioQueueGuestCallbackIsOnCurrentThread(SlotU32(call, 0))) {
+            ScheduleDeferredAudioQueueStop(entry, immediate);
+            return noErr;
+        }
+    }
+    AudioQueueUse queueUse(entry);
+    if(!queueUse) return kAudio_ParamError;
+    const OSStatus status = AudioQueueStop(queueUse.queue(), immediate);
+    if(status == noErr && immediate)
+        MarkOutputAudioQueueBuffersAvailable(entry);
+    return status;
+}
+
+OSStatus DispatchAudioQueuePause(const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 1)) return kAudio_ParamError;
+    auto entry = FindAudioQueue(SlotU32(call, 0));
+    AudioQueueUse queueUse(entry);
+    return queueUse ? AudioQueuePause(queueUse.queue()) : kAudio_ParamError;
+}
+
+OSStatus DispatchAudioQueueDispose(const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 4) || !SlotU32(call, 2) ||
+       !SlotU32(call, 3) ||
+       !WriteGuestU32(SlotU32(call, 2),
+            LC32AudioQueueDisposeTerminalNone)) {
+        return kAudio_ParamError;
+    }
+    auto entry = TakeAudioQueue(SlotU32(call, 0));
+    if(!entry) return kAudio_ParamError;
+
+    const Boolean immediate = static_cast<Boolean>(SlotU32(call, 1));
+    AudioQueueRef queue = nullptr;
+    bool deferred = false;
+    {
+        std::unique_lock<std::mutex> lock(entry->stateMutex);
+        if(entry->disposing ||
+           entry->disposed.load(std::memory_order_relaxed) ||
+           !entry->queue) {
+            (void)WriteGuestU32(SlotU32(call, 2),
+                LC32AudioQueueDisposeTerminalQuarantineMirrors);
+            lock.unlock();
+            QuarantineAudioQueue(entry);
+            return kAudio_ParamError;
+        }
+        deferred = entry->activeCallbacks != 0 &&
+            AudioQueueGuestCallbackIsOnCurrentThread(SlotU32(call, 0));
+        const u32 terminal = deferred
+            ? LC32AudioQueueDisposeTerminalDeferredCleanup
+            : LC32AudioQueueDisposeTerminalReleaseMirrors;
+        if(!WriteGuestU32(SlotU32(call, 2), terminal)) {
+            lock.unlock();
+            if(!PublishAudioQueue(entry)) QuarantineAudioQueue(entry);
+            return kAudio_ParamError;
+        }
+        entry->disposing = true;
+        entry->disposed.store(true, std::memory_order_release);
+        if(!deferred) {
+            entry->stateCondition.wait(lock, [&] {
+                return entry->activeUsers == 0 &&
+                    entry->activeCallbacks == 0;
+            });
+        }
+        queue = entry->queue;
+    }
+
+    if(deferred) {
+        ClearAudioQueueBuffers(entry);
+        ScheduleDeferredAudioQueueDispose(
+            entry, immediate, SlotU32(call, 3));
+        return noErr;
+    }
+
+    ClearAudioQueuePropertyListeners(entry);
+    const OSStatus status = queue
+        ? AudioQueueDispose(queue, immediate)
+        : kAudio_ParamError;
+    {
+        std::lock_guard<std::mutex> lock(entry->stateMutex);
+        entry->queue = nullptr;
+    }
+    ClearAudioQueueBuffers(entry);
+    if(status != noErr) QuarantineAudioQueue(entry);
+    return status;
+}
+
 } // namespace
 
 extern "C" u32 LC32_AudioToolbox_Dispatch(u32 opcode, u32 guestCall, u32) {
@@ -580,6 +2097,12 @@ extern "C" u32 LC32_AudioToolbox_Dispatch(u32 opcode, u32 guestCall, u32) {
         case LC32AudioToolboxOpAudioSessionGetProperty:
             return static_cast<u32>(
                 DispatchAudioSessionGetProperty(call));
+        case LC32AudioToolboxOpAudioSessionSetActive:
+            return static_cast<u32>(
+                DispatchAudioSessionSetActive(call));
+        case LC32AudioToolboxOpAudioSessionSetProperty:
+            return static_cast<u32>(
+                DispatchAudioSessionSetProperty(call));
         case LC32AudioToolboxOpAudioFileOpenURL: {
             if(!RequireSlots(call, 4) || !SlotU32(call, 3))
                 return static_cast<u32>(kAudio_ParamError);
@@ -589,21 +2112,8 @@ extern "C" u32 LC32_AudioToolbox_Dispatch(u32 opcode, u32 guestCall, u32) {
                 static_cast<AudioFilePermissions>(SlotU32(call, 1)),
                 SlotU32(call, 2), &file);
             if(status != noErr) return static_cast<u32>(status);
-            const u32 token = InsertAudioFile(file);
-            if(!token || !WriteGuestU32(SlotU32(call, 3), token)) {
-                auto entry = token ? TakeAudioFile(token) : nullptr;
-                if(entry) {
-                    std::lock_guard<std::mutex> lock(entry->mutex);
-                    if(entry->file) {
-                        AudioFileClose(entry->file);
-                        entry->file = nullptr;
-                    }
-                } else {
-                    AudioFileClose(file);
-                }
-                return static_cast<u32>(kAudio_ParamError);
-            }
-            return static_cast<u32>(noErr);
+            return static_cast<u32>(
+                PublishAudioFile(file, SlotU32(call, 3)));
         }
         case LC32AudioToolboxOpAudioFileGetProperty:
             return static_cast<u32>(DispatchAudioFileGetProperty(call));
@@ -620,6 +2130,78 @@ extern "C" u32 LC32_AudioToolbox_Dispatch(u32 opcode, u32 guestCall, u32) {
             entry->file = nullptr;
             return static_cast<u32>(status);
         }
+        case LC32AudioToolboxOpAudioFileCreateWithURL: {
+            if(!RequireSlots(call, 5) || !SlotHostObject<CFURLRef>(call, 0) ||
+               !SlotU32(call, 2) ||
+               !SlotU32(call, 4)) {
+                return static_cast<u32>(kAudio_ParamError);
+            }
+            AudioStreamBasicDescription format = {};
+            if(Dynarmic_mem_1read(SlotU32(call, 2), sizeof(format),
+                    reinterpret_cast<char *>(&format)) != 0) {
+                return static_cast<u32>(kAudio_ParamError);
+            }
+            AudioFileID file = nullptr;
+            const OSStatus status = AudioFileCreateWithURL(
+                SlotHostObject<CFURLRef>(call, 0), SlotU32(call, 1),
+                &format, SlotU32(call, 3), &file);
+            if(status != noErr) return static_cast<u32>(status);
+            return static_cast<u32>(
+                PublishAudioFile(file, SlotU32(call, 4)));
+        }
+        case LC32AudioToolboxOpAudioFileGetPropertyInfo:
+            return static_cast<u32>(
+                DispatchAudioFileGetPropertyInfo(call));
+        case LC32AudioToolboxOpAudioFileReadPackets:
+            return static_cast<u32>(
+                DispatchAudioFileReadPackets(call));
+        case LC32AudioToolboxOpAudioFileWriteBytes:
+            return static_cast<u32>(
+                DispatchAudioFileWriteBytes(call));
+        case LC32AudioToolboxOpAudioQueueNewInput:
+            return static_cast<u32>(DispatchAudioQueueNewInput(call));
+        case LC32AudioToolboxOpAudioQueueNewOutput:
+            return static_cast<u32>(DispatchAudioQueueNewOutput(call));
+        case LC32AudioToolboxOpAudioQueueAllocateBuffer:
+            return static_cast<u32>(
+                DispatchAudioQueueAllocateBuffer(call));
+        case LC32AudioToolboxOpAudioQueueEnqueueBuffer:
+            return static_cast<u32>(
+                DispatchAudioQueueEnqueueBuffer(call));
+        case LC32AudioToolboxOpAudioQueueFreeBuffer:
+            return static_cast<u32>(DispatchAudioQueueFreeBuffer(call));
+        case LC32AudioToolboxOpAudioQueueGetProperty:
+            return static_cast<u32>(DispatchAudioQueueGetProperty(call));
+        case LC32AudioToolboxOpAudioQueueSetProperty:
+            return static_cast<u32>(DispatchAudioQueueSetProperty(call));
+        case LC32AudioToolboxOpAudioQueueSetParameter:
+            return static_cast<u32>(
+                DispatchAudioQueueSetParameter(call));
+        case LC32AudioToolboxOpAudioQueueAddPropertyListener:
+            return static_cast<u32>(
+                DispatchAudioQueueAddPropertyListener(call));
+        case LC32AudioToolboxOpAudioQueueRemovePropertyListener:
+            return static_cast<u32>(
+                DispatchAudioQueueRemovePropertyListener(call));
+        case LC32AudioToolboxOpAudioQueuePrime:
+            return static_cast<u32>(DispatchAudioQueuePrime(call));
+        case LC32AudioToolboxOpAudioQueueCallbackEnter:
+            return static_cast<u32>(
+                DispatchAudioQueueCallbackScope(call, true));
+        case LC32AudioToolboxOpAudioQueueCallbackLeave:
+            return static_cast<u32>(
+                DispatchAudioQueueCallbackScope(call, false));
+        case LC32AudioToolboxOpAudioQueueDeviceGetCurrentTime:
+            return static_cast<u32>(
+                DispatchAudioQueueDeviceGetCurrentTime(call));
+        case LC32AudioToolboxOpAudioQueueStart:
+            return static_cast<u32>(DispatchAudioQueueStart(call));
+        case LC32AudioToolboxOpAudioQueueStop:
+            return static_cast<u32>(DispatchAudioQueueStop(call));
+        case LC32AudioToolboxOpAudioQueuePause:
+            return static_cast<u32>(DispatchAudioQueuePause(call));
+        case LC32AudioToolboxOpAudioQueueDispose:
+            return static_cast<u32>(DispatchAudioQueueDispose(call));
     }
     return static_cast<u32>(kAudio_ParamError);
 }

@@ -12,12 +12,13 @@ APPLICATION_NAME = LiveExec32
 LiveExec32_FILES = \
 	main.cpp debugger_server.cpp arm_dynarmic_cp15.cpp dynarmic.cpp filesystem.cpp variables.cpp \
 	ap_getparents.c target.c \
-	bridge.mm bridge.s log.m \
+	bridge.mm block_bridge.mm bridge.s log.m \
 	HostFrameworks/Foundation/Foundation.mm \
 	HostFrameworks/Foundation/NSString.mm \
 	HostFrameworks/CoreFoundation/CoreFoundation.mm \
 	HostFrameworks/CFNetwork/CFNetwork.mm \
 	HostFrameworks/CoreGraphics/CoreGraphics.mm \
+	HostFrameworks/CoreText/CoreText.mm \
 	HostFrameworks/AudioToolbox/AudioToolbox.mm \
 	HostFrameworks/OpenAL/OpenAL.mm \
 	HostFrameworks/OpenGLES/OpenGLES.mm \

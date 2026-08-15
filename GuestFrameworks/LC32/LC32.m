@@ -15,7 +15,9 @@ uint64_t LC32CachedHostSelector(
     if(value) return value;
 
     const uint64_t resolved = LC32GetHostSelector(selector) |
-        ((uint64_t)(returnsStruct != NO) << 63);
+        (returnsStruct != NO
+            ? LC32_HOST_SELECTOR_RETURN_STRUCT
+            : UINT64_C(0));
     uint64_t expected = 0;
     if(__atomic_compare_exchange_n(cache, &expected, resolved, false,
             __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
@@ -26,12 +28,21 @@ uint64_t LC32CachedHostSelector(
 
 static pthread_once_t LC32ObjCTraceOnce = PTHREAD_ONCE_INIT;
 static BOOL LC32ObjCTraceIsEnabled;
+static pthread_once_t LC32OperationTraceOnce = PTHREAD_ONCE_INIT;
+static BOOL LC32OperationTraceIsEnabled;
+static uint64_t LC32OperationTraceSequence;
 static pthread_once_t LC32AutoreleaseSchedulerOnce = PTHREAD_ONCE_INIT;
 static uint64_t LC32AutoreleaseScheduler;
 
 static void LC32InitializeObjCTrace(void) {
     const char *value = getenv("LC32_OBJC_TRACE");
     LC32ObjCTraceIsEnabled =
+        value && value[0] && strcmp(value, "0") != 0;
+}
+
+static void LC32InitializeOperationTrace(void) {
+    const char *value = getenv("LC32_OPERATION_TRACE");
+    LC32OperationTraceIsEnabled =
         value && value[0] && strcmp(value, "0") != 0;
 }
 
@@ -88,10 +99,16 @@ Class LC32HostToGuestClass(uint64_t address) {
 
 // Get the guest object pointer from host. The host may call back to guest with initWithHostSelf: and return it.
 id LC32HostToGuestObject(uint64_t host_object) {
+    if(!host_object) return nil;
     static uint64_t hostPtr = 0;
     uint64_t selector = LC32CachedHostSelector(
         &hostPtr, @selector(guest_self), NO);
     return (id)LC32InvokeHostSelector(host_object, selector);
+}
+
+id LC32HostToGuestOwnedObject(uint64_t host_object) {
+    if(!host_object) return nil;
+    return (id)LC32GuestObjectForOwnedHostObjectAddress(host_object);
 }
 
 id LC32DisposeFailedInit(id object) {
@@ -158,6 +175,82 @@ static LC32HostObjectPointer *LC32HostObjectState(id object, BOOL create) {
 }
 @end
 
+/*
+ * Merely exchanging NSObject's retain/release implementations after libobjc
+ * has realized the class is not enough for ARC.  The runtime caches that
+ * NSObject uses its default reference-counting implementation and its
+ * objc_retain/objc_release entry points then update the side table directly,
+ * without messaging our bridge methods.  A guest proxy can consequently gain
+ * an ARC strong reference while its native peer remains autoreleased.
+ *
+ * Defining these selectors in the category's method list makes libobjc mark
+ * NSObject and its subclasses as custom-RR while the category is attached.
+ * They intentionally start out as the ordinary root implementations.  The
+ * constructor below first copies them to guest-only helper classes, then
+ * exchanges them with LC32_* so normal proxies acquire paired guest/native
+ * ownership and the helpers continue to stay entirely inside guest libobjc.
+ */
+extern id _objc_rootAutorelease(id object);
+extern void _objc_rootRelease(id object);
+extern id _objc_rootRetain(id object);
+extern uintptr_t _objc_rootRetainCount(id object);
+
+/*
+ * Balance a guest try-retain without entering the public autorelease bridge.
+ * Keep work after the root call so libobjc cannot mistake this call site for
+ * an autorelease-return-value handshake.  The actual guest release occurs
+ * after objc_loadWeakRetained drops its side-table stripe lock.
+ */
+__attribute__((noinline))
+static void LC32AutoreleaseGuestWeakRetainRollback(id object) {
+    id result = _objc_rootAutorelease(object);
+    __asm__ volatile("" : : "r"(result) : "memory");
+}
+
+uint32_t LC32ReleaseGuestLifetimePin(id object) {
+    const BOOL isFinalReference = _objc_rootRetainCount(object) == 1;
+    _objc_rootRelease(object);
+    return isFinalReference;
+}
+
+static BOOL LC32OperationTraceEnabled(void) {
+    pthread_once(&LC32OperationTraceOnce, LC32InitializeOperationTrace);
+    return LC32OperationTraceIsEnabled;
+}
+
+static BOOL LC32OperationTraceMatchesObject(id object) {
+    for(Class cls = object_getClass(object); cls;
+            cls = class_getSuperclass(cls)) {
+        const char *name = class_getName(cls);
+        if(name && strcmp(name, "NSOperation") == 0) return YES;
+    }
+    return NO;
+}
+
+static void LC32OperationTraceObject(const char *event, id object,
+                                     uint64_t hostObject,
+                                     const void *caller) {
+    if(!LC32OperationTraceEnabled() ||
+       !LC32OperationTraceMatchesObject(object)) return;
+
+    const uint64_t sequence = __atomic_add_fetch(
+        &LC32OperationTraceSequence, 1, __ATOMIC_RELAXED);
+    fprintf(stderr,
+        "LC32 operation guest trace #%llu %s host=0x%llx guest=0x%x "
+        "class=%s guestRC=%lu caller=0x%x thread=%p\n",
+        (unsigned long long)sequence, event,
+        (unsigned long long)hostObject,
+        (uint32_t)(uintptr_t)object,
+        class_getName(object_getClass(object)),
+        (unsigned long)_objc_rootRetainCount(object),
+        (uint32_t)(uintptr_t)caller,
+        (void *)pthread_self());
+}
+
+#define LC32_OPERATION_TRACE(event, object, hostObject) \
+    LC32OperationTraceObject((event), (object), (hostObject), \
+                             __builtin_return_address(0))
+
 static const void *kLC32GuestBuffer = &kLC32GuestBuffer;
 
 void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
@@ -184,6 +277,22 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
 }
 
 @implementation NSObject(LC32)
+
+- (instancetype)autorelease {
+    return _objc_rootAutorelease(self);
+}
+
+- (void)release {
+    _objc_rootRelease(self);
+}
+
+- (instancetype)retain {
+    return _objc_rootRetain(self);
+}
+
+- (NSUInteger)retainCount {
+    return (NSUInteger)_objc_rootRetainCount(self);
+}
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wobjc-designated-initializers"
@@ -267,6 +376,7 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
 
 - (instancetype)LC32_autorelease {
     const uint64_t hostSelf = LC32ExistingHostSelf(self);
+    LC32_OPERATION_TRACE("autorelease", self, hostSelf);
 
     pthread_once(&LC32AutoreleaseSchedulerOnce,
         LC32InitializeAutoreleaseScheduler);
@@ -280,6 +390,8 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
 
 - (void)LC32_releaseGuestOwnershipOnly {
     const uint64_t hostSelf = LC32ExistingHostSelf(self);
+    LC32_OPERATION_TRACE(
+        "release-guest-ownership-only", self, hostSelf);
     if(!hostSelf) {
         [self LC32_release];
         return;
@@ -300,6 +412,7 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
 }
 - (void)LC32_release {
     const uint64_t hostSelf = LC32ExistingHostSelf(self);
+    LC32_OPERATION_TRACE("release", self, hostSelf);
     if(!hostSelf) {
         [self LC32_release];
         return;
@@ -329,19 +442,50 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
 
 - (instancetype)LC32_retain {
     const uint64_t hostSelf = LC32ExistingHostSelf(self);
-    if(!hostSelf) return [self LC32_retain];
+    if(!hostSelf) {
+        id result = [self LC32_retain];
+        LC32_OPERATION_TRACE("retain-guest-only", result, 0);
+        return result;
+    }
 
     static uint64_t _host_cmd;
     uint64_t host_cmd = LC32CachedHostSelector(
         &_host_cmd, @selector(retain), NO);
     LC32InvokeHostSelector(hostSelf, host_cmd);
-    return [self LC32_retain];
+    id result = [self LC32_retain];
+    LC32_OPERATION_TRACE("retain", result, hostSelf);
+    return result;
+}
+
+/*
+ * objc_loadWeakRetained invokes this method while holding the guest object's
+ * weak side-table stripe.  The original implementation performs the guest
+ * try-retain under that lock.  SVC 1019 then loads a host-side registered weak
+ * slot under the native runtime's lock and transfers the matching native +1.
+ *
+ * Do not inspect associated objects, query retainCount, or synchronously
+ * release either object here: each can recursively acquire the guest stripe.
+ */
+- (BOOL)LC32_retainWeakReference {
+    if(![self LC32_retainWeakReference]) return NO;
+
+    const LC32HostWeakRetainStatus status =
+        LC32TryRetainHostWeakReference((uint32_t)(uintptr_t)self);
+    if(status == LC32HostWeakRetainNoMapping ||
+       status == LC32HostWeakRetainRetained) {
+        return YES;
+    }
+
+    LC32AutoreleaseGuestWeakRetainRollback(self);
+    return NO;
 }
 
 // FIXME: need to hook this?
 - (NSUInteger)LC32_retainCount {
     const uint64_t hostSelf = LC32ExistingHostSelf(self);
     if(!hostSelf) return [self LC32_retainCount];
+
+    LC32_OPERATION_TRACE("retain-count", self, hostSelf);
 
     static uint64_t _host_cmd;
     uint64_t host_cmd = LC32CachedHostSelector(
@@ -369,6 +513,241 @@ static void swizzle(Class cls, SEL originalAction, SEL swizzledAction) {
     method_exchangeImplementations(class_getInstanceMethod(cls, originalAction), class_getInstanceMethod(cls, swizzledAction));
 }
 
+extern void _Block_release(const void *block);
+extern uint64_t LC32InvokeGuestBlockWords(
+    uint32_t invoke, const uint32_t *words, uint32_t wordCount);
+
+#define LC32_GUEST_BLOCK_CALLBACK_MAX_WORDS 16
+
+static uint64_t LC32TypedGuestBlockCompletionFunction;
+
+static BOOL LC32AppendGuestBlockWord(
+        uint32_t *words, uint32_t *wordCount, uint32_t value) {
+    if(*wordCount >= LC32_GUEST_BLOCK_CALLBACK_MAX_WORDS) return NO;
+    words[(*wordCount)++] = value;
+    return YES;
+}
+
+static BOOL LC32InvokeGuestBlockCallback(
+        LC32GuestBlockCallbackDescriptor *descriptor) {
+    if(!descriptor || !descriptor->guestBlock || !descriptor->guestInvoke ||
+       descriptor->argumentCount >
+           LC32_GUEST_BLOCK_CALLBACK_MAX_ARGUMENTS) {
+        return NO;
+    }
+
+    uint32_t words[LC32_GUEST_BLOCK_CALLBACK_MAX_WORDS] = {
+        descriptor->guestBlock
+    };
+    uint32_t wordCount = 1;
+    char pointerValues[LC32_GUEST_BLOCK_CALLBACK_MAX_ARGUMENTS] = {};
+
+    for(uint32_t index = 0; index < descriptor->argumentCount; index++) {
+        LC32GuestBlockCallbackArgument *argument =
+            &descriptor->arguments[index];
+        if(argument->reserved != 0) return NO;
+
+        switch((LC32GuestBlockValueKind)argument->kind) {
+            case LC32GuestBlockValueObject:
+                if(!LC32AppendGuestBlockWord(words, &wordCount,
+                        (uint32_t)(uintptr_t)LC32HostToGuestObject(
+                            argument->value))) return NO;
+                break;
+            case LC32GuestBlockValueSignedChar:
+            case LC32GuestBlockValueSigned32:
+            case LC32GuestBlockValueUnsigned32:
+                if(!LC32AppendGuestBlockWord(
+                        words, &wordCount, (uint32_t)argument->value)) {
+                    return NO;
+                }
+                break;
+            case LC32GuestBlockValueSigned64:
+            case LC32GuestBlockValueUnsigned64:
+                /* Apple's 32-bit ABI packs integer argument words without
+                 * natural-alignment holes and may split a 64-bit value
+                 * between r3 and the stack. */
+                if(!LC32AppendGuestBlockWord(words, &wordCount,
+                        (uint32_t)argument->value) ||
+                   !LC32AppendGuestBlockWord(words, &wordCount,
+                        (uint32_t)(argument->value >> 32))) return NO;
+                break;
+            case LC32GuestBlockValueRange:
+                if(!LC32AppendGuestBlockWord(words, &wordCount,
+                        (uint32_t)argument->value) ||
+                   !LC32AppendGuestBlockWord(words, &wordCount,
+                        (uint32_t)argument->value2)) return NO;
+                break;
+            case LC32GuestBlockValueCharPointer:
+                pointerValues[index] = (char)argument->value;
+                if(!LC32AppendGuestBlockWord(words, &wordCount,
+                        argument->value2
+                            ? (uint32_t)(uintptr_t)&pointerValues[index]
+                            : 0)) return NO;
+                break;
+            case LC32GuestBlockValueVoid:
+            default:
+                return NO;
+        }
+    }
+
+    const uint64_t result = LC32InvokeGuestBlockWords(
+        descriptor->guestInvoke, words, wordCount);
+    switch((LC32GuestBlockValueKind)descriptor->resultKind) {
+        case LC32GuestBlockValueVoid:
+            descriptor->result = 0;
+            break;
+        case LC32GuestBlockValueObject: {
+            id guestResult = (id)(uintptr_t)(uint32_t)result;
+            descriptor->result = guestResult
+                ? [guestResult host_self]
+                : 0;
+            break;
+        }
+        case LC32GuestBlockValueSignedChar:
+        case LC32GuestBlockValueSigned32:
+        case LC32GuestBlockValueUnsigned32:
+            descriptor->result = (uint32_t)result;
+            break;
+        case LC32GuestBlockValueSigned64:
+        case LC32GuestBlockValueUnsigned64:
+            descriptor->result = result;
+            break;
+        case LC32GuestBlockValueRange:
+        case LC32GuestBlockValueCharPointer:
+        default:
+            return NO;
+    }
+
+    for(uint32_t index = 0; index < descriptor->argumentCount; index++) {
+        if(descriptor->arguments[index].kind ==
+                LC32GuestBlockValueCharPointer &&
+           descriptor->arguments[index].value2) {
+            descriptor->arguments[index].value =
+                (uint8_t)pointerValues[index];
+        }
+    }
+    return YES;
+}
+
+static BOOL LC32InvokeGuestFunctionCallback(
+        LC32GuestBlockCallbackDescriptor *descriptor) {
+    if(!descriptor || descriptor->guestBlock || !descriptor->guestInvoke ||
+       !descriptor->argumentCount ||
+       descriptor->argumentCount >
+           LC32_GUEST_BLOCK_CALLBACK_MAX_ARGUMENTS ||
+       descriptor->resultKind != LC32GuestBlockValueVoid) {
+        return NO;
+    }
+
+    uint32_t words[LC32_GUEST_BLOCK_CALLBACK_MAX_WORDS] = {};
+    uint32_t wordCount = 0;
+    for(uint32_t index = 0; index < descriptor->argumentCount; index++) {
+        LC32GuestBlockCallbackArgument *argument =
+            &descriptor->arguments[index];
+        if(argument->reserved != 0) return NO;
+        switch((LC32GuestBlockValueKind)argument->kind) {
+            case LC32GuestBlockValueSignedChar:
+            case LC32GuestBlockValueSigned32:
+            case LC32GuestBlockValueUnsigned32:
+                if(!LC32AppendGuestBlockWord(words, &wordCount,
+                        (uint32_t)argument->value)) return NO;
+                break;
+            case LC32GuestBlockValueSigned64:
+            case LC32GuestBlockValueUnsigned64:
+                if(!LC32AppendGuestBlockWord(words, &wordCount,
+                        (uint32_t)argument->value) ||
+                   !LC32AppendGuestBlockWord(words, &wordCount,
+                        (uint32_t)(argument->value >> 32))) return NO;
+                break;
+            case LC32GuestBlockValueVoid:
+            case LC32GuestBlockValueObject:
+            case LC32GuestBlockValueRange:
+            case LC32GuestBlockValueCharPointer:
+            default:
+                return NO;
+        }
+    }
+
+    (void)LC32InvokeGuestBlockWords(
+        descriptor->guestInvoke, words, wordCount);
+    descriptor->result = 0;
+    return YES;
+}
+
+static void *LC32GuestCallbackExecutorMain(
+        void *unused __attribute__((unused))) {
+    for(;;) {
+        LC32GuestBlockCallbackDescriptor descriptor = {};
+        const uint32_t waitResult =
+            LC32GuestCallbackExecutorWait(&descriptor);
+        if(waitResult == LC32GuestBlockCallbackWaitResultStop) break;
+        if(waitResult == LC32GuestBlockCallbackWaitResultRetry) continue;
+        if(waitResult != LC32GuestBlockCallbackWaitResultJob) abort();
+
+        @autoreleasepool {
+            switch((LC32GuestBlockCallbackKind)descriptor.kind) {
+                case LC32GuestBlockCallbackKindInvoke:
+                    if(!LC32InvokeGuestBlockCallback(&descriptor)) {
+                        fprintf(stderr,
+                            "LC32: invalid typed guest block callback "
+                            "descriptor for 0x%x\n",
+                            descriptor.guestBlock);
+                    }
+                    if(!LC32TypedGuestBlockCompletionFunction ||
+                       !LC32InvokeHostCRet32(
+                            LC32TypedGuestBlockCompletionFunction,
+                            (uint32_t)(uintptr_t)&descriptor, 0, 0)) {
+                        fprintf(stderr,
+                            "LC32: could not return typed result for guest "
+                            "block 0x%x\n", descriptor.guestBlock);
+                    }
+                    break;
+                case LC32GuestBlockCallbackKindRelease:
+                    _Block_release(
+                        (const void *)(uintptr_t)descriptor.guestBlock);
+                    break;
+                case LC32GuestBlockCallbackKindFunction:
+                    if(!LC32InvokeGuestFunctionCallback(&descriptor)) {
+                        fprintf(stderr,
+                            "LC32: invalid guest C callback descriptor "
+                            "for 0x%x\n", descriptor.guestInvoke);
+                    }
+                    break;
+                default:
+                    abort();
+            }
+        }
+
+        if(!LC32GuestCallbackExecutorComplete(descriptor.identifier)) {
+            break;
+        }
+    }
+    return NULL;
+}
+
+static void LC32StartGuestCallbackExecutorIfSupported(void) {
+    const uint64_t supportedFunction =
+        LC32Dlsym("LC32GuestCallbackExecutorSupported", YES);
+    const uint64_t creationResultFunction =
+        LC32Dlsym("LC32GuestCallbackExecutorCreationResult", YES);
+    LC32TypedGuestBlockCompletionFunction =
+        LC32Dlsym("LC32CompleteTypedGuestBlock", YES);
+    if(!supportedFunction || !creationResultFunction ||
+       !LC32TypedGuestBlockCompletionFunction ||
+       !LC32InvokeHostCRet32(supportedFunction, 0, 0, 0)) {
+        return;
+    }
+
+    pthread_t thread;
+    const int result = pthread_create(
+        &thread, NULL, LC32GuestCallbackExecutorMain, NULL);
+    LC32InvokeHostCRet32(
+        creationResultFunction, (uint32_t)result, 0, 0);
+    if(result == 0) {
+        pthread_detach(thread);
+    }
+}
+
 __attribute__((constructor)) void LC32FrameworkInit() {
     // Ensure LC32HostObjectPointer doesn't inherit swizzled ARC methods
     Class clsLC32HostObjectPointer = objc_getClass("LC32HostObjectPointer");
@@ -377,6 +756,9 @@ __attribute__((constructor)) void LC32FrameworkInit() {
     addMethodToClass(clsLC32HostObjectPointer, class_getInstanceMethod(clsNSObject, @selector(release)));
     addMethodToClass(clsLC32HostObjectPointer, class_getInstanceMethod(clsNSObject, @selector(retain)));
     addMethodToClass(clsLC32HostObjectPointer, class_getInstanceMethod(clsNSObject, @selector(retainCount)));
+    addMethodToClass(clsLC32HostObjectPointer,
+        class_getInstanceMethod(clsNSObject,
+            sel_registerName("retainWeakReference")));
 
     // Associated guest buffers are native guest-only objects as well. Keep
     // their ownership traffic out of the host proxy retain/release bridge.
@@ -385,13 +767,19 @@ __attribute__((constructor)) void LC32FrameworkInit() {
     addMethodToClass(clsLC32GuestBuffer, class_getInstanceMethod(clsNSObject, @selector(release)));
     addMethodToClass(clsLC32GuestBuffer, class_getInstanceMethod(clsNSObject, @selector(retain)));
     addMethodToClass(clsLC32GuestBuffer, class_getInstanceMethod(clsNSObject, @selector(retainCount)));
+    addMethodToClass(clsLC32GuestBuffer,
+        class_getInstanceMethod(clsNSObject,
+            sel_registerName("retainWeakReference")));
 
     // Swizzle ARC methods
     swizzle(clsNSObject, @selector(autorelease), @selector(LC32_autorelease));
     swizzle(clsNSObject, @selector(release), @selector(LC32_release));
     swizzle(clsNSObject, @selector(retain), @selector(LC32_retain));
     swizzle(clsNSObject, @selector(retainCount), @selector(LC32_retainCount));
+    swizzle(clsNSObject, sel_registerName("retainWeakReference"),
+            @selector(LC32_retainWeakReference));
 
     // Send dlsym and LC32InvokeGuestC pointers to the host
     LC32InvokeHostCRet32(LC32Dlsym("LC32SetInvokeGuestFuncPtr", YES), &dlsym, &LC32InvokeGuestC);
+    LC32StartGuestCallbackExecutorIfSupported();
 }

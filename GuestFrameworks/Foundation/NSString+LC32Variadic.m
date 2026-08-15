@@ -15,6 +15,18 @@ static uint64_t LC32InvokeNSStringFormat(id receiver,
                                         options);
 }
 
+static id LC32InvokeNSStringFormatObject(id receiver,
+                                         uint64_t hostSelector,
+                                         NSString *format,
+                                         id locale,
+                                         va_list arguments,
+                                         LC32NSStringFormatOptions options) {
+    const uint64_t guestResult = LC32InvokeNSStringFormat(
+        receiver, hostSelector, format, locale, arguments,
+        options | LC32NSStringFormatOptionReturnGuestObject);
+    return (id)(uintptr_t)guestResult;
+}
+
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wobjc-designated-initializers"
 
@@ -25,10 +37,10 @@ static uint64_t LC32InvokeNSStringFormat(id receiver,
 
     va_list arguments;
     va_start(arguments, format);
-    uint64_t result = LC32InvokeNSStringFormat(
+    id result = LC32InvokeNSStringFormatObject(
         self, hostSelector, format, nil, arguments, 0);
     va_end(arguments);
-    return LC32HostToGuestObject(result);
+    return result;
 }
 
 + (instancetype)localizedStringWithFormat:(NSString *)format, ... {
@@ -36,10 +48,10 @@ static uint64_t LC32InvokeNSStringFormat(id receiver,
 
     va_list arguments;
     va_start(arguments, format);
-    uint64_t result = LC32InvokeNSStringFormat(
+    id result = LC32InvokeNSStringFormatObject(
         self, hostSelector, format, nil, arguments, 0);
     va_end(arguments);
-    return LC32HostToGuestObject(result);
+    return result;
 }
 
 + (instancetype)stringWithFormat:(NSString *)format locale:(id)locale, ... {
@@ -47,11 +59,11 @@ static uint64_t LC32InvokeNSStringFormat(id receiver,
 
     va_list arguments;
     va_start(arguments, locale);
-    uint64_t result = LC32InvokeNSStringFormat(
+    id result = LC32InvokeNSStringFormatObject(
         self, hostSelector, format, locale, arguments,
         LC32NSStringFormatOptionHasLocale);
     va_end(arguments);
-    return LC32HostToGuestObject(result);
+    return result;
 }
 
 - (instancetype)initWithFormat:(NSString *)format, ... {
@@ -112,10 +124,10 @@ static uint64_t LC32InvokeNSStringFormat(id receiver,
 
     va_list arguments;
     va_start(arguments, format);
-    uint64_t result = LC32InvokeNSStringFormat(
+    id result = LC32InvokeNSStringFormatObject(
         self, hostSelector, format, nil, arguments, 0);
     va_end(arguments);
-    return LC32HostToGuestObject(result);
+    return result;
 }
 
 @end

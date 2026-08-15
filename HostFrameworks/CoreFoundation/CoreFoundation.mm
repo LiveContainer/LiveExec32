@@ -4,9 +4,11 @@
 #include "bridge.h"
 #include "../../GuestFrameworks/CoreFoundation/LC32CoreFoundationBridge.h"
 
+#include <atomic>
 #include <climits>
 #include <cstdint>
 #include <cstring>
+#include <new>
 #include <vector>
 
 #pragma clang diagnostic push
@@ -19,6 +21,8 @@ constexpr uint32_t kMaximumDataBytes = 256u * 1024u * 1024u;
 constexpr uint32_t kMaximumStringBytes = 64u * 1024u * 1024u;
 constexpr uint32_t kMaximumUserInfoEntries = 1024u * 1024u;
 constexpr uint32_t kMaximumSetEntries = 1024u * 1024u;
+constexpr uint32_t kMaximumReadStreamBytes = 64u * 1024u * 1024u;
+constexpr uint32_t kMaximumWriteStreamBytes = 64u * 1024u * 1024u;
 
 bool ReadCoreFoundationCall(u32 guestAddress,
                             LC32CoreFoundationCall &call) {
@@ -295,9 +299,23 @@ bool StringRangeIsValid(CFStringRef string, u32 location, u32 length) {
             stringLength - static_cast<CFIndex>(location);
 }
 
+bool AttributedStringRangeIsValid(CFAttributedStringRef string,
+                                  int32_t location, int32_t length) {
+    if(!string || location < 0 || length < 0) return false;
+    const CFIndex stringLength = CFAttributedStringGetLength(string);
+    return static_cast<CFIndex>(location) <= stringLength &&
+        static_cast<CFIndex>(length) <=
+            stringLength - static_cast<CFIndex>(location);
+}
+
 struct LC32GuestCFRange {
     int32_t location;
     int32_t length;
+};
+
+struct LC32GuestCFStreamError {
+    int32_t domain;
+    int32_t error;
 };
 
 bool WriteGuestStringRange(u32 guestAddress, CFRange range) {
@@ -434,6 +452,506 @@ u32 GuestBundleFunctionPointer(NSBundle *bundle, NSString *functionName) {
     return static_cast<u32>(LC32InvokeGuestC(
         sharedHandle.guest_dlsym, false,
         sizeof(dlsymArgs) / sizeof(dlsymArgs[0]), dlsymArgs));
+}
+
+bool InvokeGuestVoidFunction(u32 function, const u32 *arguments,
+                             size_t argumentCount) {
+    if(!function || argumentCount >
+            LC32_GUEST_BLOCK_CALLBACK_MAX_ARGUMENTS) {
+        return false;
+    }
+    if(Dynarmic_guest_thread_is_registered()) {
+        (void)LC32InvokeGuestC(function, false,
+            static_cast<int>(argumentCount),
+            const_cast<u32 *>(arguments));
+        return true;
+    }
+
+    LC32GuestBlockCallbackDescriptor descriptor = {};
+    descriptor.kind = LC32GuestBlockCallbackKindFunction;
+    descriptor.guestInvoke = function;
+    descriptor.argumentCount = static_cast<uint32_t>(argumentCount);
+    descriptor.resultKind = LC32GuestBlockValueVoid;
+    for(size_t index = 0; index < argumentCount; ++index) {
+        descriptor.arguments[index].kind = LC32GuestBlockValueUnsigned32;
+        descriptor.arguments[index].value = arguments[index];
+    }
+    return Dynarmic_submit_guest_function_callback(&descriptor);
+}
+
+struct ReadStreamClientContext {
+    std::atomic<uint32_t> referenceCount{1};
+    u32 guestStream = 0;
+    u32 guestCallback = 0;
+    u32 guestInfo = 0;
+    u32 guestRelease = 0;
+    u32 guestCopyDescription = 0;
+};
+
+void *RetainReadStreamClientContext(void *rawContext) {
+    ReadStreamClientContext *context =
+        static_cast<ReadStreamClientContext *>(rawContext);
+    if(context) context->referenceCount.fetch_add(
+        1, std::memory_order_relaxed);
+    return context;
+}
+
+void ReleaseReadStreamClientContext(void *rawContext) {
+    ReadStreamClientContext *context =
+        static_cast<ReadStreamClientContext *>(rawContext);
+    if(!context || context->referenceCount.fetch_sub(
+            1, std::memory_order_acq_rel) != 1) {
+        return;
+    }
+
+    if(context->guestRelease) {
+        const u32 arguments[] = {context->guestInfo};
+        if(!InvokeGuestVoidFunction(
+                context->guestRelease, arguments, 1)) {
+            /* Never borrow another native thread's JIT. During teardown the
+             * serialized executor may already be gone, in which case the
+             * retained guest context is intentionally leaked with the
+             * exiting process instead of executing it unsafely. */
+            fprintf(stderr,
+                "LC32: could not dispatch CFReadStream context release "
+                "0x%08x\n", context->guestRelease);
+        }
+    }
+    delete context;
+}
+
+CFStringRef CopyReadStreamClientContextDescription(
+        void *rawContext) {
+    const ReadStreamClientContext *context =
+        static_cast<const ReadStreamClientContext *>(rawContext);
+    if(!context) return CFStringCreateCopy(
+        kCFAllocatorDefault, CFSTR("LC32 CFReadStream client"));
+
+    /* CF invokes this diagnostic hook from arbitrary threads and expects a
+     * synchronous owned string. The guest callback executor currently only
+     * transports void C callbacks, so return a useful native description
+     * without ever invoking guest code on the calling thread. */
+    return CFStringCreateWithFormat(kCFAllocatorDefault, nullptr,
+        CFSTR("LC32 CFReadStream client callback=0x%08x info=0x%08x "
+              "description=0x%08x"),
+        context->guestCallback, context->guestInfo,
+        context->guestCopyDescription);
+}
+
+void ReadStreamClientCallback(CFReadStreamRef,
+                              CFStreamEventType eventType,
+                              void *rawContext) {
+    ReadStreamClientContext *context =
+        static_cast<ReadStreamClientContext *>(rawContext);
+    if(!context || !context->guestCallback) return;
+    const u32 arguments[] = {
+        context->guestStream,
+        static_cast<u32>(eventType),
+        context->guestInfo,
+    };
+    if(!InvokeGuestVoidFunction(
+            context->guestCallback, arguments, 3)) {
+        fprintf(stderr,
+            "LC32: could not dispatch CFReadStream client callback "
+            "0x%08x\n", context->guestCallback);
+    }
+}
+
+struct WriteStreamClientContext {
+    std::atomic<uint32_t> referenceCount{1};
+    u32 guestStream = 0;
+    u32 guestCallback = 0;
+    u32 guestInfo = 0;
+    u32 guestRelease = 0;
+    u32 guestCopyDescription = 0;
+};
+
+void *RetainWriteStreamClientContext(void *rawContext) {
+    WriteStreamClientContext *context =
+        static_cast<WriteStreamClientContext *>(rawContext);
+    if(context) context->referenceCount.fetch_add(
+        1, std::memory_order_relaxed);
+    return context;
+}
+
+void ReleaseWriteStreamClientContext(void *rawContext) {
+    WriteStreamClientContext *context =
+        static_cast<WriteStreamClientContext *>(rawContext);
+    if(!context || context->referenceCount.fetch_sub(
+            1, std::memory_order_acq_rel) != 1) {
+        return;
+    }
+
+    if(context->guestRelease) {
+        const u32 arguments[] = {context->guestInfo};
+        if(!InvokeGuestVoidFunction(
+                context->guestRelease, arguments, 1)) {
+            fprintf(stderr,
+                "LC32: could not dispatch CFWriteStream context release "
+                "0x%08x\n", context->guestRelease);
+        }
+    }
+    delete context;
+}
+
+CFStringRef CopyWriteStreamClientContextDescription(
+        void *rawContext) {
+    const WriteStreamClientContext *context =
+        static_cast<const WriteStreamClientContext *>(rawContext);
+    if(!context) return CFStringCreateCopy(
+        kCFAllocatorDefault, CFSTR("LC32 CFWriteStream client"));
+
+    return CFStringCreateWithFormat(kCFAllocatorDefault, nullptr,
+        CFSTR("LC32 CFWriteStream client callback=0x%08x info=0x%08x "
+              "description=0x%08x"),
+        context->guestCallback, context->guestInfo,
+        context->guestCopyDescription);
+}
+
+void WriteStreamClientCallback(CFWriteStreamRef,
+                               CFStreamEventType eventType,
+                               void *rawContext) {
+    WriteStreamClientContext *context =
+        static_cast<WriteStreamClientContext *>(rawContext);
+    if(!context || !context->guestCallback) return;
+    const u32 arguments[] = {
+        context->guestStream,
+        static_cast<u32>(eventType),
+        context->guestInfo,
+    };
+    if(!InvokeGuestVoidFunction(
+            context->guestCallback, arguments, 3)) {
+        fprintf(stderr,
+            "LC32: could not dispatch CFWriteStream client callback "
+            "0x%08x\n", context->guestCallback);
+    }
+}
+
+struct RunLoopTimerClientContext {
+    std::atomic<uint32_t> referenceCount{1};
+    std::atomic<u32> guestTimer{0};
+    u32 guestCallback = 0;
+    u32 guestInfo = 0;
+    u32 guestRelease = 0;
+    u32 guestCopyDescription = 0;
+};
+
+const void *RetainRunLoopTimerClientContext(const void *rawContext) {
+    RunLoopTimerClientContext *context =
+        const_cast<RunLoopTimerClientContext *>(
+            static_cast<const RunLoopTimerClientContext *>(rawContext));
+    if(context) context->referenceCount.fetch_add(
+        1, std::memory_order_relaxed);
+    return context;
+}
+
+void ReleaseRunLoopTimerClientContext(const void *rawContext) {
+    RunLoopTimerClientContext *context =
+        const_cast<RunLoopTimerClientContext *>(
+            static_cast<const RunLoopTimerClientContext *>(rawContext));
+    if(!context || context->referenceCount.fetch_sub(
+            1, std::memory_order_acq_rel) != 1) {
+        return;
+    }
+
+    if(context->guestRelease) {
+        const u32 arguments[] = {context->guestInfo};
+        if(!InvokeGuestVoidFunction(
+                context->guestRelease, arguments, 1)) {
+            fprintf(stderr,
+                "LC32: could not dispatch CFRunLoopTimer context release "
+                "0x%08x\n", context->guestRelease);
+        }
+    }
+    delete context;
+}
+
+CFStringRef CopyRunLoopTimerClientContextDescription(
+        const void *rawContext) {
+    const RunLoopTimerClientContext *context =
+        static_cast<const RunLoopTimerClientContext *>(rawContext);
+    if(!context) return CFStringCreateCopy(
+        kCFAllocatorDefault, CFSTR("LC32 CFRunLoopTimer client"));
+
+    /* CoreFoundation may ask from an arbitrary native thread. The existing
+     * serialized C callback executor intentionally transports void calls, so
+     * provide a native owned diagnostic string without borrowing a guest JIT. */
+    return CFStringCreateWithFormat(kCFAllocatorDefault, nullptr,
+        CFSTR("LC32 CFRunLoopTimer callback=0x%08x info=0x%08x "
+              "description=0x%08x"),
+        context->guestCallback, context->guestInfo,
+        context->guestCopyDescription);
+}
+
+void RunLoopTimerClientCallback(CFRunLoopTimerRef,
+                                void *rawContext) {
+    RunLoopTimerClientContext *context =
+        static_cast<RunLoopTimerClientContext *>(rawContext);
+    if(!context || !context->guestCallback) return;
+    const u32 guestTimer = context->guestTimer.load(
+        std::memory_order_acquire);
+    if(!guestTimer) return;
+    const u32 arguments[] = {guestTimer, context->guestInfo};
+    if(!InvokeGuestVoidFunction(
+            context->guestCallback, arguments, 2)) {
+        fprintf(stderr,
+            "LC32: could not dispatch CFRunLoopTimer callback 0x%08x\n",
+            context->guestCallback);
+    }
+}
+
+struct RunLoopSourceClientContext {
+    std::atomic<uint32_t> referenceCount{1};
+    u32 guestPerform = 0;
+    u32 guestInfo = 0;
+    u32 guestRelease = 0;
+    u32 guestCopyDescription = 0;
+};
+
+const void *RetainRunLoopSourceClientContext(const void *rawContext) {
+    RunLoopSourceClientContext *context =
+        const_cast<RunLoopSourceClientContext *>(
+            static_cast<const RunLoopSourceClientContext *>(rawContext));
+    if(context) context->referenceCount.fetch_add(
+        1, std::memory_order_relaxed);
+    return context;
+}
+
+void ReleaseRunLoopSourceClientContext(const void *rawContext) {
+    RunLoopSourceClientContext *context =
+        const_cast<RunLoopSourceClientContext *>(
+            static_cast<const RunLoopSourceClientContext *>(rawContext));
+    if(!context || context->referenceCount.fetch_sub(
+            1, std::memory_order_acq_rel) != 1) {
+        return;
+    }
+
+    if(context->guestRelease) {
+        const u32 arguments[] = {context->guestInfo};
+        if(!InvokeGuestVoidFunction(
+                context->guestRelease, arguments, 1)) {
+            fprintf(stderr,
+                "LC32: could not dispatch CFRunLoopSource context release "
+                "0x%08x\n", context->guestRelease);
+        }
+    }
+    delete context;
+}
+
+CFStringRef CopyRunLoopSourceClientContextDescription(
+        const void *rawContext) {
+    const RunLoopSourceClientContext *context =
+        static_cast<const RunLoopSourceClientContext *>(rawContext);
+    if(!context) return CFStringCreateCopy(
+        kCFAllocatorDefault, CFSTR("LC32 CFRunLoopSource client"));
+
+    return CFStringCreateWithFormat(kCFAllocatorDefault, nullptr,
+        CFSTR("LC32 CFRunLoopSource perform=0x%08x info=0x%08x "
+              "description=0x%08x"),
+        context->guestPerform, context->guestInfo,
+        context->guestCopyDescription);
+}
+
+void RunLoopSourceClientPerform(void *rawContext) {
+    RunLoopSourceClientContext *context =
+        static_cast<RunLoopSourceClientContext *>(rawContext);
+    if(!context || !context->guestPerform) return;
+    const u32 arguments[] = {context->guestInfo};
+    if(!InvokeGuestVoidFunction(
+            context->guestPerform, arguments, 1)) {
+        fprintf(stderr,
+            "LC32: could not dispatch CFRunLoopSource perform 0x%08x\n",
+            context->guestPerform);
+    }
+}
+
+struct SocketClientContext {
+    std::atomic<uint32_t> referenceCount{1};
+    std::atomic<u32> guestSocket{0};
+    u32 guestCallback = 0;
+    u32 guestInfo = 0;
+    u32 guestRelease = 0;
+    u32 guestCopyDescription = 0;
+};
+
+const void *RetainSocketClientContext(const void *rawContext) {
+    SocketClientContext *context =
+        const_cast<SocketClientContext *>(
+            static_cast<const SocketClientContext *>(rawContext));
+    if(context) context->referenceCount.fetch_add(
+        1, std::memory_order_relaxed);
+    return context;
+}
+
+void ReleaseSocketClientContext(const void *rawContext) {
+    SocketClientContext *context =
+        const_cast<SocketClientContext *>(
+            static_cast<const SocketClientContext *>(rawContext));
+    if(!context || context->referenceCount.fetch_sub(
+            1, std::memory_order_acq_rel) != 1) {
+        return;
+    }
+
+    if(context->guestRelease) {
+        const u32 arguments[] = {context->guestInfo};
+        if(!InvokeGuestVoidFunction(
+                context->guestRelease, arguments, 1)) {
+            fprintf(stderr,
+                "LC32: could not dispatch CFSocket context release "
+                "0x%08x\n", context->guestRelease);
+        }
+    }
+    delete context;
+}
+
+CFStringRef CopySocketClientContextDescription(
+        const void *rawContext) {
+    const SocketClientContext *context =
+        static_cast<const SocketClientContext *>(rawContext);
+    if(!context) return CFStringCreateCopy(
+        kCFAllocatorDefault, CFSTR("LC32 CFSocket client"));
+
+    /* CFSocket may request descriptions on an arbitrary native thread.
+     * Never borrow a JIT merely to run a diagnostic guest callback. */
+    return CFStringCreateWithFormat(kCFAllocatorDefault, nullptr,
+        CFSTR("LC32 CFSocket callback=0x%08x info=0x%08x "
+              "description=0x%08x"),
+        context->guestCallback, context->guestInfo,
+        context->guestCopyDescription);
+}
+
+class SocketClientContextLease {
+public:
+    explicit SocketClientContextLease(SocketClientContext *context)
+        : context_(context) {
+        RetainSocketClientContext(context_);
+    }
+
+    ~SocketClientContextLease() {
+        ReleaseSocketClientContext(context_);
+    }
+
+private:
+    SocketClientContext *context_;
+};
+
+class GuestStackSInt32 {
+public:
+    explicit GuestStackSInt32(int32_t value) {
+        if(!threadHandle.jit) return;
+        std::array<std::uint32_t, 16> &registers =
+            threadHandle.jit->Regs();
+        originalStackPointer_ = registers[Reg::SP];
+        if(originalStackPointer_ < sizeof(uint64_t)) return;
+        guestAddress_ =
+            (originalStackPointer_ - sizeof(uint64_t)) & ~7u;
+        if(!GuestRangeIsValid(guestAddress_, sizeof(value))) {
+            guestAddress_ = 0;
+            return;
+        }
+        registers[Reg::SP] = guestAddress_;
+        if(Dynarmic_mem_1write(guestAddress_, sizeof(value),
+                reinterpret_cast<char *>(&value)) != 0) {
+            registers[Reg::SP] = originalStackPointer_;
+            guestAddress_ = 0;
+        }
+    }
+
+    ~GuestStackSInt32() {
+        if(guestAddress_ && threadHandle.jit) {
+            threadHandle.jit->Regs()[Reg::SP] = originalStackPointer_;
+        }
+    }
+
+    u32 address() const { return guestAddress_; }
+
+private:
+    u32 originalStackPointer_ = 0;
+    u32 guestAddress_ = 0;
+};
+
+void SocketClientCallback(CFSocketRef,
+                          CFSocketCallBackType type,
+                          CFDataRef address,
+                          const void *data,
+                          void *rawContext) {
+    SocketClientContext *context =
+        static_cast<SocketClientContext *>(rawContext);
+    if(!context || !context->guestCallback) return;
+    SocketClientContextLease contextLease(context);
+
+    /* Borrowed CFData values can only be converted while this host thread
+     * owns a registered guest JIT. In particular, do not route this callback
+     * through the foreign-thread serialized executor: its raw CFData
+     * arguments would no longer be valid by the time it ran. */
+    if(!Dynarmic_guest_thread_is_registered()) {
+        fprintf(stderr,
+            "LC32: dropping CFSocket callback type %u on an "
+            "unregistered host thread\n", static_cast<unsigned>(type));
+        return;
+    }
+
+    const u32 guestSocket = context->guestSocket.load(
+        std::memory_order_acquire);
+    if(!guestSocket) {
+        fprintf(stderr,
+            "LC32: dropping CFSocket callback before guest socket "
+            "identity was assigned\n");
+        return;
+    }
+
+    const u32 guestAddress = address ? [(id)address guest_self] : 0;
+    if(address && !guestAddress) {
+        fprintf(stderr,
+            "LC32: could not map borrowed CFSocket callback address\n");
+        return;
+    }
+
+    if(type == kCFSocketDataCallBack) {
+        CFDataRef callbackData = static_cast<CFDataRef>(data);
+        const u32 guestData = callbackData
+            ? [(id)callbackData guest_self] : 0;
+        if(callbackData && !guestData) {
+            fprintf(stderr,
+                "LC32: could not map borrowed CFSocket callback data\n");
+            return;
+        }
+        u32 arguments[] = {
+            guestSocket,
+            static_cast<u32>(type),
+            guestAddress,
+            guestData,
+            context->guestInfo,
+        };
+        (void)LC32InvokeGuestC(context->guestCallback, false,
+            sizeof(arguments) / sizeof(arguments[0]), arguments);
+        return;
+    }
+
+    if(type == kCFSocketConnectCallBack) {
+        GuestStackSInt32 guestError(
+            data ? *static_cast<const SInt32 *>(data) : 0);
+        if(data && !guestError.address()) {
+            fprintf(stderr,
+                "LC32: could not stage CFSocket connect error in guest "
+                "memory\n");
+            return;
+        }
+        u32 arguments[] = {
+            guestSocket,
+            static_cast<u32>(type),
+            guestAddress,
+            data ? guestError.address() : 0,
+            context->guestInfo,
+        };
+        (void)LC32InvokeGuestC(context->guestCallback, false,
+            sizeof(arguments) / sizeof(arguments[0]), arguments);
+        return;
+    }
+
+    fprintf(stderr,
+        "LC32: dropping unsupported CFSocket callback type %u\n",
+        static_cast<unsigned>(type));
 }
 
 } // namespace
@@ -766,6 +1284,42 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
                     SlotHostObject<CFStringRef>(call, 2),
                     static_cast<CFStringEncoding>(SlotU32(call, 3))));
         }
+        case LC32CoreFoundationOpURLCreateWithString: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFStringRef string = SlotHostObject<CFStringRef>(call, 0);
+            return string ? GuestForCreatedObject(CFURLCreateWithString(
+                kCFAllocatorDefault, string,
+                SlotHostObject<CFURLRef>(call, 1))) : 0;
+        }
+        case LC32CoreFoundationOpURLCreateWithBytes: {
+            if(!RequireSlots(call, 4) || SlotU32(call, 1) > INT32_MAX)
+                return 0;
+            std::vector<UInt8> bytes;
+            if(!ReadGuestStringBytes(SlotU32(call, 0), SlotU32(call, 1),
+                                     bytes)) return 0;
+            return GuestForCreatedObject(CFURLCreateWithBytes(
+                kCFAllocatorDefault,
+                bytes.empty() ? nullptr : bytes.data(), bytes.size(),
+                static_cast<CFStringEncoding>(SlotU32(call, 2)),
+                SlotHostObject<CFURLRef>(call, 3)));
+        }
+        case LC32CoreFoundationOpURLCreateStringByReplacingPercentEscapes: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFStringRef original = SlotHostObject<CFStringRef>(call, 0);
+            return original ? GuestForCreatedObject(
+                CFURLCreateStringByReplacingPercentEscapesUsingEncoding(
+                    kCFAllocatorDefault, original,
+                    SlotHostObject<CFStringRef>(call, 1),
+                    static_cast<CFStringEncoding>(SlotU32(call, 2)))) : 0;
+        }
+        case LC32CoreFoundationOpStringTrimWhitespace: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFMutableStringRef string =
+                SlotHostObject<CFMutableStringRef>(call, 0);
+            if(!string) return 0;
+            CFStringTrimWhitespace(string);
+            return 1;
+        }
         case LC32CoreFoundationOpNumberGetValue:
             return DispatchNumberGetValue(call);
         case LC32CoreFoundationOpBundleGetMainBundle: {
@@ -836,6 +1390,317 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             if(!RequireSlots(call, 0)) return 0;
             CFRunLoopRef runLoop = CFRunLoopGetCurrent();
             return runLoop ? [(id)runLoop guest_self] : 0;
+        }
+        case LC32CoreFoundationOpRunLoopAddSource: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFRunLoopRef runLoop =
+                SlotHostObject<CFRunLoopRef>(call, 0);
+            CFRunLoopSourceRef source =
+                SlotHostObject<CFRunLoopSourceRef>(call, 1);
+            CFRunLoopMode mode =
+                SlotHostObject<CFRunLoopMode>(call, 2);
+            if(!runLoop || !source || !mode) return 0;
+            CFRunLoopAddSource(runLoop, source, mode);
+            return 1;
+        }
+        case LC32CoreFoundationOpRunLoopAddTimer: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFRunLoopRef runLoop =
+                SlotHostObject<CFRunLoopRef>(call, 0);
+            CFRunLoopTimerRef timer =
+                SlotHostObject<CFRunLoopTimerRef>(call, 1);
+            CFRunLoopMode mode =
+                SlotHostObject<CFRunLoopMode>(call, 2);
+            if(!runLoop || !timer || !mode) return 0;
+            CFRunLoopAddTimer(runLoop, timer, mode);
+            return 1;
+        }
+        case LC32CoreFoundationOpRunLoopCopyAllModes: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFRunLoopRef runLoop =
+                SlotHostObject<CFRunLoopRef>(call, 0);
+            return runLoop ? GuestForCreatedObject(
+                CFRunLoopCopyAllModes(runLoop)) : 0;
+        }
+        case LC32CoreFoundationOpRunLoopRemoveSource: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFRunLoopRef runLoop =
+                SlotHostObject<CFRunLoopRef>(call, 0);
+            CFRunLoopSourceRef source =
+                SlotHostObject<CFRunLoopSourceRef>(call, 1);
+            CFRunLoopMode mode =
+                SlotHostObject<CFRunLoopMode>(call, 2);
+            if(!runLoop || !source || !mode) return 0;
+            CFRunLoopRemoveSource(runLoop, source, mode);
+            return 1;
+        }
+        case LC32CoreFoundationOpRunLoopRemoveTimer: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFRunLoopRef runLoop =
+                SlotHostObject<CFRunLoopRef>(call, 0);
+            CFRunLoopTimerRef timer =
+                SlotHostObject<CFRunLoopTimerRef>(call, 1);
+            CFRunLoopMode mode =
+                SlotHostObject<CFRunLoopMode>(call, 2);
+            if(!runLoop || !timer || !mode) return 0;
+            CFRunLoopRemoveTimer(runLoop, timer, mode);
+            return 1;
+        }
+        case LC32CoreFoundationOpRunLoopRun:
+            if(!RequireSlots(call, 0)) return 0;
+            CFRunLoopRun();
+            return 1;
+        case LC32CoreFoundationOpRunLoopRunInMode: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFRunLoopMode mode =
+                SlotHostObject<CFRunLoopMode>(call, 0);
+            return mode ? static_cast<u32>(static_cast<int32_t>(
+                CFRunLoopRunInMode(mode, SlotDouble(call, 1),
+                    SlotU32(call, 2) != 0))) : 0;
+        }
+        case LC32CoreFoundationOpRunLoopSourceInvalidate: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFRunLoopSourceRef source =
+                SlotHostObject<CFRunLoopSourceRef>(call, 0);
+            if(!source) return 0;
+            CFRunLoopSourceInvalidate(source);
+            return 1;
+        }
+        case LC32CoreFoundationOpRunLoopSourceCreate: {
+            if(!RequireSlots(call, 5)) return 0;
+            const u32 guestPerform = SlotU32(call, 1);
+            const u32 guestInfo = SlotU32(call, 2);
+            const u32 guestRelease = SlotU32(call, 3);
+            const auto releaseIncomingContext = [&] {
+                if(!guestRelease) return;
+                const u32 arguments[] = {guestInfo};
+                if(!InvokeGuestVoidFunction(
+                        guestRelease, arguments, 1)) {
+                    fprintf(stderr,
+                        "LC32: could not release rejected CFRunLoopSource "
+                        "context with 0x%08x\n", guestRelease);
+                }
+            };
+
+            RunLoopSourceClientContext *context =
+                new(std::nothrow) RunLoopSourceClientContext;
+            if(!context) {
+                releaseIncomingContext();
+                return 0;
+            }
+            context->guestPerform = guestPerform;
+            context->guestInfo = guestInfo;
+            context->guestRelease = guestRelease;
+            context->guestCopyDescription = SlotU32(call, 4);
+
+            CFRunLoopSourceContext nativeContext = {
+                0,
+                context,
+                RetainRunLoopSourceClientContext,
+                ReleaseRunLoopSourceClientContext,
+                context->guestCopyDescription
+                    ? CopyRunLoopSourceClientContextDescription : nullptr,
+                nullptr,
+                nullptr,
+                nullptr,
+                nullptr,
+                guestPerform ? RunLoopSourceClientPerform : nullptr,
+            };
+            CFRunLoopSourceRef source = CFRunLoopSourceCreate(
+                kCFAllocatorDefault,
+                static_cast<CFIndex>(SlotS32(call, 0)), &nativeContext);
+            const u32 guestSource = GuestForCreatedObject(source);
+            ReleaseRunLoopSourceClientContext(context);
+            return guestSource;
+        }
+        case LC32CoreFoundationOpRunLoopSourceSignal: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFRunLoopSourceRef source =
+                SlotHostObject<CFRunLoopSourceRef>(call, 0);
+            if(!source) return 0;
+            CFRunLoopSourceSignal(source);
+            return 1;
+        }
+        case LC32CoreFoundationOpRunLoopStop: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFRunLoopRef runLoop =
+                SlotHostObject<CFRunLoopRef>(call, 0);
+            if(!runLoop) return 0;
+            CFRunLoopStop(runLoop);
+            return 1;
+        }
+        case LC32CoreFoundationOpRunLoopTimerInvalidate: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFRunLoopTimerRef timer =
+                SlotHostObject<CFRunLoopTimerRef>(call, 0);
+            if(!timer) return 0;
+            CFRunLoopTimerInvalidate(timer);
+            return 1;
+        }
+        case LC32CoreFoundationOpRunLoopTimerCreate: {
+            if(!RequireSlots(call, 8)) return 0;
+            const u32 guestCallback = SlotU32(call, 4);
+            const u32 guestInfo = SlotU32(call, 5);
+            const u32 guestRelease = SlotU32(call, 6);
+            const auto releaseIncomingContext = [&] {
+                if(!guestRelease) return;
+                const u32 arguments[] = {guestInfo};
+                if(!InvokeGuestVoidFunction(
+                        guestRelease, arguments, 1)) {
+                    fprintf(stderr,
+                        "LC32: could not release rejected CFRunLoopTimer "
+                        "context with 0x%08x\n", guestRelease);
+                }
+            };
+            if(!guestCallback) {
+                releaseIncomingContext();
+                return 0;
+            }
+
+            RunLoopTimerClientContext *context =
+                new(std::nothrow) RunLoopTimerClientContext;
+            if(!context) {
+                releaseIncomingContext();
+                return 0;
+            }
+            context->guestCallback = guestCallback;
+            context->guestInfo = guestInfo;
+            context->guestRelease = guestRelease;
+            context->guestCopyDescription = SlotU32(call, 7);
+
+            CFRunLoopTimerContext nativeContext = {
+                0,
+                context,
+                RetainRunLoopTimerClientContext,
+                ReleaseRunLoopTimerClientContext,
+                context->guestCopyDescription
+                    ? CopyRunLoopTimerClientContextDescription : nullptr,
+            };
+            CFRunLoopTimerRef timer = CFRunLoopTimerCreate(
+                kCFAllocatorDefault, SlotDouble(call, 0),
+                SlotDouble(call, 1),
+                static_cast<CFOptionFlags>(SlotU32(call, 2)),
+                static_cast<CFIndex>(SlotS32(call, 3)),
+                RunLoopTimerClientCallback, &nativeContext);
+            const u32 guestTimer = GuestForCreatedObject(timer);
+            context->guestTimer.store(
+                guestTimer, std::memory_order_release);
+            ReleaseRunLoopTimerClientContext(context);
+            return guestTimer;
+        }
+        case LC32CoreFoundationOpRunLoopTimerSetNextFireDate: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFRunLoopTimerRef timer =
+                SlotHostObject<CFRunLoopTimerRef>(call, 0);
+            if(!timer) return 0;
+            CFRunLoopTimerSetNextFireDate(timer, SlotDouble(call, 1));
+            return 1;
+        }
+        case LC32CoreFoundationOpRunLoopWakeUp: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFRunLoopRef runLoop =
+                SlotHostObject<CFRunLoopRef>(call, 0);
+            if(!runLoop) return 0;
+            CFRunLoopWakeUp(runLoop);
+            return 1;
+        }
+        case LC32CoreFoundationOpSocketCreate: {
+            if(!RequireSlots(call, 8)) return 0;
+            const CFOptionFlags callbackTypes =
+                static_cast<CFOptionFlags>(SlotU32(call, 3));
+            const bool supportedCallbackTypes =
+                callbackTypes == kCFSocketNoCallBack ||
+                callbackTypes == kCFSocketDataCallBack ||
+                callbackTypes == kCFSocketConnectCallBack ||
+                callbackTypes ==
+                    (kCFSocketDataCallBack |
+                     kCFSocketConnectCallBack);
+            const u32 guestCallback = SlotU32(call, 4);
+            const u32 guestInfo = SlotU32(call, 5);
+            const u32 guestRelease = SlotU32(call, 6);
+            const auto releaseIncomingContext = [&] {
+                if(!guestRelease) return;
+                const u32 arguments[] = {guestInfo};
+                if(!InvokeGuestVoidFunction(
+                        guestRelease, arguments, 1)) {
+                    fprintf(stderr,
+                        "LC32: could not release rejected CFSocket "
+                        "context with 0x%08x\n", guestRelease);
+                }
+            };
+            if(!supportedCallbackTypes ||
+               (callbackTypes != kCFSocketNoCallBack &&
+                !guestCallback)) {
+                releaseIncomingContext();
+                return 0;
+            }
+
+            SocketClientContext *context =
+                new(std::nothrow) SocketClientContext;
+            if(!context) {
+                releaseIncomingContext();
+                return 0;
+            }
+            context->guestCallback = guestCallback;
+            context->guestInfo = guestInfo;
+            context->guestRelease = guestRelease;
+            context->guestCopyDescription = SlotU32(call, 7);
+
+            CFSocketContext nativeContext = {
+                0,
+                context,
+                RetainSocketClientContext,
+                ReleaseSocketClientContext,
+                context->guestCopyDescription
+                    ? CopySocketClientContextDescription : nullptr,
+            };
+            CFSocketRef socket = CFSocketCreate(
+                kCFAllocatorDefault, SlotS32(call, 0),
+                SlotS32(call, 1), SlotS32(call, 2), callbackTypes,
+                guestCallback ? SocketClientCallback : nullptr,
+                &nativeContext);
+            const u32 guestSocket = GuestForCreatedObject(socket);
+            context->guestSocket.store(
+                guestSocket, std::memory_order_release);
+            ReleaseSocketClientContext(context);
+            return guestSocket;
+        }
+        case LC32CoreFoundationOpSocketConnectToAddress: {
+            if(!RequireSlots(call, 3)) return static_cast<u32>(
+                static_cast<int32_t>(kCFSocketError));
+            CFSocketRef socket =
+                SlotHostObject<CFSocketRef>(call, 0);
+            CFDataRef address =
+                SlotHostObject<CFDataRef>(call, 1);
+            if(!socket || !address) return static_cast<u32>(
+                static_cast<int32_t>(kCFSocketError));
+            return static_cast<u32>(static_cast<int32_t>(
+                CFSocketConnectToAddress(
+                    socket, address, SlotDouble(call, 2))));
+        }
+        case LC32CoreFoundationOpSocketCreateRunLoopSource: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFSocketRef socket =
+                SlotHostObject<CFSocketRef>(call, 0);
+            return socket ? GuestForCreatedObject(
+                CFSocketCreateRunLoopSource(
+                    kCFAllocatorDefault, socket,
+                    static_cast<CFIndex>(SlotS32(call, 1)))) : 0;
+        }
+        case LC32CoreFoundationOpSocketGetNative: {
+            if(!RequireSlots(call, 1)) return UINT32_MAX;
+            CFSocketRef socket =
+                SlotHostObject<CFSocketRef>(call, 0);
+            return socket ? static_cast<u32>(static_cast<int32_t>(
+                CFSocketGetNative(socket))) : UINT32_MAX;
+        }
+        case LC32CoreFoundationOpSocketInvalidate: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFSocketRef socket =
+                SlotHostObject<CFSocketRef>(call, 0);
+            if(!socket) return 0;
+            CFSocketInvalidate(socket);
+            return 1;
         }
         case LC32CoreFoundationOpDictionaryGetValue: {
             if(!RequireSlots(call, 2)) return 0;
@@ -1133,6 +1998,454 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             if(set) CFSetRemoveAllValues(set);
             return 0;
         }
+        case LC32CoreFoundationOpAttributedStringCreate: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFStringRef string = SlotHostObject<CFStringRef>(call, 0);
+            return string ? GuestForCreatedObject(CFAttributedStringCreate(
+                kCFAllocatorDefault, string,
+                SlotHostObject<CFDictionaryRef>(call, 1))) : 0;
+        }
+        case LC32CoreFoundationOpAttributedStringCreateMutable: {
+            if(!RequireSlots(call, 1)) return 0;
+            const int32_t maximumLength = SlotS32(call, 0);
+            return maximumLength >= 0 ? GuestForCreatedObject(
+                CFAttributedStringCreateMutable(kCFAllocatorDefault,
+                    static_cast<CFIndex>(maximumLength))) : 0;
+        }
+        case LC32CoreFoundationOpAttributedStringCreateWithSubstring: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFAttributedStringRef string =
+                SlotHostObject<CFAttributedStringRef>(call, 0);
+            const int32_t location = SlotS32(call, 1);
+            const int32_t length = SlotS32(call, 2);
+            if(!AttributedStringRangeIsValid(string, location, length))
+                return 0;
+            return GuestForCreatedObject(
+                CFAttributedStringCreateWithSubstring(kCFAllocatorDefault,
+                    string, CFRangeMake(static_cast<CFIndex>(location),
+                                        static_cast<CFIndex>(length))));
+        }
+        case LC32CoreFoundationOpAttributedStringGetLength: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFAttributedStringRef string =
+                SlotHostObject<CFAttributedStringRef>(call, 0);
+            if(!string) return 0;
+            const CFIndex length = CFAttributedStringGetLength(string);
+            return length > INT32_MAX ? INT32_MAX : static_cast<u32>(length);
+        }
+        case LC32CoreFoundationOpAttributedStringReplaceAttributedString: {
+            if(!RequireSlots(call, 4)) return 0;
+            CFMutableAttributedStringRef string =
+                SlotHostObject<CFMutableAttributedStringRef>(call, 0);
+            const int32_t location = SlotS32(call, 1);
+            const int32_t length = SlotS32(call, 2);
+            CFAttributedStringRef replacement =
+                SlotHostObject<CFAttributedStringRef>(call, 3);
+            if(!replacement ||
+               !AttributedStringRangeIsValid(string, location, length)) {
+                return 0;
+            }
+            CFAttributedStringReplaceAttributedString(string,
+                CFRangeMake(static_cast<CFIndex>(location),
+                            static_cast<CFIndex>(length)), replacement);
+            return 1;
+        }
+        case LC32CoreFoundationOpReadStreamOpen: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFReadStreamRef stream =
+                SlotHostObject<CFReadStreamRef>(call, 0);
+            return stream && CFReadStreamOpen(stream);
+        }
+        case LC32CoreFoundationOpReadStreamClose: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFReadStreamRef stream =
+                SlotHostObject<CFReadStreamRef>(call, 0);
+            if(!stream) return 0;
+            CFReadStreamClose(stream);
+            return 1;
+        }
+        case LC32CoreFoundationOpReadStreamGetStatus: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFReadStreamRef stream =
+                SlotHostObject<CFReadStreamRef>(call, 0);
+            return stream ? static_cast<u32>(static_cast<int32_t>(
+                CFReadStreamGetStatus(stream))) : 0;
+        }
+        case LC32CoreFoundationOpReadStreamHasBytesAvailable: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFReadStreamRef stream =
+                SlotHostObject<CFReadStreamRef>(call, 0);
+            return stream && CFReadStreamHasBytesAvailable(stream);
+        }
+        case LC32CoreFoundationOpReadStreamRead: {
+            if(!RequireSlots(call, 3)) return static_cast<u32>(-1);
+            CFReadStreamRef stream =
+                SlotHostObject<CFReadStreamRef>(call, 0);
+            const u32 guestBuffer = SlotU32(call, 1);
+            const int32_t bufferLength = SlotS32(call, 2);
+            if(!stream || bufferLength < 0 ||
+               static_cast<uint32_t>(bufferLength) >
+                    kMaximumReadStreamBytes ||
+               (bufferLength && !GuestRangeIsValid(
+                    guestBuffer, static_cast<u32>(bufferLength)))) {
+                return static_cast<u32>(-1);
+            }
+
+            std::vector<UInt8> buffer(
+                static_cast<size_t>(bufferLength));
+            const CFIndex result = CFReadStreamRead(
+                stream, buffer.empty() ? nullptr : buffer.data(),
+                static_cast<CFIndex>(bufferLength));
+            if(result < 0) return static_cast<u32>(-1);
+            if(result > bufferLength || result > INT32_MAX) {
+                return static_cast<u32>(-1);
+            }
+            if(result && Dynarmic_mem_1write(
+                    guestBuffer, static_cast<u32>(result),
+                    reinterpret_cast<char *>(buffer.data())) != 0) {
+                return static_cast<u32>(-1);
+            }
+            return static_cast<u32>(static_cast<int32_t>(result));
+        }
+        case LC32CoreFoundationOpReadStreamCopyError: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFReadStreamRef stream =
+                SlotHostObject<CFReadStreamRef>(call, 0);
+            return stream ? GuestForCreatedObject(
+                CFReadStreamCopyError(stream)) : 0;
+        }
+        case LC32CoreFoundationOpReadStreamCopyProperty: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFReadStreamRef stream =
+                SlotHostObject<CFReadStreamRef>(call, 0);
+            CFStreamPropertyKey property =
+                SlotHostObject<CFStreamPropertyKey>(call, 1);
+            return stream && property ? GuestForCreatedObject(
+                CFReadStreamCopyProperty(stream, property)) : 0;
+        }
+        case LC32CoreFoundationOpReadStreamSetProperty: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFReadStreamRef stream =
+                SlotHostObject<CFReadStreamRef>(call, 0);
+            CFStreamPropertyKey property =
+                SlotHostObject<CFStreamPropertyKey>(call, 1);
+            CFTypeRef value = SlotHostObject<CFTypeRef>(call, 2);
+            return stream && property && value &&
+                CFReadStreamSetProperty(stream, property, value);
+        }
+        case LC32CoreFoundationOpReadStreamScheduleWithRunLoop: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFReadStreamRef stream =
+                SlotHostObject<CFReadStreamRef>(call, 0);
+            CFRunLoopRef runLoop =
+                SlotHostObject<CFRunLoopRef>(call, 1);
+            CFRunLoopMode mode =
+                SlotHostObject<CFRunLoopMode>(call, 2);
+            if(!stream || !runLoop || !mode) return 0;
+            CFReadStreamScheduleWithRunLoop(stream, runLoop, mode);
+            return 1;
+        }
+        case LC32CoreFoundationOpReadStreamUnscheduleFromRunLoop: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFReadStreamRef stream =
+                SlotHostObject<CFReadStreamRef>(call, 0);
+            CFRunLoopRef runLoop =
+                SlotHostObject<CFRunLoopRef>(call, 1);
+            CFRunLoopMode mode =
+                SlotHostObject<CFRunLoopMode>(call, 2);
+            if(!stream || !runLoop || !mode) return 0;
+            CFReadStreamUnscheduleFromRunLoop(stream, runLoop, mode);
+            return 1;
+        }
+        case LC32CoreFoundationOpReadStreamGetError: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFReadStreamRef stream =
+                SlotHostObject<CFReadStreamRef>(call, 0);
+            const u32 guestError = SlotU32(call, 1);
+            if(!stream || !GuestRangeIsValid(
+                    guestError, sizeof(LC32GuestCFStreamError))) {
+                return 0;
+            }
+            const CFStreamError error = CFReadStreamGetError(stream);
+            if(error.domain < INT32_MIN || error.domain > INT32_MAX) {
+                return 0;
+            }
+            LC32GuestCFStreamError guestValue = {
+                static_cast<int32_t>(error.domain),
+                static_cast<int32_t>(error.error),
+            };
+            return Dynarmic_mem_1write(
+                guestError, sizeof(guestValue),
+                reinterpret_cast<char *>(&guestValue)) == 0;
+        }
+        case LC32CoreFoundationOpReadStreamSetClient: {
+            if(!RequireSlots(call, 7)) return 0;
+            CFReadStreamRef stream =
+                SlotHostObject<CFReadStreamRef>(call, 0);
+            const u32 guestStream = SlotU32(call, 1);
+            const CFOptionFlags events =
+                static_cast<CFOptionFlags>(SlotU32(call, 2));
+            const u32 guestCallback = SlotU32(call, 3);
+            if(!guestCallback) {
+                return stream && CFReadStreamSetClient(
+                    stream, events, nullptr, nullptr);
+            }
+            const u32 guestInfo = SlotU32(call, 4);
+            const u32 guestRelease = SlotU32(call, 5);
+            const auto releaseIncomingContext = [&] {
+                if(!guestRelease) return;
+                const u32 arguments[] = {guestInfo};
+                if(!InvokeGuestVoidFunction(
+                        guestRelease, arguments, 1)) {
+                    fprintf(stderr,
+                        "LC32: could not release rejected CFReadStream "
+                        "client context with 0x%08x\n", guestRelease);
+                }
+            };
+            if(!stream || !guestStream) {
+                releaseIncomingContext();
+                return 0;
+            }
+
+            ReadStreamClientContext *context =
+                new(std::nothrow) ReadStreamClientContext;
+            if(!context) {
+                releaseIncomingContext();
+                return 0;
+            }
+            context->guestStream = guestStream;
+            context->guestCallback = guestCallback;
+            context->guestInfo = guestInfo;
+            context->guestRelease = guestRelease;
+            context->guestCopyDescription = SlotU32(call, 6);
+
+            CFStreamClientContext nativeContext = {
+                0,
+                context,
+                RetainReadStreamClientContext,
+                ReleaseReadStreamClientContext,
+                context->guestCopyDescription
+                    ? CopyReadStreamClientContextDescription : nullptr,
+            };
+            const Boolean result = CFReadStreamSetClient(
+                stream, events, ReadStreamClientCallback,
+                &nativeContext);
+            ReleaseReadStreamClientContext(context);
+            return result;
+        }
+        case LC32CoreFoundationOpWriteStreamOpen: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFWriteStreamRef stream =
+                SlotHostObject<CFWriteStreamRef>(call, 0);
+            return stream && CFWriteStreamOpen(stream);
+        }
+        case LC32CoreFoundationOpWriteStreamClose: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFWriteStreamRef stream =
+                SlotHostObject<CFWriteStreamRef>(call, 0);
+            if(!stream) return 0;
+            CFWriteStreamClose(stream);
+            return 1;
+        }
+        case LC32CoreFoundationOpWriteStreamGetStatus: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFWriteStreamRef stream =
+                SlotHostObject<CFWriteStreamRef>(call, 0);
+            return stream ? static_cast<u32>(static_cast<int32_t>(
+                CFWriteStreamGetStatus(stream))) : 0;
+        }
+        case LC32CoreFoundationOpWriteStreamCanAcceptBytes: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFWriteStreamRef stream =
+                SlotHostObject<CFWriteStreamRef>(call, 0);
+            return stream && CFWriteStreamCanAcceptBytes(stream);
+        }
+        case LC32CoreFoundationOpWriteStreamWrite: {
+            if(!RequireSlots(call, 3)) return static_cast<u32>(-1);
+            CFWriteStreamRef stream =
+                SlotHostObject<CFWriteStreamRef>(call, 0);
+            const u32 guestBuffer = SlotU32(call, 1);
+            const int32_t bufferLength = SlotS32(call, 2);
+            if(!stream || bufferLength < 0 ||
+               static_cast<uint32_t>(bufferLength) >
+                    kMaximumWriteStreamBytes ||
+               (bufferLength && !GuestRangeIsValid(
+                    guestBuffer, static_cast<u32>(bufferLength)))) {
+                return static_cast<u32>(-1);
+            }
+
+            std::vector<UInt8> buffer(
+                static_cast<size_t>(bufferLength));
+            if(bufferLength && Dynarmic_mem_1read(
+                    guestBuffer, static_cast<u32>(bufferLength),
+                    reinterpret_cast<char *>(buffer.data())) != 0) {
+                return static_cast<u32>(-1);
+            }
+            const CFIndex result = CFWriteStreamWrite(
+                stream, buffer.empty() ? nullptr : buffer.data(),
+                static_cast<CFIndex>(bufferLength));
+            if(result < 0 || result > bufferLength || result > INT32_MAX) {
+                return static_cast<u32>(-1);
+            }
+            return static_cast<u32>(static_cast<int32_t>(result));
+        }
+        case LC32CoreFoundationOpWriteStreamCopyError: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFWriteStreamRef stream =
+                SlotHostObject<CFWriteStreamRef>(call, 0);
+            return stream ? GuestForCreatedObject(
+                CFWriteStreamCopyError(stream)) : 0;
+        }
+        case LC32CoreFoundationOpWriteStreamCopyProperty: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFWriteStreamRef stream =
+                SlotHostObject<CFWriteStreamRef>(call, 0);
+            CFStreamPropertyKey property =
+                SlotHostObject<CFStreamPropertyKey>(call, 1);
+            return stream && property ? GuestForCreatedObject(
+                CFWriteStreamCopyProperty(stream, property)) : 0;
+        }
+        case LC32CoreFoundationOpWriteStreamSetProperty: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFWriteStreamRef stream =
+                SlotHostObject<CFWriteStreamRef>(call, 0);
+            CFStreamPropertyKey property =
+                SlotHostObject<CFStreamPropertyKey>(call, 1);
+            CFTypeRef value = SlotHostObject<CFTypeRef>(call, 2);
+            return stream && property && value &&
+                CFWriteStreamSetProperty(stream, property, value);
+        }
+        case LC32CoreFoundationOpWriteStreamScheduleWithRunLoop: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFWriteStreamRef stream =
+                SlotHostObject<CFWriteStreamRef>(call, 0);
+            CFRunLoopRef runLoop =
+                SlotHostObject<CFRunLoopRef>(call, 1);
+            CFRunLoopMode mode =
+                SlotHostObject<CFRunLoopMode>(call, 2);
+            if(!stream || !runLoop || !mode) return 0;
+            CFWriteStreamScheduleWithRunLoop(stream, runLoop, mode);
+            return 1;
+        }
+        case LC32CoreFoundationOpWriteStreamUnscheduleFromRunLoop: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFWriteStreamRef stream =
+                SlotHostObject<CFWriteStreamRef>(call, 0);
+            CFRunLoopRef runLoop =
+                SlotHostObject<CFRunLoopRef>(call, 1);
+            CFRunLoopMode mode =
+                SlotHostObject<CFRunLoopMode>(call, 2);
+            if(!stream || !runLoop || !mode) return 0;
+            CFWriteStreamUnscheduleFromRunLoop(stream, runLoop, mode);
+            return 1;
+        }
+        case LC32CoreFoundationOpWriteStreamGetError: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFWriteStreamRef stream =
+                SlotHostObject<CFWriteStreamRef>(call, 0);
+            const u32 guestError = SlotU32(call, 1);
+            if(!stream || !GuestRangeIsValid(
+                    guestError, sizeof(LC32GuestCFStreamError))) {
+                return 0;
+            }
+            const CFStreamError error = CFWriteStreamGetError(stream);
+            if(error.domain < INT32_MIN || error.domain > INT32_MAX) {
+                return 0;
+            }
+            LC32GuestCFStreamError guestValue = {
+                static_cast<int32_t>(error.domain),
+                static_cast<int32_t>(error.error),
+            };
+            return Dynarmic_mem_1write(
+                guestError, sizeof(guestValue),
+                reinterpret_cast<char *>(&guestValue)) == 0;
+        }
+        case LC32CoreFoundationOpWriteStreamSetClient: {
+            if(!RequireSlots(call, 7)) return 0;
+            CFWriteStreamRef stream =
+                SlotHostObject<CFWriteStreamRef>(call, 0);
+            const u32 guestStream = SlotU32(call, 1);
+            const CFOptionFlags events =
+                static_cast<CFOptionFlags>(SlotU32(call, 2));
+            const u32 guestCallback = SlotU32(call, 3);
+            if(!guestCallback) {
+                return stream && CFWriteStreamSetClient(
+                    stream, events, nullptr, nullptr);
+            }
+            const u32 guestInfo = SlotU32(call, 4);
+            const u32 guestRelease = SlotU32(call, 5);
+            const auto releaseIncomingContext = [&] {
+                if(!guestRelease) return;
+                const u32 arguments[] = {guestInfo};
+                if(!InvokeGuestVoidFunction(
+                        guestRelease, arguments, 1)) {
+                    fprintf(stderr,
+                        "LC32: could not release rejected CFWriteStream "
+                        "client context with 0x%08x\n", guestRelease);
+                }
+            };
+            if(!stream || !guestStream) {
+                releaseIncomingContext();
+                return 0;
+            }
+
+            WriteStreamClientContext *context =
+                new(std::nothrow) WriteStreamClientContext;
+            if(!context) {
+                releaseIncomingContext();
+                return 0;
+            }
+            context->guestStream = guestStream;
+            context->guestCallback = guestCallback;
+            context->guestInfo = guestInfo;
+            context->guestRelease = guestRelease;
+            context->guestCopyDescription = SlotU32(call, 6);
+
+            CFStreamClientContext nativeContext = {
+                0,
+                context,
+                RetainWriteStreamClientContext,
+                ReleaseWriteStreamClientContext,
+                context->guestCopyDescription
+                    ? CopyWriteStreamClientContextDescription : nullptr,
+            };
+            const Boolean result = CFWriteStreamSetClient(
+                stream, events, WriteStreamClientCallback,
+                &nativeContext);
+            ReleaseWriteStreamClientContext(context);
+            return result;
+        }
+        case LC32CoreFoundationOpStreamCreatePairWithSocket: {
+            if(!RequireSlots(call, 3)) return 0;
+            const CFSocketNativeHandle socket =
+                static_cast<CFSocketNativeHandle>(SlotS32(call, 0));
+            const u32 guestReadStream = SlotU32(call, 1);
+            const u32 guestWriteStream = SlotU32(call, 2);
+            if((!guestReadStream && !guestWriteStream) ||
+               (guestReadStream && guestWriteStream &&
+                    guestReadStream == guestWriteStream)) {
+                return 0;
+            }
+            if((guestReadStream &&
+                    !WriteGuestValue(guestReadStream, static_cast<u32>(0))) ||
+               (guestWriteStream &&
+                    !WriteGuestValue(guestWriteStream, static_cast<u32>(0)))) {
+                return 0;
+            }
+
+            CFReadStreamRef readStream = nullptr;
+            CFWriteStreamRef writeStream = nullptr;
+            CFStreamCreatePairWithSocket(kCFAllocatorDefault, socket,
+                guestReadStream ? &readStream : nullptr,
+                guestWriteStream ? &writeStream : nullptr);
+
+            if(!WriteGuestCreatedObject(guestReadStream, readStream)) {
+                if(writeStream) CFRelease(writeStream);
+                return 0;
+            }
+            return WriteGuestCreatedObject(
+                guestWriteStream, writeStream);
+        }
         case LC32CoreFoundationOpGetTypeID: {
             if(!RequireSlots(call, 1)) return 0;
             CFTypeRef object = SlotHostObject<CFTypeRef>(call, 0);
@@ -1332,6 +2645,19 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
                 return 0;
             }
             return GuestForCreatedObject(propertyList);
+        }
+        case LC32CoreFoundationOpPropertyListCreateDeepCopy: {
+            if(!RequireSlots(call, 2) ||
+               SlotU32(call, 1) >
+                    kCFPropertyListMutableContainersAndLeaves) {
+                return 0;
+            }
+            CFPropertyListRef propertyList =
+                SlotHostObject<CFPropertyListRef>(call, 0);
+            return propertyList ? GuestForCreatedObject(
+                CFPropertyListCreateDeepCopy(kCFAllocatorDefault,
+                    propertyList,
+                    static_cast<CFOptionFlags>(SlotU32(call, 1)))) : 0;
         }
         case LC32CoreFoundationOpURLCreateFromFileSystemRepresentation: {
             if(!RequireSlots(call, 3)) return 0;

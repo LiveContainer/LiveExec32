@@ -2,10 +2,12 @@
 #import <objc/message.h>
 #include <dlfcn.h>
 #include "LC32FoundationBridgeABI.h"
+#include "LC32ObjCBridgeABI.h"
 #include "32bit.h"
 #include "dynarmic.h"
 
-#define SEL_RETURN_STRUCT ((u64)1 << 63)
+#define SEL_RETURN_STRUCT LC32_HOST_SELECTOR_RETURN_STRUCT
+#define SEL_RETURN_GUEST_OBJECT LC32_HOST_SELECTOR_RETURN_GUEST_OBJECT
 
 __BEGIN_DECLS
 
@@ -49,6 +51,12 @@ u32 LC32CopyHostDataBytes(u64 host_object, u32 guest_output, u32 length,
 // If the native object already has a proxy, this also creates the matching
 // guest-only +1; the native +1 is released later by the guest's public release.
 u32 LC32GuestObjectForOwnedHostObject(CFTypeRef object);
+// Objective-C equivalent of LC32GuestObjectForOwnedHostObject. The caller
+// transfers a +1 result from an alloc/new/copy/mutableCopy method family.
+u32 LC32GuestObjectForOwnedHostObjectAddress(u64 object);
+// SVC 1019 host half. A Retained result transfers one native +1 to the
+// guest weak retain; callers must not release it in the SVC handler.
+LC32HostWeakRetainStatus LC32TryRetainHostWeakReference(u32 guest_object);
 //u64 LC32Dlsym(u32 guest_name);
 u64 LC32GetHostObject(u32 guest_self, u32 guest_class, bool returnClass);
 u64 LC32GetHostSelector(u32 guest_selector);
@@ -61,6 +69,12 @@ u64 LC32InvokeHostNSStringFormat(u64 host_self,
                                  u32 options);
 void LC32SetInvokeGuestFuncPtr(u32 dlsymFunc, u32 invokeFunc);
 u64 LC32InvokeGuestC(u32 pc, bool ret64, int argc, u32 *args);
+// Guest blocks use the Blocks runtime rather than NSObject retain/release.
+// Copying turns a stack block into stable guest storage; release is deferred
+// when a native block dies on a thread which is not registered with the JIT.
+u32 LC32CopyGuestBlock(u32 guest_block);
+void LC32ReleaseGuestBlock(u32 guest_block);
+u64 LC32CreateHostBlock(u32 guest_block);
 u32 LC32HostToGuestArgument(char *type, u64 value);
 u64 LC32GuestToHostReturnType(char *type, u64 value);
 u64 LC32InvokeGuestSelector(id self, SEL _cmd, u64 arg2, u64 arg3, u64 arg4, u64 arg5, u64 arg6, u64 arg7, ...);

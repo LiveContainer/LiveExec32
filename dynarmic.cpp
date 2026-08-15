@@ -24,6 +24,7 @@
 #include <unistd.h>
 
 #include <mach/thread_act.h>
+#include <mach/arm/thread_status.h>
 #include <mach/mig_errors.h>
 #include <mach/vm_map.h>
 #include <mach/vm_page_size.h>
@@ -100,6 +101,26 @@ static std::recursive_mutex guestVmMutex;
 static std::mutex guestMappingMutex;
 
 /*
+ * thread_get_state must stop a foreign native guest JIT before inspecting
+ * its register file.  Keep this halt private to that handshake: unlike the
+ * debugger pause it must never become a guest-visible SIGTRAP or participate
+ * in the process-wide all-stop coordinator.
+ */
+static constexpr Dynarmic::HaltReason LC32HaltReasonThreadState =
+    Dynarmic::HaltReason::UserDefined8;
+
+/*
+ * HaltExecution is observed at dispatcher and checked-memory boundaries, but
+ * a translated register-only loop can remain in block-linked code forever.
+ * Dynarmic's cycle-counted LinkBlock terminal is the safe preemption boundary:
+ * it has written the architectural state back before Run() returns. Keep
+ * native-thread runs finite so thread_get_state can always reach its normal
+ * owner-side snapshot handshake without suspending a host thread or copying a
+ * live/stale JIT register file.
+ */
+static constexpr u64 LC32NativeGuestRunSliceTicks = 1ULL << 18;
+
+/*
  * These interfaces are exported by libSystem on both iOS 10 and current
  * iOS, but Apple does not ship their declarations in the public SDK.  The
  * OS-reason string is deliberately compact; the complete report is retained
@@ -168,6 +189,7 @@ static bool read_guest_memory_with_permissions(
     u64 address, void *destination, size_t size,
     int requiredPermissions);
 static bool GuestAddressRangeIsValid32(u64 address, u64 size);
+static int ValidateGuestMunmapRange(u64 address, u64 size);
 static std::string CopyGuestCStringForCrash(
     u64 guestAddress, size_t maximumLength);
 
@@ -365,6 +387,7 @@ struct DebuggerMachCall {
         DebuggerMachCallPhase::Idle};
     std::atomic<bool> interruptRequested{false};
     mach_port_t thread = MACH_PORT_NULL;
+    gdb_thread_id_t guestThreadId = 0;
     /*
      * thread_abort_safely is sufficient for Mach traps, but Darwin may leave
      * a raw BSD syscall such as read(2) asleep even after reporting success.
@@ -377,7 +400,13 @@ struct DebuggerMachCall {
 static std::mutex debuggerMachCallsMutex;
 static std::vector<DebuggerMachCall *> debuggerMachCalls;
 
-static bool PumpGuestWorkqueue();
+enum class GuestWorkqueuePumpResult : uint8_t {
+    None,
+    CooperativeTransition,
+    NativeWorkerStarted,
+};
+
+static GuestWorkqueuePumpResult PumpGuestWorkqueue();
 static bool HandleGuestWorkqueueTransition();
 static bool GuestWorkqueueTransitionPending();
 static bool HandleGuestThreadTransition();
@@ -388,18 +417,390 @@ static bool GuestThreadCanYieldBeforeBlocking();
 static bool GuestThreadYieldBeforeBlocking();
 static void GuestThreadRequestRotation();
 static bool NativeGuestThreadIsCurrent();
+static bool NativeGuestWorkqueueIsCurrent();
+static void NativeGuestWorkqueueHostBlockEnter();
+static void NativeGuestWorkqueueHostBlockExit();
 static bool GuestWorkqueueActiveForCurrentThread();
 static void InvalidateAllGuestJits(u32 address, size_t size);
+static bool ConsumeGuestSoftwareTracepoint(
+    u32 pc, Dynarmic::A32::Jit *cpu);
 static void HaltAllGuestJits(Dynarmic::HaltReason reason);
 static void InterruptDebuggerMachCalls();
+static void InterruptNativeThreadStateHostCalls(
+    gdb_thread_id_t threadId);
 static void ScheduleMainGuestWorkqueueTransition();
 namespace {
+bool NativeThreadStatePauseHostWaitIfNeeded();
+bool NativeThreadStatePauseRequestedForCurrent();
+void NativeGuestHostCallEnter();
+void NativeGuestHostCallExit();
 bool NativeDebuggerPauseHostWaitIfNeeded();
 void NotifyNativeDebuggerWaiters();
 void NotifyNativeDebuggerCoordinator();
 gdb_thread_id_t CurrentGuestThreadId();
 static kern_return_t CopyGuestTaskThreadPorts(
     u32 *guestAddress, mach_msg_type_number_t *count);
+static kern_return_t CopyGuestThreadState(
+    mach_port_t target, thread_state_flavor_t flavor,
+    mach_msg_type_number_t capacity, u32 *state,
+    mach_msg_type_number_t *count);
+
+template <typename Function>
+auto InvokeNativeGuestHostCall(Function &&function)
+        -> decltype(function()) {
+    NativeGuestHostCallEnter();
+    struct ExitScope {
+        ~ExitScope() {
+            NativeGuestHostCallExit();
+        }
+    } exitScope;
+    return function();
+}
+
+enum class GuestCallbackExecutorState : uint8_t {
+    Unavailable,
+    Starting,
+    Ready,
+    Failed,
+    Stopping,
+};
+
+struct GuestCallbackJob {
+    LC32GuestBlockCallbackDescriptor descriptor = {};
+    bool delivered = false;
+    bool completed = false;
+    bool canceled = false;
+    std::condition_variable condition;
+};
+
+std::mutex guestCallbackExecutorMutex;
+std::condition_variable guestCallbackExecutorCondition;
+std::deque<std::shared_ptr<GuestCallbackJob>> guestCallbackJobs;
+std::shared_ptr<GuestCallbackJob> guestCallbackActiveJob;
+GuestCallbackExecutorState guestCallbackExecutorState =
+    GuestCallbackExecutorState::Unavailable;
+gdb_thread_id_t guestCallbackExecutorThreadId;
+uint32_t guestCallbackNextIdentifier = 1;
+bool GuestCallbackExecutorDebuggerStepPending();
+
+static void CancelQueuedGuestCallbacksLocked() {
+    for(const std::shared_ptr<GuestCallbackJob> &job :
+            guestCallbackJobs) {
+        job->canceled = true;
+        job->condition.notify_all();
+    }
+    guestCallbackJobs.clear();
+}
+
+static void ResetGuestCallbackExecutor() {
+    std::lock_guard<std::mutex> lock(
+        guestCallbackExecutorMutex);
+    CancelQueuedGuestCallbacksLocked();
+    if(guestCallbackActiveJob) {
+        guestCallbackActiveJob->canceled = true;
+        guestCallbackActiveJob->condition.notify_all();
+        guestCallbackActiveJob.reset();
+    }
+    guestCallbackExecutorState =
+        GuestCallbackExecutorState::Unavailable;
+    guestCallbackExecutorThreadId = 0;
+    guestCallbackNextIdentifier = 1;
+    guestCallbackExecutorCondition.notify_all();
+}
+
+void NotifyGuestCallbackExecutorWaiter() {
+    std::lock_guard<std::mutex> lock(
+        guestCallbackExecutorMutex);
+    guestCallbackExecutorCondition.notify_all();
+}
+
+void StopGuestCallbackExecutor() {
+    std::lock_guard<std::mutex> lock(
+        guestCallbackExecutorMutex);
+    if(guestCallbackExecutorState ==
+            GuestCallbackExecutorState::Unavailable) {
+        return;
+    }
+    guestCallbackExecutorState =
+        GuestCallbackExecutorState::Stopping;
+    CancelQueuedGuestCallbacksLocked();
+    guestCallbackExecutorCondition.notify_all();
+}
+
+void GuestCallbackExecutorThreadExited(
+        gdb_thread_id_t threadId) {
+    std::lock_guard<std::mutex> lock(
+        guestCallbackExecutorMutex);
+    if(threadId != guestCallbackExecutorThreadId) return;
+
+    const bool expected = guestCallbackExecutorState ==
+        GuestCallbackExecutorState::Stopping;
+    guestCallbackExecutorThreadId = 0;
+    if(guestCallbackActiveJob) {
+        guestCallbackActiveJob->canceled = true;
+        guestCallbackActiveJob->condition.notify_all();
+        guestCallbackActiveJob.reset();
+    }
+    CancelQueuedGuestCallbacksLocked();
+    guestCallbackExecutorState = expected
+        ? GuestCallbackExecutorState::Stopping
+        : GuestCallbackExecutorState::Failed;
+    guestCallbackExecutorCondition.notify_all();
+    if(!expected &&
+            !nativeShutdownRequested.load(
+                std::memory_order_acquire) &&
+            !guestProcessExitRequested.load(
+                std::memory_order_acquire)) {
+        fprintf(stderr,
+            "LC32: guest callback executor thread exited unexpectedly\n");
+    }
+}
+
+static bool SubmitGuestCallback(
+        const LC32GuestBlockCallbackDescriptor &input) {
+    auto job = std::make_shared<GuestCallbackJob>();
+    job->descriptor = input;
+
+    std::unique_lock<std::mutex> lock(
+        guestCallbackExecutorMutex);
+    if(guestCallbackExecutorState ==
+            GuestCallbackExecutorState::Starting) {
+        const bool ready = guestCallbackExecutorCondition.wait_for(
+            lock, std::chrono::seconds(5), [] {
+                return guestCallbackExecutorState !=
+                    GuestCallbackExecutorState::Starting;
+            });
+        if(!ready) {
+            fprintf(stderr,
+                "LC32: timed out starting guest callback executor\n");
+            return false;
+        }
+    }
+    if(guestCallbackExecutorState !=
+            GuestCallbackExecutorState::Ready ||
+            nativeShutdownRequested.load(
+                std::memory_order_acquire) ||
+            guestProcessExitRequested.load(
+                std::memory_order_acquire)) {
+        return false;
+    }
+
+    uint32_t identifier = guestCallbackNextIdentifier++;
+    if(identifier == 0) identifier = guestCallbackNextIdentifier++;
+    job->descriptor.identifier = identifier;
+    guestCallbackJobs.push_back(job);
+    guestCallbackExecutorCondition.notify_one();
+    job->condition.wait(lock, [&] {
+        return job->completed || job->canceled;
+    });
+    /* A delivered release may have run even if its worker exits before the
+     * completion SVC. Treat that as consumed to prefer a teardown-only leak
+     * over issuing _Block_release twice. Invocation callers still require an
+     * explicit completion acknowledgement. */
+    return job->completed ||
+        (job->delivered &&
+         job->descriptor.kind ==
+             LC32GuestBlockCallbackKindRelease);
+}
+
+u32 ServiceGuestCallbackExecutorWait(u32 guestDescriptor) {
+    if(!guestDescriptor || !NativeGuestThreadIsCurrent() ||
+            CurrentGuestThreadId() <= 1) {
+        return LC32GuestBlockCallbackWaitResultStop;
+    }
+
+    std::unique_lock<std::mutex> lock(
+        guestCallbackExecutorMutex);
+    if(guestCallbackExecutorState ==
+            GuestCallbackExecutorState::Starting) {
+        guestCallbackExecutorThreadId = CurrentGuestThreadId();
+        guestCallbackExecutorState =
+            GuestCallbackExecutorState::Ready;
+        guestCallbackExecutorCondition.notify_all();
+    } else if(guestCallbackExecutorState !=
+                  GuestCallbackExecutorState::Ready ||
+              guestCallbackExecutorThreadId !=
+                  CurrentGuestThreadId()) {
+        return LC32GuestBlockCallbackWaitResultStop;
+    }
+
+    while(guestCallbackJobs.empty() &&
+            guestCallbackExecutorState ==
+                GuestCallbackExecutorState::Ready &&
+            !nativeShutdownRequested.load(
+                std::memory_order_acquire) &&
+            !guestProcessExitRequested.load(
+                std::memory_order_acquire)) {
+        guestCallbackExecutorCondition.wait(lock, [] {
+            return !guestCallbackJobs.empty() ||
+                guestCallbackExecutorState !=
+                    GuestCallbackExecutorState::Ready ||
+                NativeThreadStatePauseRequestedForCurrent() ||
+                debuggerAllStopRequested.load(
+                    std::memory_order_acquire) ||
+                nativeShutdownRequested.load(
+                    std::memory_order_acquire) ||
+                guestProcessExitRequested.load(
+                    std::memory_order_acquire);
+        });
+        if(!guestCallbackJobs.empty()) break;
+
+        lock.unlock();
+        (void)NativeThreadStatePauseHostWaitIfNeeded();
+        const bool paused =
+            NativeDebuggerPauseHostWaitIfNeeded();
+        lock.lock();
+        if(paused && GuestCallbackExecutorDebuggerStepPending()) {
+            return LC32GuestBlockCallbackWaitResultRetry;
+        }
+    }
+
+    if(guestCallbackExecutorState !=
+            GuestCallbackExecutorState::Ready ||
+            nativeShutdownRequested.load(
+                std::memory_order_acquire) ||
+            guestProcessExitRequested.load(
+                std::memory_order_acquire)) {
+        return LC32GuestBlockCallbackWaitResultStop;
+    }
+    if(guestCallbackJobs.empty()) {
+        return LC32GuestBlockCallbackWaitResultRetry;
+    }
+
+    std::shared_ptr<GuestCallbackJob> job =
+        guestCallbackJobs.front();
+    guestCallbackJobs.pop_front();
+    guestCallbackActiveJob = job;
+    const LC32GuestBlockCallbackDescriptor descriptor =
+        job->descriptor;
+    lock.unlock();
+
+    if(Dynarmic_mem_1write(
+            guestDescriptor, sizeof(descriptor),
+            reinterpret_cast<char *>(
+                const_cast<LC32GuestBlockCallbackDescriptor *>(
+                    &descriptor))) != 0) {
+        lock.lock();
+        job->canceled = true;
+        job->condition.notify_all();
+        guestCallbackActiveJob.reset();
+        return LC32GuestBlockCallbackWaitResultRetry;
+    }
+    lock.lock();
+    job->delivered = true;
+    return LC32GuestBlockCallbackWaitResultJob;
+}
+
+u32 ServiceGuestCallbackExecutorComplete(u32 identifier) {
+    std::lock_guard<std::mutex> lock(
+        guestCallbackExecutorMutex);
+    if(guestCallbackExecutorThreadId !=
+            CurrentGuestThreadId() ||
+            !guestCallbackActiveJob ||
+            guestCallbackActiveJob->descriptor.identifier !=
+                identifier) {
+        return 0;
+    }
+
+    guestCallbackActiveJob->completed = true;
+    guestCallbackActiveJob->condition.notify_all();
+    guestCallbackActiveJob.reset();
+    return guestCallbackExecutorState ==
+               GuestCallbackExecutorState::Ready &&
+           !nativeShutdownRequested.load(
+               std::memory_order_acquire) &&
+           !guestProcessExitRequested.load(
+               std::memory_order_acquire);
+}
+}
+
+bool Dynarmic_guest_thread_is_registered() {
+    return threadHandle.jit != nullptr && threadHandle.cb != nullptr;
+}
+
+bool Dynarmic_submit_guest_block_callback(
+        const LC32GuestBlockCallbackDescriptor *descriptor) {
+    if(descriptor == nullptr ||
+            descriptor->kind !=
+                LC32GuestBlockCallbackKindInvoke ||
+            descriptor->argumentCount >
+                LC32_GUEST_BLOCK_CALLBACK_MAX_ARGUMENTS ||
+            Dynarmic_guest_thread_is_registered()) {
+        return false;
+    }
+    return SubmitGuestCallback(*descriptor);
+}
+
+bool Dynarmic_submit_guest_function_callback(
+        const LC32GuestBlockCallbackDescriptor *descriptor) {
+    if(descriptor == nullptr ||
+            descriptor->kind !=
+                LC32GuestBlockCallbackKindFunction ||
+            descriptor->resultKind !=
+                LC32GuestBlockValueVoid ||
+            descriptor->argumentCount == 0 ||
+            descriptor->argumentCount >
+                LC32_GUEST_BLOCK_CALLBACK_MAX_ARGUMENTS ||
+            Dynarmic_guest_thread_is_registered()) {
+        return false;
+    }
+    return SubmitGuestCallback(*descriptor);
+}
+
+bool Dynarmic_submit_guest_block_release(u32 guestBlock) {
+    if(!guestBlock || Dynarmic_guest_thread_is_registered()) {
+        return false;
+    }
+    LC32GuestBlockCallbackDescriptor descriptor = {};
+    descriptor.kind = LC32GuestBlockCallbackKindRelease;
+    descriptor.guestBlock = guestBlock;
+    return SubmitGuestCallback(descriptor);
+}
+
+u32 LC32GuestCallbackExecutorSupported(
+        u32, u32, u32) {
+    if(!NativeGuestThreadsEnabled() ||
+            sharedHandle.guest_LC32InvokeGuestC == 0) {
+        return 0;
+    }
+    {
+        std::lock_guard<std::mutex> lifecycleLock(
+            nativeLifecycleMutex);
+        if(nativeLifecycleState !=
+                NativeLifecycleState::Running ||
+                nativeShutdownRequested.load(
+                    std::memory_order_acquire)) {
+            return 0;
+        }
+    }
+    std::lock_guard<std::mutex> lock(
+        guestCallbackExecutorMutex);
+    if(guestCallbackExecutorState !=
+            GuestCallbackExecutorState::Unavailable) {
+        return 0;
+    }
+    guestCallbackExecutorState =
+        GuestCallbackExecutorState::Starting;
+    return 1;
+}
+
+u32 LC32GuestCallbackExecutorCreationResult(
+        u32 error, u32, u32) {
+    std::lock_guard<std::mutex> lock(
+        guestCallbackExecutorMutex);
+    if(guestCallbackExecutorState !=
+            GuestCallbackExecutorState::Starting) {
+        return 0;
+    }
+    if(error != 0) {
+        guestCallbackExecutorState =
+            GuestCallbackExecutorState::Failed;
+        fprintf(stderr,
+            "LC32: guest callback executor pthread_create failed: %u (%s)\n",
+            error, strerror(static_cast<int>(error)));
+    }
+    guestCallbackExecutorCondition.notify_all();
+    return error == 0;
 }
 static u32 GuestBsdthreadCreate(
     u32 function, u32 argument, u32 stack, u32 pthread, u32 flags);
@@ -414,8 +815,10 @@ static u32 GuestPsynchMutexDrop(u32 mutex);
 static u32 GuestPsynchConditionWait(u32 condition, u32 mutex);
 static u32 GuestPsynchConditionSignal(
     u32 condition, mach_port_t targetThread, bool broadcast);
-static u32 GuestPsynchRwWait(u32 rwlock);
-static u32 GuestPsynchRwUnlock(u32 rwlock);
+static u32 GuestPsynchRwWait(
+    u32 rwlock, u32 lgen, u32 rwSequence, bool write);
+static u32 GuestPsynchRwUnlock(
+    u32 rwlock, u32 lgen, u32 ugen, u32 rwSequence);
 static u32 GuestUlockWait(
     u32 operation, u32 address, u64 value, u32 timeout);
 static u32 GuestUlockWake(
@@ -430,6 +833,14 @@ struct DebuggerSoftwareBreakpoint {
     std::array<uint8_t, sizeof(uint32_t)> trap;
 };
 static std::vector<DebuggerSoftwareBreakpoint> debuggerSoftwareBreakpoints;
+
+struct GuestSoftwareTracepoint {
+    u32 address;
+    std::array<uint8_t, sizeof(uint16_t)> original;
+    bool fired;
+};
+static std::mutex guestSoftwareTracepointsMutex;
+static std::vector<GuestSoftwareTracepoint> guestSoftwareTracepoints;
 
 static int NormalizeGuestStopSignal(int signal) {
     if (signal <= 0 || signal >= NSIG) {
@@ -475,7 +886,8 @@ static GuestStopRequest CurrentGuestStopRequestForReason(
     }
 
     const Dynarmic::HaltReason visibleReason =
-        reason & ~LC32HaltReasonDebuggerPause;
+        reason & ~(LC32HaltReasonDebuggerPause |
+                   LC32HaltReasonThreadState);
     request.valid = true;
     if (Dynarmic::Has(
             visibleReason, LC32HaltReasonInterrupt)) {
@@ -506,7 +918,8 @@ static bool ConsumePendingGuestStop() {
 
 static void UpdateGuestStopSignalForHalt(Dynarmic::HaltReason reason) {
     const Dynarmic::HaltReason visibleReason =
-        reason & ~LC32HaltReasonDebuggerPause;
+        reason & ~(LC32HaltReasonDebuggerPause |
+                   LC32HaltReasonThreadState);
     if (!visibleReason) {
         return;
     }
@@ -644,63 +1057,149 @@ u32 guest_mmap(u32 guest_addr, size_t len, int prot, int flags, int fildes, off_
     return result;
 }
 
-int guest___sysctl(u32 guest_name, u_int namelen, u32 guest_oldp, u32 guest_oldlenp, u32 guest_newp, size_t newlen) {
+/*
+ * A guest size_t is 32 bits while the native sysctl ABI uses a 64-bit
+ * size_t.  In particular, the standard two-call query pattern first passes
+ * oldp == NULL and expects *oldlenp to be updated.  Keep the two sizes in
+ * separate storage and copy the result back even when no output buffer was
+ * supplied.
+ */
+static constexpr size_t LC32MaximumSysctlStagingBytes = 16 * 1024 * 1024;
+
+struct GuestSysctlStorage {
+    u32 guestOldCapacity = 0;
+    size_t hostOldCapacity = 0;
+    size_t hostOldLength = 0;
+    std::vector<char> hostOldBytes;
+    std::vector<char> hostNewBytes;
+};
+
+static int PrepareGuestSysctlStorage(
+        u32 guest_oldp, u32 guest_oldlenp,
+        u32 guest_newp, size_t newlen,
+        GuestSysctlStorage &storage) {
+    if(guest_oldp) {
+        if(!guest_oldlenp || Dynarmic_mem_1read(
+                guest_oldlenp, sizeof(storage.guestOldCapacity),
+                reinterpret_cast<char *>(&storage.guestOldCapacity)) != 0) {
+            return EFAULT;
+        }
+
+        /*
+         * Do not let a corrupt 32-bit capacity force a multi-gigabyte native
+         * allocation.  Passing the bounded capacity to the kernel preserves
+         * the normal ENOMEM/required-length result for genuinely larger
+         * values while allowing ordinary sysctls to succeed.
+         */
+        storage.hostOldCapacity = std::min<size_t>(
+            storage.guestOldCapacity, LC32MaximumSysctlStagingBytes);
+        try {
+            storage.hostOldBytes.resize(
+                std::max<size_t>(storage.hostOldCapacity, 1));
+        } catch(const std::exception &) {
+            return ENOMEM;
+        }
+        storage.hostOldLength = storage.hostOldCapacity;
+    }
+
+    if(guest_newp) {
+        if(newlen > LC32MaximumSysctlStagingBytes) return ENOMEM;
+        try {
+            storage.hostNewBytes.resize(std::max<size_t>(newlen, 1));
+        } catch(const std::exception &) {
+            return ENOMEM;
+        }
+        if(newlen && Dynarmic_mem_1read(
+                guest_newp, newlen, storage.hostNewBytes.data()) != 0) {
+            return EFAULT;
+        }
+    }
+    return 0;
+}
+
+static int CompleteGuestSysctlStorage(
+        int syscallResult, u32 guest_oldp, u32 guest_oldlenp,
+        GuestSysctlStorage &storage) {
+    if(syscallResult == 0 && guest_oldp) {
+        const size_t copyLength = std::min({
+            storage.hostOldLength,
+            storage.hostOldCapacity,
+            static_cast<size_t>(storage.guestOldCapacity),
+        });
+        if(copyLength && Dynarmic_mem_1write(
+                guest_oldp, copyLength,
+                storage.hostOldBytes.data()) != 0) {
+            return EFAULT;
+        }
+    }
+
+    if(guest_oldlenp) {
+        const bool lengthOverflow = storage.hostOldLength > UINT32_MAX;
+        u32 guestOldLength = lengthOverflow
+            ? UINT32_MAX : static_cast<u32>(storage.hostOldLength);
+        if(Dynarmic_mem_1write(
+                guest_oldlenp, sizeof(guestOldLength),
+                reinterpret_cast<char *>(&guestOldLength)) != 0) {
+            return EFAULT;
+        }
+        if(lengthOverflow && syscallResult == 0) return EOVERFLOW;
+    }
+    return 0;
+}
+
+int guest___sysctl(u32 guest_name, u_int namelen, u32 guest_oldp,
+        u32 guest_oldlenp, u32 guest_newp, size_t newlen) {
     // TODO: fake stuff like CPU architecture and KERN_USRSTACK32
     int host_name[0x10];
-    assert(namelen < sizeof(host_name));
-    Dynarmic_mem_1read(guest_name, sizeof(int) * namelen, (char *)host_name);
-
-    // Guess nothing is larger than 1kb
-    size_t host_oldlenp;
-    char host_oldp[0x400];
-    char host_newp[0x400];
-    assert(newlen <= sizeof(host_newp));
-    if(guest_newp) {
-        Dynarmic_mem_1read(guest_newp, newlen, host_newp);
+    if(namelen > sizeof(host_name) / sizeof(host_name[0])) {
+        return return_with_carry_direct(EINVAL, true);
+    }
+    if(namelen && Dynarmic_mem_1read(
+            guest_name, sizeof(int) * namelen,
+            reinterpret_cast<char *>(host_name)) != 0) {
+        return return_with_carry_direct(EFAULT, true);
     }
 
-    int result = syscallRetCarry(SYS_sysctl,
+    GuestSysctlStorage storage;
+    const int prepareError = PrepareGuestSysctlStorage(
+        guest_oldp, guest_oldlenp, guest_newp, newlen, storage);
+    if(prepareError) return return_with_carry_direct(prepareError, true);
+
+    const int result = syscallRetCarry(SYS_sysctl,
         host_name, namelen,
-        guest_oldp ? &host_oldp : NULL,
-        guest_oldlenp ? &host_oldlenp : 0,
-        guest_newp ? (int *)host_newp : NULL, newlen,
-        0
-    );
+        guest_oldp ? storage.hostOldBytes.data() : nullptr,
+        guest_oldlenp ? &storage.hostOldLength : nullptr,
+        guest_newp ? storage.hostNewBytes.data() : nullptr, newlen,
+        0);
 
-    if(guest_oldp) {
-        Dynarmic_mem_1write(guest_oldp, host_oldlenp, host_oldp);
-        CurrentUserCallbacks()->MemoryWrite32(
-            guest_oldlenp, host_oldlenp);
-    }
+    const int completionError = CompleteGuestSysctlStorage(
+        result, guest_oldp, guest_oldlenp, storage);
+    if(completionError)
+        return return_with_carry_direct(completionError, true);
     return result;
 }
 
-int guest___sysctlbyname(u32 guest_name, u_int namelen, u32 guest_oldp, u32 guest_oldlenp, u32 guest_newp, size_t newlen) {
+int guest___sysctlbyname(u32 guest_name, u_int namelen, u32 guest_oldp,
+        u32 guest_oldlenp, u32 guest_newp, size_t newlen) {
     // TODO: fake stuff like CPU architecture and KERN_USRSTACK32
     DynarmicHostString host_name(guest_name);
 
-    // Guess nothing is larger than 1kb
-    size_t host_oldlenp;
-    char host_oldp[0x400];
-    char host_newp[0x400];
-    assert(newlen <= sizeof(host_newp));
-    if(guest_newp) {
-        Dynarmic_mem_1read(guest_newp, newlen, host_newp);
-    }
+    GuestSysctlStorage storage;
+    const int prepareError = PrepareGuestSysctlStorage(
+        guest_oldp, guest_oldlenp, guest_newp, newlen, storage);
+    if(prepareError) return return_with_carry_direct(prepareError, true);
 
-    int result = syscallRetCarry(SYS_sysctlbyname,
+    const int result = syscallRetCarry(SYS_sysctlbyname,
         host_name.hostPtr, namelen,
-        guest_oldp ? &host_oldp : NULL,
-        guest_oldlenp ? &host_oldlenp : 0,
-        guest_newp ? (int *)host_newp : NULL, newlen,
-        0
-    );
+        guest_oldp ? storage.hostOldBytes.data() : nullptr,
+        guest_oldlenp ? &storage.hostOldLength : nullptr,
+        guest_newp ? storage.hostNewBytes.data() : nullptr, newlen,
+        0);
 
-    if(guest_oldp) {
-        Dynarmic_mem_1write(guest_oldp, host_oldlenp, host_oldp);
-        CurrentUserCallbacks()->MemoryWrite32(
-            guest_oldlenp, host_oldlenp);
-    }
+    const int completionError = CompleteGuestSysctlStorage(
+        result, guest_oldp, guest_oldlenp, storage);
+    if(completionError)
+        return return_with_carry_direct(completionError, true);
     return result;
 }
 
@@ -770,6 +1269,9 @@ static mach_msg_return_t debugger_aware_mach_msg(
      */
     DebuggerMachCall call;
     call.thread = pthread_mach_thread_np(pthread_self());
+    call.guestThreadId = NativeGuestThreadsEnabled()
+        ? CurrentGuestThreadId()
+        : 0;
     call.phase.store(
         DebuggerMachCallPhase::Arming, std::memory_order_release);
     {
@@ -797,6 +1299,7 @@ static mach_msg_return_t debugger_aware_mach_msg(
     const auto stopRequested = [&call] {
         return call.interruptRequested.load(
                    std::memory_order_acquire) ||
+            NativeThreadStatePauseRequestedForCurrent() ||
             debuggerInterruptRequested.load(std::memory_order_acquire) ||
             debuggerAllStopRequested.load(std::memory_order_acquire) ||
             nativeShutdownRequested.load(std::memory_order_acquire) ||
@@ -805,6 +1308,7 @@ static mach_msg_return_t debugger_aware_mach_msg(
 
     if (stopRequested()) {
         finishCall();
+        (void)NativeThreadStatePauseHostWaitIfNeeded();
         (void)NativeDebuggerPauseHostWaitIfNeeded();
         return interruptedBeforeCall();
     }
@@ -813,6 +1317,7 @@ static mach_msg_return_t debugger_aware_mach_msg(
         DebuggerMachCallPhase::InCall, std::memory_order_release);
     if (stopRequested()) {
         finishCall();
+        (void)NativeThreadStatePauseHostWaitIfNeeded();
         (void)NativeDebuggerPauseHostWaitIfNeeded();
         return interruptedBeforeCall();
     }
@@ -830,6 +1335,7 @@ static mach_msg_return_t debugger_aware_mach_msg(
             notify);
     finishCall();
     if (stopRequested()) {
+        (void)NativeThreadStatePauseHostWaitIfNeeded();
         (void)NativeDebuggerPauseHostWaitIfNeeded();
     }
     return result;
@@ -943,6 +1449,70 @@ static void InterruptDebuggerMachCalls() {
     }
 }
 
+/*
+ * Wake only the host call which belongs to the guest JIT being sampled.
+ * This mirrors the debugger interruption protocol without setting any
+ * process-wide debugger flags or disturbing unrelated guest pthreads.
+ */
+static void InterruptNativeThreadStateHostCalls(
+        gdb_thread_id_t threadId) {
+    constexpr unsigned retryCount = 100;
+    constexpr useconds_t retryDelayMicroseconds = 1000;
+
+    for (unsigned attempt = 0; attempt < retryCount; ++attempt) {
+        std::vector<std::pair<mach_port_t, bool>> threads;
+        size_t activeCalls = 0;
+        {
+            std::lock_guard<std::mutex> lock(
+                debuggerMachCallsMutex);
+            for (DebuggerMachCall *call : debuggerMachCalls) {
+                if (call == nullptr ||
+                        call->guestThreadId != threadId ||
+                        !MACH_PORT_VALID(call->thread)) {
+                    continue;
+                }
+                const DebuggerMachCallPhase phase =
+                    call->phase.load(std::memory_order_acquire);
+                if (phase == DebuggerMachCallPhase::Arming ||
+                        phase == DebuggerMachCallPhase::InCall) {
+                    ++activeCalls;
+                    call->interruptRequested.store(
+                        true, std::memory_order_release);
+                }
+                if (phase == DebuggerMachCallPhase::InCall) {
+                    auto existing = std::find_if(
+                        threads.begin(), threads.end(),
+                        [call](const auto &entry) {
+                            return entry.first == call->thread;
+                        });
+                    if (existing != threads.end()) {
+                        existing->second |= call->forceAbort;
+                    } else if (mach_port_mod_refs(
+                            mach_task_self(), call->thread,
+                            MACH_PORT_RIGHT_SEND, 1) == KERN_SUCCESS) {
+                        threads.push_back({
+                            call->thread, call->forceAbort});
+                    }
+                }
+            }
+        }
+
+        for (const auto &entry : threads) {
+            if (entry.second) {
+                (void)thread_abort(entry.first);
+            } else {
+                (void)thread_abort_safely(entry.first);
+            }
+            (void)mach_port_deallocate(
+                mach_task_self(), entry.first);
+        }
+        if (activeCalls == 0 || attempt + 1 == retryCount) {
+            return;
+        }
+        usleep(retryDelayMicroseconds);
+    }
+}
+
 static void DrainDebuggerMachCalls() {
     for (;;) {
         InterruptDebuggerMachCalls();
@@ -985,6 +1555,9 @@ static Result debugger_aware_host_wait(
     DebuggerMachCall call;
     call.thread = pthread_mach_thread_np(
         pthread_self());
+    call.guestThreadId = NativeGuestThreadsEnabled()
+        ? CurrentGuestThreadId()
+        : 0;
     call.forceAbort = true;
     call.phase.store(
         DebuggerMachCallPhase::Arming,
@@ -1013,6 +1586,7 @@ static Result debugger_aware_host_wait(
     const auto stopRequested = [&call] {
         return call.interruptRequested.load(
                    std::memory_order_acquire) ||
+            NativeThreadStatePauseRequestedForCurrent() ||
             debuggerInterruptRequested.load(
                    std::memory_order_acquire) ||
             debuggerAllStopRequested.load(
@@ -1025,6 +1599,7 @@ static Result debugger_aware_host_wait(
 
     if (stopRequested()) {
         finishCall();
+        (void)NativeThreadStatePauseHostWaitIfNeeded();
         (void)NativeDebuggerPauseHostWaitIfNeeded();
         return interruptedResult;
     }
@@ -1033,6 +1608,7 @@ static Result debugger_aware_host_wait(
         std::memory_order_release);
     if (stopRequested()) {
         finishCall();
+        (void)NativeThreadStatePauseHostWaitIfNeeded();
         (void)NativeDebuggerPauseHostWaitIfNeeded();
         return interruptedResult;
     }
@@ -1040,6 +1616,7 @@ static Result debugger_aware_host_wait(
     Result result = function();
     finishCall();
     if (stopRequested()) {
+        (void)NativeThreadStatePauseHostWaitIfNeeded();
         (void)NativeDebuggerPauseHostWaitIfNeeded();
     }
     return result;
@@ -1072,7 +1649,8 @@ guest_mach_msg_trap(u32 guest_msg,
      * those workers concurrently while this thread waits for its reply.
      */
     if (send_size == 0 && (option & MACH_RCV_MSG) != 0) {
-        if (PumpGuestWorkqueue()) {
+        if (PumpGuestWorkqueue() ==
+                GuestWorkqueuePumpResult::CooperativeTransition) {
             free(host_msg);
             return MACH_RCV_INTERRUPTED;
         }
@@ -1112,8 +1690,17 @@ guest_mach_msg_trap(u32 guest_msg,
             free(host_msg);
             return MACH_RCV_INTERRUPTED;
         }
+        const bool nativeWorkqueueMayBlock =
+            NativeGuestWorkqueueIsCurrent() &&
+            ((option & MACH_RCV_TIMEOUT) == 0 || timeout != 0);
+        if (nativeWorkqueueMayBlock) {
+            NativeGuestWorkqueueHostBlockEnter();
+        }
         result = debugger_aware_mach_msg(host_header, option, 0, rcv_size,
             rcv_name, timeout, notify);
+        if (nativeWorkqueueMayBlock) {
+            NativeGuestWorkqueueHostBlockExit();
+        }
         if (rcv_size != 0 && result != MACH_RCV_INTERRUPTED &&
                 result != MACH_SEND_INTERRUPTED) {
             Dynarmic_mem_1write(guest_msg, rcv_size, host_msg);
@@ -1402,6 +1989,26 @@ guest_mach_msg_trap(u32 guest_msg,
             static_assert(sizeof(TaskThreadsReply32) == 52,
                 "unexpected 32-bit task_threads reply layout");
 
+            if (send_size != sizeof(mach_msg_header_t) &&
+                    rcv_size < sizeof(mig_reply_error_t)) {
+                host_header->msgh_size = sizeof(mig_reply_error_t);
+                result = MACH_RCV_TOO_LARGE;
+                break;
+            }
+            if (send_size != sizeof(mach_msg_header_t)) {
+                auto *error = reinterpret_cast<mig_reply_error_t *>(
+                    host_header);
+                host_header->msgh_size = sizeof(*error);
+                error->NDR = NDR_record;
+                error->RetCode = MIG_BAD_ARGUMENTS;
+                break;
+            }
+            if (rcv_size < sizeof(TaskThreadsReply32)) {
+                host_header->msgh_size = sizeof(TaskThreadsReply32);
+                result = MACH_RCV_TOO_LARGE;
+                break;
+            }
+
             u32 guestThreadPorts = 0;
             mach_msg_type_number_t threadCount = 0;
             const kern_return_t kr =
@@ -1427,11 +2034,121 @@ guest_mach_msg_trap(u32 guest_msg,
             reply->act_list.address = guestThreadPorts;
             reply->act_list.count = threadCount;
             reply->act_list.deallocate = false;
-            reply->act_list.copy = MACH_MSG_VIRTUAL_COPY;
+            reply->act_list.copy = MACH_MSG_PHYSICAL_COPY;
             reply->act_list.disposition = MACH_MSG_TYPE_MOVE_SEND;
             reply->act_list.type = MACH_MSG_OOL_PORTS_DESCRIPTOR;
             reply->NDR = NDR_record;
             reply->act_listCnt = threadCount;
+            break;
+        }
+        case 3603: { // thread_get_state
+            /*
+             * thread_act.defs uses natural_t arrays, so this wire layout is
+             * identical for an ARM32 client even though LiveExec32 itself is
+             * built for arm64. Never forward the synthetic guest thread port
+             * to the host API: that would expose the emulator pthread's ARM64
+             * register file instead of the logical ARM32 context.
+             */
+            struct __attribute__((packed, aligned(4)))
+                ThreadGetStateRequest32 {
+                mach_msg_header_t Head;
+                NDR_record_t NDR;
+                thread_state_flavor_t flavor;
+                mach_msg_type_number_t old_stateCnt;
+            };
+            struct __attribute__((packed, aligned(4)))
+                ThreadGetStateReply32 {
+                mach_msg_header_t Head;
+                NDR_record_t NDR;
+                kern_return_t RetCode;
+                mach_msg_type_number_t old_stateCnt;
+                u32 old_state[144];
+            };
+            static_assert(sizeof(ThreadGetStateRequest32) == 40,
+                "unexpected 32-bit thread_get_state request layout");
+            static_assert(offsetof(
+                ThreadGetStateReply32, old_state) == 40,
+                "unexpected 32-bit thread_get_state reply layout");
+
+            auto *request = reinterpret_cast<
+                ThreadGetStateRequest32 *>(host_header);
+            kern_return_t kr = MIG_BAD_ARGUMENTS;
+            mach_msg_type_number_t stateCount = 0;
+            auto *reply = reinterpret_cast<
+                ThreadGetStateReply32 *>(host_header);
+            constexpr mach_msg_size_t MinimumSuccessReplySize =
+                offsetof(ThreadGetStateReply32, old_state) +
+                17 * sizeof(reply->old_state[0]);
+            if (send_size != sizeof(*request)) {
+                if (rcv_size < sizeof(mig_reply_error_t)) {
+                    host_header->msgh_size = sizeof(mig_reply_error_t);
+                    result = MACH_RCV_TOO_LARGE;
+                } else {
+                    auto *error = reinterpret_cast<mig_reply_error_t *>(
+                        host_header);
+                    host_header->msgh_size = sizeof(*error);
+                    error->NDR = NDR_record;
+                    error->RetCode = MIG_BAD_ARGUMENTS;
+                }
+                break;
+            }
+
+            THREAD_TRACE(
+                "LC32: thread_get_state target=0x%x flavor=%d "
+                "capacity=%u\n",
+                host_header->msgh_request_port, request->flavor,
+                request->old_stateCnt);
+            const bool validStateRequest =
+                (request->flavor == ARM_THREAD_STATE ||
+                 request->flavor == ARM_THREAD_STATE32) &&
+                request->old_stateCnt >= 17 &&
+                request->old_stateCnt <=
+                        sizeof(reply->old_state) /
+                            sizeof(reply->old_state[0]);
+            if (validStateRequest &&
+                    rcv_size < MinimumSuccessReplySize) {
+                host_header->msgh_size = MinimumSuccessReplySize;
+                result = MACH_RCV_TOO_LARGE;
+                break;
+            }
+            if (!validStateRequest &&
+                    rcv_size < sizeof(mig_reply_error_t)) {
+                host_header->msgh_size = sizeof(mig_reply_error_t);
+                result = MACH_RCV_TOO_LARGE;
+                break;
+            }
+            if (validStateRequest) {
+                stateCount = request->old_stateCnt;
+                kr = CopyGuestThreadState(
+                    host_header->msgh_request_port,
+                    request->flavor, request->old_stateCnt,
+                    reply->old_state, &stateCount);
+            }
+            if (kr != KERN_SUCCESS) {
+                auto *error = reinterpret_cast<mig_reply_error_t *>(
+                    host_header);
+                host_header->msgh_size = sizeof(*error);
+                error->NDR = NDR_record;
+                error->RetCode = kr;
+                break;
+            }
+
+            const mach_msg_size_t replySize = static_cast<
+                mach_msg_size_t>(offsetof(
+                    ThreadGetStateReply32, old_state) +
+                    sizeof(reply->old_state[0]) * stateCount);
+            if (replySize > rcv_size) {
+                auto *error = reinterpret_cast<mig_reply_error_t *>(
+                    host_header);
+                host_header->msgh_size = sizeof(*error);
+                error->NDR = NDR_record;
+                error->RetCode = MIG_ARRAY_TOO_LARGE;
+                break;
+            }
+            reply->NDR = NDR_record;
+            reply->RetCode = KERN_SUCCESS;
+            reply->old_stateCnt = stateCount;
+            host_header->msgh_size = replySize;
             break;
         }
         case 3409: {
@@ -1634,10 +2351,20 @@ guest_mach_msg_trap(u32 guest_msg,
              * Preserve their request dispositions and forward the complete
              * operation because they may transfer port rights and use both
              * send-only and combined send/receive calls.
-             */
+            */
             host_header->msgh_bits = request_bits;
+            const bool nativeWorkqueueMayBlock =
+                NativeGuestWorkqueueIsCurrent() &&
+                (option & MACH_RCV_MSG) != 0 &&
+                ((option & MACH_RCV_TIMEOUT) == 0 || timeout != 0);
+            if (nativeWorkqueueMayBlock) {
+                NativeGuestWorkqueueHostBlockEnter();
+            }
             result = debugger_aware_mach_msg(host_header, option, send_size,
                 rcv_size, rcv_name, timeout, notify);
+            if (nativeWorkqueueMayBlock) {
+                NativeGuestWorkqueueHostBlockExit();
+            }
             if ((option & MACH_RCV_MSG) != 0 && rcv_size != 0 &&
                     result != MACH_RCV_INTERRUPTED &&
                     result != MACH_SEND_INTERRUPTED) {
@@ -2010,12 +2737,15 @@ int guest_bsdthread_ctl(u32 command, u32 arg1, u32 arg2, u32 arg3) {
 }
 
 int guest_workq_kernreturn(int options, u32 item, int arg2, int arg3) {
-    std::lock_guard<std::recursive_mutex> lock(
-        guestWorkqueueMutex);
-    WORKQUEUE_TRACE(
-        "LC32: workq_kernreturn op=0x%x item=0x%x arg2=%d "
-        "arg3=0x%x active=%d\n",
-        options, item, arg2, arg3, guestWorkqueueUpcallActive);
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestWorkqueueMutex);
+        WORKQUEUE_TRACE(
+            "LC32: workq_kernreturn op=0x%x item=0x%x arg2=%d "
+            "arg3=0x%x active=%d\n",
+            options, item, arg2, arg3,
+            guestWorkqueueUpcallActive);
+    }
     switch (options) {
         case WQOPS_QUEUE_NEWSPISUPP:
             /*
@@ -2023,25 +2753,43 @@ int guest_workq_kernreturn(int options, u32 item, int arg2, int arg3) {
              * handshake. arg2 is the dispatch queue serial-number offset and
              * bit zero of arg3 requests direct kevent delivery.
              */
-            guest_workqueue_dispatch_offset = arg2;
-            guest_workqueue_kevent_enabled = (arg3 & 1) != 0;
+            {
+                std::lock_guard<std::recursive_mutex> lock(
+                    guestWorkqueueMutex);
+                guest_workqueue_dispatch_offset = arg2;
+                guest_workqueue_kevent_enabled = (arg3 & 1) != 0;
+            }
             return return_with_carry_direct(0, false);
         case WQOPS_SET_EVENT_MANAGER_PRIORITY:
-            guestWorkqueueEventManagerPriority = static_cast<u32>(arg2);
+            {
+                std::lock_guard<std::recursive_mutex> lock(
+                    guestWorkqueueMutex);
+                guestWorkqueueEventManagerPriority =
+                    static_cast<u32>(arg2);
+            }
             return return_with_carry_direct(0, false);
         case WQOPS_QUEUE_REQTHREADS: {
-            if (!guest_workqueue_opened || arg2 <= 0 || arg2 > 4096) {
-                return return_with_carry_direct(EINVAL, true);
+            {
+                std::lock_guard<std::recursive_mutex> lock(
+                    guestWorkqueueMutex);
+                if (!guest_workqueue_opened ||
+                        arg2 <= 0 || arg2 > 4096) {
+                    return return_with_carry_direct(EINVAL, true);
+                }
+                guestWorkqueueRequests.push_back(
+                    {.remaining = arg2,
+                     .priority = static_cast<u32>(arg3)});
             }
-            guestWorkqueueRequests.push_back(
-                {.remaining = arg2, .priority = static_cast<u32>(arg3)});
             /*
              * XNU may start the requested worker before this syscall returns.
-             * Prepare the cooperative overlay now so dispatch_async does not
-             * depend on the main thread eventually entering mach_msg.
+             * Start native workers or prepare the cooperative overlay now so
+             * dispatch_async does not depend on a later mach_msg receive.
              */
-            const bool prepared = PumpGuestWorkqueue();
-            if (prepared && NativeGuestThreadIsCurrent() &&
+            const GuestWorkqueuePumpResult pumpResult =
+                PumpGuestWorkqueue();
+            if (pumpResult ==
+                    GuestWorkqueuePumpResult::CooperativeTransition &&
+                    NativeGuestThreadIsCurrent() &&
                     CurrentGuestThreadId() != 1) {
                 /*
                  * Workqueue overlays run on the main JIT. A request can be
@@ -2059,7 +2807,10 @@ int guest_workq_kernreturn(int options, u32 item, int arg2, int arg3) {
              */
             return return_with_carry_direct(ENOTSUP, true);
         case WQOPS_THREAD_KEVENT_RETURN: {
-            const int error = ApplyGuestKeventChanges(item, arg2);
+            std::lock_guard<std::recursive_mutex> lock(
+                guestWorkqueueMutex);
+            const int error =
+                ApplyGuestKeventChanges(item, arg2);
             return return_with_carry_direct(error, error != 0);
         }
         case WQOPS_THREAD_RETURN:
@@ -4249,6 +5000,9 @@ public:
     void ExceptionRaised(u32 pc, Dynarmic::A32::Exception exception) override {
         const bool isBkpt =
             exception == Dynarmic::A32::Exception::Breakpoint;
+        if (isBkpt && ConsumeGuestSoftwareTracepoint(pc, cpu)) {
+            return;
+        }
         const bool isDebuggerBreakpoint =
             isBkpt && Dynarmic_debugger_has_breakpoint(pc);
         const bool inspectInstruction =
@@ -5032,6 +5786,7 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                     std::memory_order_release);
                 guestProcessExitRequested.store(
                     true, std::memory_order_release);
+                StopGuestCallbackExecutor();
                 HaltAllGuestJits(LC32HaltReasonExit);
                 InterruptDebuggerMachCalls();
                 NotifyNativeDebuggerWaiters();
@@ -5254,10 +6009,35 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 break;
             case 300: // psynch_rw_upgrade
             case 306: // psynch_rw_rdlock
-            case 307: // psynch_rw_wrlock
+            case 307: { // psynch_rw_wrlock
+                const bool tracePsynchRw =
+                    getenv("LC32_TRACE_PSYNCH_RW") != nullptr;
+                if(tracePsynchRw) {
+                    fprintf(stderr,
+                        "LC32: psynch_rw enter tid=%llu nr=%d "
+                        "r0=%08x r1=%08x r2=%08x r3=%08x "
+                        "r4=%08x r5=%08x r6=%08x\n",
+                        CurrentGuestThreadId(), NR,
+                        cpu->Regs()[0], cpu->Regs()[1],
+                        cpu->Regs()[2], cpu->Regs()[3],
+                        cpu->Regs()[4], cpu->Regs()[5],
+                        cpu->Regs()[6]);
+                    fflush(stderr);
+                }
                 cpu->Regs()[0] =
-                    GuestPsynchRwWait(cpu->Regs()[0]);
+                    GuestPsynchRwWait(
+                        cpu->Regs()[0], cpu->Regs()[1],
+                        cpu->Regs()[3], NR != 306);
+                if(tracePsynchRw) {
+                    fprintf(stderr,
+                        "LC32: psynch_rw return tid=%llu nr=%d "
+                        "result=%08x carry=%u\n",
+                        CurrentGuestThreadId(), NR,
+                        cpu->Regs()[0], cpsr->hasCarry());
+                    fflush(stderr);
+                }
                 break;
+            }
             case 301: // psynch_mutexwait
                 cpu->Regs()[0] = GuestPsynchMutexWait(
                     cpu->Regs()[0], cpu->Regs()[1]);
@@ -5281,10 +6061,35 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                     cpu->Regs()[0], cpu->Regs()[4]);
                 break;
             case 308: // psynch_rw_unlock
-            case 309: // psynch_rw_unlock2
+            case 309: { // psynch_rw_unlock2
+                const bool tracePsynchRw =
+                    getenv("LC32_TRACE_PSYNCH_RW") != nullptr;
+                if(tracePsynchRw) {
+                    fprintf(stderr,
+                        "LC32: psynch_rw enter tid=%llu nr=%d "
+                        "r0=%08x r1=%08x r2=%08x r3=%08x "
+                        "r4=%08x r5=%08x r6=%08x\n",
+                        CurrentGuestThreadId(), NR,
+                        cpu->Regs()[0], cpu->Regs()[1],
+                        cpu->Regs()[2], cpu->Regs()[3],
+                        cpu->Regs()[4], cpu->Regs()[5],
+                        cpu->Regs()[6]);
+                    fflush(stderr);
+                }
                 cpu->Regs()[0] =
-                    GuestPsynchRwUnlock(cpu->Regs()[0]);
+                    GuestPsynchRwUnlock(
+                        cpu->Regs()[0], cpu->Regs()[1],
+                        cpu->Regs()[2], cpu->Regs()[3]);
+                if(tracePsynchRw) {
+                    fprintf(stderr,
+                        "LC32: psynch_rw return tid=%llu nr=%d "
+                        "result=%08x carry=%u\n",
+                        CurrentGuestThreadId(), NR,
+                        cpu->Regs()[0], cpsr->hasCarry());
+                    fflush(stderr);
+                }
                 break;
+            }
             case 312: // psynch_cvclrprepost
                 cpu->Regs()[0] =
                     return_with_carry_direct(0, false);
@@ -5369,14 +6174,17 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                     operation, cpu->Regs()[1], cpu->Regs()[2],
                     cpu->Regs()[3]);
                 if (GuestWorkqueueActiveForCurrentThread() &&
+                        !NativeGuestWorkqueueIsCurrent() &&
                         cpu->Regs()[0] == 0 &&
                         (operation == WQOPS_THREAD_RETURN ||
                          operation == WQOPS_THREAD_KEVENT_RETURN)) {
                     /*
-                     * These calls park a kernel-created worker and never
-                     * return to its abandoned userspace stack. The outer
-                     * execution loop restores the waiting guest context
-                     * before it executes another worker instruction.
+                     * A cooperative worker overlays the main JIT, so restore
+                     * its saved context instead of returning on the worker
+                     * stack. A one-shot native worker intentionally receives
+                     * a zero return: iOS 10 libpthread then follows its
+                     * thexit path and performs normal pthread cleanup before
+                     * bsdthread_terminate retires the host-backed JIT.
                      */
                     std::lock_guard<std::recursive_mutex> lock(
                         guestWorkqueueMutex);
@@ -5456,7 +6264,11 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 }
                 typedef u32(*HostCall)(u32, u32, u32);
                 HostCall hostCall = (HostCall)((u64)cpu->Regs()[0] | ((u64)cpu->Regs()[1] << 32));
-                cpu->Regs()[0] = hostCall(cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[Reg::SP]);
+                const u32 result = InvokeNativeGuestHostCall([&] {
+                    return hostCall(cpu->Regs()[2], cpu->Regs()[3],
+                        cpu->Regs()[Reg::SP]);
+                });
+                cpu->Regs()[0] = result;
                 break;
             }
             case 1003: { // LC32GuestToHostCString
@@ -5488,7 +6300,10 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 }
                 u64 host_self = (u64)cpu->Regs()[0] | ((u64)cpu->Regs()[1] << 32);
                 u64 host_cmd = (u64)cpu->Regs()[2] | ((u64)cpu->Regs()[3] << 32);
-                u64 result = LC32InvokeHostSelector(host_self, host_cmd, cpu->Regs()[Reg::SP]);
+                u64 result = InvokeNativeGuestHostCall([&] {
+                    return LC32InvokeHostSelector(
+                        host_self, host_cmd, cpu->Regs()[Reg::SP]);
+                });
                 cpu->Regs()[0] = (u32)result;
                 cpu->Regs()[1] = (u32)(result >> 32);
                 break;
@@ -5499,7 +6314,10 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                     cpu->HaltExecution(LC32HaltReasonSVC);
                     return;
                 }
-                u64 result = LC32GetHostObject(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                u64 result = InvokeNativeGuestHostCall([&] {
+                    return LC32GetHostObject(
+                        cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                });
                 cpu->Regs()[0] = (u32)result;
                 cpu->Regs()[1] = (u32)(result >> 32);
                 break;
@@ -5534,9 +6352,11 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                     Dynarmic_current_user_callbacks()->MemoryRead32(stack + 16);
                 u32 options =
                     Dynarmic_current_user_callbacks()->MemoryRead32(stack + 20);
-                u64 result = LC32InvokeHostNSStringFormat(
-                    host_self, host_selector, host_format, host_locale,
-                    guest_arguments, options);
+                u64 result = InvokeNativeGuestHostCall([&] {
+                    return LC32InvokeHostNSStringFormat(
+                        host_self, host_selector, host_format, host_locale,
+                        guest_arguments, options);
+                });
                 cpu->Regs()[0] = (u32)result;
                 cpu->Regs()[1] = (u32)(result >> 32);
                 break;
@@ -5548,8 +6368,11 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 }
                 const u64 host_object = (u64)cpu->Regs()[0] |
                     ((u64)cpu->Regs()[1] << 32);
-                cpu->Regs()[0] = LC32CopyHostStringUTF8(
-                    host_object, cpu->Regs()[2], cpu->Regs()[3]);
+                const u32 result = InvokeNativeGuestHostCall([&] {
+                    return LC32CopyHostStringUTF8(
+                        host_object, cpu->Regs()[2], cpu->Regs()[3]);
+                });
+                cpu->Regs()[0] = result;
                 break;
             }
             case 1012: { // LC32CopyHostDataBytes
@@ -5562,8 +6385,12 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 const u32 offset =
                     Dynarmic_current_user_callbacks()->MemoryRead32(
                         cpu->Regs()[Reg::SP]);
-                cpu->Regs()[0] = LC32CopyHostDataBytes(
-                    host_object, cpu->Regs()[2], cpu->Regs()[3], offset);
+                const u32 result = InvokeNativeGuestHostCall([&] {
+                    return LC32CopyHostDataBytes(
+                        host_object, cpu->Regs()[2], cpu->Regs()[3],
+                        offset);
+                });
+                cpu->Regs()[0] = result;
                 break;
             }
             case 1013: { // LC32CopyHostStringBytes
@@ -5577,8 +6404,12 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 const u32 capacity =
                     Dynarmic_current_user_callbacks()->MemoryRead32(
                         cpu->Regs()[Reg::SP]);
-                cpu->Regs()[0] = LC32CopyHostStringBytes(
-                    host_object, cpu->Regs()[2], guest_output, capacity);
+                const u32 result = InvokeNativeGuestHostCall([&] {
+                    return LC32CopyHostStringBytes(
+                        host_object, cpu->Regs()[2], guest_output,
+                        capacity);
+                });
+                cpu->Regs()[0] = result;
                 break;
             }
             case 1014: { // LC32HostStringRangeOfString
@@ -5597,13 +6428,77 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                         request.byteSize == sizeof(request) &&
                         request.variant <=
                             LC32FoundationStringRangeWithLocale) {
-                    result = LC32HostStringRangeOfString(&request);
+                    result = InvokeNativeGuestHostCall([&] {
+                        return LC32HostStringRangeOfString(&request);
+                    });
                 } else {
                     fprintf(stderr,
                             "LC32: invalid NSString range bridge request\n");
                 }
                 cpu->Regs()[0] = (u32)result;
                 cpu->Regs()[1] = (u32)(result >> 32);
+                break;
+            }
+            case 1015: { // LC32CreateHostBlock
+                if(cpu->IsExecuting()) {
+                    // Copying a stack block and creating a native block both
+                    // call back into guest/host runtimes. Leave the SVC before
+                    // performing that nested work.
+                    cpu->HaltExecution(LC32HaltReasonSVC);
+                    return;
+                }
+                const u64 result = InvokeNativeGuestHostCall([&] {
+                    return LC32CreateHostBlock(cpu->Regs()[0]);
+                });
+                cpu->Regs()[0] = (u32)result;
+                cpu->Regs()[1] = (u32)(result >> 32);
+                break;
+            }
+            case 1016: { // LC32GuestObjectForOwnedHostObjectAddress
+                if(cpu->IsExecuting()) {
+                    // Proxy conversion invokes guest Objective-C helpers.
+                    cpu->HaltExecution(LC32HaltReasonSVC);
+                    return;
+                }
+                const u64 hostObject = (u64)cpu->Regs()[0] |
+                    ((u64)cpu->Regs()[1] << 32);
+                const u32 result = InvokeNativeGuestHostCall([&] {
+                    return LC32GuestObjectForOwnedHostObjectAddress(
+                        hostObject);
+                });
+                cpu->Regs()[0] = result;
+                break;
+            }
+            case 1017: { // LC32GuestCallbackExecutorWait
+                if(cpu->IsExecuting()) {
+                    // The host wait and the later callback must happen only
+                    // after this JIT callback has unwound.
+                    cpu->HaltExecution(LC32HaltReasonSVC);
+                    return;
+                }
+                const u32 result = InvokeNativeGuestHostCall([&] {
+                    return ServiceGuestCallbackExecutorWait(
+                        cpu->Regs()[0]);
+                });
+                cpu->Regs()[0] = result;
+                break;
+            }
+            case 1018: { // LC32GuestCallbackExecutorComplete
+                cpu->Regs()[0] = ServiceGuestCallbackExecutorComplete(
+                    cpu->Regs()[0]);
+                break;
+            }
+            case 1019: { // LC32TryRetainHostWeakReference
+                if(cpu->IsExecuting()) {
+                    // Native objc_loadWeakRetained may initialize/custom-dispatch.
+                    cpu->HaltExecution(LC32HaltReasonSVC);
+                    return;
+                }
+                const u32 result = InvokeNativeGuestHostCall([&] {
+                    return LC32TryRetainHostWeakReference(
+                        cpu->Regs()[0]);
+                });
+                cpu->Regs()[0] = result;
                 break;
             }
             default:
@@ -5666,7 +6561,9 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
     }
 
     u64 GetTicksRemaining() override {
-        return 0x10000000000ULL;
+        return NativeGuestThreadsEnabled()
+            ? LC32NativeGuestRunSliceTicks
+            : 0x10000000000ULL;
     }
 
     khash_t(memory) *memory = NULL;
@@ -5700,6 +6597,69 @@ enum class GuestThreadWaitKind : uint8_t {
     Ulock,
 };
 
+enum class GuestRwlockWaitType : uint8_t {
+    None,
+    Read,
+    Write,
+};
+
+/*
+ * iOS 10 libpthread stores psynch generations in the high 24 bits and
+ * reserves the low byte for lock state.  Slow-path rwlock wakeups return a
+ * relative grant count plus these L-word bits, not a plain zero result.
+ */
+constexpr u32 GuestPsynchCountIncrement = 0x100u;
+constexpr u32 GuestPsynchCountMask = 0xffffff00u;
+constexpr u32 GuestPsynchBitMask = 0xffu;
+constexpr u32 GuestPsynchRwKernelBit = 0x01u;
+constexpr u32 GuestPsynchRwExclusiveBit = 0x02u;
+constexpr u32 GuestPsynchRwWriterBit = 0x04u;
+constexpr u32 GuestPsynchRwSequenceSavedWriterBit = 0x04u;
+constexpr u32 GuestPsynchRwOverlapBit = 0x40u;
+
+static bool GuestPsynchSequenceLower(u32 lhs, u32 rhs) {
+    lhs &= GuestPsynchCountMask;
+    rhs &= GuestPsynchCountMask;
+    if (lhs < rhs) {
+        return rhs - lhs < GuestPsynchCountMask / 2;
+    }
+    return lhs - rhs > GuestPsynchCountMask / 2;
+}
+
+static bool GuestPsynchSequenceLowerOrEqual(
+        u32 lhs, u32 rhs) {
+    return (lhs & GuestPsynchCountMask) ==
+            (rhs & GuestPsynchCountMask) ||
+        GuestPsynchSequenceLower(lhs, rhs);
+}
+
+static size_t GuestPsynchSequenceDistance(
+        u32 newer, u32 older) {
+    return static_cast<size_t>(
+        (((newer & GuestPsynchCountMask) -
+          (older & GuestPsynchCountMask)) &
+         GuestPsynchCountMask) /
+        GuestPsynchCountIncrement);
+}
+
+struct NativeThreadStateSlot {
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::mutex registerAccessMutex;
+    uint64_t nextGeneration = 0;
+    uint64_t requestedGeneration = 0;
+    uint64_t acknowledgedGeneration = 0;
+    uint64_t releasedGeneration = 0;
+    context32 snapshot = {};
+    bool snapshotValid = false;
+    bool ownerExited = false;
+    size_t hostCallDepth = 0;
+    size_t guestCallbackDepth = 0;
+    bool hostRegistersQuiescent = false;
+};
+
+NativeThreadStateSlot mainNativeThreadState;
+
 struct NativeGuestJit {
     Dynarmic::A32::Jit *jit = nullptr;
     DynarmicCpsr *cpsr = nullptr;
@@ -5716,6 +6676,12 @@ struct NativeGuestJit {
     bool debuggerHostWaitPaused = false;
     bool hostThreadCreated = false;
     bool exited = false;
+    bool workqueue = false;
+    std::atomic<bool> workqueueHostBlocked{false};
+    std::atomic<bool> workqueueCompensationPending{false};
+    u32 workqueuePriority = 0;
+    size_t threadStateUsers = 0;
+    NativeThreadStateSlot threadState;
     mach_port_t joinSemaphore = MACH_PORT_NULL;
 };
 
@@ -5726,15 +6692,21 @@ struct GuestThreadContext {
     mach_port_t threadPort = MACH_PORT_NULL;
     u32 allocationAddress = 0;
     u32 allocationSize = 0;
+    u32 retirementFreeAddress = 0;
+    u32 retirementFreeSize = 0;
     context32 saved = {};
     u32 signalMask = 0;
     GuestThreadWaitKind waitKind = GuestThreadWaitKind::None;
     u32 waitAddress = 0;
     u32 wakeResult = 0;
     u64 waitSequence = 0;
+    GuestRwlockWaitType rwlockWaitType =
+        GuestRwlockWaitType::None;
+    u32 rwlockSequence = 0;
     bool savedValid = false;
     bool alive = false;
     bool runnable = false;
+    bool workqueue = false;
     NativeGuestJit *nativeJit = nullptr;
 };
 
@@ -5751,6 +6723,7 @@ uint64_t guestProcessorIdsInUse = 1;
 thread_local gdb_thread_id_t nativeGuestThreadId;
 thread_local bool nativeGuestThreadRetiring;
 thread_local NativeGuestJit *nativeGuestRuntime;
+thread_local size_t nativeGuestWorkqueueHostBlockDepth;
 thread_local bool nativeDebuggerHostWaitStep;
 thread_local uint64_t nativeDebuggerHostWaitStepGeneration;
 thread_local gdb_thread_id_t
@@ -5760,6 +6733,10 @@ thread_local gdb_thread_id_t
 std::mutex nativeGuestJitMutex;
 std::condition_variable nativeGuestJitCondition;
 std::vector<NativeGuestJit *> nativeGuestJits;
+
+bool GuestCallbackExecutorDebuggerStepPending() {
+    return nativeDebuggerHostWaitStep;
+}
 
 enum class NativeDebuggerRunState : uint8_t {
     Disabled,
@@ -5814,6 +6791,9 @@ struct NativeGuestWaiter {
     GuestThreadWaitKind kind = GuestThreadWaitKind::None;
     u32 address = 0;
     uint8_t ulockOpcode = 0;
+    GuestRwlockWaitType rwlockWaitType =
+        GuestRwlockWaitType::None;
+    u32 rwlockSequence = 0;
     mach_port_t threadPort = MACH_PORT_NULL;
     u32 wakeResult = 0;
     u64 sequence = 0;
@@ -5823,6 +6803,25 @@ struct NativeGuestWaiter {
 
 std::mutex nativeGuestWaitMutex;
 std::vector<std::shared_ptr<NativeGuestWaiter>> nativeGuestWaiters;
+
+struct NativeGuestRwlockUnlock {
+    u32 address = 0;
+    u32 lgen = 0;
+    u32 rwSequence = 0;
+    size_t expectedWaiters = 0;
+};
+
+std::vector<NativeGuestRwlockUnlock>
+    nativeGuestRwlockUnlocks;
+
+struct NativeGuestRwlockOverlap {
+    u32 address = 0;
+    u32 lastSequence = 0;
+    u32 nextSequence = 0;
+};
+
+std::vector<NativeGuestRwlockOverlap>
+    nativeGuestRwlockOverlaps;
 
 static bool NativeDebuggerActive() {
     return NativeGuestThreadsEnabled() &&
@@ -5952,10 +6951,13 @@ static bool ConsumeNativeDebuggerHostWaitStep(
 }
 
 void NotifyNativeDebuggerWaiters() {
-    std::lock_guard<std::mutex> lock(nativeGuestWaitMutex);
-    for (const auto &waiter : nativeGuestWaiters) {
-        waiter->condition.notify_all();
+    {
+        std::lock_guard<std::mutex> lock(nativeGuestWaitMutex);
+        for (const auto &waiter : nativeGuestWaiters) {
+            waiter->condition.notify_all();
+        }
     }
+    NotifyGuestCallbackExecutorWaiter();
 }
 
 void NotifyNativeDebuggerCoordinator() {
@@ -5979,6 +6981,24 @@ struct GuestWorkqueueDelivery {
     std::vector<uint8_t> message;
     bool eventManager = false;
 };
+
+struct GuestWorkqueueJob {
+    GuestWorkqueueDelivery delivery;
+    u32 priority = 0;
+    bool hasDelivery = false;
+};
+
+/*
+ * Native workqueue upcalls own independent JITs, but creating one for every
+ * untrusted QUEUE_REQTHREADS count would multiply the per-JIT code cache.
+ * Four concurrent workers are enough to preserve forward progress when a
+ * constrained worker blocks while keeping the experiment's memory bounded.
+ * Completed workers immediately run libpthread's ordinary exit path, so no
+ * idle native pool is retained.
+ */
+constexpr size_t MaxNativeGuestWorkqueueWorkers = 4;
+std::mutex guestNativeWorkqueuePumpMutex;
+std::deque<GuestWorkqueueJob> guestNativeWorkqueuePendingJobs;
 
 struct GuestWorkqueuePendingUpcall {
     u32 eventList;
@@ -6049,6 +7069,413 @@ void SaveGuestContext(context32 &context) {
     context.cpsr = jit->Cpsr();
     context.fpscr = jit->Fpscr();
     context.uro = callbacks->cp15->uro;
+}
+
+static NativeThreadStateSlot *CurrentNativeThreadStateSlot() {
+    if (!NativeGuestThreadsEnabled() || nativeGuestThreadId == 0) {
+        return nullptr;
+    }
+    return nativeGuestRuntime != nullptr
+        ? &nativeGuestRuntime->threadState
+        : &mainNativeThreadState;
+}
+
+/*
+ * A deferred host call runs after Jit::Run has returned, so its architectural
+ * register file is stable even if the host call owns the thread indefinitely
+ * (UIApplicationMain is the important case).  Publish that state under a
+ * small gate. A nested host-to-guest callback revokes quiescence before it
+ * saves or changes any registers and restores it only after the outer guest
+ * context has been put back.
+ */
+void NativeGuestHostCallEnter() {
+    NativeThreadStateSlot *slot =
+        CurrentNativeThreadStateSlot();
+    if (slot == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(
+        slot->registerAccessMutex);
+    ++slot->hostCallDepth;
+    slot->hostRegistersQuiescent =
+        slot->guestCallbackDepth == 0;
+}
+
+void NativeGuestHostCallExit() {
+    NativeThreadStateSlot *slot =
+        CurrentNativeThreadStateSlot();
+    if (slot == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(
+        slot->registerAccessMutex);
+    assert(slot->hostCallDepth != 0);
+    --slot->hostCallDepth;
+    /* The host return value has not yet been written to the guest JIT. */
+    slot->hostRegistersQuiescent = false;
+}
+
+static void NativeGuestCallbackRegisterAccessBegin() {
+    NativeThreadStateSlot *slot =
+        CurrentNativeThreadStateSlot();
+    if (slot == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(
+        slot->registerAccessMutex);
+    ++slot->guestCallbackDepth;
+    slot->hostRegistersQuiescent = false;
+}
+
+static void NativeGuestCallbackRegisterAccessEnd() {
+    NativeThreadStateSlot *slot =
+        CurrentNativeThreadStateSlot();
+    if (slot == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(
+        slot->registerAccessMutex);
+    assert(slot->guestCallbackDepth != 0);
+    --slot->guestCallbackDepth;
+    slot->hostRegistersQuiescent =
+        slot->hostCallDepth != 0 &&
+        slot->guestCallbackDepth == 0;
+}
+
+static bool TryCopyQuiescentNativeThreadState(
+        NativeThreadStateSlot &slot,
+        Dynarmic::A32::Jit *jit,
+        DynarmicCallbacks32 *callbacks,
+        context32 &snapshot) {
+    if (jit == nullptr || callbacks == nullptr) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(
+        slot.registerAccessMutex);
+    if (!slot.hostRegistersQuiescent ||
+            slot.hostCallDepth == 0 ||
+            slot.guestCallbackDepth != 0) {
+        return false;
+    }
+    snapshot.regs = jit->Regs();
+    snapshot.extRegs = jit->ExtRegs();
+    snapshot.cpsr = jit->Cpsr();
+    snapshot.fpscr = jit->Fpscr();
+    snapshot.uro = callbacks->cp15->uro;
+    return true;
+}
+
+bool NativeThreadStatePauseRequestedForCurrent() {
+    NativeThreadStateSlot *slot =
+        CurrentNativeThreadStateSlot();
+    if (slot == nullptr) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(slot->mutex);
+    return slot->requestedGeneration >
+        slot->releasedGeneration;
+}
+
+/*
+ * Called only by the host pthread which owns this JIT, either after Run()
+ * observes the private halt or while that same pthread is inside an
+ * interruptible syscall callback.  Consequently SaveGuestContext never
+ * races Dynarmic execution.
+ */
+static bool PublishNativeThreadStateAndWaitIfNeeded() {
+    NativeThreadStateSlot *slot =
+        CurrentNativeThreadStateSlot();
+    if (slot == nullptr) {
+        return false;
+    }
+
+    std::unique_lock<std::mutex> lock(slot->mutex);
+    bool paused = false;
+    while (slot->requestedGeneration >
+            slot->releasedGeneration &&
+            !slot->ownerExited &&
+            !nativeGuestThreadRetiring &&
+            !nativeShutdownRequested.load(
+                std::memory_order_acquire) &&
+            !guestProcessExitRequested.load(
+                std::memory_order_acquire)) {
+        const uint64_t generation =
+            slot->requestedGeneration;
+        if (slot->acknowledgedGeneration < generation) {
+            SaveGuestContext(slot->snapshot);
+            slot->snapshotValid = true;
+            slot->acknowledgedGeneration = generation;
+        }
+        paused = true;
+        slot->condition.notify_all();
+        slot->condition.wait(lock, [slot, generation] {
+            return slot->releasedGeneration >= generation ||
+                slot->ownerExited ||
+                nativeGuestThreadRetiring ||
+                nativeShutdownRequested.load(
+                    std::memory_order_acquire) ||
+                guestProcessExitRequested.load(
+                    std::memory_order_acquire);
+        });
+    }
+
+    Dynarmic::A32::Jit *jit = threadHandle.jit;
+    if (jit != nullptr) {
+        jit->ClearHalt(LC32HaltReasonThreadState);
+    }
+    lock.unlock();
+    return paused;
+}
+
+/*
+ * Two guest pthreads can ask for each other's state at the same time (objc's
+ * cache collector normally serializes this, but the Mach ABI does not).  A
+ * requester is already outside Jit::Run with stable registers, so it may
+ * acknowledge an incoming request without parking immediately.  It remains
+ * in the outgoing request loop, then waits for the incoming request's release
+ * before returning to guest execution.
+ */
+static bool AcknowledgeNestedNativeThreadStateRequest() {
+    NativeThreadStateSlot *slot =
+        CurrentNativeThreadStateSlot();
+    if (slot == nullptr) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(slot->mutex);
+    if (slot->requestedGeneration <=
+            slot->releasedGeneration ||
+            slot->acknowledgedGeneration >=
+                slot->requestedGeneration ||
+            slot->ownerExited) {
+        return false;
+    }
+    SaveGuestContext(slot->snapshot);
+    slot->snapshotValid = true;
+    slot->acknowledgedGeneration =
+        slot->requestedGeneration;
+    slot->condition.notify_all();
+    return true;
+}
+
+bool NativeThreadStatePauseHostWaitIfNeeded() {
+    if (!NativeThreadStatePauseRequestedForCurrent()) {
+        return false;
+    }
+    return PublishNativeThreadStateAndWaitIfNeeded();
+}
+
+static bool ConsumeNativeThreadStateHalt(
+        Dynarmic::HaltReason &reason) {
+    const bool hasHalt = Dynarmic::Has(
+        reason, LC32HaltReasonThreadState);
+    if (!hasHalt &&
+            !NativeThreadStatePauseRequestedForCurrent()) {
+        return false;
+    }
+    const bool paused =
+        PublishNativeThreadStateAndWaitIfNeeded();
+    reason = reason & ~LC32HaltReasonThreadState;
+    return hasHalt || paused;
+}
+
+static void NativeThreadStateOwnerExited(
+        NativeThreadStateSlot &slot) {
+    std::lock_guard<std::mutex> lock(slot.mutex);
+    slot.ownerExited = true;
+    slot.releasedGeneration = std::max(
+        slot.releasedGeneration,
+        slot.requestedGeneration);
+    slot.condition.notify_all();
+}
+
+static void ResetNativeThreadStateSlot(
+        NativeThreadStateSlot &slot) {
+    {
+        std::lock_guard<std::mutex> lock(slot.mutex);
+        slot.nextGeneration = 0;
+        slot.requestedGeneration = 0;
+        slot.acknowledgedGeneration = 0;
+        slot.releasedGeneration = 0;
+        slot.snapshot = {};
+        slot.snapshotValid = false;
+        slot.ownerExited = false;
+        slot.condition.notify_all();
+    }
+    {
+        std::lock_guard<std::mutex> lock(
+            slot.registerAccessMutex);
+        slot.hostCallDepth = 0;
+        slot.guestCallbackDepth = 0;
+        slot.hostRegistersQuiescent = false;
+    }
+}
+
+static bool PinNativeGuestJitForThreadState(
+        NativeGuestJit *runtime) {
+    if (runtime == nullptr) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(nativeGuestJitMutex);
+    if (runtime->exited ||
+            std::find(nativeGuestJits.begin(),
+                nativeGuestJits.end(), runtime) ==
+                nativeGuestJits.end()) {
+        return false;
+    }
+    ++runtime->threadStateUsers;
+    return true;
+}
+
+static void UnpinNativeGuestJitForThreadState(
+        NativeGuestJit *runtime) {
+    if (runtime == nullptr) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(nativeGuestJitMutex);
+        assert(runtime->threadStateUsers != 0);
+        --runtime->threadStateUsers;
+    }
+    nativeGuestJitCondition.notify_all();
+}
+
+static kern_return_t RequestNativeThreadStateSnapshot(
+        NativeThreadStateSlot &slot,
+        Dynarmic::A32::Jit *jit,
+        DynarmicCallbacks32 *callbacks,
+        NativeGuestJit *pinnedRuntime,
+        gdb_thread_id_t hostCallThreadId,
+        context32 &snapshot) {
+    const auto finish = [pinnedRuntime](kern_return_t result) {
+        (void)PublishNativeThreadStateAndWaitIfNeeded();
+        UnpinNativeGuestJitForThreadState(pinnedRuntime);
+        return result;
+    };
+    if (jit == nullptr || callbacks == nullptr) {
+        return finish(KERN_FAILURE);
+    }
+
+    if (TryCopyQuiescentNativeThreadState(
+            slot, jit, callbacks, snapshot)) {
+        return finish(KERN_SUCCESS);
+    }
+
+    if (NativeDebuggerActive()) {
+        bool copiedStoppedState = false;
+        {
+            std::lock_guard<std::mutex> debuggerLock(
+                nativeDebugger.mutex);
+            const bool targetExecuting =
+                pinnedRuntime != nullptr
+                ? pinnedRuntime->debuggerExecuting
+                : nativeDebugger.mainExecuting;
+            if (!targetExecuting) {
+                snapshot.regs = jit->Regs();
+                snapshot.extRegs = jit->ExtRegs();
+                snapshot.cpsr = jit->Cpsr();
+                snapshot.fpscr = jit->Fpscr();
+                snapshot.uro = callbacks->cp15->uro;
+                copiedStoppedState = true;
+            }
+        }
+        if (copiedStoppedState) {
+            return finish(KERN_SUCCESS);
+        }
+    }
+
+    std::unique_lock<std::mutex> lock(slot.mutex);
+    while (slot.requestedGeneration >
+            slot.releasedGeneration &&
+            !slot.ownerExited &&
+            !nativeShutdownRequested.load(
+                std::memory_order_acquire) &&
+            !guestProcessExitRequested.load(
+                std::memory_order_acquire)) {
+        lock.unlock();
+        if (TryCopyQuiescentNativeThreadState(
+                slot, jit, callbacks, snapshot)) {
+            return finish(KERN_SUCCESS);
+        }
+        (void)AcknowledgeNestedNativeThreadStateRequest();
+        lock.lock();
+        (void)slot.condition.wait_for(
+            lock, std::chrono::milliseconds(20));
+    }
+    if (slot.ownerExited ||
+            nativeShutdownRequested.load(
+                std::memory_order_acquire) ||
+            guestProcessExitRequested.load(
+                std::memory_order_acquire)) {
+        lock.unlock();
+        return finish(KERN_FAILURE);
+    }
+
+    uint64_t generation = ++slot.nextGeneration;
+    if (generation == 0) {
+        generation = ++slot.nextGeneration;
+    }
+    slot.requestedGeneration = generation;
+    slot.snapshotValid = false;
+    jit->HaltExecution(LC32HaltReasonThreadState);
+    lock.unlock();
+
+    NotifyNativeDebuggerWaiters();
+    InterruptNativeThreadStateHostCalls(hostCallThreadId);
+
+    lock.lock();
+    bool capturedQuiescentState = false;
+    for (;;) {
+        lock.unlock();
+        context32 quiescentSnapshot = {};
+        const bool quiescent =
+            TryCopyQuiescentNativeThreadState(
+                slot, jit, callbacks,
+                quiescentSnapshot);
+        (void)AcknowledgeNestedNativeThreadStateRequest();
+        lock.lock();
+        if (quiescent &&
+                slot.requestedGeneration == generation &&
+                slot.releasedGeneration < generation) {
+            snapshot = quiescentSnapshot;
+            capturedQuiescentState = true;
+            break;
+        }
+        if (slot.acknowledgedGeneration >= generation &&
+                slot.snapshotValid) {
+            snapshot = slot.snapshot;
+            break;
+        }
+        if (slot.ownerExited ||
+                nativeShutdownRequested.load(
+                    std::memory_order_acquire) ||
+                guestProcessExitRequested.load(
+                    std::memory_order_acquire) ||
+                debuggerAllStopRequested.load(
+                    std::memory_order_acquire)) {
+            break;
+        }
+        if (slot.condition.wait_for(
+                lock, std::chrono::milliseconds(20)) ==
+                std::cv_status::timeout) {
+            lock.unlock();
+            NotifyNativeDebuggerWaiters();
+            InterruptNativeThreadStateHostCalls(
+                hostCallThreadId);
+            lock.lock();
+        }
+    }
+
+    const bool succeeded =
+        capturedQuiescentState ||
+        (slot.acknowledgedGeneration >= generation &&
+         slot.snapshotValid);
+    slot.releasedGeneration = std::max(
+        slot.releasedGeneration, generation);
+    /* Serialize clearing the old level-triggered bit with the next request. */
+    jit->ClearHalt(LC32HaltReasonThreadState);
+    slot.condition.notify_all();
+    lock.unlock();
+    return finish(succeeded ? KERN_SUCCESS : KERN_ABORTED);
 }
 
 void LoadGuestContext(const context32 &context) {
@@ -6224,17 +7651,16 @@ static kern_return_t CopyGuestTaskThreadPorts(
                 /*
                  * Cooperative mode does not keep a synthetic port for the
                  * main thread: thread_self_trap normally falls through to
-                 * this host thread. mach_thread_self supplies exactly the
-                 * extra send-right reference transferred by task_threads.
+                 * this host thread. pthread_mach_thread_np identifies that
+                 * port, and retainExistingPort supplies the extra send-right
+                 * reference transferred by task_threads.
                  */
-                const mach_port_t mainPort = mach_thread_self();
+                const mach_port_t mainPort =
+                    pthread_mach_thread_np(pthread_self());
                 if (!MACH_PORT_VALID(mainPort)) {
                     retainResult = KERN_FAILURE;
-                } else if (alreadyAdded(mainPort)) {
-                    (void)mach_port_deallocate(
-                        mach_task_self(), mainPort);
                 } else {
-                    ports.push_back(mainPort);
+                    retainResult = retainExistingPort(mainPort);
                 }
             }
             if (retainResult != KERN_SUCCESS) {
@@ -6245,7 +7671,9 @@ static kern_return_t CopyGuestTaskThreadPorts(
     if (retainResult == KERN_SUCCESS) {
         std::lock_guard<std::recursive_mutex> lock(
             guestWorkqueueMutex);
-        if (MACH_PORT_VALID(guestWorkqueueThreadPort)) {
+        if (guestWorkqueueUpcallActive &&
+                guestWorkqueueWaitingContextValid &&
+                MACH_PORT_VALID(guestWorkqueueThreadPort)) {
             retainResult = retainExistingPort(
                 guestWorkqueueThreadPort);
         }
@@ -6288,14 +7716,153 @@ static kern_return_t CopyGuestTaskThreadPorts(
 
     *guestAddress = allocation;
     *count = static_cast<mach_msg_type_number_t>(ports.size());
-    fprintf(stderr,
+    THREAD_TRACE(
         "LC32: task_threads returned %u guest threads at 0x%x\n",
         *count, *guestAddress);
     return KERN_SUCCESS;
 }
 
+static kern_return_t CopyGuestThreadState(
+        mach_port_t target, thread_state_flavor_t flavor,
+        mach_msg_type_number_t capacity, u32 *state,
+        mach_msg_type_number_t *count) {
+    constexpr mach_msg_type_number_t ArmThreadStateWordCount = 17;
+    if (!MACH_PORT_VALID(target) || state == nullptr || count == nullptr ||
+            (flavor != ARM_THREAD_STATE &&
+             flavor != ARM_THREAD_STATE32) ||
+            capacity < ArmThreadStateWordCount) {
+        return KERN_INVALID_ARGUMENT;
+    }
+
+    EnsureGuestThreadRegistry();
+    context32 snapshot = {};
+    bool found = false;
+    bool workqueueActive = false;
+    gdb_thread_id_t waitingThreadId = 0;
+    context32 waitingContext = {};
+    NativeThreadStateSlot *nativeSlot = nullptr;
+    Dynarmic::A32::Jit *nativeJit = nullptr;
+    DynarmicCallbacks32 *nativeCallbacks = nullptr;
+    NativeGuestJit *pinnedRuntime = nullptr;
+    gdb_thread_id_t hostCallThreadId = 0;
+
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestWorkqueueMutex);
+        workqueueActive = guestWorkqueueUpcallActive &&
+            guestWorkqueueWaitingContextValid;
+        if (workqueueActive) {
+            waitingThreadId = guestWorkqueueWaitingThreadId;
+            waitingContext = guestWorkqueueWaitingContext;
+            if (target == guestWorkqueueThreadPort) {
+                /*
+                 * In cooperative mode the active workqueue owns the shared
+                 * JIT. Native mode may call this routine concurrently from a
+                 * different guest pthread, so only read the JIT when this
+                 * host thread actually owns the workqueue overlay.
+                 */
+                if (!NativeGuestThreadsEnabled() ||
+                        guestWorkqueueOverlayCurrent) {
+                    SaveGuestContext(snapshot);
+                    found = true;
+                } else {
+                    nativeSlot = &mainNativeThreadState;
+                    nativeJit = sharedHandle.cb != nullptr
+                        ? sharedHandle.cb->cpu
+                        : nullptr;
+                    nativeCallbacks = sharedHandle.cb;
+                    hostCallThreadId = 1;
+                }
+            }
+        }
+    }
+
+    if (!found) {
+        const mach_port_t cooperativeMainPort =
+            !NativeGuestThreadsEnabled()
+            ? pthread_mach_thread_np(pthread_self())
+            : MACH_PORT_NULL;
+        std::lock_guard<std::recursive_mutex> lock(guestThreadMutex);
+        for (const GuestThreadContext &thread : guestThreads) {
+            if (!thread.alive) {
+                continue;
+            }
+            const bool targetMatches =
+                thread.threadPort == target ||
+                (thread.debuggerId == 1 &&
+                 !MACH_PORT_VALID(thread.threadPort) &&
+                 target == cooperativeMainPort);
+            if (!targetMatches) {
+                continue;
+            }
+
+            if (workqueueActive &&
+                    waitingThreadId == thread.debuggerId) {
+                snapshot = waitingContext;
+                found = true;
+                break;
+            }
+            if (thread.debuggerId == CurrentGuestThreadId()) {
+                SaveGuestContext(snapshot);
+                found = true;
+                break;
+            }
+            if (NativeGuestThreadsEnabled()) {
+                hostCallThreadId = thread.debuggerId;
+                if (thread.debuggerId == 1) {
+                    nativeSlot = &mainNativeThreadState;
+                    nativeJit = sharedHandle.cb != nullptr
+                        ? sharedHandle.cb->cpu
+                        : nullptr;
+                    nativeCallbacks = sharedHandle.cb;
+                } else if (thread.nativeJit != nullptr &&
+                        PinNativeGuestJitForThreadState(
+                            thread.nativeJit)) {
+                    pinnedRuntime = thread.nativeJit;
+                    nativeSlot = &pinnedRuntime->threadState;
+                    nativeJit = pinnedRuntime->jit;
+                    nativeCallbacks = pinnedRuntime->callbacks;
+                }
+                break;
+            }
+            if (thread.savedValid) {
+                snapshot = thread.saved;
+                found = true;
+            }
+            break;
+        }
+    }
+
+    if (!found && nativeSlot != nullptr) {
+        const kern_return_t result =
+            RequestNativeThreadStateSnapshot(
+                *nativeSlot, nativeJit, nativeCallbacks,
+                pinnedRuntime,
+                hostCallThreadId, snapshot);
+        pinnedRuntime = nullptr;
+        if (result != KERN_SUCCESS) {
+            return result;
+        }
+        found = true;
+    }
+
+    if (!found) {
+        return KERN_INVALID_ARGUMENT;
+    }
+
+    static_assert(std::tuple_size<decltype(snapshot.regs)>::value == 16,
+        "ARM32 context must contain r0-r15");
+    memcpy(state, snapshot.regs.data(), sizeof(snapshot.regs));
+    state[16] = snapshot.cpsr;
+    *count = ArmThreadStateWordCount;
+    return KERN_SUCCESS;
+}
+
 bool ParkCurrentGuestThread(
-        GuestThreadWaitKind kind, u32 address, u32 wakeResult) {
+        GuestThreadWaitKind kind, u32 address, u32 wakeResult,
+        GuestRwlockWaitType rwlockWaitType =
+            GuestRwlockWaitType::None,
+        u32 rwlockSequence = 0) {
     EnsureGuestThreadRegistry();
     if (GuestWorkqueueActiveForCurrentThread()) {
         return false;
@@ -6314,12 +7881,17 @@ bool ParkCurrentGuestThread(
     current->wakeResult = wakeResult;
     current->waitSequence = guestNextWaitSequence.fetch_add(
         1, std::memory_order_relaxed);
+    current->rwlockWaitType = rwlockWaitType;
+    current->rwlockSequence = rwlockSequence;
     if (NextGuestThread() == nullptr) {
         current->runnable = true;
         current->waitKind = GuestThreadWaitKind::None;
         current->waitAddress = 0;
         current->wakeResult = 0;
         current->waitSequence = 0;
+        current->rwlockWaitType =
+            GuestRwlockWaitType::None;
+        current->rwlockSequence = 0;
         return false;
     }
     guestThreadRotationRequested = true;
@@ -6356,6 +7928,9 @@ size_t WakeGuestThreads(
         selected->waitKind = GuestThreadWaitKind::None;
         selected->waitAddress = 0;
         selected->waitSequence = 0;
+        selected->rwlockWaitType =
+            GuestRwlockWaitType::None;
+        selected->rwlockSequence = 0;
         if (selected->savedValid) {
             selected->saved.regs[Reg::R0] =
                 selected->wakeResult;
@@ -6369,6 +7944,107 @@ size_t WakeGuestThreads(
         }
     }
     return count;
+}
+
+static u32 GrantCooperativeGuestRwlockThreads(
+        u32 address, size_t *wokenCount) {
+    std::lock_guard<std::recursive_mutex> lock(
+        guestThreadMutex);
+    std::vector<GuestThreadContext *> candidates;
+    for (GuestThreadContext &thread : guestThreads) {
+        if (thread.alive && !thread.runnable &&
+                thread.waitKind == GuestThreadWaitKind::Rwlock &&
+                thread.waitAddress == address &&
+                thread.rwlockWaitType !=
+                    GuestRwlockWaitType::None) {
+            candidates.push_back(&thread);
+        }
+    }
+    if (candidates.empty()) {
+        if (wokenCount != nullptr) {
+            *wokenCount = 0;
+        }
+        return 0;
+    }
+
+    GuestThreadContext *lowest = candidates.front();
+    GuestThreadContext *lowestWriter = nullptr;
+    for (GuestThreadContext *thread : candidates) {
+        if (GuestPsynchSequenceLower(
+                thread->rwlockSequence,
+                lowest->rwlockSequence)) {
+            lowest = thread;
+        }
+        if (thread->rwlockWaitType ==
+                    GuestRwlockWaitType::Write &&
+                (lowestWriter == nullptr ||
+                 GuestPsynchSequenceLower(
+                    thread->rwlockSequence,
+                    lowestWriter->rwlockSequence))) {
+            lowestWriter = thread;
+        }
+    }
+
+    std::vector<GuestThreadContext *> granted;
+    if (lowest->rwlockWaitType ==
+            GuestRwlockWaitType::Write) {
+        granted.push_back(lowest);
+    } else {
+        for (GuestThreadContext *thread : candidates) {
+            if (thread->rwlockWaitType !=
+                    GuestRwlockWaitType::Read) {
+                continue;
+            }
+            if (lowestWriter == nullptr ||
+                    GuestPsynchSequenceLower(
+                        thread->rwlockSequence,
+                        lowestWriter->rwlockSequence)) {
+                granted.push_back(thread);
+            }
+        }
+    }
+
+    const bool writerGrant = granted.size() == 1 &&
+        granted.front()->rwlockWaitType ==
+            GuestRwlockWaitType::Write;
+    const bool writerRemains = std::any_of(
+        candidates.begin(), candidates.end(),
+        [&granted](const GuestThreadContext *thread) {
+            return thread->rwlockWaitType ==
+                    GuestRwlockWaitType::Write &&
+                std::find(granted.begin(), granted.end(), thread) ==
+                    granted.end();
+        });
+    u32 update = writerGrant
+        ? GuestPsynchCountIncrement |
+            GuestPsynchRwKernelBit |
+            GuestPsynchRwExclusiveBit
+        : static_cast<u32>(granted.size()) *
+            GuestPsynchCountIncrement;
+    if (writerRemains) {
+        update |= GuestPsynchRwKernelBit |
+            GuestPsynchRwWriterBit;
+    }
+
+    for (GuestThreadContext *thread : granted) {
+        thread->runnable = true;
+        thread->waitKind = GuestThreadWaitKind::None;
+        thread->waitAddress = 0;
+        thread->waitSequence = 0;
+        thread->rwlockWaitType =
+            GuestRwlockWaitType::None;
+        thread->rwlockSequence = 0;
+        if (thread->savedValid) {
+            thread->saved.regs[Reg::R0] = update;
+            thread->saved.cpsr &=
+                ~(static_cast<u32>(1) << CARRY_BIT);
+        }
+        thread->wakeResult = 0;
+    }
+    if (wokenCount != nullptr) {
+        *wokenCount = granted.size();
+    }
+    return update;
 }
 
 void RecordGuestPsynchPrepost(
@@ -6704,7 +8380,10 @@ static void ScheduleMainGuestWorkqueueTransition() {
     if (mainJit != nullptr) {
         mainJit->HaltExecution(LC32HaltReasonWorkqueue);
     }
-    InterruptDebuggerMachCalls();
+    /* A normal workqueue request does not set a debugger-wide stop flag, so
+     * InterruptDebuggerMachCalls would deliberately do nothing here. Wake
+     * only the main guest JIT's published host wait. */
+    InterruptNativeThreadStateHostCalls(1);
 }
 
 static void HaltAllGuestJits(
@@ -6749,7 +8428,8 @@ static void ClearAllGuestJitHalts(
 
 static Dynarmic::HaltReason NativeDebuggerVisibleReason(
         Dynarmic::HaltReason reason) {
-    return reason & ~LC32HaltReasonDebuggerPause;
+    return reason & ~(LC32HaltReasonDebuggerPause |
+                      LC32HaltReasonThreadState);
 }
 
 static bool NativeDebuggerStopOwnerAlive(
@@ -7082,11 +8762,14 @@ static void DestroyNativeGuestJit(
         return;
     }
     {
-        std::lock_guard<std::mutex> lock(
+        std::unique_lock<std::mutex> lock(
             nativeGuestJitMutex);
         nativeGuestJits.erase(std::remove(
             nativeGuestJits.begin(), nativeGuestJits.end(),
             runtime), nativeGuestJits.end());
+        nativeGuestJitCondition.wait(lock, [runtime] {
+            return runtime->threadStateUsers == 0;
+        });
     }
     if (sharedHandle.monitor != nullptr &&
             runtime->processorId <
@@ -7181,6 +8864,8 @@ static void *RunNativeGuestThread(void *opaque) {
         start->debuggerId, runtime->hostMachThread,
         runtime->processorId);
 
+    u32 retirementFreeAddress = 0;
+    u32 retirementFreeSize = 0;
     {
         /*
          * Unlike NSThread and libdispatch workers, a raw host pthread has no
@@ -7284,6 +8969,12 @@ static void *RunNativeGuestThread(void *opaque) {
             if (GuestThreadContext *thread =
                     FindGuestThread(start->debuggerId, false)) {
                 leftoverPort = thread->threadPort;
+                retirementFreeAddress =
+                    thread->retirementFreeAddress;
+                retirementFreeSize =
+                    thread->retirementFreeSize;
+                thread->retirementFreeAddress = 0;
+                thread->retirementFreeSize = 0;
                 thread->threadPort = MACH_PORT_NULL;
                 thread->alive = false;
                 thread->runnable = false;
@@ -7293,17 +8984,110 @@ static void *RunNativeGuestThread(void *opaque) {
         }
         NativeDebuggerTransferStopOwner(
             start->debuggerId, 1);
+        GuestCallbackExecutorThreadExited(
+            start->debuggerId);
         if (MACH_PORT_VALID(leftoverPort)) {
             (void)mach_port_destroy(
                 mach_task_self(), leftoverPort);
         }
+
+        /*
+         * The pool may own bridge autorelease tokens whose dealloc methods
+         * release guest references.  This logical guest thread is already
+         * retired and its Exit halt is still latched, so advertising its JIT
+         * here could partially execute a fresh guest callback before the halt
+         * is observed.  Make direct guest entry unavailable before the pool
+         * pops; bridge releases will use the callback executor or the existing
+         * deferred-release queue instead.
+        */
+        threadHandle = {};
+        if (runtime->workqueue &&
+                !nativeShutdownRequested.load(
+                    std::memory_order_acquire) &&
+                !guestProcessExitRequested.load(
+                    std::memory_order_acquire)) {
+            runtime->workqueueHostBlocked.store(
+                false, std::memory_order_release);
+            runtime->workqueueCompensationPending.store(
+                false, std::memory_order_release);
+            /* The registry no longer counts this worker. Fill the newly
+             * available bounded slot before publishing runtime->exited; a
+             * pump must never reap and pthread_join its own host thread. */
+            (void)PumpGuestWorkqueue();
+        }
     }
 
-    threadHandle = {};
+    /*
+     * bsdthread_terminate executes on this guest stack.  Dynarmic may still
+     * finish the translated block containing the SVC after the callback asks
+     * it to halt, and draining the host autorelease pool above may re-enter
+     * guest destructors on the same worker.  Release the stack only after
+     * both have fully unwound, but before pthread_join can observe exit.
+     */
+    if (retirementFreeAddress != 0 &&
+            retirementFreeSize != 0 &&
+            Dynarmic_munmap(
+                retirementFreeAddress,
+                retirementFreeSize) != 0) {
+        fprintf(stderr,
+            "LC32: deferred native thread unmap "
+            "failed guest-thread=%llu free=0x%x+0x%x "
+            "errno=%d\n",
+            start->debuggerId,
+            retirementFreeAddress,
+            retirementFreeSize, errno);
+    }
+
     nativeGuestThreadId = 0;
     nativeGuestThreadRetiring = false;
     nativeGuestRuntime = nullptr;
     runtime->hostMachThread = MACH_PORT_NULL;
+    NativeThreadStateOwnerExited(runtime->threadState);
+
+    const auto signalJoinSemaphore = [](
+            mach_port_t semaphore, gdb_thread_id_t debuggerId) {
+        if (!MACH_PORT_VALID(semaphore)) {
+            return;
+        }
+        const kern_return_t result =
+            semaphore_signal_trap(semaphore);
+        if (result != KERN_SUCCESS) {
+            fprintf(stderr,
+                "LC32: native guest-thread=%llu join "
+                "semaphore 0x%x failed: 0x%x\n",
+                debuggerId, semaphore, result);
+        }
+    };
+
+    /*
+     * A completed one-shot worker otherwise keeps its joinable host pthread
+     * and 16 MiB JIT cache until another guest thread is created. Serialize
+     * with creation and teardown before deciding ownership: Running means no
+     * reaper or destroy pass can have claimed this runtime. A shutdown keeps
+     * the existing joinable path so Dynarmic_nativeDestroy can wait for us.
+     */
+    std::unique_lock<std::mutex> lifecycleLock(
+        nativeLifecycleMutex);
+    if (nativeLifecycleState == NativeLifecycleState::Running &&
+            runtime->hostThreadCreated &&
+            pthread_equal(runtime->hostThread, pthread_self())) {
+        const int detachResult = pthread_detach(pthread_self());
+        if (detachResult == 0) {
+            const mach_port_t joinSemaphore = runtime->joinSemaphore;
+            const gdb_thread_id_t debuggerId = runtime->debuggerId;
+            runtime->joinSemaphore = MACH_PORT_NULL;
+            runtime->hostThreadCreated = false;
+            DestroyNativeGuestJit(runtime);
+            signalJoinSemaphore(joinSemaphore, debuggerId);
+            return nullptr;
+        }
+        fprintf(stderr,
+            "LC32: pthread_detach guest-thread=%llu failed: %d (%s)\n",
+            runtime->debuggerId, detachResult,
+            strerror(detachResult));
+    }
+    lifecycleLock.unlock();
+
     {
         std::lock_guard<std::mutex> lock(
             nativeGuestJitMutex);
@@ -7311,19 +9095,261 @@ static void *RunNativeGuestThread(void *opaque) {
     }
     nativeGuestJitCondition.notify_all();
     if (MACH_PORT_VALID(runtime->joinSemaphore)) {
-        const kern_return_t result =
-            semaphore_signal_trap(
-                runtime->joinSemaphore);
-        if (result != KERN_SUCCESS) {
-            fprintf(stderr,
-                "LC32: native guest-thread=%llu join "
-                "semaphore 0x%x failed: 0x%x\n",
-                runtime->debuggerId,
-                runtime->joinSemaphore, result);
-        }
+        signalJoinSemaphore(
+            runtime->joinSemaphore, runtime->debuggerId);
         runtime->joinSemaphore = MACH_PORT_NULL;
     }
     return nullptr;
+}
+
+static bool StartNativeGuestWorkqueueWorker(
+        const GuestWorkqueueJob &job) {
+    EnsureGuestThreadRegistry();
+    if (!NativeGuestThreadsEnabled() ||
+            guest_bsdthread_wqthread_start == 0 ||
+            guest_bsdthread_pthread_size <= 0 ||
+            guest_bsdthread_tsd_offset >=
+                static_cast<u32>(guest_bsdthread_pthread_size)) {
+        return false;
+    }
+
+    std::unique_lock<std::mutex> lifecycleLock(
+        nativeLifecycleMutex);
+    if (nativeLifecycleState != NativeLifecycleState::Running ||
+            nativeShutdownRequested.load(
+                std::memory_order_acquire) ||
+            guestProcessExitRequested.load(
+                std::memory_order_acquire)) {
+        return false;
+    }
+    /* Joining an exited peer here both releases its code cache and makes its
+     * processor ID available before this worker reserves another one. */
+    ReapExitedNativeGuestJits();
+
+    gdb_thread_id_t debuggerId = 0;
+    size_t processorId = 0;
+    u32 signalMask = 0;
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestThreadMutex);
+        debuggerId = guestNextDebuggerThreadId++;
+        for (const GuestThreadContext &thread : guestThreads) {
+            if (thread.debuggerId == 1 && thread.alive) {
+                signalMask = thread.signalMask;
+                break;
+            }
+        }
+        for (size_t candidate = 1;
+                candidate < MaxNativeGuestProcessors;
+                ++candidate) {
+            const uint64_t bit = uint64_t{1} << candidate;
+            if ((guestProcessorIdsInUse & bit) == 0) {
+                guestProcessorIdsInUse |= bit;
+                processorId = candidate;
+                break;
+            }
+        }
+    }
+    if (processorId == 0) {
+        return false;
+    }
+    const auto releaseProcessor = [processorId] {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestThreadMutex);
+        guestProcessorIdsInUse &=
+            ~(uint64_t{1} << processorId);
+    };
+
+    const u64 pthreadSize64 =
+        (static_cast<u64>(guest_bsdthread_pthread_size) +
+         DYN_PAGE_MASK) & ~static_cast<u64>(DYN_PAGE_MASK);
+    if (pthreadSize64 == 0 ||
+            pthreadSize64 > UINT32_MAX -
+                GuestWorkqueueGuardSize -
+                GuestWorkqueueStackSize) {
+        releaseProcessor();
+        return false;
+    }
+    const u32 allocationSize =
+        GuestWorkqueueGuardSize + GuestWorkqueueStackSize +
+        static_cast<u32>(pthreadSize64);
+    const u32 allocationAddress = Dynarmic_mmap(
+        0, allocationSize, PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (allocationAddress == UINT32_MAX) {
+        releaseProcessor();
+        return false;
+    }
+    const auto releaseAllocation = [=] {
+        (void)Dynarmic_munmap(
+            allocationAddress, allocationSize);
+    };
+    if (Dynarmic_mprotect(
+            allocationAddress, GuestWorkqueueGuardSize,
+            PROT_NONE) != 0) {
+        releaseAllocation();
+        releaseProcessor();
+        return false;
+    }
+
+    const u32 stackBottom =
+        allocationAddress + GuestWorkqueueGuardSize;
+    const u32 pthreadAddress =
+        stackBottom + GuestWorkqueueStackSize;
+    const u32 eventList = pthreadAddress -
+        static_cast<u32>(GuestWorkqueueEventCapacity *
+                         sizeof(guest_kevent_qos_s));
+    const u32 messageBuffer = eventList -
+        static_cast<u32>(GuestWorkqueueMessageCapacity);
+    const u32 stackPointer = (messageBuffer - 16) & ~0xfu;
+
+    const mach_port_t threadPort = AllocateGuestThreadPort();
+    if (!MACH_PORT_VALID(threadPort)) {
+        releaseAllocation();
+        releaseProcessor();
+        return false;
+    }
+    const auto releasePort = [threadPort] {
+        (void)mach_port_destroy(
+            mach_task_self(), threadPort);
+    };
+
+    u32 priority = job.priority;
+    u32 eventListArgument = 0;
+    u32 eventCount = 0;
+    u32 upcallFlags =
+        WQ_FLAG_THREAD_NEWSPI | WQ_FLAG_THREAD_TSD_BASE_SET;
+    if (job.hasDelivery) {
+        guest_kevent_qos_s event = job.delivery.event;
+        if (job.delivery.message.size() >
+                GuestWorkqueueMessageCapacity) {
+            releasePort();
+            releaseAllocation();
+            releaseProcessor();
+            return false;
+        }
+        if (!job.delivery.message.empty()) {
+            if (Dynarmic_mem_1write(
+                    messageBuffer, job.delivery.message.size(),
+                    reinterpret_cast<char *>(const_cast<uint8_t *>(
+                        job.delivery.message.data()))) != 0) {
+                releasePort();
+                releaseAllocation();
+                releaseProcessor();
+                return false;
+            }
+            event.ext[0] = messageBuffer;
+            event.ext[1] = job.delivery.message.size();
+        }
+        if (Dynarmic_mem_1write(
+                eventList, sizeof(event),
+                reinterpret_cast<char *>(&event)) != 0) {
+            releasePort();
+            releaseAllocation();
+            releaseProcessor();
+            return false;
+        }
+        eventListArgument = eventList;
+        eventCount = 1;
+        upcallFlags |= WQ_FLAG_THREAD_KEVENT;
+        if (job.delivery.eventManager) {
+            upcallFlags |= WQ_FLAG_THREAD_EVENT_MANAGER;
+        }
+    }
+    if ((priority & PTHREAD_PRIORITY_OVERCOMMIT_FLAG) != 0) {
+        upcallFlags |= WQ_FLAG_THREAD_OVERCOMMIT;
+    }
+    upcallFlags |= GuestWorkqueueQosClass(priority);
+
+    context32 initial = {};
+    initial.cpsr = (guest_bsdthread_wqthread_start & 1) != 0
+        ? 0x00000030
+        : 0x000001d0;
+    initial.regs[Reg::R0] = pthreadAddress;
+    initial.regs[Reg::R1] = threadPort;
+    initial.regs[Reg::R2] = stackBottom;
+    initial.regs[Reg::R3] = eventListArgument;
+    initial.regs[Reg::R4] = upcallFlags;
+    initial.regs[Reg::R5] = eventCount;
+    initial.regs[Reg::SP] = stackPointer;
+    initial.regs[Reg::PC] =
+        guest_bsdthread_wqthread_start & ~1u;
+    initial.uro = pthreadAddress + guest_bsdthread_tsd_offset;
+
+    NativeGuestJit *runtime =
+        CreateNativeGuestJit(initial, processorId);
+    if (runtime == nullptr) {
+        releasePort();
+        releaseAllocation();
+        releaseProcessor();
+        return false;
+    }
+    runtime->debuggerId = debuggerId;
+    runtime->workqueue = true;
+    runtime->workqueuePriority = priority;
+
+    GuestThreadContext thread = {};
+    thread.debuggerId = debuggerId;
+    thread.threadSelfId = AllocateGuestThreadSelfId();
+    thread.pthreadAddress = pthreadAddress;
+    thread.threadPort = threadPort;
+    thread.allocationAddress = allocationAddress;
+    thread.allocationSize = allocationSize;
+    /* If guest cleanup faults before bsdthread_terminate supplies its range,
+     * the host runtime still owns and eventually releases this allocation. */
+    thread.retirementFreeAddress = allocationAddress;
+    thread.retirementFreeSize = allocationSize;
+    thread.saved = initial;
+    thread.signalMask = signalMask;
+    thread.savedValid = true;
+    thread.alive = true;
+    thread.runnable = true;
+    thread.workqueue = true;
+    thread.nativeJit = runtime;
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestThreadMutex);
+        guestThreads.push_back(std::move(thread));
+    }
+
+    auto *start = new NativeGuestThreadStart{
+        .debuggerId = debuggerId,
+        .runtime = runtime,
+    };
+    pthread_t hostThread;
+    const int createResult = pthread_create(
+        &hostThread, nullptr, RunNativeGuestThread, start);
+    if (createResult != 0) {
+        delete start;
+        {
+            std::lock_guard<std::recursive_mutex> lock(
+                guestThreadMutex);
+            guestThreads.erase(std::remove_if(
+                guestThreads.begin(), guestThreads.end(),
+                [debuggerId](const GuestThreadContext &candidate) {
+                    return candidate.debuggerId == debuggerId;
+                }), guestThreads.end());
+        }
+        NativeThreadStateOwnerExited(runtime->threadState);
+        DestroyNativeGuestJit(runtime);
+        releasePort();
+        releaseAllocation();
+        return false;
+    }
+    runtime->hostThread = hostThread;
+    runtime->hostThreadCreated = true;
+    {
+        std::lock_guard<std::mutex> lock(runtime->startMutex);
+        runtime->startAllowed = true;
+    }
+    runtime->startCondition.notify_one();
+    fprintf(stderr,
+        "LC32: native workqueue guest-thread=%llu pthread=0x%x "
+        "port=0x%x pc=0x%x sp=0x%x flags=0x%x\n",
+        debuggerId, pthreadAddress, threadPort,
+        initial.regs[Reg::PC], initial.regs[Reg::SP],
+        upcallFlags);
+    return true;
 }
 
 static u32 GuestBsdthreadCreate(
@@ -7547,6 +9573,7 @@ static u32 GuestBsdthreadCreate(
                         return candidate.debuggerId == debuggerId;
                     }), guestThreads.end());
             }
+            NativeThreadStateOwnerExited(runtime->threadState);
             DestroyNativeGuestJit(runtime);
             (void)mach_port_destroy(
                 mach_task_self(), threadPort);
@@ -7578,7 +9605,8 @@ static u32 GuestBsdthreadTerminate(
         u32 freeAddress, u32 freeSize, mach_port_t threadPort,
         mach_port_t joinSemaphore) {
     EnsureGuestThreadRegistry();
-    if (GuestWorkqueueActiveForCurrentThread()) {
+    if (GuestWorkqueueActiveForCurrentThread() &&
+            !NativeGuestWorkqueueIsCurrent()) {
         return return_with_carry_direct(EINVAL, true);
     }
 
@@ -7595,7 +9623,8 @@ static u32 GuestBsdthreadTerminate(
     }
 
     if (freeAddress != 0 && freeSize != 0 &&
-            Dynarmic_munmap(freeAddress, freeSize) != 0) {
+            ValidateGuestMunmapRange(
+                freeAddress, freeSize) != 0) {
         return return_with_carry_direct(EINVAL, true);
     }
 
@@ -7625,6 +9654,10 @@ static u32 GuestBsdthreadTerminate(
         }
         currentPort = current->threadPort;
         debuggerId = current->debuggerId;
+        if (freeAddress != 0 && freeSize != 0) {
+            current->retirementFreeAddress = freeAddress;
+            current->retirementFreeSize = freeSize;
+        }
         current->threadPort = MACH_PORT_NULL;
         current->alive = false;
         current->runnable = false;
@@ -7661,7 +9694,12 @@ static u32 GuestBsdthreadTerminate(
                 joinSemaphore;
         }
         nativeGuestThreadRetiring = true;
-        if (threadHandle.jit->IsExecuting()) {
+        if (threadHandle.jit != nullptr) {
+            /*
+             * SVCs are normally serviced after Run() has returned.  Keep the
+             * exit halt level-triggered so the JIT cannot execute the syscall
+             * epilogue on the stack bsdthread_terminate just released.
+             */
             threadHandle.jit->HaltExecution(
                 LC32HaltReasonExit);
         }
@@ -7672,10 +9710,15 @@ static u32 GuestBsdthreadTerminate(
     if (LiveGuestThreadCount() == 0) {
         guestThreadCurrentRetiring = false;
         guestThreadRotationRequested = false;
-        if (threadHandle.jit->IsExecuting()) {
+        if (threadHandle.jit != nullptr) {
             threadHandle.jit->HaltExecution(
                 LC32HaltReasonExit);
         }
+    } else if (threadHandle.jit != nullptr) {
+        /* Run() is usually already stopped for the SVC.  Publish a
+         * level-triggered scheduler halt before returning to its loop. */
+        threadHandle.jit->HaltExecution(
+            LC32HaltReasonWorkqueue);
     }
     return return_with_carry_direct(0, false);
 }
@@ -7724,43 +9767,67 @@ static bool HandleGuestThreadTransition() {
     if (NativeGuestThreadIsCurrent()) {
         return false;
     }
-    std::lock_guard<std::recursive_mutex> lock(
-        guestThreadMutex);
-    if (!guestThreadRotationRequested ||
-            GuestWorkqueueActiveForCurrentThread() ||
-            threadHandle.jit == nullptr ||
-            threadHandle.cb == nullptr) {
-        return false;
-    }
+    u32 retirementFreeAddress = 0;
+    u32 retirementFreeSize = 0;
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestThreadMutex);
+        if (!guestThreadRotationRequested ||
+                GuestWorkqueueActiveForCurrentThread() ||
+                threadHandle.jit == nullptr ||
+                threadHandle.cb == nullptr) {
+            return false;
+        }
 
-    GuestThreadContext *current =
-        FindGuestThread(guestCurrentThreadId, false);
-    GuestThreadContext *next = NextGuestThread();
-    if (current == nullptr || next == nullptr ||
-            !next->savedValid) {
+        GuestThreadContext *current =
+            FindGuestThread(guestCurrentThreadId, false);
+        GuestThreadContext *next = NextGuestThread();
+        if (current == nullptr || next == nullptr ||
+                !next->savedValid) {
+            guestThreadRotationRequested = false;
+            guestThreadCurrentRetiring = false;
+            return false;
+        }
+
+        if (!guestThreadCurrentRetiring) {
+            SaveGuestContext(current->saved);
+            current->savedValid = true;
+        } else {
+            retirementFreeAddress =
+                current->retirementFreeAddress;
+            retirementFreeSize =
+                current->retirementFreeSize;
+            current->retirementFreeAddress = 0;
+            current->retirementFreeSize = 0;
+        }
+        LoadGuestContext(next->saved);
+        THREAD_TRACE(
+            "LC32: switched guest-thread %llu -> %llu pc=0x%x\n",
+            guestCurrentThreadId, next->debuggerId,
+            threadHandle.jit->Regs()[Reg::PC]);
+        guestCurrentThreadId = next->debuggerId;
         guestThreadRotationRequested = false;
         guestThreadCurrentRetiring = false;
-        return false;
     }
-
-    if (!guestThreadCurrentRetiring) {
-        SaveGuestContext(current->saved);
-        current->savedValid = true;
+    /* The JIT now uses the next thread's stack and register context. */
+    if (retirementFreeAddress != 0 &&
+            retirementFreeSize != 0 &&
+            Dynarmic_munmap(
+                retirementFreeAddress,
+                retirementFreeSize) != 0) {
+        fprintf(stderr,
+            "LC32: deferred cooperative thread unmap "
+            "failed free=0x%x+0x%x errno=%d\n",
+            retirementFreeAddress,
+            retirementFreeSize, errno);
     }
-    LoadGuestContext(next->saved);
-    THREAD_TRACE(
-        "LC32: switched guest-thread %llu -> %llu pc=0x%x\n",
-        guestCurrentThreadId, next->debuggerId,
-        threadHandle.jit->Regs()[Reg::PC]);
-    guestCurrentThreadId = next->debuggerId;
-    guestThreadRotationRequested = false;
-    guestThreadCurrentRetiring = false;
     return true;
 }
 
 static u64 GuestCurrentThreadSelfId() {
     EnsureGuestThreadRegistry();
-    if (GuestWorkqueueActiveForCurrentThread()) {
+    if (GuestWorkqueueActiveForCurrentThread() &&
+            !NativeGuestWorkqueueIsCurrent()) {
         std::lock_guard<std::recursive_mutex> lock(
             guestWorkqueueMutex);
         return guestWorkqueueThreadSelfId;
@@ -7776,7 +9843,8 @@ static u64 GuestCurrentThreadSelfId() {
 
 static mach_port_t GuestCurrentSyntheticThreadPort() {
     EnsureGuestThreadRegistry();
-    if (GuestWorkqueueActiveForCurrentThread()) {
+    if (GuestWorkqueueActiveForCurrentThread() &&
+            !NativeGuestWorkqueueIsCurrent()) {
         std::lock_guard<std::recursive_mutex> lock(
             guestWorkqueueMutex);
         return guestWorkqueueThreadPort;
@@ -7791,14 +9859,15 @@ static mach_port_t GuestCurrentSyntheticThreadPort() {
 static int GuestThreadSigmask(
         int how, u32 guestSet, u32 guestOldSet) {
     EnsureGuestThreadRegistry();
-    const bool workqueue =
-        GuestWorkqueueActiveForCurrentThread();
-    std::recursive_mutex &mutex = workqueue
+    const bool cooperativeWorkqueue =
+        GuestWorkqueueActiveForCurrentThread() &&
+        !NativeGuestWorkqueueIsCurrent();
+    std::recursive_mutex &mutex = cooperativeWorkqueue
         ? guestWorkqueueMutex
         : guestThreadMutex;
     std::lock_guard<std::recursive_mutex> lock(mutex);
     u32 *mask = nullptr;
-    if (workqueue) {
+    if (cooperativeWorkqueue) {
         mask = &guestWorkqueueSignalMask;
     } else if (GuestThreadContext *current =
             FindGuestThread(CurrentGuestThreadId(), true)) {
@@ -7847,35 +9916,306 @@ static bool NativeGuestThreadIsCurrent() {
         nativeGuestThreadId != 0;
 }
 
+static bool NativeGuestWorkqueueIsCurrent() {
+    return NativeGuestThreadIsCurrent() &&
+        nativeGuestRuntime != nullptr &&
+        nativeGuestRuntime->workqueue;
+}
+
+static void NativeGuestWorkqueueHostBlockEnter() {
+    if (!NativeGuestWorkqueueIsCurrent()) {
+        return;
+    }
+    if (nativeGuestWorkqueueHostBlockDepth++ != 0) {
+        return;
+    }
+    nativeGuestRuntime->workqueueHostBlocked.store(
+        true, std::memory_order_release);
+    nativeGuestRuntime->workqueueCompensationPending.store(
+        true, std::memory_order_release);
+    /*
+     * XNU compensates for a constrained workqueue thread which blocks in the
+     * kernel.  Without that compensation a single requested root worker can
+     * sleep in libnotify while unrelated dispatch work remains queued.
+     */
+    (void)PumpGuestWorkqueue();
+}
+
+static void NativeGuestWorkqueueHostBlockExit() {
+    if (!NativeGuestWorkqueueIsCurrent() ||
+            nativeGuestWorkqueueHostBlockDepth == 0) {
+        return;
+    }
+    if (--nativeGuestWorkqueueHostBlockDepth == 0) {
+        nativeGuestRuntime->workqueueCompensationPending.store(
+            false, std::memory_order_release);
+        nativeGuestRuntime->workqueueHostBlocked.store(
+            false, std::memory_order_release);
+    }
+}
+
+class NativeGuestWorkqueueHostBlockScope {
+public:
+    NativeGuestWorkqueueHostBlockScope() = default;
+    NativeGuestWorkqueueHostBlockScope(
+        const NativeGuestWorkqueueHostBlockScope &) = delete;
+    NativeGuestWorkqueueHostBlockScope &operator=(
+        const NativeGuestWorkqueueHostBlockScope &) = delete;
+
+    void Enter() {
+        if (active || !NativeGuestWorkqueueIsCurrent()) {
+            return;
+        }
+        active = true;
+        NativeGuestWorkqueueHostBlockEnter();
+    }
+
+    ~NativeGuestWorkqueueHostBlockScope() {
+        if (active) {
+            NativeGuestWorkqueueHostBlockExit();
+        }
+    }
+
+private:
+    bool active = false;
+};
+
 static bool GuestWorkqueueActiveForCurrentThread() {
     if (NativeGuestThreadIsCurrent()) {
-        return guestWorkqueueOverlayCurrent;
+        return NativeGuestWorkqueueIsCurrent() ||
+            guestWorkqueueOverlayCurrent;
     }
     std::lock_guard<std::recursive_mutex> lock(
         guestWorkqueueMutex);
     return guestWorkqueueUpcallActive;
 }
 
+/* nativeGuestWaitMutex must be held by the following rwlock helpers. */
+static bool TryHandleNativeGuestRwlockOverlapLocked(
+        u32 address, u32 lgen, u32 rwSequence,
+        u32 *updateResult) {
+    auto overlapIt = std::find_if(
+        nativeGuestRwlockOverlaps.begin(),
+        nativeGuestRwlockOverlaps.end(),
+        [address](const NativeGuestRwlockOverlap &overlap) {
+            return overlap.address == address;
+        });
+    if (overlapIt == nativeGuestRwlockOverlaps.end() ||
+            (rwSequence &
+                GuestPsynchRwSequenceSavedWriterBit) != 0 ||
+            (lgen & GuestPsynchRwWriterBit) != 0 ||
+            (!GuestPsynchSequenceLowerOrEqual(
+                    rwSequence, overlapIt->nextSequence) &&
+             !GuestPsynchSequenceLowerOrEqual(
+                    rwSequence, overlapIt->lastSequence))) {
+        return false;
+    }
+
+    overlapIt->nextSequence += GuestPsynchCountIncrement;
+    *updateResult = GuestPsynchCountIncrement |
+        (overlapIt->nextSequence & GuestPsynchBitMask) |
+        GuestPsynchRwOverlapBit;
+    return true;
+}
+
+static bool TryGrantNativeGuestRwlockLocked(
+        u32 address, u32 *updateResult = nullptr) {
+    auto unlockIt = std::find_if(
+        nativeGuestRwlockUnlocks.begin(),
+        nativeGuestRwlockUnlocks.end(),
+        [address](const NativeGuestRwlockUnlock &unlock) {
+            return unlock.address == address;
+        });
+    if (unlockIt == nativeGuestRwlockUnlocks.end()) {
+        return false;
+    }
+
+    std::vector<std::shared_ptr<NativeGuestWaiter>> candidates;
+    for (const auto &waiter : nativeGuestWaiters) {
+        if (!waiter->signaled &&
+                waiter->kind == GuestThreadWaitKind::Rwlock &&
+                waiter->address == address &&
+                waiter->rwlockWaitType !=
+                    GuestRwlockWaitType::None &&
+                GuestPsynchSequenceLowerOrEqual(
+                    waiter->rwlockSequence, unlockIt->lgen)) {
+            candidates.push_back(waiter);
+        }
+    }
+    if (candidates.size() < unlockIt->expectedWaiters) {
+        return false;
+    }
+
+    nativeGuestRwlockOverlaps.erase(std::remove_if(
+        nativeGuestRwlockOverlaps.begin(),
+        nativeGuestRwlockOverlaps.end(),
+        [address](const NativeGuestRwlockOverlap &overlap) {
+            return overlap.address == address;
+        }), nativeGuestRwlockOverlaps.end());
+
+    std::shared_ptr<NativeGuestWaiter> lowest =
+        candidates.front();
+    std::shared_ptr<NativeGuestWaiter> lowestWriter;
+    for (const auto &waiter : candidates) {
+        if (GuestPsynchSequenceLower(
+                waiter->rwlockSequence,
+                lowest->rwlockSequence)) {
+            lowest = waiter;
+        }
+        if (waiter->rwlockWaitType ==
+                    GuestRwlockWaitType::Write &&
+                (!lowestWriter || GuestPsynchSequenceLower(
+                    waiter->rwlockSequence,
+                    lowestWriter->rwlockSequence))) {
+            lowestWriter = waiter;
+        }
+    }
+
+    std::vector<std::shared_ptr<NativeGuestWaiter>> granted;
+    if (lowest->rwlockWaitType ==
+            GuestRwlockWaitType::Write) {
+        granted.push_back(lowest);
+    } else {
+        for (const auto &waiter : candidates) {
+            if (waiter->rwlockWaitType !=
+                    GuestRwlockWaitType::Read) {
+                continue;
+            }
+            if (!lowestWriter || GuestPsynchSequenceLower(
+                    waiter->rwlockSequence,
+                    lowestWriter->rwlockSequence)) {
+                granted.push_back(waiter);
+            }
+        }
+    }
+
+    const bool writerGrant = granted.size() == 1 &&
+        granted.front()->rwlockWaitType ==
+            GuestRwlockWaitType::Write;
+    const bool writerRemains = std::any_of(
+        nativeGuestWaiters.begin(), nativeGuestWaiters.end(),
+        [&granted, address](
+                const std::shared_ptr<NativeGuestWaiter> &waiter) {
+            return !waiter->signaled &&
+                waiter->kind == GuestThreadWaitKind::Rwlock &&
+                waiter->address == address &&
+                waiter->rwlockWaitType ==
+                    GuestRwlockWaitType::Write &&
+                std::find(granted.begin(), granted.end(), waiter) ==
+                    granted.end();
+        });
+    u32 update = writerGrant
+        ? GuestPsynchCountIncrement |
+            GuestPsynchRwKernelBit |
+            GuestPsynchRwExclusiveBit
+        : static_cast<u32>(granted.size()) *
+            GuestPsynchCountIncrement;
+    if (writerRemains) {
+        update |= GuestPsynchRwKernelBit |
+            GuestPsynchRwWriterBit;
+    }
+    if (!writerGrant && !writerRemains) {
+        nativeGuestRwlockOverlaps.push_back({
+            .address = address,
+            .lastSequence = unlockIt->rwSequence,
+            .nextSequence =
+                (unlockIt->rwSequence & GuestPsynchCountMask) +
+                update,
+        });
+    }
+    for (const auto &waiter : granted) {
+        waiter->wakeResult = update;
+        waiter->signaled = true;
+        waiter->condition.notify_one();
+    }
+    if (updateResult != nullptr) {
+        *updateResult = update;
+    }
+    nativeGuestRwlockUnlocks.erase(unlockIt);
+    return true;
+}
+
+static u32 PostNativeGuestRwlockUnlockLocked(
+        u32 address, u32 lgen, u32 ugen, u32 rwSequence) {
+    const size_t expected = GuestPsynchSequenceDistance(
+        lgen, ugen);
+    if (expected == 0) {
+        return 0;
+    }
+
+    auto unlockIt = std::find_if(
+        nativeGuestRwlockUnlocks.begin(),
+        nativeGuestRwlockUnlocks.end(),
+        [address](const NativeGuestRwlockUnlock &unlock) {
+            return unlock.address == address;
+        });
+    const NativeGuestRwlockUnlock unlock = {
+        .address = address,
+        .lgen = lgen,
+        .rwSequence = rwSequence,
+        .expectedWaiters = expected,
+    };
+    if (unlockIt == nativeGuestRwlockUnlocks.end()) {
+        nativeGuestRwlockUnlocks.push_back(unlock);
+    } else {
+        *unlockIt = unlock;
+    }
+
+    u32 update = 0;
+    if (TryGrantNativeGuestRwlockLocked(address, &update)) {
+        return update;
+    }
+    /* Apple records the missing waiter generations as a prepost. */
+    return lgen;
+}
+
 static u32 WaitNativeGuestThread(
         GuestThreadWaitKind kind, u32 address,
-        u32 wakeResult) {
+        u32 wakeResult,
+        GuestRwlockWaitType rwlockWaitType =
+            GuestRwlockWaitType::None,
+        u32 rwlockSequence = 0,
+        u32 rwlockStateSequence = 0) {
+    NativeGuestWorkqueueHostBlockScope workqueueBlock;
     auto waiter = std::make_shared<NativeGuestWaiter>();
     waiter->kind = kind;
     waiter->address = address;
     waiter->threadPort = GuestCurrentSyntheticThreadPort();
     waiter->wakeResult = wakeResult;
+    waiter->rwlockWaitType = rwlockWaitType;
+    waiter->rwlockSequence = rwlockSequence;
 
     std::unique_lock<std::mutex> lock(nativeGuestWaitMutex);
-    if (ConsumeGuestPsynchPrepost(kind, address)) {
+    if (kind == GuestThreadWaitKind::Rwlock &&
+            rwlockWaitType == GuestRwlockWaitType::Read) {
+        u32 overlapUpdate = 0;
+        if (TryHandleNativeGuestRwlockOverlapLocked(
+                address, rwlockSequence,
+                rwlockStateSequence, &overlapUpdate)) {
+            return return_with_carry_direct(
+                static_cast<int>(overlapUpdate), false);
+        }
+    }
+    if (kind != GuestThreadWaitKind::Rwlock &&
+            ConsumeGuestPsynchPrepost(kind, address)) {
         return return_with_carry_direct(
             static_cast<int>(wakeResult), false);
     }
     waiter->sequence = guestNextWaitSequence.fetch_add(
         1, std::memory_order_relaxed);
     nativeGuestWaiters.push_back(waiter);
+    if (kind == GuestThreadWaitKind::Rwlock) {
+        (void)TryGrantNativeGuestRwlockLocked(address);
+    }
+    if (!waiter->signaled) {
+        lock.unlock();
+        workqueueBlock.Enter();
+        lock.lock();
+    }
     while (!waiter->signaled) {
         waiter->condition.wait(lock, [&] {
             return waiter->signaled ||
+                NativeThreadStatePauseRequestedForCurrent() ||
                 debuggerAllStopRequested.load(
                     std::memory_order_acquire) ||
                 nativeShutdownRequested.load(
@@ -7887,6 +10227,7 @@ static u32 WaitNativeGuestThread(
             break;
         }
         lock.unlock();
+        (void)NativeThreadStatePauseHostWaitIfNeeded();
         const bool paused =
             NativeDebuggerPauseHostWaitIfNeeded();
         lock.lock();
@@ -7954,8 +10295,7 @@ static u32 GuestPsynchMutexWait(
         u32 mutex, u32 generation) {
     const u32 wakeResult =
         (generation & ~0xffu) | 0x03u;
-    if (NativeGuestThreadIsCurrent() &&
-            !GuestWorkqueueActiveForCurrentThread()) {
+    if (NativeGuestThreadIsCurrent()) {
         return WaitNativeGuestThread(
             GuestThreadWaitKind::Mutex, mutex, wakeResult);
     }
@@ -8004,8 +10344,7 @@ static u32 GuestPsynchConditionWait(
                 GuestThreadWaitKind::Mutex, mutex, false);
         }
     }
-    if (NativeGuestThreadIsCurrent() &&
-            !GuestWorkqueueActiveForCurrentThread()) {
+    if (NativeGuestThreadIsCurrent()) {
         return WaitNativeGuestThread(
             GuestThreadWaitKind::Condition, condition, 0x100);
     }
@@ -8057,28 +10396,45 @@ static u32 GuestPsynchConditionSignal(
         static_cast<int>(updateBits), false);
 }
 
-static u32 GuestPsynchRwWait(u32 rwlock) {
-    if (NativeGuestThreadIsCurrent() &&
-            !GuestWorkqueueActiveForCurrentThread()) {
+static u32 GuestPsynchRwWait(
+        u32 rwlock, u32 lgen, u32 rwSequence,
+        bool write) {
+    const GuestRwlockWaitType waitType = write
+        ? GuestRwlockWaitType::Write
+        : GuestRwlockWaitType::Read;
+    if (NativeGuestThreadIsCurrent()) {
         return WaitNativeGuestThread(
-            GuestThreadWaitKind::Rwlock, rwlock, 0);
+            GuestThreadWaitKind::Rwlock, rwlock, 0,
+            waitType, lgen, rwSequence);
     }
     if (ParkCurrentGuestThread(
-            GuestThreadWaitKind::Rwlock, rwlock, 0)) {
+            GuestThreadWaitKind::Rwlock, rwlock, 0,
+            waitType, lgen)) {
         return return_with_carry_direct(0, false);
     }
     return return_with_carry_direct(EINTR, true);
 }
 
-static u32 GuestPsynchRwUnlock(u32 rwlock) {
+static u32 GuestPsynchRwUnlock(
+        u32 rwlock, u32 lgen, u32 ugen,
+        u32 rwSequence) {
     if (NativeGuestThreadIsCurrent()) {
-        (void)WakeNativeGuestThreads(
-            GuestThreadWaitKind::Rwlock, rwlock, true);
-    } else {
-        (void)WakeGuestThreads(
-            GuestThreadWaitKind::Rwlock, rwlock, true);
+        std::lock_guard<std::mutex> lock(nativeGuestWaitMutex);
+        return return_with_carry_direct(
+            static_cast<int>(PostNativeGuestRwlockUnlockLocked(
+                rwlock, lgen, ugen, rwSequence)), false);
     }
-    return return_with_carry_direct(0, false);
+    size_t woken = 0;
+    const u32 update = GrantCooperativeGuestRwlockThreads(
+        rwlock, &woken);
+    if (woken == 0) {
+        /* Cooperative threads cannot race into their wait SVC while another
+         * guest thread is executing, so no rwlock prepost is necessary. */
+        return return_with_carry_direct(
+            static_cast<int>(lgen), false);
+    }
+    return return_with_carry_direct(
+        static_cast<int>(update), false);
 }
 
 namespace {
@@ -8186,8 +10542,8 @@ static u32 GuestUlockWait(
         return GuestUlockReturn(EINVAL, flags);
     }
 
-    if (NativeGuestThreadIsCurrent() &&
-            !GuestWorkqueueActiveForCurrentThread()) {
+    if (NativeGuestThreadIsCurrent()) {
+        NativeGuestWorkqueueHostBlockScope workqueueBlock;
         auto waiter = std::make_shared<NativeGuestWaiter>();
         waiter->kind = GuestThreadWaitKind::Ulock;
         waiter->address = address;
@@ -8221,6 +10577,9 @@ static u32 GuestUlockWait(
         waiter->sequence = guestNextWaitSequence.fetch_add(
             1, std::memory_order_relaxed);
         nativeGuestWaiters.push_back(waiter);
+        lock.unlock();
+        workqueueBlock.Enter();
+        lock.lock();
         bool woke = true;
         auto deadline = std::chrono::steady_clock::now() +
             std::chrono::microseconds(timeout);
@@ -8228,6 +10587,7 @@ static u32 GuestUlockWait(
             if (timeout == 0) {
                 waiter->condition.wait(lock, [&] {
                     return waiter->signaled ||
+                        NativeThreadStatePauseRequestedForCurrent() ||
                         debuggerAllStopRequested.load(
                             std::memory_order_acquire) ||
                         nativeShutdownRequested.load(
@@ -8239,6 +10599,7 @@ static u32 GuestUlockWait(
                 woke = waiter->condition.wait_until(
                     lock, deadline, [&] {
                         return waiter->signaled ||
+                            NativeThreadStatePauseRequestedForCurrent() ||
                             debuggerAllStopRequested.load(
                                 std::memory_order_acquire) ||
                             nativeShutdownRequested.load(
@@ -8257,6 +10618,7 @@ static u32 GuestUlockWait(
             const auto pauseStart =
                 std::chrono::steady_clock::now();
             lock.unlock();
+            (void)NativeThreadStatePauseHostWaitIfNeeded();
             const bool paused =
                 NativeDebuggerPauseHostWaitIfNeeded();
             lock.lock();
@@ -8410,18 +10772,143 @@ static bool HandleGuestContextTransition() {
     return HandleGuestThreadTransition();
 }
 
-static bool PumpGuestWorkqueue() {
+static GuestWorkqueuePumpResult PumpGuestWorkqueue() {
+    if (NativeGuestThreadsEnabled()) {
+        std::lock_guard<std::mutex> pumpLock(
+            guestNativeWorkqueuePumpMutex);
+        bool startedWorker = false;
+        for (;;) {
+            size_t activeWorkers = 0;
+            size_t blockedWorkers = 0;
+            u32 compensationPriority = 0;
+            gdb_thread_id_t compensationThreadId = 0;
+            {
+                std::lock_guard<std::recursive_mutex> threadLock(
+                    guestThreadMutex);
+                for (const GuestThreadContext &thread : guestThreads) {
+                    if (!thread.alive || !thread.workqueue ||
+                            thread.nativeJit == nullptr) {
+                        continue;
+                    }
+                    ++activeWorkers;
+                    if (thread.nativeJit->workqueueHostBlocked.load(
+                            std::memory_order_acquire)) {
+                        ++blockedWorkers;
+                        if (compensationThreadId == 0 &&
+                                thread.nativeJit->
+                                    workqueueCompensationPending.load(
+                                        std::memory_order_acquire)) {
+                            compensationPriority =
+                                thread.nativeJit->workqueuePriority;
+                            compensationThreadId = thread.debuggerId;
+                        }
+                    }
+                }
+            }
+            if (activeWorkers >= MaxNativeGuestWorkqueueWorkers) {
+                break;
+            }
+
+            GuestWorkqueueJob job;
+            bool haveJob = false;
+            bool retryJobOnFailure = false;
+            {
+                std::lock_guard<std::recursive_mutex> workqueueLock(
+                    guestWorkqueueMutex);
+                if (!guest_workqueue_opened) {
+                    break;
+                }
+                if (!guestNativeWorkqueuePendingJobs.empty()) {
+                    job = std::move(
+                        guestNativeWorkqueuePendingJobs.front());
+                    guestNativeWorkqueuePendingJobs.pop_front();
+                    haveJob = true;
+                    retryJobOnFailure = true;
+                } else {
+                    while (!guestWorkqueueRequests.empty() &&
+                            guestWorkqueueRequests.front().remaining <= 0) {
+                        guestWorkqueueRequests.pop_front();
+                    }
+                    if (!guestWorkqueueRequests.empty()) {
+                        GuestWorkqueueRequest &request =
+                            guestWorkqueueRequests.front();
+                        job.priority = request.priority;
+                        --request.remaining;
+                        if (request.remaining <= 0) {
+                            guestWorkqueueRequests.pop_front();
+                        }
+                        haveJob = true;
+                        retryJobOnFailure = true;
+                    } else {
+                        GuestWorkqueueDelivery delivery;
+                        if (NextGuestWorkqueueEvent(delivery)) {
+                            job.priority = delivery.eventManager
+                                ? guestWorkqueueEventManagerPriority
+                                : static_cast<u32>(delivery.event.qos);
+                            job.delivery = std::move(delivery);
+                            job.hasDelivery = true;
+                            haveJob = true;
+                            retryJobOnFailure = true;
+                        } else if (activeWorkers != 0 &&
+                                blockedWorkers == activeWorkers &&
+                                compensationThreadId != 0) {
+                            /* XNU's workqueue scheduler compensates when all
+                             * constrained workers are asleep in the kernel.
+                             * Enter another root worker even though dispatch
+                             * requested only the worker which is now blocked. */
+                            job.priority = compensationPriority;
+                            haveJob = true;
+                        }
+                    }
+                }
+            }
+            if (!haveJob) {
+                break;
+            }
+
+            if (!StartNativeGuestWorkqueueWorker(job)) {
+                /* A direct-kevent job may already own a Mach message removed
+                 * from its receive right. Keep the complete immutable job in
+                 * userspace so a transient JIT/thread failure loses nothing. */
+                if (retryJobOnFailure) {
+                    std::lock_guard<std::recursive_mutex> workqueueLock(
+                        guestWorkqueueMutex);
+                    guestNativeWorkqueuePendingJobs.push_front(
+                        std::move(job));
+                }
+                break;
+            }
+            if (compensationThreadId != 0) {
+                std::lock_guard<std::recursive_mutex> threadLock(
+                    guestThreadMutex);
+                if (GuestThreadContext *blockedThread =
+                        FindGuestThread(compensationThreadId, true);
+                        blockedThread != nullptr &&
+                        blockedThread->workqueue &&
+                        blockedThread->nativeJit != nullptr) {
+                    blockedThread->nativeJit->
+                        workqueueCompensationPending.store(
+                            false, std::memory_order_release);
+                }
+            }
+            startedWorker = true;
+        }
+        return startedWorker
+            ? GuestWorkqueuePumpResult::NativeWorkerStarted
+            : GuestWorkqueuePumpResult::None;
+    }
+
     std::lock_guard<std::recursive_mutex> lock(
         guestWorkqueueMutex);
     if (guestWorkqueueUpcallActive || !guest_workqueue_opened) {
-        return false;
+        return GuestWorkqueuePumpResult::None;
     }
     /*
      * Allocate the worker before consuming a request or Mach message.  A
      * setup failure must leave the work available for a later attempt.
      */
     if (!EnsureGuestWorkqueueWorker()) {
-        return false;
+        return GuestWorkqueuePumpResult::None;
     }
 
     /*
@@ -8442,21 +10929,23 @@ static bool PumpGuestWorkqueue() {
             "LC32: pumping root worker priority=0x%x remaining=%d\n",
             priority, request.remaining - 1);
         if (!PrepareGuestWorkqueueUpcall(nullptr, priority)) {
-            return false;
+            return GuestWorkqueuePumpResult::None;
         }
         --request.remaining;
-        return true;
+        return GuestWorkqueuePumpResult::CooperativeTransition;
     }
 
     GuestWorkqueueDelivery delivery;
     if (!NextGuestWorkqueueEvent(delivery)) {
-        return false;
+        return GuestWorkqueuePumpResult::None;
     }
     WORKQUEUE_TRACE(
         "LC32: pumping event ident=0x%llx filter=%d data=0x%llx\n",
         delivery.event.ident, delivery.event.filter,
         static_cast<uint64_t>(delivery.event.data));
-    return PrepareGuestWorkqueueUpcall(&delivery, 0);
+    return PrepareGuestWorkqueueUpcall(&delivery, 0)
+        ? GuestWorkqueuePumpResult::CooperativeTransition
+        : GuestWorkqueuePumpResult::None;
 }
 
 static bool HandleGuestWorkqueueTransition() {
@@ -8498,7 +10987,8 @@ static bool HandleGuestWorkqueueTransition() {
         lock.unlock();
         NativeDebuggerTransferStopOwner(
             2, 1);
-        if (PumpGuestWorkqueue()) {
+        if (PumpGuestWorkqueue() ==
+                GuestWorkqueuePumpResult::CooperativeTransition) {
             jit->HaltExecution(LC32HaltReasonWorkqueue);
         }
         return true;
@@ -8579,9 +11069,19 @@ CurrentGuestVmEpochParticipant() {
 
 static Dynarmic::HaltReason RunGuestJit(
         Dynarmic::A32::Jit *jit) {
-    GuestVmEpochGuard guard(
-        CurrentGuestVmEpochParticipant());
-    return jit->Run();
+    for (;;) {
+        Dynarmic::HaltReason reason;
+        {
+            GuestVmEpochGuard guard(
+                CurrentGuestVmEpochParticipant());
+            reason = jit->Run();
+        }
+        if (!!reason ||
+                NativeThreadStatePauseRequestedForCurrent()) {
+            return reason;
+        }
+        /* Cycle-budget expiration is an internal scheduling boundary. */
+    }
 }
 
 static Dynarmic::HaltReason StepGuestJit(
@@ -8628,6 +11128,8 @@ bool Dynarmic_nativeInitialize() {
         false, std::memory_order_release);
     guestProcessExitCode.store(
         0, std::memory_order_release);
+    ResetGuestCallbackExecutor();
+    ResetNativeThreadStateSlot(mainNativeThreadState);
 
     sharedHandle.memory = kh_init(memory);
     if(sharedHandle.memory == NULL) {
@@ -8729,6 +11231,7 @@ void Dynarmic_nativeDestroy() {
          */
         nativeShutdownRequested.store(
             true, std::memory_order_release);
+        StopGuestCallbackExecutor();
         HaltAllGuestJits(LC32HaltReasonExit);
         InterruptDebuggerMachCalls();
         NotifyNativeDebuggerWaiters();
@@ -8758,6 +11261,7 @@ void Dynarmic_nativeDestroy() {
         nativeShutdownRequested.store(
             true, std::memory_order_release);
     }
+    StopGuestCallbackExecutor();
 
     {
         std::lock_guard<std::mutex> lock(
@@ -8876,11 +11380,18 @@ void Dynarmic_nativeDestroy() {
         std::lock_guard<std::mutex> lock(
             nativeGuestWaitMutex);
         nativeGuestWaiters.clear();
+        nativeGuestRwlockUnlocks.clear();
+        nativeGuestRwlockOverlaps.clear();
     }
     {
         std::lock_guard<std::mutex> lock(
             guestPsynchPrepostMutex);
         guestPsynchPreposts.clear();
+    }
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestWorkqueueMutex);
+        guestNativeWorkqueuePendingJobs.clear();
     }
 
     guestDebuggerEnabled.store(
@@ -8898,6 +11409,7 @@ void Dynarmic_nativeDestroy() {
         nativeDebugger.mainExecuting = false;
     }
     nativeGuestThreadId = 0;
+    nativeGuestWorkqueueHostBlockDepth = 0;
     nativeShutdownRequested.store(
         false, std::memory_order_release);
     guestProcessExitRequested.store(
@@ -8914,9 +11426,8 @@ void Dynarmic_nativeDestroy() {
     nativeLifecycleCondition.notify_all();
 }
 
-int Dynarmic_munmap(u64 address, u64 size) {
-    std::unique_lock<std::recursive_mutex> lock(
-        guestVmMutex);
+static int ValidateGuestMunmapRangeLocked(
+        u64 address, u64 size) {
     if(address & DYN_PAGE_MASK) {
         errno = EINVAL;
         return -1;
@@ -8950,6 +11461,24 @@ int Dynarmic_munmap(u64 address, u64 size) {
             return -1;
         }
     }
+    return 0;
+}
+
+static int ValidateGuestMunmapRange(
+        u64 address, u64 size) {
+    std::lock_guard<std::recursive_mutex> lock(
+        guestVmMutex);
+    return ValidateGuestMunmapRangeLocked(address, size);
+}
+
+int Dynarmic_munmap(u64 address, u64 size) {
+    std::unique_lock<std::recursive_mutex> lock(
+        guestVmMutex);
+    if (ValidateGuestMunmapRangeLocked(address, size) != 0) {
+        return -1;
+    }
+    khash_t(memory) *memory = sharedHandle.memory;
+    const u64 end = address + size;
 
     for(u64 vaddr = address; vaddr < end;
             vaddr += DYN_PAGE_SIZE) {
@@ -9734,6 +12263,172 @@ static int DebuggerWritePhysicalMemory(u64 address,
     return 0;
 }
 
+bool Dynarmic_guest_tracepoint_set(u64 address) {
+    if (address > UINT32_MAX) {
+        return false;
+    }
+    const u32 guestAddress = static_cast<u32>(address) & ~1u;
+    constexpr size_t kind = sizeof(uint16_t);
+
+    std::lock_guard<std::mutex> lock(
+        guestSoftwareTracepointsMutex);
+    for (const GuestSoftwareTracepoint &tracepoint :
+         guestSoftwareTracepoints) {
+        if (tracepoint.address == guestAddress) {
+            return true;
+        }
+    }
+    for (const DebuggerSoftwareBreakpoint &breakpoint :
+         debuggerSoftwareBreakpoints) {
+        if (DebuggerRangesOverlap(
+                guestAddress, kind,
+                breakpoint.address, breakpoint.kind)) {
+            return false;
+        }
+    }
+
+    GuestSoftwareTracepoint tracepoint = {
+        .address = guestAddress,
+        .original = {},
+        .fired = false,
+    };
+    if (Dynarmic_mem_1read(
+            guestAddress, kind,
+            reinterpret_cast<char *>(
+                tracepoint.original.data())) != 0) {
+        return false;
+    }
+
+    const uint16_t trap = 0xBE00;
+    guestSoftwareTracepoints.push_back(tracepoint);
+    if (DebuggerWritePhysicalMemory(
+            guestAddress, kind,
+            reinterpret_cast<const char *>(&trap)) != 0) {
+        guestSoftwareTracepoints.pop_back();
+        return false;
+    }
+    InvalidateAllGuestJits(guestAddress, kind);
+    return true;
+}
+
+static bool ConsumeGuestSoftwareTracepoint(
+        u32 pc, Dynarmic::A32::Jit *cpu) {
+    const u32 guestAddress = pc & ~1u;
+    GuestSoftwareTracepoint tracepoint = {};
+    {
+        std::lock_guard<std::mutex> lock(
+            guestSoftwareTracepointsMutex);
+        auto it = std::find_if(
+            guestSoftwareTracepoints.begin(),
+            guestSoftwareTracepoints.end(),
+            [guestAddress](const GuestSoftwareTracepoint &candidate) {
+                return candidate.address == guestAddress;
+            });
+        if (it == guestSoftwareTracepoints.end()) {
+            return false;
+        }
+        if (!it->fired) {
+            if (DebuggerWritePhysicalMemory(
+                    guestAddress, it->original.size(),
+                    reinterpret_cast<const char *>(
+                        it->original.data())) != 0) {
+                fprintf(stderr,
+                    "LC32 guest tracepoint 0x%08x: failed to restore "
+                    "the original instruction\n",
+                    guestAddress);
+                return false;
+            }
+            it->fired = true;
+        }
+        tracepoint = *it;
+    }
+
+    // Only the first JIT to arrive owns the trace event.  Keep the fired
+    // record as a tombstone: another native guest JIT may already have
+    // translated the old BKPT and arrive after the physical bytes were
+    // restored but before it processes its queued invalidation.
+    static std::mutex loggedTracepointsMutex;
+    static std::unordered_set<u32> loggedTracepoints;
+    bool shouldLog = false;
+    {
+        std::lock_guard<std::mutex> lock(loggedTracepointsMutex);
+        shouldLog = loggedTracepoints.insert(guestAddress).second;
+    }
+    if (shouldLog) {
+        const auto &registers = cpu->Regs();
+        fprintf(stderr,
+            "LC32 guest tracepoint 0x%08x "
+            "r0=%08x r1=%08x r2=%08x r3=%08x "
+            "sp=%08x lr=%08x cpsr=%08x host_thread=%u\n",
+            guestAddress,
+            registers[Reg::R0], registers[Reg::R1],
+            registers[Reg::R2], registers[Reg::R3],
+            registers[Reg::SP], registers[Reg::LR], cpu->Cpsr(),
+            pthread_mach_thread_np(pthread_self()));
+        std::array<u32, 10> r0Words = {};
+        if (registers[Reg::R0] != 0 &&
+                Dynarmic_mem_1read(
+                    registers[Reg::R0], sizeof(r0Words),
+                    reinterpret_cast<char *>(r0Words.data())) == 0) {
+            fprintf(stderr,
+                "LC32 guest tracepoint 0x%08x r0_words="
+                "%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
+                guestAddress,
+                r0Words[0], r0Words[1], r0Words[2], r0Words[3],
+                r0Words[4], r0Words[5], r0Words[6], r0Words[7],
+                r0Words[8], r0Words[9]);
+        }
+        std::array<u32, 10> r2Words = {};
+        if (registers[Reg::R2] != 0 &&
+                Dynarmic_mem_1read(
+                    registers[Reg::R2], sizeof(r2Words),
+                    reinterpret_cast<char *>(r2Words.data())) == 0) {
+            fprintf(stderr,
+                "LC32 guest tracepoint 0x%08x r2_words="
+                "%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
+                guestAddress,
+                r2Words[0], r2Words[1], r2Words[2], r2Words[3],
+                r2Words[4], r2Words[5], r2Words[6], r2Words[7],
+                r2Words[8], r2Words[9]);
+        }
+        std::array<u32, 6> r3Words = {};
+        if (registers[Reg::R3] != 0 &&
+                Dynarmic_mem_1read(
+                    registers[Reg::R3], sizeof(r3Words),
+                    reinterpret_cast<char *>(r3Words.data())) == 0) {
+            fprintf(stderr,
+                "LC32 guest tracepoint 0x%08x r3_words="
+                "%08x,%08x,%08x,%08x,%08x,%08x\n",
+                guestAddress,
+                r3Words[0], r3Words[1], r3Words[2],
+                r3Words[3], r3Words[4], r3Words[5]);
+        }
+        std::array<u32, 12> stackWords = {};
+        if (registers[Reg::SP] != 0 &&
+                Dynarmic_mem_1read(
+                    registers[Reg::SP], sizeof(stackWords),
+                    reinterpret_cast<char *>(stackWords.data())) == 0) {
+            fprintf(stderr,
+                "LC32 guest tracepoint 0x%08x stack_words="
+                "%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,"
+                "%08x,%08x,%08x,%08x\n",
+                guestAddress,
+                stackWords[0], stackWords[1], stackWords[2],
+                stackWords[3], stackWords[4], stackWords[5],
+                stackWords[6], stackWords[7], stackWords[8],
+                stackWords[9], stackWords[10], stackWords[11]);
+        }
+    }
+
+    // Dynarmic reports the PC after executing BKPT.  Replay the instruction
+    // that the tracepoint temporarily replaced, and force every guest JIT to
+    // discard translations that contain the trap.
+    cpu->Regs()[Reg::PC] = guestAddress;
+    InvalidateAllGuestJits(
+        guestAddress, tracepoint.original.size());
+    return true;
+}
+
 /*
  * RSP memory reads describe the logical inferior memory.  Software
  * breakpoints are a debugger implementation detail, so overlay the saved
@@ -9867,6 +12562,20 @@ bool Dynarmic_debugger_set_breakpoint(u64 address, size_t kind) {
         (kind == sizeof(uint32_t) &&
          (guestAddress & (sizeof(uint32_t) - 1)) != 0)) {
         return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(
+            guestSoftwareTracepointsMutex);
+        for (const GuestSoftwareTracepoint &tracepoint :
+             guestSoftwareTracepoints) {
+            if (DebuggerRangesOverlap(
+                    guestAddress, kind,
+                    tracepoint.address,
+                    tracepoint.original.size())) {
+                return false;
+            }
+        }
     }
 
     for (const DebuggerSoftwareBreakpoint &breakpoint :
@@ -10393,6 +13102,9 @@ Dynarmic::HaltReason Dynarmic_emu_1start(u32 pc) {
       cpu->Regs()[15] = (u32) (pc & ~1);
       for (;;) {
         reason = RunGuestJit(cpu);
+        if (ConsumeNativeThreadStateHalt(reason) && !reason) {
+          continue;
+        }
         if (Dynarmic::Has(
                 reason, Dynarmic::HaltReason::CacheInvalidation)) {
           reason = reason &
@@ -10402,10 +13114,21 @@ Dynarmic::HaltReason Dynarmic_emu_1start(u32 pc) {
           }
         }
         if (Dynarmic::Has(reason, LC32HaltReasonWorkqueue)) {
-          if (!HandleGuestContextTransition()) {
+          const bool transitionPending =
+              GuestContextTransitionPending();
+          if (transitionPending &&
+                  !HandleGuestContextTransition()) {
             reason = LC32HaltReasonTrap;
             break;
           }
+          /*
+           * HaltExecution is level-triggered. A native guest worker can
+           * prepare a workqueue upcall and halt the main JIT while the main
+           * thread is inside an SVC callback. ServiceGuestSVC installs that
+           * upcall before Run() observes the halt, leaving a stale
+           * Workqueue bit behind. It is only an error when a transition is
+           * still pending but cannot be applied.
+           */
           const Dynarmic::HaltReason remaining =
               reason & ~LC32HaltReasonWorkqueue;
           if (!!remaining) {
@@ -10418,11 +13141,17 @@ Dynarmic::HaltReason Dynarmic_emu_1start(u32 pc) {
           break;
         }
         ServiceGuestSVC();
+        if (nativeGuestThreadRetiring) {
+          reason = LC32HaltReasonExit;
+          break;
+        }
       }
     } else {
       return LC32HaltReasonTrap;
     }
-  UpdateGuestStopSignalForHalt(reason);
+  if (!nativeGuestThreadRetiring) {
+    UpdateGuestStopSignalForHalt(reason);
+  }
   return reason;
 }
 
@@ -10443,6 +13172,9 @@ Dynarmic::HaltReason Dynarmic_emu_1resume() {
     Dynarmic::HaltReason reason;
     if (guestDeferredSVC) {
         ServiceDeferredGuestSVC();
+        if (nativeGuestThreadRetiring) {
+            return LC32HaltReasonExit;
+        }
         if (!NativeDebuggerMainContextMayRun()) {
             reason = Dynarmic::HaltReason::Step;
             UpdateGuestStopSignalForHalt(reason);
@@ -10451,6 +13183,9 @@ Dynarmic::HaltReason Dynarmic_emu_1resume() {
     }
     for (;;) {
         reason = RunGuestJit(jit);
+        if (ConsumeNativeThreadStateHalt(reason) && !reason) {
+            continue;
+        }
         if (Dynarmic::Has(
                 reason, Dynarmic::HaltReason::CacheInvalidation)) {
             reason = reason &
@@ -10460,7 +13195,10 @@ Dynarmic::HaltReason Dynarmic_emu_1resume() {
             }
         }
         if (Dynarmic::Has(reason, LC32HaltReasonWorkqueue)) {
-            if (!HandleGuestContextTransition()) {
+            const bool transitionPending =
+                GuestContextTransitionPending();
+            if (transitionPending &&
+                    !HandleGuestContextTransition()) {
                 reason = LC32HaltReasonTrap;
                 break;
             }
@@ -10487,12 +13225,18 @@ Dynarmic::HaltReason Dynarmic_emu_1resume() {
             break;
         }
         ServiceDeferredGuestSVC();
+        if (nativeGuestThreadRetiring) {
+            reason = LC32HaltReasonExit;
+            break;
+        }
         if (!NativeDebuggerMainContextMayRun()) {
             reason = Dynarmic::HaltReason::Step;
             break;
         }
     }
-    UpdateGuestStopSignalForHalt(reason);
+    if (!nativeGuestThreadRetiring) {
+        UpdateGuestStopSignalForHalt(reason);
+    }
     return reason;
 }
 
@@ -10510,15 +13254,22 @@ Dynarmic::HaltReason Dynarmic_emu_1step() {
     guestSingleStepping = true;
     if (guestDeferredSVC) {
         ServiceDeferredGuestSVC();
-        reason = Dynarmic::HaltReason::Step;
+        reason = nativeGuestThreadRetiring
+            ? LC32HaltReasonExit
+            : Dynarmic::HaltReason::Step;
         guestSingleStepping = false;
-        UpdateGuestStopSignalForHalt(reason);
+        if (!nativeGuestThreadRetiring) {
+            UpdateGuestStopSignalForHalt(reason);
+        }
         return reason;
     }
     for (;;) {
         reason = drainInternalWorker
             ? RunGuestJit(jit)
             : StepGuestJit(jit);
+        if (ConsumeNativeThreadStateHalt(reason) && !reason) {
+            continue;
+        }
         if (Dynarmic::Has(
                 reason, Dynarmic::HaltReason::CacheInvalidation)) {
             reason = reason &
@@ -10531,7 +13282,10 @@ Dynarmic::HaltReason Dynarmic_emu_1step() {
             const bool wasWorkerActive = guestWorkqueueUpcallActive;
             const bool hadGuestThreadTransition =
                 GuestThreadTransitionPending();
-            if (!HandleGuestContextTransition()) {
+            const bool transitionPending =
+                GuestContextTransitionPending();
+            if (transitionPending &&
+                    !HandleGuestContextTransition()) {
                 reason = LC32HaltReasonTrap;
                 break;
             }
@@ -10541,6 +13295,9 @@ Dynarmic::HaltReason Dynarmic_emu_1step() {
             if (!!remaining) {
                 reason = remaining;
                 break;
+            }
+            if (!transitionPending) {
+                continue;
             }
             if (hadGuestThreadTransition &&
                     !wasWorkerActive &&
@@ -10575,13 +13332,19 @@ Dynarmic::HaltReason Dynarmic_emu_1step() {
             break;
         }
         ServiceDeferredGuestSVC();
+        if (nativeGuestThreadRetiring) {
+            reason = LC32HaltReasonExit;
+            break;
+        }
         if (!NativeDebuggerMainContextMayRun()) {
             reason = Dynarmic::HaltReason::Step;
             break;
         }
     }
     guestSingleStepping = false;
-    UpdateGuestStopSignalForHalt(reason);
+    if (!nativeGuestThreadRetiring) {
+        UpdateGuestStopSignalForHalt(reason);
+    }
     return reason;
 }
 
@@ -10930,6 +13693,7 @@ void Dynarmic_emu_1set_1debugger_1enabled(bool enabled) {
         guestDebuggerEnabled.store(
             true, std::memory_order_release);
         nativeDebugger.condition.notify_all();
+        NotifyGuestCallbackExecutorWaiter();
         return;
     }
     guestDebuggerEnabled.store(
@@ -11076,6 +13840,7 @@ void Dynarmic_context_1restore(t_context32 ctx) {
 
     DynarmicCallbacks32 *cb = threadHandle.cb;
     cb->cp15.get()->uro = ctx->uro;
+    NativeGuestCallbackRegisterAccessEnd();
 }
 
 /*
@@ -11084,6 +13849,7 @@ void Dynarmic_context_1restore(t_context32 ctx) {
  * Signature: (JJ)V
  */
 void Dynarmic_context_1save(t_context32 ctx) {
+    NativeGuestCallbackRegisterAccessBegin();
     Dynarmic::A32::Jit *jit = threadHandle.jit;
     ctx->regs = jit->Regs();
     ctx->extRegs = jit->ExtRegs();

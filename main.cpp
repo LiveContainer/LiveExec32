@@ -31,6 +31,46 @@
 #include "arm_dynarmic_cp15.h"
 #include "debugger_server.h"
 
+extern "C" void LC32ConfigureLegacyAppTransportSecurity(
+    uint32_t guestSDKVersion);
+
+static uint32_t guestExecutableSDKVersion;
+
+static void InstallGuestTracepointsFromEnvironment() {
+    const char *value = getenv("LC32_GUEST_TRACEPOINTS");
+    if (value == nullptr || value[0] == '\0') {
+        return;
+    }
+
+    char *list = strdup(value);
+    if (list == nullptr) {
+        fprintf(stderr,
+            "LC32: could not allocate guest tracepoint list\n");
+        return;
+    }
+    char *state = nullptr;
+    for (char *token = strtok_r(list, ", \t\r\n", &state);
+         token != nullptr;
+         token = strtok_r(nullptr, ", \t\r\n", &state)) {
+        errno = 0;
+        char *end = nullptr;
+        const unsigned long long parsed =
+            strtoull(token, &end, 0);
+        if (errno != 0 || end == token || *end != '\0' ||
+                parsed > UINT32_MAX ||
+                !Dynarmic_guest_tracepoint_set(parsed)) {
+            fprintf(stderr,
+                "LC32: failed to install guest tracepoint '%s'\n",
+                token);
+            continue;
+        }
+        fprintf(stderr,
+            "LC32: installed one-shot guest tracepoint at 0x%08x\n",
+            static_cast<uint32_t>(parsed) & ~1u);
+    }
+    free(list);
+}
+
 u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) {
@@ -97,6 +137,18 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
     u32 firstSegmentVMAddr = 0;
     for (uint i = 0; i < header->ncmds; i++, cur += lc->cmdsize) {
         lc = (load_command *)cur;
+        if(!isDyld && lc->cmd == LC_VERSION_MIN_IPHONEOS &&
+                lc->cmdsize >= sizeof(version_min_command)) {
+            guestExecutableSDKVersion =
+                ((version_min_command *)lc)->sdk;
+        } else if(!isDyld && lc->cmd == LC_BUILD_VERSION &&
+                  lc->cmdsize >= sizeof(build_version_command)) {
+            build_version_command *build =
+                (build_version_command *)lc;
+            if(build->platform == PLATFORM_IOS) {
+                guestExecutableSDKVersion = build->sdk;
+            }
+        }
         if (lc->cmd == LC_SEGMENT) {
             segment_command *seg = (segment_command *)lc;
             if(!strncmp(seg->segname, "__PAGEZERO", 10)) {
@@ -193,11 +245,48 @@ u32 prependString(u32& address, const char* fmt, ...) {
     return address;
 }
 
+static std::string DefaultGuestRootPath(const char *argv0) {
+    std::string executablePath = argv0 ? argv0 : "";
+    const size_t lastSlash = executablePath.rfind('/');
+    if(lastSlash == std::string::npos) return "RootFS";
+    return executablePath.substr(0, lastSlash + 1) + "RootFS";
+}
+
+static const char *ConfigureGuestThreadMode(const char *argv0) {
+    const char *rootPath = getenv("ROOT_PATH");
+    static std::string defaultRootPath;
+    if(!rootPath || !rootPath[0]) {
+        defaultRootPath = DefaultGuestRootPath(argv0);
+        rootPath = defaultRootPath.c_str();
+    }
+
+    /*
+     * The generated Objective-C frameworks use native NSThread objects for
+     * cross-thread selector delivery.  That is only valid when each guest
+     * pthread owns a host pthread/JIT.  Detect this bridge configuration by
+     * its private LC32 framework, before Dynarmic caches the thread mode.
+     * Full-system roots do not contain that framework, so their cooperative
+     * scheduler remains the default.  An explicit environment setting always
+     * wins, including NATIVE_GUEST_THREADS=0 for debugging either mode.
+     */
+    if(getenv("NATIVE_GUEST_THREADS") == NULL) {
+        const std::string marker = std::string(rootPath) +
+            "/System/Library/Frameworks/LC32.framework/LC32";
+        if(access(marker.c_str(), F_OK) == 0) {
+            setenv("NATIVE_GUEST_THREADS", "1", 0);
+            fprintf(stderr,
+                "LC32: enabling native guest threads for shim frameworks\n");
+        }
+    }
+    return rootPath;
+}
+
 void setupPathEnvs(char* argv0) {
     char path[PATH_MAX];
     
     // resolve default rootfs path to /path/to/LiveExec32.app/RootFS
-    snprintf(path, sizeof(path), "%s/RootFS", dirname(argv0));
+    const std::string defaultRootPath = DefaultGuestRootPath(argv0);
+    snprintf(path, sizeof(path), "%s", defaultRootPath.c_str());
     setenv("ROOT_PATH", path, 0);
     const char *rootPath = getenv("ROOT_PATH");
 
@@ -230,6 +319,9 @@ int main(int argc, char* argv[], char* envp[]) {
         return 1;
     }
     
+    // NativeGuestThreadsRequested() caches this setting during initialization.
+    ConfigureGuestThreadMode(argv[0]);
+
     // initialize page table, callback, Jit objects, paths
     if (!Dynarmic_nativeInitialize()) {
         fprintf(stderr, "Failed to initialize Dynarmic.\n");
@@ -274,11 +366,14 @@ int main(int argc, char* argv[], char* envp[]) {
 
     // map the main executable first
     u32 execAddr = Dynarmic_map_file(false, 0x11000000, execPath);
+    LC32ConfigureLegacyAppTransportSecurity(
+        guestExecutableSDKVersion);
     
     // map dyld
     const char *dyldPath = getenv("DYLD_PATH");
     printf("Loading dyld at DYLD_PATH %s\n", dyldPath);
     Dynarmic_map_file(true, 0x10000000, dyldPath);
+    InstallGuestTracepointsFromEnvironment();
     printf("entry point: 0x%x\n", threadHandle.jit->Regs()[15]);
     
     // commpage 0xffff4000+0x1000
@@ -321,7 +416,11 @@ int main(int argc, char* argv[], char* envp[]) {
     u32 guest_envp[] = {
         0, // separator
         // envp
+        prependString(dyldStackPtr, "LC32_OBJC_TRACE=%s",
+            getenv("LC32_OBJC_TRACE") ?: "0"),
         prependString(dyldStackPtr, "HOME=%s", guestHome.c_str()),
+        prependString(dyldStackPtr, "NATIVE_GUEST_THREADS=%s",
+            getenv("NATIVE_GUEST_THREADS") ?: "0"),
         //prependString(dyldStackPtr, "OBJC_PRINT_LOAD_METHODS=1"),
         //prependString(dyldStackPtr, "OBJC_PRINT_RESOLVED_METHODS=1"),
         //prependString(dyldStackPtr, "OBJC_PRINT_CLASS_SETUP=1"),
@@ -389,6 +488,16 @@ int main(int argc, char* argv[], char* envp[]) {
             return -1;
         }
     } else {
-        Dynarmic_emu_1start(threadHandle.jit->Regs()[15]);
+        const Dynarmic::HaltReason reason =
+            Dynarmic_emu_1start(threadHandle.jit->Regs()[15]);
+        fprintf(stderr,
+            "LC32: top-level guest execution stopped: reason=0x%08x "
+            "pc=0x%08x lr=0x%08x sp=0x%08x cpsr=0x%08x\n",
+            static_cast<unsigned>(reason),
+            threadHandle.jit->Regs()[Reg::PC],
+            threadHandle.jit->Regs()[Reg::LR],
+            threadHandle.jit->Regs()[Reg::SP],
+            threadHandle.jit->Cpsr());
+        fflush(stderr);
     }
 }

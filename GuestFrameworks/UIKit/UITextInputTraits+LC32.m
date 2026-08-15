@@ -41,9 +41,8 @@ LC32_TEXT_INPUT_INTEGER_PROPERTY(BOOL, getter, setter)
     static uint64_t hostSelector; \
     const uint64_t selector = LC32CachedHostSelector( \
         &hostSelector, _cmd, 0); \
-    const uint64_t result = LC32InvokeHostSelector( \
+    return (type)LC32InvokeHostObjectSelector( \
         self.host_self, selector, (uint64_t)0); \
-    return LC32HostToGuestObject(result); \
 } \
 - (void)setter:(type)value { \
     static uint64_t hostSelector; \

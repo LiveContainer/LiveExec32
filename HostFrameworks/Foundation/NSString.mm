@@ -1,6 +1,7 @@
 @import Foundation;
 
 #import "../../bridge.h"
+#import "../../GuestFrameworks/Foundation/LC32FoundationBridge.h"
 
 #include <atomic>
 #include <ctype.h>
@@ -14,10 +15,28 @@ namespace {
 
 constexpr size_t kMaximumFormatArguments = 64;
 constexpr size_t kMaximumGuestStringUnits = 1024 * 1024;
+constexpr size_t kMaximumGuestStringBytes = 64 * 1024 * 1024;
+
+static_assert(sizeof(LC32FoundationStringGetBytesRequest) == 48);
+
+bool guestStringByteRangeIsValid(u32 address, size_t byteCount) {
+    return !byteCount || (address &&
+        static_cast<uint64_t>(address) + byteCount <=
+            static_cast<uint64_t>(UINT32_MAX) + 1);
+}
+
+bool writeGuestStringBytes(u32 address, const void *bytes,
+                           size_t byteCount) {
+    return guestStringByteRangeIsValid(address, byteCount) &&
+        (!byteCount || Dynarmic_mem_1write(
+            address, byteCount,
+            const_cast<char *>(reinterpret_cast<const char *>(bytes))) == 0);
+}
 
 enum : u32 {
     LC32FormatHasLocale = 1 << 0,
     LC32FormatTakesArgumentsList = 1 << 1,
+    LC32FormatReturnGuestObject = 1 << 2,
 };
 
 enum class FormatArgumentKind {
@@ -534,6 +553,72 @@ u64 invokeHostFormat(u64 receiver,
 
 } // namespace
 
+extern "C" u32 LC32_Foundation_StringGetBytes(
+        u32 guestRequestAddress, u32, u32) {
+    LC32FoundationStringGetBytesRequest request = {};
+    if(!guestStringByteRangeIsValid(
+            guestRequestAddress, sizeof(request)) ||
+       Dynarmic_mem_1read(guestRequestAddress, sizeof(request),
+            reinterpret_cast<char *>(&request)) != 0 ||
+       request.version != LC32FoundationStringGetBytesABIVersion ||
+       request.byteSize != sizeof(request) ||
+       request.maximumLength > kMaximumGuestStringBytes ||
+       (request.guestBuffer && !guestStringByteRangeIsValid(
+            request.guestBuffer, request.maximumLength)) ||
+       (request.guestUsedLength && !guestStringByteRangeIsValid(
+            request.guestUsedLength, sizeof(uint32_t))) ||
+       (request.guestRemainingRange && !guestStringByteRangeIsValid(
+            request.guestRemainingRange, sizeof(uint32_t) * 2)) ||
+       static_cast<uint64_t>(request.rangeLocation) + request.rangeLength >
+            static_cast<uint64_t>(UINT32_MAX)) {
+        return NO;
+    }
+
+    const u64 hostStringAddress = request.hostStringLow |
+        (static_cast<u64>(request.hostStringHigh) << 32);
+    NSString *string = reinterpret_cast<NSString *>(hostStringAddress);
+    if(!string || request.rangeLocation > string.length ||
+       request.rangeLength > string.length - request.rangeLocation) {
+        return NO;
+    }
+
+    std::vector<uint8_t> bytes(request.guestBuffer
+        ? request.maximumLength : 0);
+    NSUInteger usedLength = 0;
+    NSRange remainingRange = NSMakeRange(0, 0);
+    const BOOL converted = [string
+        getBytes:bytes.empty() ? nullptr : bytes.data()
+        maxLength:request.maximumLength
+        usedLength:&usedLength
+        encoding:(NSStringEncoding)request.encoding
+        options:(NSStringEncodingConversionOptions)request.options
+        range:NSMakeRange(request.rangeLocation, request.rangeLength)
+        remainingRange:request.guestRemainingRange
+            ? &remainingRange : nullptr];
+
+    if(usedLength > request.maximumLength || usedLength > UINT32_MAX ||
+       remainingRange.location > UINT32_MAX ||
+       remainingRange.length > UINT32_MAX ||
+       (request.guestBuffer && !writeGuestStringBytes(
+            request.guestBuffer, bytes.data(), usedLength))) {
+        return NO;
+    }
+    const uint32_t guestUsedLength = static_cast<uint32_t>(usedLength);
+    const uint32_t guestRemainingRange[] = {
+        static_cast<uint32_t>(remainingRange.location),
+        static_cast<uint32_t>(remainingRange.length),
+    };
+    if((request.guestUsedLength && !writeGuestStringBytes(
+            request.guestUsedLength, &guestUsedLength,
+            sizeof(guestUsedLength))) ||
+       (request.guestRemainingRange && !writeGuestStringBytes(
+            request.guestRemainingRange, guestRemainingRange,
+            sizeof(guestRemainingRange)))) {
+        return NO;
+    }
+    return converted;
+}
+
 u64 LC32InvokeHostNSStringFormat(u64 host_self,
                                  u64 host_selector,
                                  u64 host_format,
@@ -556,6 +641,11 @@ u64 LC32InvokeHostNSStringFormat(u64 host_self,
         return 0;
     }
 
-    return invokeHostFormat(host_self, host_selector, host_format, host_locale,
-                            options, hostSlots);
+    const u64 result = invokeHostFormat(
+        host_self, host_selector, host_format, host_locale,
+        options, hostSlots);
+    if(!(options & LC32FormatReturnGuestObject) || !result) {
+        return result;
+    }
+    return [(id)result guest_self];
 }

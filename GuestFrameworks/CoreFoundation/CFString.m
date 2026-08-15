@@ -373,3 +373,9 @@ void CFStringUppercase(CFMutableStringRef string, CFLocaleRef locale) {
     LC32_CF_CALL(LC32CoreFoundationOpStringUppercase,
         LC32_CF_HOST(string), LC32_CF_HOST(locale));
 }
+
+void CFStringTrimWhitespace(CFMutableStringRef string) {
+    if(!string) return;
+    LC32_CF_CALL(LC32CoreFoundationOpStringTrimWhitespace,
+        LC32_CF_HOST(string));
+}

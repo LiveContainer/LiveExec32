@@ -10,7 +10,9 @@
 
 typedef struct {
     pthread_mutex_t lock;
+    pthread_cond_t ready;
     pthread_t pthread;
+    uint64_t hostThread;
     id target;
     id object;
     id block;
@@ -52,6 +54,7 @@ static LC32NSThreadState *LC32NSThreadCreateState(void) {
     LC32NSThreadState *state = calloc(1, sizeof(*state));
     if(!state) return NULL;
     pthread_mutex_init(&state->lock, NULL);
+    pthread_cond_init(&state->ready, NULL);
     state->priority = 0.5;
     state->qualityOfService = NSQualityOfServiceDefault;
     return state;
@@ -59,13 +62,57 @@ static LC32NSThreadState *LC32NSThreadCreateState(void) {
 
 static void LC32NSThreadDestroyState(LC32NSThreadState *state) {
     if(!state) return;
+    const uint64_t hostThread = state->hostThread;
     if(state->ownsTarget) [state->target release];
     [state->object release];
     [state->block release];
     [state->name release];
     [state->threadDictionary release];
+    if(hostThread) {
+        static uint64_t releaseSelector __attribute__((aligned(8)));
+        LC32InvokeHostSelector(hostThread,
+            LC32CachedHostSelector(&releaseSelector,
+                @selector(release), NO), (uint64_t)0);
+    }
+    pthread_cond_destroy(&state->ready);
     pthread_mutex_destroy(&state->lock);
     free(state);
+}
+
+static uint64_t LC32HostNSThread(SEL selector) {
+    static uint64_t currentThreadSelector __attribute__((aligned(8)));
+    static uint64_t mainThreadSelector __attribute__((aligned(8)));
+    uint64_t *selectorCache = selector == @selector(mainThread)
+        ? &mainThreadSelector : &currentThreadSelector;
+    const uint64_t hostClass = [(id)objc_getClass("NSThread") host_self];
+    const uint64_t hostThread = LC32InvokeHostSelector(
+        hostClass, LC32CachedHostSelector(selectorCache, selector, NO),
+        (uint64_t)0);
+    if(hostThread) {
+        static uint64_t retainSelector __attribute__((aligned(8)));
+        LC32InvokeHostSelector(hostThread,
+            LC32CachedHostSelector(&retainSelector,
+                @selector(retain), NO), (uint64_t)0);
+    }
+    return hostThread;
+}
+
+static void LC32NSThreadPublishHostThread(
+        LC32NSThreadState *state, uint64_t hostThread) {
+    if(!state || !hostThread) return;
+    pthread_mutex_lock(&state->lock);
+    if(!state->hostThread) {
+        state->hostThread = hostThread;
+        hostThread = 0;
+    }
+    pthread_cond_broadcast(&state->ready);
+    pthread_mutex_unlock(&state->lock);
+    if(hostThread) {
+        static uint64_t releaseSelector __attribute__((aligned(8)));
+        LC32InvokeHostSelector(hostThread,
+            LC32CachedHostSelector(&releaseSelector,
+                @selector(release), NO), (uint64_t)0);
+    }
 }
 
 static void LC32NSThreadSetFlag(LC32NSThreadState *state,
@@ -102,6 +149,8 @@ static NSThread *LC32NSThreadGetMainObject(void) {
         state->started = YES;
         state->executing = YES;
         pthread_mutex_unlock(&state->lock);
+        LC32NSThreadPublishHostThread(
+            state, LC32HostNSThread(@selector(mainThread)));
         LC32NSThreadMainObject = thread;
     }
     NSThread *thread = LC32NSThreadMainObject;
@@ -120,6 +169,7 @@ static void LC32NSThreadFinish(void *opaque) {
     pthread_mutex_lock(&state->lock);
     state->executing = NO;
     state->finished = YES;
+    pthread_cond_broadcast(&state->ready);
     pthread_mutex_unlock(&state->lock);
     pthread_setspecific(LC32NSThreadKey, NULL);
     [thread release];
@@ -130,6 +180,8 @@ static void *LC32NSThreadEntry(void *opaque) {
     LC32NSThreadState *state = thread->_lc32State;
     pthread_once(&LC32NSThreadKeyOnce, LC32NSThreadCreateKey);
     pthread_setspecific(LC32NSThreadKey, thread);
+    LC32NSThreadPublishHostThread(
+        state, LC32HostNSThread(@selector(currentThread)));
     LC32NSThreadSetFlag(state, &state->executing, YES);
 
     pthread_cleanup_push(LC32NSThreadFinish, thread);
@@ -176,6 +228,7 @@ static int LC32NSThreadStart(NSThread *thread,
         [thread release];
         pthread_mutex_lock(&state->lock);
         state->started = NO;
+        pthread_cond_broadcast(&state->ready);
         pthread_mutex_unlock(&state->lock);
         return result;
     }
@@ -238,6 +291,14 @@ __attribute__((constructor)) static void LC32NSThreadInitialize(void) {
     NSThread *thread = pthread_getspecific(LC32NSThreadKey);
     if(thread) return thread;
     thread = [[self alloc] init];
+    LC32NSThreadState *state = thread->_lc32State;
+    pthread_mutex_lock(&state->lock);
+    state->pthread = pthread_self();
+    state->started = YES;
+    state->executing = YES;
+    pthread_mutex_unlock(&state->lock);
+    LC32NSThreadPublishHostThread(
+        state, LC32HostNSThread(@selector(currentThread)));
     pthread_setspecific(LC32NSThreadKey, thread);
     return thread;
 }
@@ -448,3 +509,24 @@ __attribute__((constructor)) static void LC32NSThreadInitialize(void) {
 }
 
 @end
+
+BOOL LC32NSThreadNativeModeEnabled(void) {
+    const char *value = getenv("NATIVE_GUEST_THREADS");
+    return value && value[0] && strcmp(value, "0") != 0;
+}
+
+BOOL LC32NSThreadIsCurrentThread(NSThread *thread) {
+    return thread && thread == [NSThread currentThread];
+}
+
+uint64_t LC32NSThreadHostThread(NSThread *thread) {
+    if(!thread || !thread->_lc32State) return 0;
+    LC32NSThreadState *state = thread->_lc32State;
+    pthread_mutex_lock(&state->lock);
+    while(state->started && !state->finished && !state->hostThread) {
+        pthread_cond_wait(&state->ready, &state->lock);
+    }
+    const uint64_t hostThread = state->hostThread;
+    pthread_mutex_unlock(&state->lock);
+    return hostThread;
+}

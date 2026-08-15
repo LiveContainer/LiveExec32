@@ -17,6 +17,19 @@ static BOOL LC32IsDispatchData(id object) {
     return NO;
 }
 
+CFPropertyListRef CFPropertyListCreateDeepCopy(
+        CFAllocatorRef allocator, CFPropertyListRef propertyList,
+        CFOptionFlags mutabilityOption) {
+    (void)allocator;
+    if(!propertyList ||
+       mutabilityOption > kCFPropertyListMutableContainersAndLeaves) {
+        return NULL;
+    }
+    return (CFPropertyListRef)LC32_CF_CALL(
+        LC32CoreFoundationOpPropertyListCreateDeepCopy,
+        LC32_CF_HOST(propertyList), LC32_CF_U32(mutabilityOption));
+}
+
 CFPropertyListRef CFPropertyListCreateWithData(
         CFAllocatorRef allocator, CFDataRef data, CFOptionFlags options,
         CFPropertyListFormat *format, CFErrorRef *error) {

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>UIKit</key>
+    <dict>
+        <key>LC32ScalarPointerFixture</key>
+        <dict>
+            <key>-</key>
+            <dict>
+                <key>consumeFloat:</key>
+                <string>v12@0:4r^f8</string>
+                <key>mutateFloat:</key>
+                <string>v12@0:4^f8</string>
+                <key>mutateDouble:</key>
+                <string>v12@0:4^d8</string>
+                <key>mutateInteger:</key>
+                <string>v12@0:4^i8</string>
+                <key>produceFloat:</key>
+                <string>v12@0:4o^f8</string>
+            </dict>
+        </dict>
+        <key>NSString</key>
+        <dict>
+            <key>-</key>
+            <dict>
+                <key>sizeWithFont:minFontSize:actualFontSize:forWidth:lineBreakMode:</key>
+                <string>{CGSize=ff}28@0:4@8f12^f16f20i24</string>
+            </dict>
+        </dict>
+    </dict>
+</dict>
+</plist>

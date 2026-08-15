@@ -1,8 +1,12 @@
 @import Darwin;
 @import CoreGraphics;
 #include "bridge.h"
+#include "LC32CoreGraphicsHost.h"
 #include "../../GuestFrameworks/CoreGraphics/LC32CoreGraphicsBridge.h"
 
+#include <cstdio>
+#include <dlfcn.h>
+#include <cmath>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -12,6 +16,8 @@ namespace {
 
 constexpr size_t kMaximumBitmapBytes = 256u * 1024u * 1024u;
 constexpr size_t kMaximumColorComponents = 1024;
+constexpr size_t kMaximumGradientStops = 4096;
+constexpr size_t kMaximumGradientComponentsPerStop = 64;
 
 struct BitmapBacking {
     CGContextRef context = nullptr;
@@ -22,6 +28,25 @@ struct BitmapBacking {
 
 std::mutex bitmapBackingsMutex;
 std::unordered_map<CGContextRef, BitmapBacking *> bitmapBackings;
+
+using CGContextGetFillColorSpaceFunction =
+    CGColorSpaceRef (*)(CGContextRef);
+
+CGContextGetFillColorSpaceFunction GetContextFillColorSpaceFunction() {
+    static const auto function =
+        reinterpret_cast<CGContextGetFillColorSpaceFunction>(
+            dlsym(RTLD_DEFAULT, "CGContextGetFillColorSpace"));
+    return function;
+}
+
+void ReportMissingContextFillColorSpaceFunction() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        std::fprintf(stderr,
+            "LC32: CGContextSetFillColor is unavailable because the host "
+            "does not export CGContextGetFillColorSpace\n");
+    });
+}
 
 bool ReadCoreGraphicsCall(u32 guestAddress, LC32CoreGraphicsCall &call) {
     struct {
@@ -73,6 +98,66 @@ CGFloat SlotCGFloat(const LC32CoreGraphicsCall &call, size_t index) {
     float value;
     memcpy(&value, &bits, sizeof(value));
     return static_cast<CGFloat>(value);
+}
+
+u32 ReturnCGFloat(CGFloat value) {
+    const float narrowed = static_cast<float>(value);
+    u32 bits;
+    memcpy(&bits, &narrowed, sizeof(bits));
+    return bits;
+}
+
+bool ReadGuestCGFloatArray(u32 guestAddress, size_t count,
+                           bool nullable,
+                           std::vector<CGFloat> &hostValues,
+                           const CGFloat *&hostPointer) {
+    hostPointer = nullptr;
+    hostValues.clear();
+    if(!guestAddress) return nullable;
+    if(!count || count >
+            (kMaximumGradientComponentsPerStop + 1) *
+                kMaximumGradientStops ||
+       count > SIZE_MAX / sizeof(float)) {
+        return false;
+    }
+
+    const size_t byteCount = count * sizeof(float);
+    if(static_cast<uint64_t>(guestAddress) + byteCount >
+            static_cast<uint64_t>(UINT32_MAX) + 1) {
+        return false;
+    }
+
+    std::vector<float> guestValues(count);
+    if(Dynarmic_mem_1read(guestAddress, byteCount,
+            reinterpret_cast<char *>(guestValues.data())) != 0) {
+        return false;
+    }
+    hostValues.resize(count);
+    for(size_t index = 0; index < count; ++index)
+        hostValues[index] = static_cast<CGFloat>(guestValues[index]);
+    hostPointer = hostValues.data();
+    return true;
+}
+
+bool ReadGuestGradientLocations(u32 guestAddress, size_t count,
+                                std::vector<CGFloat> &hostValues,
+                                const CGFloat *&hostPointer) {
+    if(!ReadGuestCGFloatArray(guestAddress, count, true,
+            hostValues, hostPointer)) {
+        return false;
+    }
+    if(!hostPointer) return true;
+
+    CGFloat previous = 0;
+    for(size_t index = 0; index < count; ++index) {
+        const CGFloat location = hostPointer[index];
+        if(!std::isfinite(location) || location < 0 || location > 1 ||
+           (index && location < previous)) {
+            return false;
+        }
+        previous = location;
+    }
+    return true;
 }
 
 CGRect SlotRect(const LC32CoreGraphicsCall &call, size_t first) {
@@ -135,6 +220,10 @@ void ReleaseBitmapBacking(void *releaseInfo, void *data) {
 } // namespace
 
 __BEGIN_DECLS
+
+void LC32CoreGraphicsSyncBitmapBacking(CGContextRef context) {
+    if(context) SyncBitmapBacking(context, FindBitmapBacking(context));
+}
 
 u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
     LC32CoreGraphicsCall call;
@@ -395,6 +484,448 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             /* Guest CFRelease performs the paired proxy/native decrement.
              * This opcode deliberately validates without releasing again. */
             return SlotHostObject<CGPathRef>(call, 0) != nullptr;
+        }
+        case LC32CoreGraphicsOpColorCreate: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGColorSpaceRef space =
+                SlotHostObject<CGColorSpaceRef>(call, 0);
+            const u32 guestComponents = SlotU32(call, 1);
+            if(!space || !guestComponents) return 0;
+
+            const size_t colorComponents =
+                CGColorSpaceGetNumberOfComponents(space);
+            if(colorComponents >= kMaximumColorComponents) return 0;
+            const size_t count = colorComponents + 1;
+            const size_t byteCount = count * sizeof(float);
+            if(static_cast<uint64_t>(guestComponents) + byteCount >
+                    static_cast<uint64_t>(UINT32_MAX) + 1) {
+                return 0;
+            }
+
+            std::vector<float> guestValues(count);
+            if(Dynarmic_mem_1read(guestComponents, byteCount,
+                    reinterpret_cast<char *>(guestValues.data())) != 0) {
+                return 0;
+            }
+            std::vector<CGFloat> hostValues(count);
+            for(size_t index = 0; index < count; ++index)
+                hostValues[index] = guestValues[index];
+            CGColorRef color = CGColorCreate(space, hostValues.data());
+            return color ? LC32GuestObjectForOwnedHostObject(color) : 0;
+        }
+        case LC32CoreGraphicsOpColorGetAlpha: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGColorRef color = SlotHostObject<CGColorRef>(call, 0);
+            return color ? ReturnCGFloat(CGColorGetAlpha(color)) : 0;
+        }
+        case LC32CoreGraphicsOpColorSpaceCreateDeviceGray: {
+            if(!RequireCoreGraphicsSlots(call, 0)) return 0;
+            CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceGray();
+            return colorSpace
+                ? LC32GuestObjectForOwnedHostObject(colorSpace) : 0;
+        }
+        case LC32CoreGraphicsOpGradientCreateWithColorComponents: {
+            if(!RequireCoreGraphicsSlots(call, 4)) return 0;
+            CGColorSpaceRef space =
+                SlotHostObject<CGColorSpaceRef>(call, 0);
+            const size_t stopCount = SlotU32(call, 3);
+            if(!stopCount || stopCount > kMaximumGradientStops) return 0;
+
+            /* CoreGraphics uses Generic RGB when the space is NULL. Every
+             * stop contains the color-space components followed by alpha. */
+            size_t colorComponentCount = space
+                ? CGColorSpaceGetNumberOfComponents(space) : 3;
+            if(!colorComponentCount ||
+               colorComponentCount > kMaximumGradientComponentsPerStop ||
+               colorComponentCount + 1 > SIZE_MAX / stopCount) {
+                return 0;
+            }
+            if(space) {
+                const CGColorSpaceModel model = CGColorSpaceGetModel(space);
+                if(model == kCGColorSpaceModelIndexed ||
+                   model == kCGColorSpaceModelPattern) {
+                    return 0;
+                }
+            }
+
+            const size_t componentCount =
+                (colorComponentCount + 1) * stopCount;
+            std::vector<CGFloat> components;
+            const CGFloat *componentPointer;
+            if(!ReadGuestCGFloatArray(SlotU32(call, 1), componentCount,
+                    false, components, componentPointer)) {
+                return 0;
+            }
+            std::vector<CGFloat> locations;
+            const CGFloat *locationPointer;
+            if(!ReadGuestGradientLocations(SlotU32(call, 2), stopCount,
+                    locations, locationPointer)) {
+                return 0;
+            }
+
+            CGGradientRef gradient = CGGradientCreateWithColorComponents(
+                space, componentPointer, locationPointer, stopCount);
+            return gradient
+                ? LC32GuestObjectForOwnedHostObject(gradient) : 0;
+        }
+        case LC32CoreGraphicsOpGradientCreateWithColors: {
+            if(!RequireCoreGraphicsSlots(call, 3)) return 0;
+            CGColorSpaceRef space =
+                SlotHostObject<CGColorSpaceRef>(call, 0);
+            CFArrayRef colors = SlotHostObject<CFArrayRef>(call, 1);
+            if(!colors || CFGetTypeID(colors) != CFArrayGetTypeID()) return 0;
+            const CFIndex signedCount = CFArrayGetCount(colors);
+            if(signedCount <= 0 ||
+               static_cast<uint64_t>(signedCount) > kMaximumGradientStops) {
+                return 0;
+            }
+            const size_t stopCount = static_cast<size_t>(signedCount);
+            for(CFIndex index = 0; index < signedCount; ++index) {
+                CFTypeRef color = static_cast<CFTypeRef>(
+                    CFArrayGetValueAtIndex(colors, index));
+                if(!color || CFGetTypeID(color) != CGColorGetTypeID())
+                    return 0;
+            }
+
+            std::vector<CGFloat> locations;
+            const CGFloat *locationPointer;
+            if(!ReadGuestGradientLocations(SlotU32(call, 2), stopCount,
+                    locations, locationPointer)) {
+                return 0;
+            }
+            CGGradientRef gradient = CGGradientCreateWithColors(
+                space, colors, locationPointer);
+            return gradient
+                ? LC32GuestObjectForOwnedHostObject(gradient) : 0;
+        }
+        case LC32CoreGraphicsOpBitmapContextCreateImage: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            if(!context) return 0;
+            CGImageRef image = CGBitmapContextCreateImage(context);
+            return image ? LC32GuestObjectForOwnedHostObject(image) : 0;
+        }
+        case LC32CoreGraphicsOpContextSaveGState:
+        case LC32CoreGraphicsOpContextRestoreGState:
+        case LC32CoreGraphicsOpContextBeginPath:
+        case LC32CoreGraphicsOpContextClosePath:
+        case LC32CoreGraphicsOpContextClip:
+        case LC32CoreGraphicsOpContextFillPath:
+        case LC32CoreGraphicsOpContextStrokePath: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            if(!context) return 0;
+            switch(static_cast<LC32CoreGraphicsOpcode>(opcode)) {
+                case LC32CoreGraphicsOpContextSaveGState:
+                    CGContextSaveGState(context);
+                    break;
+                case LC32CoreGraphicsOpContextRestoreGState:
+                    CGContextRestoreGState(context);
+                    break;
+                case LC32CoreGraphicsOpContextBeginPath:
+                    CGContextBeginPath(context);
+                    break;
+                case LC32CoreGraphicsOpContextClosePath:
+                    CGContextClosePath(context);
+                    break;
+                case LC32CoreGraphicsOpContextClip:
+                    CGContextClip(context);
+                    break;
+                case LC32CoreGraphicsOpContextFillPath:
+                    CGContextFillPath(context);
+                    SyncBitmapBacking(context, FindBitmapBacking(context));
+                    break;
+                case LC32CoreGraphicsOpContextStrokePath:
+                    CGContextStrokePath(context);
+                    SyncBitmapBacking(context, FindBitmapBacking(context));
+                    break;
+                default:
+                    break;
+            }
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextMoveToPoint:
+        case LC32CoreGraphicsOpContextAddLineToPoint:
+        case LC32CoreGraphicsOpContextScaleCTM:
+        case LC32CoreGraphicsOpContextSetGrayFillColor:
+        case LC32CoreGraphicsOpContextSetTextPosition: {
+            if(!RequireCoreGraphicsSlots(call, 3)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            if(!context) return 0;
+            const CGFloat first = SlotCGFloat(call, 1);
+            const CGFloat second = SlotCGFloat(call, 2);
+            switch(static_cast<LC32CoreGraphicsOpcode>(opcode)) {
+                case LC32CoreGraphicsOpContextMoveToPoint:
+                    CGContextMoveToPoint(context, first, second);
+                    break;
+                case LC32CoreGraphicsOpContextAddLineToPoint:
+                    CGContextAddLineToPoint(context, first, second);
+                    break;
+                case LC32CoreGraphicsOpContextScaleCTM:
+                    CGContextScaleCTM(context, first, second);
+                    break;
+                case LC32CoreGraphicsOpContextSetGrayFillColor:
+                    CGContextSetGrayFillColor(context, first, second);
+                    break;
+                case LC32CoreGraphicsOpContextSetTextPosition:
+                    CGContextSetTextPosition(context, first, second);
+                    break;
+                default:
+                    break;
+            }
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextAddArc: {
+            if(!RequireCoreGraphicsSlots(call, 7)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            if(!context) return 0;
+            CGContextAddArc(context, SlotCGFloat(call, 1),
+                SlotCGFloat(call, 2), SlotCGFloat(call, 3),
+                SlotCGFloat(call, 4), SlotCGFloat(call, 5),
+                SlotU32(call, 6) != 0);
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextAddArcToPoint: {
+            if(!RequireCoreGraphicsSlots(call, 6)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            if(!context) return 0;
+            CGContextAddArcToPoint(context, SlotCGFloat(call, 1),
+                SlotCGFloat(call, 2), SlotCGFloat(call, 3),
+                SlotCGFloat(call, 4), SlotCGFloat(call, 5));
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextAddRect:
+        case LC32CoreGraphicsOpContextFillRect:
+        case LC32CoreGraphicsOpContextStrokeRect: {
+            if(!RequireCoreGraphicsSlots(call, 5)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            if(!context) return 0;
+            const CGRect rect = SlotRect(call, 1);
+            switch(static_cast<LC32CoreGraphicsOpcode>(opcode)) {
+                case LC32CoreGraphicsOpContextAddRect:
+                    CGContextAddRect(context, rect);
+                    break;
+                case LC32CoreGraphicsOpContextFillRect:
+                    CGContextFillRect(context, rect);
+                    SyncBitmapBacking(context, FindBitmapBacking(context));
+                    break;
+                case LC32CoreGraphicsOpContextStrokeRect:
+                    CGContextStrokeRect(context, rect);
+                    SyncBitmapBacking(context, FindBitmapBacking(context));
+                    break;
+                default:
+                    break;
+            }
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextAddPath: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            CGPathRef path = SlotHostObject<CGPathRef>(call, 1);
+            if(!context || !path) return 0;
+            CGContextAddPath(context, path);
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextClipToMask: {
+            if(!RequireCoreGraphicsSlots(call, 6)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            CGImageRef mask = SlotHostObject<CGImageRef>(call, 5);
+            if(!context || !mask) return 0;
+            CGContextClipToMask(context, SlotRect(call, 1), mask);
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextConcatCTM: {
+            if(!RequireCoreGraphicsSlots(call, 7)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            if(!context) return 0;
+            CGContextConcatCTM(context, CGAffineTransformMake(
+                SlotCGFloat(call, 1), SlotCGFloat(call, 2),
+                SlotCGFloat(call, 3), SlotCGFloat(call, 4),
+                SlotCGFloat(call, 5), SlotCGFloat(call, 6)));
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextDrawLinearGradient: {
+            if(!RequireCoreGraphicsSlots(call, 7)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            CGGradientRef gradient =
+                SlotHostObject<CGGradientRef>(call, 1);
+            const u32 options = SlotU32(call, 6);
+            const u32 validOptions = kCGGradientDrawsBeforeStartLocation |
+                kCGGradientDrawsAfterEndLocation;
+            if(!context || !gradient || (options & ~validOptions)) return 0;
+            CGContextDrawLinearGradient(context, gradient,
+                CGPointMake(SlotCGFloat(call, 2), SlotCGFloat(call, 3)),
+                CGPointMake(SlotCGFloat(call, 4), SlotCGFloat(call, 5)),
+                static_cast<CGGradientDrawingOptions>(options));
+            SyncBitmapBacking(context, FindBitmapBacking(context));
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextSetFillColorWithColor:
+        case LC32CoreGraphicsOpContextSetStrokeColorWithColor: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            CGColorRef color = SlotHostObject<CGColorRef>(call, 1);
+            if(!context || !color) return 0;
+            if(static_cast<LC32CoreGraphicsOpcode>(opcode) ==
+                    LC32CoreGraphicsOpContextSetFillColorWithColor) {
+                CGContextSetFillColorWithColor(context, color);
+            } else {
+                CGContextSetStrokeColorWithColor(context, color);
+            }
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextSetFillColor: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            const u32 guestComponents = SlotU32(call, 1);
+            if(!context || !guestComponents) return 0;
+
+            const auto getFillColorSpace =
+                GetContextFillColorSpaceFunction();
+            if(!getFillColorSpace) {
+                ReportMissingContextFillColorSpaceFunction();
+                return 0;
+            }
+
+            CGColorSpaceRef space = getFillColorSpace(context);
+            if(!space ||
+               CGColorSpaceGetModel(space) == kCGColorSpaceModelPattern) {
+                return 0;
+            }
+            const size_t colorComponentCount =
+                CGColorSpaceGetNumberOfComponents(space);
+            if(!colorComponentCount ||
+               colorComponentCount >= kMaximumColorComponents) {
+                return 0;
+            }
+
+            std::vector<CGFloat> components;
+            const CGFloat *componentPointer = nullptr;
+            if(!ReadGuestCGFloatArray(guestComponents,
+                    colorComponentCount + 1, false,
+                    components, componentPointer)) {
+                return 0;
+            }
+            CGContextSetFillColor(context, componentPointer);
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextSetBlendMode: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            const u32 mode = SlotU32(call, 1);
+            if(!context || mode > kCGBlendModePlusLighter) return 0;
+            CGContextSetBlendMode(context, static_cast<CGBlendMode>(mode));
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextSetInterpolationQuality: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            const u32 quality = SlotU32(call, 1);
+            if(!context || quality > kCGInterpolationMedium) return 0;
+            CGContextSetInterpolationQuality(context,
+                static_cast<CGInterpolationQuality>(quality));
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextSetLineCap: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            const u32 cap = SlotU32(call, 1);
+            if(!context || cap > kCGLineCapSquare) return 0;
+            CGContextSetLineCap(context, static_cast<CGLineCap>(cap));
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextSetLineWidth: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            if(!context) return 0;
+            CGContextSetLineWidth(context, SlotCGFloat(call, 1));
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextSetShouldAntialias: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            const u32 shouldAntialias = SlotU32(call, 1);
+            if(!context || shouldAntialias > 1) return 0;
+            CGContextSetShouldAntialias(context, shouldAntialias != 0);
+            return 1;
+        }
+        case LC32CoreGraphicsOpImageCreateWithImageInRect: {
+            if(!RequireCoreGraphicsSlots(call, 5)) return 0;
+            CGImageRef image = SlotHostObject<CGImageRef>(call, 0);
+            if(!image) return 0;
+            CGImageRef result = CGImageCreateWithImageInRect(
+                image, SlotRect(call, 1));
+            return result ? LC32GuestObjectForOwnedHostObject(result) : 0;
+        }
+        case LC32CoreGraphicsOpImageCreateWithMask: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGImageRef image = SlotHostObject<CGImageRef>(call, 0);
+            CGImageRef mask = SlotHostObject<CGImageRef>(call, 1);
+            if(!image || !mask) return 0;
+            CGImageRef result = CGImageCreateWithMask(image, mask);
+            return result ? LC32GuestObjectForOwnedHostObject(result) : 0;
+        }
+        case LC32CoreGraphicsOpImageGetAlphaInfo: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGImageRef image = SlotHostObject<CGImageRef>(call, 0);
+            return image ? static_cast<u32>(CGImageGetAlphaInfo(image)) : 0;
+        }
+        case LC32CoreGraphicsOpImageGetBitmapInfo: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGImageRef image = SlotHostObject<CGImageRef>(call, 0);
+            return image ? static_cast<u32>(CGImageGetBitmapInfo(image)) : 0;
+        }
+        case LC32CoreGraphicsOpImageGetBitsPerComponent: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGImageRef image = SlotHostObject<CGImageRef>(call, 0);
+            return image
+                ? static_cast<u32>(CGImageGetBitsPerComponent(image)) : 0;
+        }
+        case LC32CoreGraphicsOpImageGetColorSpace: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGImageRef image = SlotHostObject<CGImageRef>(call, 0);
+            CGColorSpaceRef space = image
+                ? CGImageGetColorSpace(image) : nullptr;
+            return space ? [(id)space guest_self] : 0;
+        }
+        case LC32CoreGraphicsOpPathAddArcToPoint:
+        case LC32CoreGraphicsOpPathAddCurveToPoint:
+        case LC32CoreGraphicsOpPathAddRect: {
+            const auto operation =
+                static_cast<LC32CoreGraphicsOpcode>(opcode);
+            const u32 expectedSlots =
+                operation == LC32CoreGraphicsOpPathAddArcToPoint ? 13 :
+                operation == LC32CoreGraphicsOpPathAddCurveToPoint ? 14 : 12;
+            if(!RequireCoreGraphicsSlots(call, expectedSlots)) return 0;
+            CGMutablePathRef path =
+                SlotHostObject<CGMutablePathRef>(call, 0);
+            if(!path) return 0;
+            CGAffineTransform transformStorage;
+            const CGAffineTransform *transform;
+            if(!SlotOptionalTransform(call, 1, 2, transformStorage,
+                    transform)) return 0;
+            if(operation == LC32CoreGraphicsOpPathAddArcToPoint) {
+                CGPathAddArcToPoint(path, transform,
+                    SlotCGFloat(call, 8), SlotCGFloat(call, 9),
+                    SlotCGFloat(call, 10), SlotCGFloat(call, 11),
+                    SlotCGFloat(call, 12));
+            } else if(operation ==
+                    LC32CoreGraphicsOpPathAddCurveToPoint) {
+                CGPathAddCurveToPoint(path, transform,
+                    SlotCGFloat(call, 8), SlotCGFloat(call, 9),
+                    SlotCGFloat(call, 10), SlotCGFloat(call, 11),
+                    SlotCGFloat(call, 12), SlotCGFloat(call, 13));
+            } else {
+                CGPathAddRect(path, transform, SlotRect(call, 8));
+            }
+            return 1;
+        }
+        case LC32CoreGraphicsOpPathCreateCopy: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGPathRef path = SlotHostObject<CGPathRef>(call, 0);
+            if(!path) return 0;
+            CGPathRef result = CGPathCreateCopy(path);
+            return result ? LC32GuestObjectForOwnedHostObject(result) : 0;
         }
     }
     return 0;

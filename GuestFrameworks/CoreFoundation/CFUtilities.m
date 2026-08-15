@@ -103,6 +103,26 @@ CFStringRef CFURLCreateStringByAddingPercentEscapes(
         LC32_CF_U32(encoding));
 }
 
+CFStringRef CFURLCreateStringByReplacingPercentEscapesUsingEncoding(
+        CFAllocatorRef allocator, CFStringRef originalString,
+        CFStringRef charactersToLeaveEscaped,
+        CFStringEncoding encoding) {
+    (void)allocator;
+    if(!originalString) return NULL;
+    return (CFStringRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCreateStringByReplacingPercentEscapes,
+        LC32_CF_HOST(originalString),
+        LC32_CF_HOST(charactersToLeaveEscaped), LC32_CF_U32(encoding));
+}
+
+CFStringRef CFURLCreateStringByReplacingPercentEscapes(
+        CFAllocatorRef allocator, CFStringRef originalString,
+        CFStringRef charactersToLeaveEscaped) {
+    return CFURLCreateStringByReplacingPercentEscapesUsingEncoding(
+        allocator, originalString, charactersToLeaveEscaped,
+        kCFStringEncodingUTF8);
+}
+
 Boolean CFNumberGetValue(CFNumberRef number, CFNumberType type,
                          void *valuePointer) {
     if(!number || !valuePointer) return false;

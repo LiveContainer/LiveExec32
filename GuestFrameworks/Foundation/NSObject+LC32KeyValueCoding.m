@@ -22,18 +22,16 @@
     static uint64_t hostSelector;
     const uint64_t selector = LC32CachedHostSelector(
         &hostSelector, _cmd, NO);
-    const uint64_t result = LC32InvokeHostSelector(
+    return LC32InvokeHostObjectSelector(
         self.host_self, selector, key.host_self, (uint64_t)0);
-    return LC32HostToGuestObject(result);
 }
 
 - (id)valueForKeyPath:(NSString *)keyPath {
     static uint64_t hostSelector;
     const uint64_t selector = LC32CachedHostSelector(
         &hostSelector, _cmd, NO);
-    const uint64_t result = LC32InvokeHostSelector(
+    return LC32InvokeHostObjectSelector(
         self.host_self, selector, keyPath.host_self, (uint64_t)0);
-    return LC32HostToGuestObject(result);
 }
 
 - (void)setValue:(id)value forKey:(NSString *)key {
@@ -58,9 +56,8 @@
     static uint64_t hostSelector;
     const uint64_t selector = LC32CachedHostSelector(
         &hostSelector, _cmd, NO);
-    const uint64_t result = LC32InvokeHostSelector(
+    return LC32InvokeHostObjectSelector(
         self.host_self, selector, keys.host_self, (uint64_t)0);
-    return LC32HostToGuestObject(result);
 }
 
 - (void)setValuesForKeysWithDictionary:(NSDictionary<NSString *, id> *)values {
@@ -75,9 +72,8 @@
     static uint64_t hostSelector;
     const uint64_t selector = LC32CachedHostSelector(
         &hostSelector, _cmd, NO);
-    const uint64_t result = LC32InvokeHostSelector(
+    return LC32InvokeHostObjectSelector(
         self.host_self, selector, key.host_self, (uint64_t)0);
-    return LC32HostToGuestObject(result);
 }
 
 - (void)setValue:(id)value forUndefinedKey:(NSString *)key {
