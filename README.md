@@ -8,24 +8,29 @@ This project is heavily based on [unidbg](https://github.com/zhkl0228/unidbg).
 There are also missing syscalls that I have yet to provide to pass through. Please see [ARM32SyscallHandler.java](https://github.com/zhkl0228/unidbg/blob/master/unidbg-ios/src/main/java/com/github/unidbg/ios/ARM32SyscallHandler.java) and [DarwinSyscallHandler.java](https://github.com/zhkl0228/unidbg/blob/master/unidbg-ios/src/main/java/com/github/unidbg/ios/DarwinSyscallHandler.java) to implement them properly.
 
 ## Usage
-- Download and extract a ramdisk image using pzb and xpwn. For example, I chose the last 32-bit iPhone (armv7s) on the latest iOS 10.3.3:
-```bash
-pzb -g 058-75249-062.dmg http://appldnld.apple.com/ios10.3.3/091-23384-20170719-CA966D80-6977-11E7-9F96-3E9100BA0AE3/iPhone_4.0_32bit_10.3.3_14G60_Restore.ipsw
-xpwntool 058-75249-062.dmg ramdisk.dmg -k
-```
-- Extract the dmg
-```bash
-7z x ramdisk.dmg
-# extracted files go into ramdisk/
-```
-
-- Replace all of `/var/mobile/Documents/TrollExperiments` with your paths
 - Compile this project using theos
 - Generate the guest Objective-C shims, then build the guest frameworks:
 ```bash
 gmake -C GuestMakefile generate-shims
 gmake -C GuestMakefile
 ```
+- Set up the guest root filesystem and install the built shim frameworks:
+```bash
+./GuestMakefile/pack-ramdisk.sh
+```
+  On the first run this downloads the iOS 10.3.3 restore ramdisk component
+  (`058-75249-062.dmg`) from Apple's IPSW, decrypts it with `xpwntool`, and
+  copies it into `tmp/ramdisk` with `rsync -aH` (7z would break the HFS
+  symlinks and dylib hardlink pairs that the guest dyld relies on).  The
+  download and decrypted image are cached under `tmp/ipsw/`, so subsequent
+  runs only reinstall the rebuilt frameworks.
+
+  Override the sources with `RAMDISK_IPSW_URL`, `RAMDISK_IPSW_COMPONENT`,
+  `RAMDISK_SETUP_DIR`, `RAMDISK_ROOT`, and `IOS_SYSTEM_ROOT` (the latter is
+  the decrypted iOS 10.3.3 system root used for framework metadata; it only
+  needs to be mounted when regenerating shims).  Requires `pzb`, `xpwntool`,
+  `hdiutil`, and `rsync`.
+
 - Launch a binary and profit.
 ```bash
 sudo .theos/out/LiveExec32 /var/mobile/ramdisk32/usr/bin/fdisk

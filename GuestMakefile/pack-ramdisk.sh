@@ -8,9 +8,109 @@ RAMDISK_ROOT=${RAMDISK_ROOT:-"$REPO_ROOT/tmp/ramdisk"}
 IOS_SYSTEM_ROOT=${IOS_SYSTEM_ROOT:-/Volumes/Greensburg14G60.N41N42N48N49OS}
 BUILD_ROOT=${BUILD_ROOT:-"$SCRIPT_DIR/.theos/obj/debug/armv7s"}
 
+# The guest root is the iOS 10.3.3 restore ramdisk.  If it has not been set
+# up yet, download and decrypt it from the IPSW, then copy it into place
+# with rsync -aH.  (7z would break the HFS symlinks and dylib hardlink
+# pairs that the guest dyld relies on.)  This only runs once, before the
+# first pack.
+RAMDISK_IPSW_URL=${RAMDISK_IPSW_URL:-
+    "http://appldnld.apple.com/ios10.3.3/091-23384-20170719-CA966D80-6977-11E7-9F96-3E9100BA0AE3/iPhone_4.0_32bit_10.3.3_14G60_Restore.ipsw"}
+RAMDISK_IPSW_COMPONENT=${RAMDISK_IPSW_COMPONENT:-"058-75249-062.dmg"}
+RAMDISK_SETUP_DIR=${RAMDISK_SETUP_DIR:-"$REPO_ROOT/tmp/ipsw"}
+
+setup_ramdisk() {
+    echo "Setting up guest ramdisk at $RAMDISK_ROOT" >&2
+    mkdir -p "$RAMDISK_SETUP_DIR"
+    encrypted_image="$RAMDISK_SETUP_DIR/$RAMDISK_IPSW_COMPONENT"
+    decrypted_image="$RAMDISK_SETUP_DIR/ramdisk.dmg"
+
+    if [ ! -f "$encrypted_image" ]; then
+        echo "Downloading $RAMDISK_IPSW_COMPONENT from the iOS 10.3.3 IPSW" >&2
+        download_attempt=1
+        while :; do
+            if (cd "$RAMDISK_SETUP_DIR" && pzb -g "$RAMDISK_IPSW_COMPONENT" "$RAMDISK_IPSW_URL") \
+                    && [ -f "$encrypted_image" ]; then
+                break
+            fi
+            download_attempt=$((download_attempt + 1))
+            if [ "$download_attempt" -gt 3 ]; then
+                echo "Failed to download $RAMDISK_IPSW_COMPONENT" >&2
+                exit 1
+            fi
+            echo "Download failed; retrying ($download_attempt/3)" >&2
+            sleep 2
+        done
+    fi
+
+    if [ ! -f "$decrypted_image" ]; then
+        echo "Decrypting ramdisk image" >&2
+        xpwntool "$encrypted_image" "$decrypted_image" -k
+    fi
+
+    mount_point=$(mktemp -d "$RAMDISK_ROOT.attach.XXXXXX")
+    cleanup() {
+        hdiutil detach "$mount_point" >/dev/null 2>&1 || true
+        rm -rf "$mount_point"
+    }
+    trap cleanup EXIT HUP INT TERM
+
+    echo "Mounting decrypted ramdisk" >&2
+    hdiutil attach -nobrowse -readonly "$decrypted_image" -mountpoint "$mount_point" >/dev/null
+
+    mkdir -p "$RAMDISK_ROOT"
+    # -a preserves symlinks and permissions; -H preserves the dylib hardlink
+    # pairs.  The HFS image's root-owned .Trashes directory is unreadable to
+    # a normal user, so exclude it (and the HFS+ private data dir) outright.
+    rsync -aH \
+        --exclude='.Trashes' \
+        --exclude='.HFS+ Private Directory Data' \
+        --exclude='System/Library/CoreServices/DumpPanic' \
+        --exclude='System/Library/CoreServices/ReportCrash' \
+        --exclude='System/Library/Extensions/*' \
+        --exclude='System/Library/Filesystems/*' \
+        --exclude='System/Library/Frameworks/*' \
+        --exclude='System/Library/PrivateFrameworks/*' \
+        --exclude='usr/lib/updaters' \
+        --exclude='usr/lib/IOABPLib.dylib' \
+        --exclude='usr/lib/libamsupport.dylib' \
+        --exclude='usr/lib/libauthinstall.dylib' \
+        --exclude='usr/lib/libARI.dylib' \
+        --exclude='usr/lib/libATCommandStudioDynamic.dylib' \
+        --exclude='usr/lib/libBasebandUSB.dylib' \
+        --exclude='usr/lib/libBBUpdaterDynamic.dylib' \
+        --exclude='usr/lib/libCRFSuite.dylib' \
+        --exclude='usr/lib/libFDR.dylib' \
+        --exclude='usr/lib/libH5Dynamic.dylib' \
+        --exclude='usr/lib/libIOAccessoryManager.dylib' \
+        --exclude='usr/lib/libKTLDynamic.dylib' \
+        --exclude='usr/lib/libmav_ipc_router_dynamic.dylib' \
+        --exclude='usr/lib/libPCITransport.dylib' \
+        --exclude='usr/lib/libQMIParserDynamic.dylib' \
+        --exclude='usr/lib/libReverseProxyDevice.dylib' \
+        --exclude='usr/lib/libTelephony*.dylib' \
+        --exclude='usr/lib/libTiSerialFlasher.dylib' \
+        --exclude='usr/local' \
+        --exclude='usr/share/progressui' \
+        --exclude='usr/standalone' \
+        --exclude='usr/bin/*' \
+        --exclude='usr/sbin/*' \
+        --exclude='usr/libexec/*' \
+        --exclude='bin/*' \
+        --exclude='sbin/*' \
+        --exclude='mnt*' \
+        "$mount_point/" "$RAMDISK_ROOT/"
+    hdiutil detach "$mount_point" >/dev/null
+    rm -rf "$mount_point"
+    trap - EXIT HUP INT TERM
+
+    if [ ! -d "$RAMDISK_ROOT/System/Library" ]; then
+        echo "Ramdisk setup failed: missing System/Library in $RAMDISK_ROOT" >&2
+        exit 1
+    fi
+}
+
 if [ ! -d "$RAMDISK_ROOT/System/Library" ]; then
-    echo "Ramdisk root is missing System/Library: $RAMDISK_ROOT" >&2
-    exit 1
+    setup_ramdisk
 fi
 if [ ! -d "$IOS_SYSTEM_ROOT/System/Library" ]; then
     echo "iOS system root is unavailable; reusing ramdisk metadata" >&2
