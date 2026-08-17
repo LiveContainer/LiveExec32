@@ -114,6 +114,66 @@ void LC32AdoptLegacyRootViewControllers(void) {
 
 @end
 
+/*
+ * Sentinel returned to the guest UIApplicationMain shim when the host run
+ * loop was interrupted by a guest-debugger all-stop. The guest shim loops
+ * back and re-enters this function, which then drives the run loop directly
+ * (the app object and delegate already exist). Keep the value in sync with
+ * GuestFrameworks/UIKit/UIKit.m.
+ */
+static const int LC32UIKITRunLoopDebuggerStop = 0x1C32DEAD;
+
+/*
+ * The guest debugger can request an all-stop (worker crash, ^C, breakpoint)
+ * while the guest main thread is parked inside the host UIApplicationMain run
+ * loop. That blocking mach_msg lives in CoreFoundation and is not tracked by
+ * the coordinator's debuggerMachCalls, so it cannot be aborted like a guest
+ * SVC wait. GSEventRunModal(0) also loops forever, so CFRunLoopStop alone
+ * cannot make UIApplicationMain return. Instead the notifier below wakes the
+ * main run loop and its armed block unwinds the run loop via a caught
+ * Objective-C exception, returning control to the guest JIT so the stop
+ * reply is delivered. Once the debugger resumes, the guest shim re-enters
+ * this function and LC32RunDebuggerAwareMainRunLoop drives the run loop
+ * directly with a poll, avoiding any further unwinding.
+ */
+@interface LC32DebuggerStopException : NSException
+@end
+@implementation LC32DebuggerStopException
+@end
+
+/* Non-zero only while UIApplicationMain's own run loop is executing, so the
+ * notifier block only unwinds (throws) inside the @try below. */
+static bool LC32RunLoopExceptionArmed = false;
+
+static void LC32DebuggerStopRunLoopBlock(void) {
+    if(LC32DebuggerAllStopRequested() && LC32RunLoopExceptionArmed) {
+        @throw [LC32DebuggerStopException
+            exceptionWithName:@"LC32DebuggerStopException"
+                       reason:@"Guest debugger requested an all-stop"
+                     userInfo:nil];
+    }
+}
+
+static void LC32DebuggerStopRunLoopNotify(void) {
+    CFRunLoopRef runLoop = CFRunLoopGetMain();
+    CFRunLoopPerformBlock(runLoop, kCFRunLoopCommonModes, ^{
+        LC32DebuggerStopRunLoopBlock();
+    });
+    CFRunLoopWakeUp(runLoop);
+}
+
+static int LC32RunDebuggerAwareMainRunLoop(void) {
+    /* Re-entry after a debugger stop: the app object and delegate already
+     * exist, so drive the run loop directly. The short timeout bounds stop
+     * latency even if the wake-up is missed. */
+    for(;;) {
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, false);
+        if(LC32DebuggerAllStopRequested()) {
+            return LC32UIKITRunLoopDebuggerStop;
+        }
+    }
+}
+
 __BEGIN_DECLS
 
 int LC32_UIKit_UIApplicationMain(u32 r2, u32 r3, u32 sp) {
@@ -134,8 +194,32 @@ int LC32_UIKit_UIApplicationMain(u32 r2, u32 r3, u32 sp) {
     (void)launchObserver;
     char executableName[] = "exec";
     char *host_argv[] = {executableName, nullptr};
-    const int result = UIApplicationMain(
-        argc, host_argv, principalClassName, delegateClassName);
+
+    static bool firstEntry = true;
+    if(!firstEntry) {
+        return LC32RunDebuggerAwareMainRunLoop();
+    }
+    firstEntry = false;
+    if(!LC32DebuggerActive()) {
+        return UIApplicationMain(
+            argc, host_argv, principalClassName, delegateClassName);
+    }
+
+    LC32SetDebuggerStopRunLoopNotifier(
+        LC32DebuggerStopRunLoopNotify);
+    LC32RunLoopExceptionArmed = true;
+    int result;
+    @try {
+        result = UIApplicationMain(
+            argc, host_argv, principalClassName, delegateClassName);
+    } @catch(LC32DebuggerStopException *exception) {
+        LC32RunLoopExceptionArmed = false;
+        fprintf(stderr,
+            "LC32: host run loop interrupted by guest debugger stop\n");
+        fflush(stderr);
+        return LC32UIKITRunLoopDebuggerStop;
+    }
+    LC32RunLoopExceptionArmed = false;
     fprintf(stderr,
         "LC32: host UIApplicationMain returned %d\n", result);
     fflush(stderr);

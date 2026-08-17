@@ -93,6 +93,16 @@ static std::atomic<bool> reemitPendingGuestStop{false};
 static std::atomic<bool> guestDebuggerEnabled{false};
 static std::atomic<bool> debuggerInterruptRequested{false};
 static std::atomic<bool> debuggerAllStopRequested{false};
+/*
+ * Registered by the host UIKit shim while the guest main thread is parked
+ * inside the host UIApplicationMain run loop. When an all-stop is requested
+ * (worker crash, ^C, breakpoint) the run loop's blocking mach_msg is not one
+ * of the guest SVC waits tracked by debuggerMachCalls, so the coordinator
+ * cannot abort it. The notifier wakes the main run loop; its block unwinds
+ * the run loop via an Objective-C exception caught by the shim, returning
+ * control to the guest JIT so the stop reply can be delivered.
+ */
+static std::atomic<void (*)(void)> debuggerStopRunLoopNotifier{nullptr};
 static std::atomic<bool> nativeShutdownRequested{false};
 static std::atomic<bool> guestProcessExitRequested{false};
 static std::atomic<int> guestProcessExitCode{0};
@@ -980,6 +990,23 @@ extern "C"
 int return_with_carry(int result, bool carry) {
     threadHandle.cpsr->setCarry(carry);
     return carry ? errno : result;
+}
+
+extern "C"
+bool LC32DebuggerActive() {
+    return NativeDebuggerActive();
+}
+
+extern "C"
+bool LC32DebuggerAllStopRequested() {
+    return debuggerAllStopRequested.load(std::memory_order_acquire);
+}
+
+extern "C"
+void LC32SetDebuggerStopRunLoopNotifier(
+        void (*notifier)(void)) {
+    debuggerStopRunLoopNotifier.store(
+        notifier, std::memory_order_release);
 }
 
 extern "C"
@@ -8557,6 +8584,18 @@ static bool NativeDebuggerRequestStop(
      */
     HaltAllGuestJits(LC32HaltReasonDebuggerPause);
     InterruptDebuggerMachCalls();
+    /*
+     * The guest main thread may be parked inside the host UIApplicationMain
+     * run loop, whose blocking mach_msg is not tracked by debuggerMachCalls.
+     * Wake the run loop so its armed block can unwind the host call and let
+     * the main JIT return to the coordinator. Harmless when the main thread
+     * is executing guest code (no run loop is running).
+     */
+    if (void (*notifier)(void) =
+            debuggerStopRunLoopNotifier.load(
+                std::memory_order_acquire)) {
+        notifier();
+    }
     NotifyNativeDebuggerWaiters();
     nativeDebugger.condition.notify_all();
     return true;

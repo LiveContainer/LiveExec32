@@ -309,6 +309,10 @@ Dynarmic::HaltReason Dynarmic_debugger_step(
     gdb_thread_id_t thread_id,
     bool continue_other_threads);
 void Dynarmic_emu_1set_1debugger_1enabled(bool enabled);
+bool LC32DebuggerActive();
+bool LC32DebuggerAllStopRequested();
+void LC32SetDebuggerStopRunLoopNotifier(
+    void (*notifier)(void));
 int Dynarmic_emu_1get_1stop_1signal();
 int Dynarmic_emu_1get_1exit_1code();
 void Dynarmic_emu_1set_1resume_1signal(int signal);

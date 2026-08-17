@@ -117,12 +117,29 @@ static void LC32DisableLegacyAdMobNetworking(void) {
     printf("LC32: disabled obsolete GADBannerView networking\n");
 }
 
+/*
+ * Sentinel returned by the host UIApplicationMain shim when the host run
+ * loop was interrupted by a guest-debugger all-stop. Keep in sync with
+ * HostFrameworks/UIKit/UIKit.mm.
+ */
+#define LC32_UIKIT_RUNLOOP_DEBUGGER_STOP 0x1C32DEAD
+
 int UIApplicationMain(int argc, char * argv[], NSString *
 principalClassName, NSString *delegateClassName) {
     pthread_once(&LC32LegacyAdMobOnce, LC32DisableLegacyAdMobNetworking);
     static uint64_t hostPtr = 0;
     if(!hostPtr) hostPtr = LC32Dlsym("LC32_UIKit_UIApplicationMain", YES);
-    return LC32InvokeHostCRet32(hostPtr, argc, argv, principalClassName.host_self, delegateClassName.host_self);
+    for(;;) {
+        const int result = LC32InvokeHostCRet32(
+            hostPtr, argc, argv,
+            principalClassName.host_self, delegateClassName.host_self);
+        if(result != LC32_UIKIT_RUNLOOP_DEBUGGER_STOP) {
+            return result;
+        }
+        /* The host run loop returned because the guest debugger stopped the
+         * process. The guest JIT halts at this host call; when the debugger
+         * resumes, re-enter the host run loop so the app keeps running. */
+    }
 }
 
 static pthread_once_t LC32UIImageCGImageOnce = PTHREAD_ONCE_INIT;
