@@ -1,7 +1,15 @@
 # LiveExec32
 Run 32-bit binaries on 64-bit iOS by passing through syscalls.
 
-The source code is currently very messy and may be prone to a lot of bugs (write overflow, etc). At least it works, but I will improve it later.
+> [!NOTE]
+> Some further work in this branch is done by LLM, mainly GPT-5.6 Sol; notable for implementing GDB Stub, Native Threads, more shims, etc.
+> Its commit history is kept for later reference.
+> Last commit before LLM is [760e9c7](https://github.com/LiveContainer/LiveExec32/commit/760e9c7da2856285a54404e7a6e00ee9fb99fd14)
+>
+> While I'd love to work more on it myself more, I can't really do it due to lack of time and I have too many side projects still left in the dust.
+> I still try to review changes. LLM also validates them through test cases made by itself.
+>
+> Contributions are welcome.
 
 This project is heavily based on [unidbg](https://github.com/zhkl0228/unidbg).
 
@@ -33,7 +41,7 @@ gmake -C GuestMakefile
 
 - Launch a binary and profit.
 ```bash
-sudo .theos/out/LiveExec32 /var/mobile/ramdisk32/usr/bin/fdisk
+.theos/out/LiveExec32 /var/mobile/ramdisk32/usr/bin/fdisk
 ```
 
 ## Design
@@ -54,8 +62,13 @@ classes from the installed Catalyst runtime, so those particular shims remain
 host-dependent until their iOS 10 signatures are captured in the tracked
 templates.
 
-## FAQ: can this be used to run 32-bit apps & integrate to LiveContainer?
-Although this can execute simple C/C++/Objective-C binaries, more work needs to be done. The most important thing is to figure out how to proxy Objective-C classes, objects and method calls between host (64-bit) and guest (32-bit).
+## FAQ
+### Can this be used to run 32-bit apps & integrate to LiveContainer?
+eta son. No support for iOS 26+ yet until I can enable dual-mapping JIT for Dynarmic.
+
+### Will this be available as a jailbreak tweak?
+Yes, but no plan for this yet. This could be made as transparent as possible,
+by allowing 32-bit apps to install and replace main binary with LiveExec32 when SpringBoard launches 32-bit app(?)
 
 ## License
 Apache License 2.0
