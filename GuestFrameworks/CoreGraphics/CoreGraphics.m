@@ -390,6 +390,30 @@ void CGContextSetStrokeColorWithColor(CGContextRef context,
         LC32_CG_HOST(context), LC32_CG_HOST(color));
 }
 
+void CGContextSetStrokeColorSpace(CGContextRef context,
+                                  CGColorSpaceRef space) {
+    if(context && space) LC32_CG_CALL(
+        LC32CoreGraphicsOpContextSetStrokeColorSpace,
+        LC32_CG_HOST(context), LC32_CG_HOST(space));
+}
+
+void CGContextSetStrokeColor(CGContextRef context,
+                             const CGFloat *components) {
+    if(context && components) LC32_CG_CALL(
+        LC32CoreGraphicsOpContextSetStrokeColor,
+        LC32_CG_HOST(context),
+        LC32_CG_U32((uintptr_t)components));
+}
+
+void CGContextStrokeLineSegments(CGContextRef context,
+                                 const CGPoint *points,
+                                 size_t count) {
+    if(context && points && count && count <= UINT32_MAX) LC32_CG_CALL(
+        LC32CoreGraphicsOpContextStrokeLineSegments,
+        LC32_CG_HOST(context), LC32_CG_U32((uintptr_t)points),
+        LC32_CG_U32(count));
+}
+
 void CGContextSetGrayFillColor(CGContextRef context, CGFloat gray,
                                CGFloat alpha) {
     if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextSetGrayFillColor,
@@ -469,6 +493,12 @@ CGBitmapInfo CGImageGetBitmapInfo(CGImageRef image) {
 size_t CGImageGetBitsPerComponent(CGImageRef image) {
     return image ? (size_t)LC32_CG_CALL(
         LC32CoreGraphicsOpImageGetBitsPerComponent,
+        LC32_CG_HOST(image)) : 0;
+}
+
+size_t CGImageGetBitsPerPixel(CGImageRef image) {
+    return image ? (size_t)LC32_CG_CALL(
+        LC32CoreGraphicsOpImageGetBitsPerPixel,
         LC32_CG_HOST(image)) : 0;
 }
 
@@ -624,6 +654,24 @@ bool CGAffineTransformIsIdentity(CGAffineTransform transform) {
     return transform.a == 1 && transform.b == 0 &&
         transform.c == 0 && transform.d == 1 &&
         transform.tx == 0 && transform.ty == 0;
+}
+
+CGAffineTransform CGAffineTransformConcat(CGAffineTransform first,
+                                          CGAffineTransform second) {
+    return (CGAffineTransform){
+        (CGFloat)((double)first.a * second.a +
+                  (double)first.b * second.c),
+        (CGFloat)((double)first.a * second.b +
+                  (double)first.b * second.d),
+        (CGFloat)((double)first.c * second.a +
+                  (double)first.d * second.c),
+        (CGFloat)((double)first.c * second.b +
+                  (double)first.d * second.d),
+        (CGFloat)((double)first.tx * second.a +
+                  (double)first.ty * second.c + second.tx),
+        (CGFloat)((double)first.tx * second.b +
+                  (double)first.ty * second.d + second.ty),
+    };
 }
 
 static CGAffineTransform LC32CGAffineTransformConcat(

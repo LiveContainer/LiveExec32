@@ -13,6 +13,7 @@
 #include "LC32OpenGLESBridge.h"
 
 NSString * const kEAGLColorFormatRGBA8 = @"EAGLColorFormat8888";
+NSString * const kEAGLColorFormatRGB565 = @"EAGLColorFormat565";
 NSString * const kEAGLDrawablePropertyColorFormat =
     @"EAGLDrawablePropertyColorFormat";
 NSString * const kEAGLDrawablePropertyRetainedBacking =
@@ -144,6 +145,10 @@ void glGetFloatv(GLenum pname, GLfloat *params) {
 
 void glActiveTexture(GLenum texture) {
     LC32_GL_CALL(LC32OpenGLESOpActiveTexture, LC32_GL_U32(texture));
+}
+
+void glClientActiveTexture(GLenum texture) {
+    LC32_GL_CALL(LC32OpenGLESOpClientActiveTexture, LC32_GL_U32(texture));
 }
 
 void glAttachShader(GLuint program, GLuint shader) {
@@ -680,6 +685,11 @@ void glTexParameterfv(GLenum target, GLenum pname, const GLfloat *params) {
         LC32_GL_U32(target), LC32_GL_U32(pname), LC32_GL_PTR(params));
 }
 
+void glTexEnvi(GLenum target, GLenum pname, GLint param) {
+    LC32_GL_CALL(LC32OpenGLESOpTexEnvi,
+        LC32_GL_U32(target), LC32_GL_U32(pname), LC32_GL_I32(param));
+}
+
 void glTexParameteri(GLenum target, GLenum pname, GLint param) {
     LC32_GL_CALL(LC32OpenGLESOpTexParameteri,
         LC32_GL_U32(target), LC32_GL_U32(pname), LC32_GL_I32(param));
@@ -905,8 +915,22 @@ void glGenRenderbuffersOES(GLsizei count, GLuint *renderbuffers) {
         LC32_GL_I32(count), LC32_GL_PTR(renderbuffers));
 }
 
+void glLightfv(GLenum light, GLenum pname, const GLfloat *params) {
+    LC32_GL_CALL(LC32OpenGLESOpLightfv,
+        LC32_GL_U32(light), LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
 void glLoadIdentity(void) {
     LC32_GL_CALL0(LC32OpenGLESOpLoadIdentity);
+}
+
+void glLoadMatrixf(const GLfloat *matrix) {
+    LC32_GL_CALL(LC32OpenGLESOpLoadMatrixf, LC32_GL_PTR(matrix));
+}
+
+void glMaterialfv(GLenum face, GLenum pname, const GLfloat *params) {
+    LC32_GL_CALL(LC32OpenGLESOpMaterialfv,
+        LC32_GL_U32(face), LC32_GL_U32(pname), LC32_GL_PTR(params));
 }
 
 void glMatrixMode(GLenum mode) {
@@ -920,6 +944,11 @@ void glMultMatrixf(const GLfloat *matrix) {
 void glNormal3f(GLfloat x, GLfloat y, GLfloat z) {
     LC32_GL_CALL(LC32OpenGLESOpNormal3f,
         LC32_GL_F32(x), LC32_GL_F32(y), LC32_GL_F32(z));
+}
+
+void glNormalPointer(GLenum type, GLsizei stride, const GLvoid *pointer) {
+    LC32_GL_CALL(LC32OpenGLESOpNormalPointer,
+        LC32_GL_U32(type), LC32_GL_I32(stride), LC32_GL_PTR(pointer));
 }
 
 void glOrthof(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top,
@@ -943,6 +972,41 @@ void glRenderbufferStorageOES(GLenum target, GLenum internalFormat,
     LC32_GL_CALL(LC32OpenGLESOpRenderbufferStorageOES,
         LC32_GL_U32(target), LC32_GL_U32(internalFormat),
         LC32_GL_I32(width), LC32_GL_I32(height));
+}
+
+/* Legacy OES aliases.  These were the only names exposed by the iOS 2.x-era
+ * OpenGL ES 1 headers, so old apps link against them; the host exports the
+ * extension-free entry points only. */
+void glBindFramebufferOES(GLenum target, GLuint framebuffer) {
+    glBindFramebuffer(target, framebuffer);
+}
+
+GLenum glCheckFramebufferStatusOES(GLenum target) {
+    return glCheckFramebufferStatus(target);
+}
+
+void glDeleteFramebuffersOES(GLsizei count, const GLuint *framebuffers) {
+    glDeleteFramebuffers(count, framebuffers);
+}
+
+void glDeleteRenderbuffersOES(GLsizei count, const GLuint *renderbuffers) {
+    glDeleteRenderbuffers(count, renderbuffers);
+}
+
+void glFramebufferTexture2DOES(GLenum target, GLenum attachment,
+                               GLenum textureTarget, GLuint texture,
+                               GLint level) {
+    glFramebufferTexture2D(target, attachment, textureTarget, texture,
+        level);
+}
+
+void glGenFramebuffersOES(GLsizei count, GLuint *framebuffers) {
+    glGenFramebuffers(count, framebuffers);
+}
+
+void glGetRenderbufferParameterivOES(GLenum target, GLenum pname,
+                                     GLint *params) {
+    glGetRenderbufferParameteriv(target, pname, params);
 }
 
 void glRotatef(GLfloat angle, GLfloat x, GLfloat y, GLfloat z) {

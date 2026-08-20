@@ -84,6 +84,10 @@ typedef enum : uint32_t {
     LC32CoreGraphicsOpGradientCreateWithColors = 66,
     LC32CoreGraphicsOpContextDrawLinearGradient = 67,
     LC32CoreGraphicsOpContextSetFillColor = 68,
+    LC32CoreGraphicsOpContextSetStrokeColorSpace = 69,
+    LC32CoreGraphicsOpContextSetStrokeColor = 70,
+    LC32CoreGraphicsOpContextStrokeLineSegments = 71,
+    LC32CoreGraphicsOpImageGetBitsPerPixel = 72,
 } LC32CoreGraphicsOpcode;
 
 #endif

@@ -5,14 +5,11 @@
 #import <OpenGLES/ES1/glext.h>
 #import <OpenGLES/ES2/gl.h>
 #import <QuartzCore/CAEAGLLayer.h>
-#import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
 #include <algorithm>
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -30,7 +27,12 @@
 @interface EAGLContext (LC32EAGLCompatibility)
 - (BOOL)lc32_renderbufferStorage:(NSUInteger)target
                     fromDrawable:(id<EAGLDrawable>)drawable;
-- (BOOL)lc32_trace_presentRenderbuffer:(NSUInteger)target;
+@end
+
+@interface LC32EAGLContextStateLifetime : NSObject {
+@public
+    uintptr_t _contextKey;
+}
 @end
 
 namespace {
@@ -39,76 +41,6 @@ constexpr size_t kMaximumTransfer = 256u * 1024u * 1024u;
 constexpr size_t kMaximumString = 16u * 1024u * 1024u;
 
 thread_local GLenum bridgeError = GL_NO_ERROR;
-
-bool GLTraceEnabled() {
-    static const bool enabled = [] {
-        const char *value = getenv("LC32_GL_TRACE");
-        return value && *value && strcmp(value, "0") != 0;
-    }();
-    return enabled;
-}
-
-void TraceEAGLState(const char *event, EAGLContext *context,
-                    id<EAGLDrawable> drawable, BOOL result) {
-    if(!GLTraceEnabled()) return;
-
-    GLint framebuffer = 0;
-    GLint renderbuffer = 0;
-    GLint renderbufferWidth = 0;
-    GLint renderbufferHeight = 0;
-    GLint viewport[4] = {};
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
-    glGetIntegerv(GL_RENDERBUFFER_BINDING, &renderbuffer);
-    glGetIntegerv(GL_VIEWPORT, viewport);
-    if(renderbuffer) {
-        glGetRenderbufferParameteriv(GL_RENDERBUFFER,
-                                     GL_RENDERBUFFER_WIDTH,
-                                     &renderbufferWidth);
-        glGetRenderbufferParameteriv(GL_RENDERBUFFER,
-                                     GL_RENDERBUFFER_HEIGHT,
-                                     &renderbufferHeight);
-    }
-
-    CALayer *layer = [(id)drawable isKindOfClass:
-        NSClassFromString(@"CALayer")] ? (CALayer *)(id)drawable : nil;
-    NSDictionary *drawableProperties = [(id)drawable respondsToSelector:
-        @selector(drawableProperties)] ? [(id)drawable drawableProperties] : nil;
-    UIView *view = [layer.delegate isKindOfClass:UIView.class]
-        ? (UIView *)layer.delegate : nil;
-    UIWindow *window = view.window;
-    UIViewController *root = window.rootViewController;
-    UIView *rootView = root.viewIfLoaded;
-    CGRect sceneBounds = window.windowScene
-        ? window.windowScene.coordinateSpace.bounds : CGRectZero;
-
-    fprintf(stderr,
-        "LC32 GL %s result=%d context=%p current=%p drawable=%s:%p "
-        "properties=%s native.keys={%s,%s} native.rgba8=%s "
-        "layer.bounds=%s layer.frame=%s layer.scale=%.4g "
-        "view=%p view.frame=%s view.bounds=%s view.scale=%.4g "
-        "window=%p window.frame=%s window.bounds=%s scene.bounds=%s "
-        "root=%s:%p root.view=%p root.bounds=%s "
-        "fb=%d rb=%d rb.size=%dx%d viewport=%d,%d,%d,%d\n",
-        event, result, context, EAGLContext.currentContext,
-        drawable ? object_getClassName((id)drawable) : "(nil)", drawable,
-        drawableProperties.description.UTF8String,
-        kEAGLDrawablePropertyRetainedBacking.UTF8String,
-        kEAGLDrawablePropertyColorFormat.UTF8String,
-        kEAGLColorFormatRGBA8.UTF8String,
-        NSStringFromCGRect(layer.bounds).UTF8String,
-        NSStringFromCGRect(layer.frame).UTF8String,
-        layer.contentsScale,
-        view, NSStringFromCGRect(view.frame).UTF8String,
-        NSStringFromCGRect(view.bounds).UTF8String,
-        view.contentScaleFactor,
-        window, NSStringFromCGRect(window.frame).UTF8String,
-        NSStringFromCGRect(window.bounds).UTF8String,
-        NSStringFromCGRect(sceneBounds).UTF8String,
-        root ? object_getClassName(root) : "(nil)", root,
-        rootView, NSStringFromCGRect(rootView.bounds).UTF8String,
-        framebuffer, renderbuffer, renderbufferWidth, renderbufferHeight,
-        viewport[0], viewport[1], viewport[2], viewport[3]);
-}
 
 void SetBridgeError(GLenum error) {
     if(bridgeError == GL_NO_ERROR) bridgeError = error;
@@ -505,6 +437,7 @@ enum class ClientArrayKind : uint8_t {
     Vertex,
     Color,
     TexCoord,
+    Normal,
 };
 
 struct ClientArrayDescriptor {
@@ -523,18 +456,39 @@ struct ClientArrayContextState {
     std::unordered_set<GLuint> enabledVertexAttribs;
     ClientArrayDescriptor vertex;
     ClientArrayDescriptor color;
-    ClientArrayDescriptor texCoord;
+    std::unordered_map<GLenum, ClientArrayDescriptor> texCoords;
+    std::unordered_set<GLenum> enabledTexCoords;
+    ClientArrayDescriptor normal;
+    GLenum clientActiveTexture = GL_TEXTURE0;
     bool vertexEnabled = false;
     bool colorEnabled = false;
-    bool texCoordEnabled = false;
+    bool normalEnabled = false;
 };
 
 std::mutex clientArrayStateMutex;
 std::unordered_map<uintptr_t, ClientArrayContextState> clientArrayStates;
+static const void *clientArrayStateLifetimeKey =
+    &clientArrayStateLifetimeKey;
+
+void RemoveClientArrayState(uintptr_t contextKey) {
+    std::lock_guard<std::mutex> lock(clientArrayStateMutex);
+    clientArrayStates.erase(contextKey);
+}
 
 uintptr_t CurrentGLContextKey() {
-    return reinterpret_cast<uintptr_t>(
-        (__bridge void *)EAGLContext.currentContext);
+    EAGLContext *context = EAGLContext.currentContext;
+    const uintptr_t contextKey = reinterpret_cast<uintptr_t>(
+        (__bridge void *)context);
+    if(context && !objc_getAssociatedObject(
+            context, clientArrayStateLifetimeKey)) {
+        LC32EAGLContextStateLifetime *lifetime =
+            [LC32EAGLContextStateLifetime new];
+        lifetime->_contextKey = contextKey;
+        objc_setAssociatedObject(context, clientArrayStateLifetimeKey,
+            lifetime, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [lifetime release];
+    }
+    return contextKey;
 }
 
 void SetVertexAttribArrayEnabled(GLuint index, bool enabled) {
@@ -550,9 +504,21 @@ void SetClientStateEnabled(GLenum array, bool enabled) {
     switch(array) {
         case GL_VERTEX_ARRAY: state.vertexEnabled = enabled; break;
         case GL_COLOR_ARRAY: state.colorEnabled = enabled; break;
-        case GL_TEXTURE_COORD_ARRAY: state.texCoordEnabled = enabled; break;
+        case GL_TEXTURE_COORD_ARRAY:
+            if(enabled) {
+                state.enabledTexCoords.insert(state.clientActiveTexture);
+            } else {
+                state.enabledTexCoords.erase(state.clientActiveTexture);
+            }
+            break;
+        case GL_NORMAL_ARRAY: state.normalEnabled = enabled; break;
         default: break;
     }
+}
+
+void SetClientActiveTexture(GLenum texture) {
+    std::lock_guard<std::mutex> lock(clientArrayStateMutex);
+    clientArrayStates[CurrentGLContextKey()].clientActiveTexture = texture;
 }
 
 void RememberVertexAttribPointer(const ClientArrayDescriptor *descriptor,
@@ -568,11 +534,23 @@ void RememberClientPointer(const ClientArrayDescriptor *descriptor,
                            ClientArrayKind kind) {
     std::lock_guard<std::mutex> lock(clientArrayStateMutex);
     auto &state = clientArrayStates[CurrentGLContextKey()];
+    if(kind == ClientArrayKind::TexCoord) {
+        const GLenum texture = state.clientActiveTexture;
+        if(descriptor) {
+            ClientArrayDescriptor saved = *descriptor;
+            saved.index = texture;
+            state.texCoords[texture] = saved;
+        } else {
+            state.texCoords.erase(texture);
+        }
+        return;
+    }
     ClientArrayDescriptor *destination = nullptr;
     switch(kind) {
         case ClientArrayKind::Vertex: destination = &state.vertex; break;
         case ClientArrayKind::Color: destination = &state.color; break;
-        case ClientArrayKind::TexCoord: destination = &state.texCoord; break;
+        case ClientArrayKind::TexCoord: return;
+        case ClientArrayKind::Normal: destination = &state.normal; break;
         case ClientArrayKind::VertexAttrib: return;
     }
     *destination = descriptor ? *descriptor : ClientArrayDescriptor{};
@@ -595,7 +573,8 @@ std::vector<ClientArrayDescriptor> EnabledClientArrays() {
     if(context == clientArrayStates.end()) return descriptors;
 
     const auto &state = context->second;
-    descriptors.reserve(state.enabledVertexAttribs.size() + 3);
+    descriptors.reserve(state.enabledVertexAttribs.size() +
+        state.enabledTexCoords.size() + 3);
     for(GLuint index : state.enabledVertexAttribs) {
         auto descriptor = state.vertexAttribs.find(index);
         if(descriptor != state.vertexAttribs.end() &&
@@ -607,8 +586,15 @@ std::vector<ClientArrayDescriptor> EnabledClientArrays() {
         descriptors.push_back(state.vertex);
     if(state.colorEnabled && state.color.valid)
         descriptors.push_back(state.color);
-    if(state.texCoordEnabled && state.texCoord.valid)
-        descriptors.push_back(state.texCoord);
+    for(GLenum texture : state.enabledTexCoords) {
+        auto descriptor = state.texCoords.find(texture);
+        if(descriptor != state.texCoords.end() &&
+                descriptor->second.valid) {
+            descriptors.push_back(descriptor->second);
+        }
+    }
+    if(state.normalEnabled && state.normal.valid)
+        descriptors.push_back(state.normal);
     return descriptors;
 }
 
@@ -676,6 +662,8 @@ bool StageClientArrays(size_t maximumIndex,
     if(staged.empty()) return true;
 
     GLint savedBinding = 0;
+    GLint savedClientActiveTexture = GL_TEXTURE0;
+    bool changedClientActiveTexture = false;
     glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &savedBinding);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     for(const StagedClientArray &array : staged) {
@@ -696,11 +684,22 @@ bool StageClientArrays(size_t maximumIndex,
                     descriptor.stride, pointer);
                 break;
             case ClientArrayKind::TexCoord:
+                if(!changedClientActiveTexture) {
+                    glGetIntegerv(GL_CLIENT_ACTIVE_TEXTURE,
+                                  &savedClientActiveTexture);
+                    changedClientActiveTexture = true;
+                }
+                glClientActiveTexture(descriptor.index);
                 glTexCoordPointer(descriptor.size, descriptor.type,
                     descriptor.stride, pointer);
                 break;
+            case ClientArrayKind::Normal:
+                glNormalPointer(descriptor.type, descriptor.stride, pointer);
+                break;
         }
     }
+    if(changedClientActiveTexture)
+        glClientActiveTexture(savedClientActiveTexture);
     glBindBuffer(GL_ARRAY_BUFFER, static_cast<GLuint>(savedBinding));
     return true;
 }
@@ -932,6 +931,15 @@ size_t VertexAttribElementCount(GLenum pname) {
 
 } // namespace
 
+@implementation LC32EAGLContextStateLifetime
+
+- (void)dealloc {
+    RemoveClientArrayState(_contextKey);
+    [super dealloc];
+}
+
+@end
+
 @implementation EAGLContext (LC32EAGLCompatibility)
 
 + (void)load {
@@ -940,23 +948,18 @@ size_t VertexAttribElementCount(GLenum pname) {
         contextClass, @selector(renderbufferStorage:fromDrawable:));
     Method normalizedStorage = class_getInstanceMethod(
         contextClass, @selector(lc32_renderbufferStorage:fromDrawable:));
-    Method present = class_getInstanceMethod(
-        contextClass, @selector(presentRenderbuffer:));
-    Method tracedPresent = class_getInstanceMethod(
-        contextClass, @selector(lc32_trace_presentRenderbuffer:));
     if(storage && normalizedStorage) {
         method_exchangeImplementations(storage, normalizedStorage);
-    }
-    if(GLTraceEnabled() && present && tracedPresent) {
-        method_exchangeImplementations(present, tracedPresent);
     }
 }
 
 - (BOOL)lc32_renderbufferStorage:(NSUInteger)target
                     fromDrawable:(id<EAGLDrawable>)drawable {
+    CAEAGLLayer *drawableLayer = nil;
+    BOOL requestedRGB565 = NO;
     if([(id)drawable isKindOfClass:CAEAGLLayer.class]) {
-        CAEAGLLayer *layer = (CAEAGLLayer *)(id)drawable;
-        NSDictionary *properties = layer.drawableProperties;
+        drawableLayer = (CAEAGLLayer *)(id)drawable;
+        NSDictionary *properties = drawableLayer.drawableProperties;
         NSMutableDictionary *normalized =
             [NSMutableDictionary dictionaryWithCapacity:properties.count];
         for(id key in properties) {
@@ -984,26 +987,36 @@ size_t VertexAttribElementCount(GLenum pname) {
                 if([value isEqual:@"EAGLColorFormat8888"] ||
                         [value isEqual:@"EAGLColorFormatRGBA8"]) {
                     normalizedValue = kEAGLColorFormatRGBA8;
-                } else if([value isEqual:@"EAGLColorFormatRGB565"]) {
+                } else if([value isEqual:kEAGLColorFormatRGB565] ||
+                        [value isEqual:@"EAGLColorFormat565"] ||
+                        [value isEqual:@"EAGLColorFormatRGB565"]) {
                     normalizedValue = kEAGLColorFormatRGB565;
+                    requestedRGB565 = YES;
                 }
             }
             normalized[normalizedKey] = normalizedValue;
         }
-        layer.drawableProperties = normalized;
+        drawableLayer.drawableProperties = normalized;
     }
 
     BOOL result = [self lc32_renderbufferStorage:target
                                     fromDrawable:drawable];
-    TraceEAGLState("renderbufferStorage", self, drawable, result);
-    return result;
-}
-
-- (BOOL)lc32_trace_presentRenderbuffer:(NSUInteger)target {
-    BOOL result = [self lc32_trace_presentRenderbuffer:target];
-    static std::atomic<bool> traced{false};
-    if(!traced.exchange(true, std::memory_order_relaxed)) {
-        TraceEAGLState("first presentRenderbuffer", self, nil, result);
+    if(!result && requestedRGB565 && drawableLayer) {
+        /*
+         * Recent Simulator OpenGLES builds no longer allocate RGB565 layer
+         * storage even though the legacy constant remains exported.  Old
+         * games commonly request it to save memory.  Preserve RGB565 where
+         * the host still supports it, but promote a rejected request to the
+         * universally supported RGBA8 format so the renderbuffer is usable.
+         */
+        NSMutableDictionary *fallback =
+            [drawableLayer.drawableProperties mutableCopy];
+        fallback[kEAGLDrawablePropertyColorFormat] =
+            kEAGLColorFormatRGBA8;
+        drawableLayer.drawableProperties = fallback;
+        [fallback release];
+        result = [self lc32_renderbufferStorage:target
+                                    fromDrawable:drawable];
     }
     return result;
 }
@@ -1719,11 +1732,109 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
             glFogfv(U(0), values.data());
             return 0;
         }
+        case LC32OpenGLESOpLightfv: {
+            REQUIRE(3);
+            size_t count;
+            switch(U(1)) {
+                case GL_AMBIENT:
+                case GL_DIFFUSE:
+                case GL_SPECULAR:
+                case GL_POSITION:
+                    count = 4;
+                    break;
+                case GL_SPOT_DIRECTION:
+                    count = 3;
+                    break;
+                case GL_SPOT_EXPONENT:
+                case GL_SPOT_CUTOFF:
+                case GL_CONSTANT_ATTENUATION:
+                case GL_LINEAR_ATTENUATION:
+                case GL_QUADRATIC_ATTENUATION:
+                    count = 1;
+                    break;
+                default: {
+                    const GLfloat dummy[4] = {};
+                    glLightfv(U(0), U(1), dummy);
+                    return 0;
+                }
+            }
+            std::vector<GLfloat> values;
+            if(!ReadGuestArray(U(2), count, values)) return 0;
+            glLightfv(U(0), U(1), values.data());
+            return 0;
+        }
+        case LC32OpenGLESOpMaterialfv: {
+            REQUIRE(3);
+            size_t count;
+            switch(U(1)) {
+                case GL_SHININESS:
+                    count = 1;
+                    break;
+                case GL_AMBIENT:
+                case GL_DIFFUSE:
+                case GL_SPECULAR:
+                case GL_EMISSION:
+                case GL_AMBIENT_AND_DIFFUSE:
+                    count = 4;
+                    break;
+                default: {
+                    const GLfloat dummy[4] = {};
+                    glMaterialfv(U(0), U(1), dummy);
+                    return 0;
+                }
+            }
+            std::vector<GLfloat> values;
+            if(!ReadGuestArray(U(2), count, values)) return 0;
+            glMaterialfv(U(0), U(1), values.data());
+            return 0;
+        }
+        case LC32OpenGLESOpClientActiveTexture: {
+            REQUIRE(1);
+            glClientActiveTexture(U(0));
+            GLint activeTexture = GL_TEXTURE0;
+            glGetIntegerv(GL_CLIENT_ACTIVE_TEXTURE, &activeTexture);
+            SetClientActiveTexture((GLenum)activeTexture);
+            return 0;
+        }
+        case LC32OpenGLESOpNormalPointer: {
+            REQUIRE(3);
+            GLint binding = 0;
+            glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &binding);
+            if(!binding) {
+                ClientArrayDescriptor descriptor;
+                descriptor.kind = ClientArrayKind::Normal;
+                descriptor.size = 3;
+                descriptor.type = U(0);
+                descriptor.stride = I(1);
+                descriptor.guestPointer = U(2);
+                descriptor.valid = true;
+                RememberClientPointer(&descriptor, ClientArrayKind::Normal);
+                glNormalPointer(U(0), I(1), nullptr);
+                return 0;
+            }
+            RememberClientPointer(nullptr, ClientArrayKind::Normal);
+            const GLvoid *pointer = reinterpret_cast<const GLvoid *>(
+                static_cast<uintptr_t>(U(2)));
+            glNormalPointer(U(0), I(1), pointer);
+            return 0;
+        }
+        case LC32OpenGLESOpTexEnvi: {
+            REQUIRE(3);
+            glTexEnvi(U(0), U(1), I(2));
+            return 0;
+        }
         case LC32OpenGLESOpMultMatrixf: {
             REQUIRE(1);
             std::vector<GLfloat> matrix;
             if(!ReadGuestArray(U(0), 16, matrix)) return 0;
             glMultMatrixf(matrix.data());
+            return 0;
+        }
+        case LC32OpenGLESOpLoadMatrixf: {
+            REQUIRE(1);
+            std::vector<GLfloat> matrix;
+            if(!ReadGuestArray(U(0), 16, matrix)) return 0;
+            glLoadMatrixf(matrix.data());
             return 0;
         }
         case LC32OpenGLESOpDiscardFramebufferEXT: {

@@ -48,6 +48,25 @@ void ReportMissingContextFillColorSpaceFunction() {
     });
 }
 
+using CGContextGetStrokeColorSpaceFunction =
+    CGColorSpaceRef (*)(CGContextRef);
+
+CGContextGetStrokeColorSpaceFunction GetContextStrokeColorSpaceFunction() {
+    static const auto function =
+        reinterpret_cast<CGContextGetStrokeColorSpaceFunction>(
+            dlsym(RTLD_DEFAULT, "CGContextGetStrokeColorSpace"));
+    return function;
+}
+
+void ReportMissingContextStrokeColorSpaceFunction() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        std::fprintf(stderr,
+            "LC32: CGContextSetStrokeColor is unavailable because the host "
+            "does not export CGContextGetStrokeColorSpace\n");
+    });
+}
+
 bool ReadCoreGraphicsCall(u32 guestAddress, LC32CoreGraphicsCall &call) {
     struct {
         uint32_t version;
@@ -919,6 +938,84 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
                 CGPathAddRect(path, transform, SlotRect(call, 8));
             }
             return 1;
+        }
+        case LC32CoreGraphicsOpContextSetStrokeColorSpace: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            CGColorSpaceRef space = SlotHostObject<CGColorSpaceRef>(call, 1);
+            if(!context || !space) return 0;
+            CGContextSetStrokeColorSpace(context, space);
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextSetStrokeColor: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            const u32 guestComponents = SlotU32(call, 1);
+            if(!context || !guestComponents) return 0;
+
+            const auto getStrokeColorSpace =
+                GetContextStrokeColorSpaceFunction();
+            if(!getStrokeColorSpace) {
+                ReportMissingContextStrokeColorSpaceFunction();
+                return 0;
+            }
+
+            CGColorSpaceRef space = getStrokeColorSpace(context);
+            if(!space ||
+               CGColorSpaceGetModel(space) == kCGColorSpaceModelPattern) {
+                return 0;
+            }
+            const size_t colorComponentCount =
+                CGColorSpaceGetNumberOfComponents(space);
+            if(!colorComponentCount ||
+               colorComponentCount >= kMaximumColorComponents) {
+                return 0;
+            }
+
+            std::vector<CGFloat> components;
+            const CGFloat *componentPointer = nullptr;
+            if(!ReadGuestCGFloatArray(guestComponents,
+                    colorComponentCount + 1, false,
+                    components, componentPointer)) {
+                return 0;
+            }
+            CGContextSetStrokeColor(context, componentPointer);
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextStrokeLineSegments: {
+            if(!RequireCoreGraphicsSlots(call, 3)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            const u32 guestPoints = SlotU32(call, 1);
+            const u32 count = SlotU32(call, 2);
+            if(!context || !guestPoints || !count ||
+               count > kMaximumBitmapBytes / (2 * sizeof(float))) {
+                return 0;
+            }
+
+            const size_t byteCount = (size_t)count * 2 * sizeof(float);
+            if(static_cast<uint64_t>(guestPoints) + byteCount >
+                    static_cast<uint64_t>(UINT32_MAX) + 1) {
+                return 0;
+            }
+            std::vector<float> guestValues(count * 2);
+            if(Dynarmic_mem_1read(guestPoints, byteCount,
+                    reinterpret_cast<char *>(guestValues.data())) != 0) {
+                return 0;
+            }
+            std::vector<CGPoint> points(count);
+            for(size_t index = 0; index < count; ++index) {
+                points[index] = CGPointMake(
+                    static_cast<CGFloat>(guestValues[index * 2]),
+                    static_cast<CGFloat>(guestValues[index * 2 + 1]));
+            }
+            CGContextStrokeLineSegments(context, points.data(), count);
+            SyncBitmapBacking(context, FindBitmapBacking(context));
+            return 1;
+        }
+        case LC32CoreGraphicsOpImageGetBitsPerPixel: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGImageRef image = SlotHostObject<CGImageRef>(call, 0);
+            return image ? static_cast<u32>(CGImageGetBitsPerPixel(image)) : 0;
         }
         case LC32CoreGraphicsOpPathCreateCopy: {
             if(!RequireCoreGraphicsSlots(call, 1)) return 0;

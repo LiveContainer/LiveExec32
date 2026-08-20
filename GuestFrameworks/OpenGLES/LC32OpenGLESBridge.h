@@ -189,6 +189,12 @@ typedef enum : uint32_t {
     LC32OpenGLESOpFramebufferRenderbufferOES = 168,
     LC32OpenGLESOpGenRenderbuffersOES = 169,
     LC32OpenGLESOpRenderbufferStorageOES = 170,
+    LC32OpenGLESOpLoadMatrixf = 171,
+    LC32OpenGLESOpClientActiveTexture = 172,
+    LC32OpenGLESOpLightfv = 173,
+    LC32OpenGLESOpMaterialfv = 174,
+    LC32OpenGLESOpNormalPointer = 175,
+    LC32OpenGLESOpTexEnvi = 176,
 } LC32OpenGLESOpcode;
 
 #endif
