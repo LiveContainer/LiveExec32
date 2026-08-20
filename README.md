@@ -35,9 +35,9 @@ gmake -C GuestMakefile
 
   Override the sources with `RAMDISK_IPSW_URL`, `RAMDISK_IPSW_COMPONENT`,
   `RAMDISK_SETUP_DIR`, `RAMDISK_ROOT`, and `IOS_SYSTEM_ROOT` (the latter is
-  the decrypted iOS 10.3.3 system root used for framework metadata; it only
-  needs to be mounted when regenerating shims).  Requires `pzb`, `xpwntool`,
-  `hdiutil`, and `rsync`.
+  the decrypted iOS 10.3.3 system root used for framework metadata and must
+  be mounted while packing).  Requires `pzb`, `xpwntool`, `hdiutil`, and
+  `rsync`.
 
 - Launch a binary and profit.
 ```bash

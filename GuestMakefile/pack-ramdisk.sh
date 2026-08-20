@@ -113,8 +113,9 @@ if [ ! -d "$RAMDISK_ROOT/System/Library" ]; then
     setup_ramdisk
 fi
 if [ ! -d "$IOS_SYSTEM_ROOT/System/Library" ]; then
-    echo "iOS system root is unavailable; reusing ramdisk metadata" >&2
-    IOS_SYSTEM_ROOT=$RAMDISK_ROOT
+    echo "iOS system root is unavailable: $IOS_SYSTEM_ROOT" >&2
+    echo "Mount or set IOS_SYSTEM_ROOT so framework Info.plists can be installed" >&2
+    exit 1
 fi
 
 framework_count=0
