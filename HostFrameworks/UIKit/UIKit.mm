@@ -16,6 +16,159 @@ r3 = sp+4
 
 namespace {
 
+bool LC32GuestIsIPadOnly(void) {
+    const char *guestExecutable = getenv("LC32_GUEST_EXECUTABLE");
+    /* UIKit can create internal windows while the shim dylib is loading.
+     * Do not consume the cache until main.cpp has published the guest. */
+    if(!guestExecutable || !guestExecutable[0]) return false;
+
+    static bool result = false;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *path = [NSString stringWithUTF8String:
+            getenv("LC32_GUEST_EXECUTABLE")];
+        NSBundle *bundle = [NSBundle bundleWithPath:
+            path.stringByDeletingLastPathComponent];
+        NSArray *families = [bundle objectForInfoDictionaryKey:
+            @"UIDeviceFamily"];
+        bool supportsPhone = false;
+        bool supportsPad = false;
+        if([families isKindOfClass:NSArray.class]) {
+            for(id family in families) {
+                if(![family respondsToSelector:@selector(integerValue)]) {
+                    continue;
+                }
+                const NSInteger value = [family integerValue];
+                supportsPhone |= value == 1;
+                supportsPad |= value == 2;
+            }
+        }
+        result = supportsPad && !supportsPhone;
+    });
+    return result;
+}
+
+const void *LC32LegacyIPadWindowBoundsKey =
+    &LC32LegacyIPadWindowBoundsKey;
+const void *LC32LegacyIPadWindowBaseTransformKey =
+    &LC32LegacyIPadWindowBaseTransformKey;
+const void *LC32LegacyIPadWindowAppliedTransformKey =
+    &LC32LegacyIPadWindowAppliedTransformKey;
+
+CGAffineTransform LC32WindowOrientationTransform(
+        CGAffineTransform transform) {
+    /* A later UIKit orientation update can be composed with the fit scale
+     * that this shim installed previously. Reduce each linear basis vector
+     * back to unit length before treating it as the new orientation, or a
+     * subsequent pass would fit an already-scaled window a second time. */
+    const CGFloat xLength = hypot(transform.a, transform.b);
+    const CGFloat yLength = hypot(transform.c, transform.d);
+    if(xLength > 0) {
+        transform.a /= xLength;
+        transform.b /= xLength;
+    }
+    if(yLength > 0) {
+        transform.c /= yLength;
+        transform.d /= yLength;
+    }
+    transform.tx = 0;
+    transform.ty = 0;
+    return transform;
+}
+
+void LC32ScaleLegacyIPadWindow(UIWindow *window) {
+    /* UIKit owns additional keyboard, alert, and text-effects windows in the
+     * same process. Only scale a UIWindow that is actually paired with a
+     * guest object. */
+    if(!window || !window.guest_selfOrNull || !LC32GuestIsIPadOnly()) return;
+
+    UIScreen *screen = window.screen ?: UIScreen.mainScreen;
+    /* A classic/compatibility scene can be landscape while UIScreen still
+     * reports the device's physical portrait bounds. UIWindow geometry is
+     * expressed in the scene coordinate space, so fit and center there. */
+    id<UICoordinateSpace> sceneSpace = window.windowScene.coordinateSpace;
+    const CGRect hostBounds = sceneSpace ? sceneSpace.bounds : screen.bounds;
+    const CGFloat hostShortEdge = MIN(hostBounds.size.width,
+                                      hostBounds.size.height);
+    if(hostShortEdge <= 0 || hostShortEdge >= 600) return;
+
+    NSValue *savedValue = objc_getAssociatedObject(
+        window, LC32LegacyIPadWindowBoundsKey);
+    CGRect virtualBounds = savedValue
+        ? savedValue.CGRectValue : window.bounds;
+    if(virtualBounds.size.width < 700 ||
+            virtualBounds.size.height < 900) {
+        virtualBounds = CGRectMake(0, 0, 768, 1024);
+    }
+    if(!savedValue) {
+        objc_setAssociatedObject(window, LC32LegacyIPadWindowBoundsKey,
+            [NSValue valueWithCGRect:virtualBounds],
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
+    const CGAffineTransform currentTransform = window.transform;
+    NSValue *baseTransformValue = objc_getAssociatedObject(
+        window, LC32LegacyIPadWindowBaseTransformKey);
+    NSValue *appliedTransformValue = objc_getAssociatedObject(
+        window, LC32LegacyIPadWindowAppliedTransformKey);
+    const CGAffineTransform lastApplied = appliedTransformValue
+        ? appliedTransformValue.CGAffineTransformValue
+        : CGAffineTransformIdentity;
+    const CGAffineTransform baseTransform =
+        baseTransformValue && appliedTransformValue &&
+            CGAffineTransformEqualToTransform(
+                currentTransform, lastApplied)
+        ? baseTransformValue.CGAffineTransformValue
+        : LC32WindowOrientationTransform(currentTransform);
+
+    /* Keep the raw portrait bounds used by the guest view and EAGL layer.
+     * UIKit's quarter-turn transforms this 768x1024 extent into landscape
+     * 1024x768 for composition. Swapping the bounds here rotates twice and
+     * desynchronizes the EAGL viewport from its drawable storage. */
+    const CGRect transformedVirtualBounds = CGRectApplyAffineTransform(
+        CGRectMake(0, 0, virtualBounds.size.width,
+                   virtualBounds.size.height), baseTransform);
+    const CGFloat transformedWidth =
+        fabs(transformedVirtualBounds.size.width);
+    const CGFloat transformedHeight =
+        fabs(transformedVirtualBounds.size.height);
+    if(!(transformedWidth > 0) || !(transformedHeight > 0)) return;
+
+    const CGFloat scale = MIN(
+        hostBounds.size.width / transformedWidth,
+        hostBounds.size.height / transformedHeight);
+    if(!(scale > 0)) return;
+
+    /* Keep one coherent virtual coordinate system. Core Animation scales the
+     * entire window into the host scene, and UIKit's normal coordinate
+     * conversion applies the inverse transform to touches before guest
+     * callbacks are bridged. */
+    window.transform = CGAffineTransformIdentity;
+    window.bounds = virtualBounds;
+    window.center = CGPointMake(CGRectGetMidX(hostBounds),
+                                CGRectGetMidY(hostBounds));
+    CGAffineTransform appliedTransform = baseTransform;
+    appliedTransform.a *= scale;
+    appliedTransform.b *= scale;
+    appliedTransform.c *= scale;
+    appliedTransform.d *= scale;
+    /* bounds + center now own the placement. UIKit's old orientation
+     * translation was calculated for the pre-virtualized window and would
+     * otherwise shift the scaled canvas away from the host center. */
+    appliedTransform.tx = 0;
+    appliedTransform.ty = 0;
+    window.transform = appliedTransform;
+    window.clipsToBounds = YES;
+    objc_setAssociatedObject(window, LC32LegacyIPadWindowBaseTransformKey,
+        [NSValue valueWithCGAffineTransform:baseTransform],
+        OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(window,
+        LC32LegacyIPadWindowAppliedTransformKey,
+        [NSValue valueWithCGAffineTransform:appliedTransform],
+        OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+}
+
 UIViewController *LC32OwningViewController(UIView *view) {
     for(UIResponder *responder = view; responder;
             responder = responder.nextResponder) {
@@ -42,7 +195,8 @@ id LC32ObjectProperty(id object, const char *name) {
 }
 
 void LC32AdoptLegacyRootViewController(UIWindow *window) {
-    if(!window || window.rootViewController) return;
+    if(!window) return;
+    if(window.rootViewController) return;
 
     UIViewController *controller = nil;
     for(UIView *subview in [window.subviews reverseObjectEnumerator]) {
@@ -79,12 +233,14 @@ void LC32AdoptLegacyRootViewControllers(void) {
                                                    "window");
     if(delegateWindow) {
         LC32AdoptLegacyRootViewController(delegateWindow);
+        LC32ScaleLegacyIPadWindow(delegateWindow);
         return;
     }
     for(UIScene *scene in application.connectedScenes) {
         if(![scene isKindOfClass:UIWindowScene.class]) continue;
         for(UIWindow *window in ((UIWindowScene *)scene).windows) {
             LC32AdoptLegacyRootViewController(window);
+            LC32ScaleLegacyIPadWindow(window);
         }
     }
 }
@@ -110,6 +266,11 @@ void LC32AdoptLegacyRootViewControllers(void) {
 - (void)lc32_makeKeyAndVisible {
     LC32AdoptLegacyRootViewController(self);
     [self lc32_makeKeyAndVisible];
+    /* Let UIKit attach the scene and install its unscaled orientation
+     * transform first. Scaling before the native call makes UIKit compose
+     * the quarter-turn with our fit transform, and a second pass then fits
+     * that already-scaled result again. */
+    LC32ScaleLegacyIPadWindow(self);
 }
 
 @end
@@ -255,6 +416,31 @@ u32 LC32_UIKit_CGSizeFromString(u32 stringLow, u32 stringHigh, u32 sp) {
         const_cast<char *>(reinterpret_cast<const char *>(&guestSize))) == 0;
 }
 
+u32 LC32_UIKit_CGRectFromString(u32 stringLow, u32 stringHigh, u32 sp) {
+    NSString *string = reinterpret_cast<NSString *>(
+        static_cast<uintptr_t>(stringLow |
+            (static_cast<u64>(stringHigh) << 32)));
+    const u32 guestResult =
+        Dynarmic_current_user_callbacks()->MemoryRead32(sp);
+    if(!string || !guestResult || guestResult > UINT32_MAX - 15)
+        return 0;
+
+    const CGRect rect = CGRectFromString(string);
+    const struct {
+        float x;
+        float y;
+        float width;
+        float height;
+    } guestRect = {
+        static_cast<float>(rect.origin.x),
+        static_cast<float>(rect.origin.y),
+        static_cast<float>(rect.size.width),
+        static_cast<float>(rect.size.height),
+    };
+    return Dynarmic_mem_1write(guestResult, sizeof(guestRect),
+        const_cast<char *>(reinterpret_cast<const char *>(&guestRect))) == 0;
+}
+
 void LC32_UIKit_UIGraphicsBeginImageContext(
         u32 widthBits, u32 heightBits, u32) {
     float width;
@@ -305,6 +491,30 @@ u32 LC32_UIKit_UIImageJPEGRepresentation(
         ? UIImageJPEGRepresentation(image, static_cast<CGFloat>(quality))
         : nil;
     return data ? data.guest_self : 0;
+}
+
+u32 LC32_UIKit_UIImagePNGRepresentation(u32 imageLow, u32 imageHigh, u32) {
+    UIImage *image = reinterpret_cast<UIImage *>(static_cast<uintptr_t>(
+        imageLow | (static_cast<u64>(imageHigh) << 32)));
+    NSData *data = image ? UIImagePNGRepresentation(image) : nil;
+    return data ? data.guest_self : 0;
+}
+
+u32 LC32_UIKit_NSStringFromCGRect(
+        u32 xBits, u32 yBits, u32 sp) {
+    float x;
+    float y;
+    float width;
+    float height;
+    memcpy(&x, &xBits, sizeof(x));
+    memcpy(&y, &yBits, sizeof(y));
+    const u32 widthBits =
+        Dynarmic_current_user_callbacks()->MemoryRead32(sp);
+    const u32 heightBits =
+        Dynarmic_current_user_callbacks()->MemoryRead32(sp + sizeof(u32));
+    memcpy(&width, &widthBits, sizeof(width));
+    memcpy(&height, &heightBits, sizeof(height));
+    return NSStringFromCGRect(CGRectMake(x, y, width, height)).guest_self;
 }
 
 void LC32_UIKit_SetWindowRootViewController(

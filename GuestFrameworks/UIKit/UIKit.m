@@ -1,4 +1,5 @@
 #import <LC32/LC32.h>
+#import <CoreGraphics/CoreGraphics+LC32.h>
 #import <UIKit/UIKit+LC32.h>
 #import <objc/runtime.h>
 
@@ -73,10 +74,60 @@ NSNotificationName const UIWindowDidBecomeVisibleNotification =
 const UIEdgeInsets UIEdgeInsetsZero = {0,0,0,0};
 const UIOffset UIOffsetZero = {0,0};
 const UIWindowLevel UIWindowLevelAlert = 2000.0f;
+const UIWindowLevel UIWindowLevelStatusBar = 1000.0f;
 
 static pthread_once_t LC32LegacyAdMobOnce = PTHREAD_ONCE_INIT;
 static pthread_once_t LC32VoiceOverOnce = PTHREAD_ONCE_INIT;
 static uint64_t LC32HostUIAccessibilityIsVoiceOverRunning;
+static pthread_once_t LC32LegacyIPadCanvasOnce = PTHREAD_ONCE_INIT;
+static BOOL LC32LegacyIPadCanvasRequired;
+static BOOL LC32LegacyIPadStatusBarHidden;
+
+static void LC32ResolveLegacyIPadCanvas(void) {
+    NSDictionary *info = NSBundle.mainBundle.infoDictionary;
+    NSArray *families = [info objectForKey:@"UIDeviceFamily"];
+    BOOL supportsPhone = NO;
+    BOOL supportsPad = NO;
+    if([families isKindOfClass:NSArray.class]) {
+        for(id family in families) {
+            if(![family respondsToSelector:@selector(integerValue)]) continue;
+            const NSInteger value = [family integerValue];
+            supportsPhone |= value == 1;
+            supportsPad |= value == 2;
+        }
+    }
+    LC32LegacyIPadCanvasRequired = supportsPad && !supportsPhone;
+    LC32LegacyIPadStatusBarHidden = [[info objectForKey:
+        @"UIStatusBarHidden"] boolValue];
+}
+
+static BOOL LC32RequiresLegacyIPadCanvas(void) {
+    pthread_once(&LC32LegacyIPadCanvasOnce, LC32ResolveLegacyIPadCanvas);
+    return LC32LegacyIPadCanvasRequired;
+}
+
+static BOOL LC32ScreenNeedsLegacyIPadCanvas(CGRect hostBounds) {
+    if(!LC32RequiresLegacyIPadCanvas()) return NO;
+    const CGFloat shortEdge = MIN(hostBounds.size.width,
+                                  hostBounds.size.height);
+    /* A full-size iPad canvas has never had a short edge below 600 points.
+     * A smaller value means that an iPad-only guest is running inside a
+     * phone/classic host scene and needs a coherent virtual canvas. */
+    return shortEdge > 0 && shortEdge < 600;
+}
+
+static CGRect LC32HostScreenRect(UIScreen *screen, SEL selector) {
+    static uint64_t boundsSelector __attribute__((aligned(8)));
+    static uint64_t applicationFrameSelector __attribute__((aligned(8)));
+    uint64_t *storage = selector == @selector(bounds)
+        ? &boundsSelector : &applicationFrameSelector;
+    const uint64_t hostSelector = LC32CachedHostSelector(
+        storage, selector, YES);
+    CGRect_64 hostResult;
+    LC32InvokeHostSelector(screen.host_self, hostSelector,
+                           &hostResult, sizeof(hostResult), (uint64_t)0);
+    return LC32GuestCGRect(hostResult);
+}
 
 static void LC32ResolveVoiceOverFunction(void) {
     LC32HostUIAccessibilityIsVoiceOverRunning =
@@ -147,12 +198,15 @@ static uint64_t LC32UIImageCGImageSelector;
 static pthread_once_t LC32UIKitGeometryOnce = PTHREAD_ONCE_INIT;
 static uint64_t LC32UIKitNSStringFromCGSize;
 static uint64_t LC32UIKitCGSizeFromString;
+static uint64_t LC32UIKitCGRectFromString;
 static uint64_t LC32UIKitBeginImageContext;
 static uint64_t LC32UIKitBeginImageContextWithOptions;
 static uint64_t LC32UIKitEndImageContext;
 static uint64_t LC32UIKitGetCurrentContext;
 static uint64_t LC32UIKitGetImageFromCurrentImageContext;
 static uint64_t LC32UIKitJPEGRepresentation;
+static uint64_t LC32UIKitPNGRepresentation;
+static uint64_t LC32UIKitNSStringFromCGRect;
 static uint64_t LC32UIKitSetWindowRootViewController;
 static void LC32UIImageResolveCGImageSelector(void) {
     LC32UIImageCGImageSelector = LC32GetHostSelector(@selector(CGImage));
@@ -163,6 +217,8 @@ static void LC32UIKitResolveGeometryFunctions(void) {
         LC32Dlsym("LC32_UIKit_NSStringFromCGSize", YES);
     LC32UIKitCGSizeFromString =
         LC32Dlsym("LC32_UIKit_CGSizeFromString", YES);
+    LC32UIKitCGRectFromString =
+        LC32Dlsym("LC32_UIKit_CGRectFromString", YES);
     LC32UIKitBeginImageContext =
         LC32Dlsym("LC32_UIKit_UIGraphicsBeginImageContext", YES);
     LC32UIKitBeginImageContextWithOptions = LC32Dlsym(
@@ -175,6 +231,10 @@ static void LC32UIKitResolveGeometryFunctions(void) {
         "LC32_UIKit_UIGraphicsGetImageFromCurrentImageContext", YES);
     LC32UIKitJPEGRepresentation =
         LC32Dlsym("LC32_UIKit_UIImageJPEGRepresentation", YES);
+    LC32UIKitPNGRepresentation =
+        LC32Dlsym("LC32_UIKit_UIImagePNGRepresentation", YES);
+    LC32UIKitNSStringFromCGRect =
+        LC32Dlsym("LC32_UIKit_NSStringFromCGRect", YES);
     LC32UIKitSetWindowRootViewController = LC32Dlsym(
         "LC32_UIKit_SetWindowRootViewController", YES);
 }
@@ -198,6 +258,19 @@ NSString *NSStringFromCGSize(CGSize size) {
     return (__bridge NSString *)(void *)(uintptr_t)guestString;
 }
 
+NSString *NSStringFromCGRect(CGRect rect) {
+    pthread_once(&LC32UIKitGeometryOnce,
+        LC32UIKitResolveGeometryFunctions);
+    if(!LC32UIKitNSStringFromCGRect) return nil;
+    const uint32_t guestString = LC32InvokeHostCRet32(
+        LC32UIKitNSStringFromCGRect,
+        LC32UIKitFloatBits(rect.origin.x),
+        LC32UIKitFloatBits(rect.origin.y),
+        LC32UIKitFloatBits(rect.size.width),
+        LC32UIKitFloatBits(rect.size.height));
+    return (__bridge NSString *)(void *)(uintptr_t)guestString;
+}
+
 CGSize CGSizeFromString(NSString *string) {
     CGSize result = CGSizeZero;
     if(!string) return result;
@@ -208,6 +281,20 @@ CGSize CGSizeFromString(NSString *string) {
     if(!LC32InvokeHostCRet32(LC32UIKitCGSizeFromString,
             string.host_self, (uint64_t)guestResult)) {
         return CGSizeZero;
+    }
+    return result;
+}
+
+CGRect CGRectFromString(NSString *string) {
+    CGRect result = CGRectZero;
+    if(!string) return result;
+    pthread_once(&LC32UIKitGeometryOnce,
+        LC32UIKitResolveGeometryFunctions);
+    if(!LC32UIKitCGRectFromString) return result;
+    const uint32_t guestResult = (uint32_t)(uintptr_t)&result;
+    if(!LC32InvokeHostCRet32(LC32UIKitCGRectFromString,
+            string.host_self, (uint64_t)guestResult)) {
+        return CGRectZero;
     }
     return result;
 }
@@ -265,6 +352,16 @@ NSData *UIImageJPEGRepresentation(UIImage *image,
     const uint32_t guestData = LC32InvokeHostCRet32(
         LC32UIKitJPEGRepresentation, image.host_self,
         LC32UIKitFloatBits(compressionQuality));
+    return (__bridge NSData *)(void *)(uintptr_t)guestData;
+}
+
+NSData *UIImagePNGRepresentation(UIImage *image) {
+    if(!image) return nil;
+    pthread_once(&LC32UIKitGeometryOnce,
+        LC32UIKitResolveGeometryFunctions);
+    if(!LC32UIKitPNGRepresentation) return nil;
+    const uint32_t guestData = LC32InvokeHostCRet32(
+        LC32UIKitPNGRepresentation, image.host_self);
     return (__bridge NSData *)(void *)(uintptr_t)guestData;
 }
 
@@ -330,6 +427,67 @@ compatibleWithTraitCollection:nil];
         LC32UIImageResolveCGImageSelector);
     return (__bridge CGImageRef)LC32InvokeHostObjectSelector(
         self.host_self, LC32UIImageCGImageSelector);
+}
+
+@end
+
+@implementation UIDevice (LC32LegacyUniqueIdentifier)
+
+- (UIUserInterfaceIdiom)userInterfaceIdiom {
+    if(LC32RequiresLegacyIPadCanvas()) {
+        return UIUserInterfaceIdiomPad;
+    }
+
+    static uint64_t hostSelector __attribute__((aligned(8)));
+    const uint64_t selector = LC32CachedHostSelector(
+        &hostSelector, _cmd, NO);
+    return (UIUserInterfaceIdiom)LC32InvokeHostSelector(
+        self.host_self, selector, (uint64_t)0);
+}
+
+- (NSString *)uniqueIdentifier {
+    /* uniqueIdentifier was removed from UIDevice in iOS 7. Legacy apps call
+     * it to fingerprint the install; synthesize one from the modern
+     * identifierForVendor (stable per vendor per device), which both
+     * forwarding shims already provide for the guest. */
+    return self.identifierForVendor.UUIDString;
+}
+
+@end
+
+@implementation UIScreen (LC32LegacyIPadCanvas)
+
+- (CGRect)bounds {
+    CGRect bounds = LC32HostScreenRect(self, _cmd);
+    if(LC32ScreenNeedsLegacyIPadCanvas(bounds)) {
+        bounds = CGRectMake(0, 0, 768, 1024);
+    }
+    return bounds;
+}
+
+- (CGRect)applicationFrame {
+    CGRect frame = LC32HostScreenRect(self, _cmd);
+    if(LC32ScreenNeedsLegacyIPadCanvas(frame)) {
+        /* iOS 3.x iPad applications laid out below a 20-point status bar.
+         * Preserve it when visible; full-screen apps use -bounds instead. */
+        frame = LC32LegacyIPadStatusBarHidden
+            ? CGRectMake(0, 0, 768, 1024)
+            : CGRectMake(0, 20, 768, 1004);
+    }
+    return frame;
+}
+
+- (CGFloat)scale {
+    const CGRect bounds = LC32HostScreenRect(self, @selector(bounds));
+    if(LC32ScreenNeedsLegacyIPadCanvas(bounds)) {
+        return 1.0f;
+    }
+
+    static uint64_t hostSelector __attribute__((aligned(8)));
+    const uint64_t selector = LC32CachedHostSelector(
+        &hostSelector, _cmd, NO);
+    return (CGFloat)LC32HostFloatingResult(LC32InvokeHostSelector(
+        self.host_self, selector, (uint64_t)0));
 }
 
 @end
