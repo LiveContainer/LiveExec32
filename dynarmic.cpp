@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <cstdarg>
 #include <cstdio>
@@ -19,6 +20,8 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <pthread.h>
+
+#include <CommonCrypto/CommonCryptor.h>
 #include <sched.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -198,6 +201,11 @@ static void SetPendingGuestCrashMessageIfEmpty(const char *format, ...) {
 static bool read_guest_memory_with_permissions(
     u64 address, void *destination, size_t size,
     int requiredPermissions);
+static bool write_guest_memory_with_permissions(
+    u64 address, const void *source, size_t size,
+    int requiredPermissions);
+static bool guest_memory_range_has_permissions(
+    u64 address, size_t size, int requiredPermissions);
 static bool GuestAddressRangeIsValid32(u64 address, u64 size);
 static int ValidateGuestMunmapRange(u64 address, u64 size);
 static std::string CopyGuestCStringForCrash(
@@ -3498,16 +3506,97 @@ ssize_t guest_writev(int NR, int fildes, u32 guest_iov, int iovcnt) {
     return result;
 }
 
+/*
+ * Keep the legacy AES character device entirely inside the emulator.  A real
+ * host descriptor backed by /dev/null gives the guest an ordinary descriptor
+ * lifetime (close, dup and fcntl still work) without depending on the host
+ * kernel exposing an AES device with the 32-bit iOS ABI.
+ */
+static std::mutex guestAesFileDescriptorsMutex;
+static std::unordered_set<int> guestAesFileDescriptors;
+
+static bool IsGuestAesFileDescriptor(int fildes) {
+    std::lock_guard<std::mutex> lock(
+        guestAesFileDescriptorsMutex);
+    return guestAesFileDescriptors.count(fildes) != 0;
+}
+
+static void RegisterGuestAesFileDescriptor(int fildes) {
+    std::lock_guard<std::mutex> lock(
+        guestAesFileDescriptorsMutex);
+    guestAesFileDescriptors.insert(fildes);
+}
+
+static int guest_close(int NR, int fildes) {
+    std::lock_guard<std::mutex> lock(
+        guestAesFileDescriptorsMutex);
+    const int result = syscallRetCarry(
+        NR, fildes, 0, 0, 0, 0, 0, 0);
+    if (!threadHandle.cpsr->hasCarry() && result == 0) {
+        guestAesFileDescriptors.erase(fildes);
+    }
+    return result;
+}
+
+static int guest_dup(int fildes) {
+    std::lock_guard<std::mutex> lock(
+        guestAesFileDescriptorsMutex);
+    const bool duplicateIsAes =
+        guestAesFileDescriptors.count(fildes) != 0;
+    const int result = syscallRetCarry(
+        SYS_dup, fildes, 0, 0, 0, 0, 0, 0);
+    if (!threadHandle.cpsr->hasCarry() &&
+            result >= 0 && duplicateIsAes) {
+        guestAesFileDescriptors.insert(result);
+    }
+    return result;
+}
+
+static int guest_dup2(int source, int destination) {
+    std::lock_guard<std::mutex> lock(
+        guestAesFileDescriptorsMutex);
+    const bool duplicateIsAes =
+        guestAesFileDescriptors.count(source) != 0;
+    const int result = syscallRetCarry(
+        SYS_dup2, source, destination, 0, 0, 0, 0, 0);
+    if (!threadHandle.cpsr->hasCarry() && result >= 0) {
+        guestAesFileDescriptors.erase(result);
+        if (duplicateIsAes) {
+            guestAesFileDescriptors.insert(result);
+        }
+    }
+    return result;
+}
+
+static void CloseAllGuestAesFileDescriptors() {
+    std::lock_guard<std::mutex> lock(
+        guestAesFileDescriptorsMutex);
+    for (int fildes : guestAesFileDescriptors) {
+        (void)close(fildes);
+    }
+    guestAesFileDescriptors.clear();
+}
+
 int guest_open(int NR, u32 guest_path, int oflag, int mode) {
+    DynarmicHostString guestPath(guest_path);
     char host_path[PATH_MAX];
-    sharedHandle.fs->pathGuestToHost(guest_path, host_path);
+    sharedHandle.fs->pathGuestToHost(
+        guestPath.hostPtr, host_path);
+    const bool openGuestAesDevice =
+        strcmp(guestPath.hostPtr, "/dev/aes_0") == 0;
+    const char *openedHostPath = openGuestAesDevice
+        ? "/dev/null" : host_path;
     int result = debugger_aware_host_wait(
         [&] {
             return syscallRetCarry(
-                NR, host_path, oflag, mode,
+                NR, openedHostPath, oflag, mode,
                 0, 0, 0, 0);
         },
         return_with_carry_direct(EINTR, true));
+    if (openGuestAesDevice && result >= 0 &&
+            !threadHandle.cpsr->hasCarry()) {
+        RegisterGuestAesFileDescriptor(result);
+    }
     return result;
 }
 
@@ -3567,7 +3656,249 @@ int guest_sigprocmask(int how, u32 guest_set, u32 guest_oldset) {
     return result;
 }
 
+/*
+ * Classic iOS corecrypto offloaded sufficiently large AES-CBC operations to
+ * /dev/aes_0.  The command numbers contain the exact 32-bit payload sizes:
+ *
+ *   _IOR ('T', 0x65, 40) = 0x40285465  capability query
+ *   _IOWR('T', 0x66, 76) = 0xc04c5466  AES-CBC operation
+ *
+ * The layouts below were recovered from the armv7 corecrypto shipped in the
+ * guest root.  Keep every unknown word so host compiler layout changes cannot
+ * silently alter the guest ABI.
+ */
+static constexpr u32 LC32_AES_GET_INFO = 0x40285465u;
+static constexpr u32 LC32_AES_CRYPT = 0xc04c5466u;
+static constexpr size_t LC32_AES_BLOCK_SIZE = 16;
+static constexpr size_t LC32_AES_MAXIMUM_BYTES_PER_CALL = 64 * 1024;
+static constexpr size_t LC32_AES_WORKING_BUFFER_SIZE = 16 * 1024;
+
+struct LC32AESInfo {
+    uint8_t reserved0[28];
+    uint32_t maximumBytesPerCall;
+    uint8_t reserved1[8];
+};
+
+struct LC32AESCrypt {
+    /* libcorecrypto puts input first for encryption, output first for
+     * decryption.  Name these by position so that asymmetry stays explicit. */
+    uint32_t firstBuffer;
+    uint32_t secondBuffer;
+    uint32_t dataLength;
+    uint8_t iv[LC32_AES_BLOCK_SIZE];
+    uint32_t decrypt;
+    uint32_t keyBits;
+    uint8_t key[32];
+    uint32_t reserved68;
+    uint32_t reserved72;
+};
+
+static_assert(sizeof(LC32AESInfo) == 40,
+    "legacy AES info ioctl ABI must remain 40 bytes");
+static_assert(offsetof(LC32AESInfo, maximumBytesPerCall) == 28,
+    "legacy AES info quantum must remain at offset 28");
+static_assert(sizeof(LC32AESCrypt) == 76,
+    "legacy AES crypt ioctl ABI must remain 76 bytes");
+static_assert(offsetof(LC32AESCrypt, firstBuffer) == 0 &&
+        offsetof(LC32AESCrypt, secondBuffer) == 4 &&
+        offsetof(LC32AESCrypt, dataLength) == 8,
+    "legacy AES buffer fields must remain at offsets 0, 4, and 8");
+static_assert(offsetof(LC32AESCrypt, iv) == 12,
+    "legacy AES IV must remain at offset 12");
+static_assert(offsetof(LC32AESCrypt, decrypt) == 28,
+    "legacy AES direction must remain at offset 28");
+static_assert(offsetof(LC32AESCrypt, keyBits) == 32,
+    "legacy AES key length must remain at offset 32");
+static_assert(offsetof(LC32AESCrypt, key) == 36,
+    "legacy AES key must remain at offset 36");
+static_assert(offsetof(LC32AESCrypt, reserved68) == 68,
+    "legacy AES trailing fields must remain at offset 68");
+static_assert(offsetof(LC32AESCrypt, reserved72) == 72,
+    "legacy AES final field must remain at offset 72");
+static_assert(LC32_AES_MAXIMUM_BYTES_PER_CALL %
+        LC32_AES_BLOCK_SIZE == 0,
+    "legacy AES quantum must contain complete blocks");
+static_assert(LC32_AES_WORKING_BUFFER_SIZE %
+        LC32_AES_BLOCK_SIZE == 0,
+    "legacy AES working buffer must contain complete blocks");
+
+class LC32ScopedSensitiveWipe {
+public:
+    LC32ScopedSensitiveWipe(void *bytes, size_t size)
+        : bytes(bytes), size(size) {}
+
+    ~LC32ScopedSensitiveWipe() {
+        if (bytes != nullptr && size != 0) {
+            volatile uint8_t *output =
+                static_cast<volatile uint8_t *>(bytes);
+            for (size_t index = 0; index < size; ++index) {
+                output[index] = 0;
+            }
+        }
+    }
+
+    LC32ScopedSensitiveWipe(
+        const LC32ScopedSensitiveWipe &) = delete;
+    LC32ScopedSensitiveWipe &operator=(
+        const LC32ScopedSensitiveWipe &) = delete;
+
+private:
+    void *bytes;
+    size_t size;
+};
+
+static int GuestAesIoctlError(int error) {
+    return return_with_carry_direct(error, true);
+}
+
+static bool GuestAesRangesOverlap(
+        u32 first, u32 second, size_t size) {
+    const u64 firstEnd = static_cast<u64>(first) + size;
+    const u64 secondEnd = static_cast<u64>(second) + size;
+    return static_cast<u64>(first) < secondEnd &&
+        static_cast<u64>(second) < firstEnd;
+}
+
+static int guest_aes_ioctl(u32 request, u32 guest_arg) {
+    if (request == LC32_AES_GET_INFO) {
+        LC32AESInfo info{};
+        info.maximumBytesPerCall =
+            LC32_AES_MAXIMUM_BYTES_PER_CALL;
+        if (guest_arg == 0 ||
+                !write_guest_memory_with_permissions(
+                    guest_arg, &info, sizeof(info), PROT_WRITE)) {
+            return GuestAesIoctlError(EFAULT);
+        }
+        return return_with_carry_direct(0, false);
+    }
+
+    if (request != LC32_AES_CRYPT) {
+        return GuestAesIoctlError(ENOTTY);
+    }
+
+    LC32AESCrypt crypt{};
+    if (guest_arg == 0 ||
+            !read_guest_memory_with_permissions(
+                guest_arg, &crypt, sizeof(crypt), PROT_READ) ||
+            !guest_memory_range_has_permissions(
+                guest_arg, sizeof(crypt), PROT_WRITE)) {
+        return GuestAesIoctlError(EFAULT);
+    }
+    LC32ScopedSensitiveWipe cryptWipe(&crypt, sizeof(crypt));
+
+    if (crypt.decrypt > 1 ||
+            (crypt.keyBits != 128 && crypt.keyBits != 192 &&
+                crypt.keyBits != 256) ||
+            crypt.dataLength == 0 ||
+            crypt.dataLength % LC32_AES_BLOCK_SIZE != 0 ||
+            crypt.dataLength > LC32_AES_MAXIMUM_BYTES_PER_CALL) {
+        return GuestAesIoctlError(EINVAL);
+    }
+
+    const size_t dataLength = crypt.dataLength;
+    const u32 source = crypt.decrypt
+        ? crypt.secondBuffer : crypt.firstBuffer;
+    const u32 destination = crypt.decrypt
+        ? crypt.firstBuffer : crypt.secondBuffer;
+    if (!GuestAddressRangeIsValid32(source, dataLength) ||
+            !GuestAddressRangeIsValid32(
+                destination, dataLength) ||
+            !guest_memory_range_has_permissions(
+                source, dataLength, PROT_READ) ||
+            !guest_memory_range_has_permissions(
+                destination, dataLength, PROT_WRITE)) {
+        return GuestAesIoctlError(EFAULT);
+    }
+
+    /* Exact in-place operation is supported.  Reject shifted overlap because
+     * chunked copyout could otherwise overwrite ciphertext that a later chunk
+     * has not copied in yet. */
+    if (source != destination &&
+            GuestAesRangesOverlap(
+                source, destination, dataLength)) {
+        return GuestAesIoctlError(EINVAL);
+    }
+
+    const size_t bufferSize = std::min(
+        dataLength, LC32_AES_WORKING_BUFFER_SIZE);
+    std::vector<uint8_t> input;
+    std::vector<uint8_t> output;
+    try {
+        input.resize(bufferSize);
+        output.resize(bufferSize);
+    } catch (const std::bad_alloc &) {
+        return GuestAesIoctlError(ENOMEM);
+    }
+    LC32ScopedSensitiveWipe inputWipe(
+        input.data(), input.size());
+    LC32ScopedSensitiveWipe outputWipe(
+        output.data(), output.size());
+    std::array<uint8_t, LC32_AES_BLOCK_SIZE> chainingValue;
+    memcpy(chainingValue.data(), crypt.iv, chainingValue.size());
+    LC32ScopedSensitiveWipe ivWipe(
+        chainingValue.data(), chainingValue.size());
+
+    const CCOperation operation = crypt.decrypt
+        ? kCCDecrypt : kCCEncrypt;
+    const size_t keySize = crypt.keyBits / 8;
+    size_t offset = 0;
+    while (offset < dataLength) {
+        const size_t chunkLength = std::min(
+            dataLength - offset, input.size());
+        if (!read_guest_memory_with_permissions(
+                static_cast<u64>(source) + offset,
+                input.data(), chunkLength, PROT_READ)) {
+            return GuestAesIoctlError(EFAULT);
+        }
+
+        size_t moved = 0;
+        const CCCryptorStatus status = CCCrypt(
+            operation, kCCAlgorithmAES, 0,
+            crypt.key, keySize, chainingValue.data(),
+            input.data(), chunkLength,
+            output.data(), output.size(), &moved);
+        if (status != kCCSuccess || moved != chunkLength) {
+            return GuestAesIoctlError(EIO);
+        }
+
+        const uint8_t *nextChainingValue = crypt.decrypt
+            ? input.data() + chunkLength - LC32_AES_BLOCK_SIZE
+            : output.data() + chunkLength - LC32_AES_BLOCK_SIZE;
+        memcpy(chainingValue.data(), nextChainingValue,
+            chainingValue.size());
+
+        if (!write_guest_memory_with_permissions(
+                static_cast<u64>(destination) + offset,
+                output.data(), moved, PROT_WRITE)) {
+            return GuestAesIoctlError(EFAULT);
+        }
+        offset += chunkLength;
+    }
+
+    memcpy(crypt.iv, chainingValue.data(), sizeof(crypt.iv));
+    if (!write_guest_memory_with_permissions(
+            guest_arg, &crypt, sizeof(crypt), PROT_WRITE)) {
+        return GuestAesIoctlError(EFAULT);
+    }
+    return return_with_carry_direct(0, false);
+}
+
 int guest_ioctl(int fildes, u32 request, u32 guest_r2) {
+    if (IsGuestAesFileDescriptor(fildes)) {
+        return guest_aes_ioctl(request, guest_r2);
+    }
+    if (request == LC32_AES_GET_INFO ||
+            request == LC32_AES_CRYPT) {
+        /* Preserve EBADF for a closed descriptor and report ENOTTY for an
+         * unrelated live descriptor without exposing a 32-bit pointer to the
+         * host ioctl ABI. */
+        const int descriptorStatus = syscallRetCarry(
+            SYS_fcntl, fildes, F_GETFD, 0, 0, 0, 0, 0);
+        if (threadHandle.cpsr->hasCarry()) {
+            return descriptorStatus;
+        }
+        return GuestAesIoctlError(ENOTTY);
+    }
     switch(request) {
         case TIOCSCTTY:
         case TIOCEXCL:
@@ -3637,6 +3968,23 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
     switch (cmd) {
         // r2 is null or is a literal
         case F_DUPFD:
+#ifdef F_DUPFD_CLOEXEC
+        case F_DUPFD_CLOEXEC:
+#endif
+        {
+            std::lock_guard<std::mutex> lock(
+                guestAesFileDescriptorsMutex);
+            const bool duplicateIsAes =
+                guestAesFileDescriptors.count(fildes) != 0;
+            const int result = syscallRetCarry(
+                SYS_fcntl, fildes, cmd, guest_r2,
+                0, 0, 0, 0);
+            if (!threadHandle.cpsr->hasCarry() &&
+                    result >= 0 && duplicateIsAes) {
+                guestAesFileDescriptors.insert(result);
+            }
+            return result;
+        }
         case F_GETFD:
         case F_SETFD:
         case F_GETFL:
@@ -4360,6 +4708,30 @@ static bool GuestProtectionIsValid(int protection) {
     constexpr int supportedProtection =
         PROT_READ | PROT_WRITE | PROT_EXEC;
     return (protection & ~supportedProtection) == 0;
+}
+
+static bool guest_memory_range_has_permissions(
+        u64 address, size_t size,
+        int requiredPermissions) {
+    if (!GuestAddressRangeIsValid32(address, size)) {
+        return false;
+    }
+    std::lock_guard<std::recursive_mutex> lock(
+        guestVmMutex);
+    while (size != 0) {
+        if (get_memory_page_with_permissions(
+                address, requiredPermissions) == nullptr) {
+            return false;
+        }
+        const size_t pageOffset =
+            address & DYN_PAGE_MASK;
+        const size_t chunk = std::min(
+            size, static_cast<size_t>(
+                DYN_PAGE_SIZE - pageOffset));
+        address += chunk;
+        size -= chunk;
+    }
+    return true;
 }
 
 static bool read_guest_memory_with_permissions(
@@ -5562,7 +5934,6 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             case -26: // mach_reply_port
             case -21: // _kernelrpc_mach_port_insert_right_trap
             case -19: // _kernelrpc_mach_port_mod_refs_trap
-            case SYS_close: // 6
             case SYS_getpid: // 20
             case SYS_setuid: // 23
             case SYS_getuid: // 24
@@ -5572,7 +5943,6 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             case SYS_getgid: // 47
             case SYS_socket: // 97
             case SYS_issetugid: // 327
-            case SYS_close_nocancel: // 399
                 cpu->Regs()[0] = syscallRetCarry(NR, cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3]);
                 cpsr->setCarry(false); // FIXME: mach_reply_port sets carry to true, idk why
                 break;
@@ -5856,6 +6226,20 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                         : SYS_open_nocancel,
                     cpu->Regs()[0], cpu->Regs()[1],
                     cpu->Regs()[2]);
+                break;
+            case SYS_close: // 6
+            case SYS_close_nocancel: // 399
+                cpu->Regs()[0] = guest_close(
+                    NR, static_cast<int>(cpu->Regs()[0]));
+                break;
+            case SYS_dup: // 41
+                cpu->Regs()[0] = guest_dup(
+                    static_cast<int>(cpu->Regs()[0]));
+                break;
+            case SYS_dup2: // 90
+                cpu->Regs()[0] = guest_dup2(
+                    static_cast<int>(cpu->Regs()[0]),
+                    static_cast<int>(cpu->Regs()[1]));
                 break;
             case SYS_unlink: // 10
                 cpu->Regs()[0] = guest_unlink(cpu->Regs()[0]);
@@ -11403,6 +11787,7 @@ void Dynarmic_nativeDestroy() {
     for (NativeGuestJit *runtime : runtimes) {
         DestroyNativeGuestJit(runtime);
     }
+    CloseAllGuestAesFileDescriptors();
 
     Dynarmic::A32::Jit *jit = threadHandle.jit;
     DynarmicCallbacks32 *cb = sharedHandle.cb;
