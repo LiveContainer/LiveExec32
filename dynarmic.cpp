@@ -855,7 +855,8 @@ static std::vector<DebuggerSoftwareBreakpoint> debuggerSoftwareBreakpoints;
 
 struct GuestSoftwareTracepoint {
     u32 address;
-    std::array<uint8_t, sizeof(uint16_t)> original;
+    size_t kind;
+    std::array<uint8_t, sizeof(uint32_t)> original;
     bool fired;
 };
 static std::mutex guestSoftwareTracepointsMutex;
@@ -12361,7 +12362,7 @@ u32 Dynarmic_mmap(
         (off - aligned_off);
     
     printf("DBG: mmaping host 0x%llx to 0x%x\n", addr, address);
-    
+
     const u64 end = reservedAddress + size;
     for(u64 vaddr = reservedAddress; vaddr < end;
             vaddr += DYN_PAGE_SIZE) {
@@ -12767,15 +12768,17 @@ bool Dynarmic_guest_tracepoint_set(u64 address) {
     if (address > UINT32_MAX) {
         return false;
     }
+    const bool thumb = (address & 1u) != 0;
     const u32 guestAddress = static_cast<u32>(address) & ~1u;
-    constexpr size_t kind = sizeof(uint16_t);
+    const size_t kind = thumb
+        ? sizeof(uint16_t) : sizeof(uint32_t);
 
     std::lock_guard<std::mutex> lock(
         guestSoftwareTracepointsMutex);
     for (const GuestSoftwareTracepoint &tracepoint :
          guestSoftwareTracepoints) {
         if (tracepoint.address == guestAddress) {
-            return true;
+            return tracepoint.kind == kind;
         }
     }
     for (const DebuggerSoftwareBreakpoint &breakpoint :
@@ -12789,6 +12792,7 @@ bool Dynarmic_guest_tracepoint_set(u64 address) {
 
     GuestSoftwareTracepoint tracepoint = {
         .address = guestAddress,
+        .kind = kind,
         .original = {},
         .fired = false,
     };
@@ -12799,7 +12803,7 @@ bool Dynarmic_guest_tracepoint_set(u64 address) {
         return false;
     }
 
-    const uint16_t trap = 0xBE00;
+    const uint32_t trap = thumb ? 0xBE00u : 0xE1200070u;
     guestSoftwareTracepoints.push_back(tracepoint);
     if (DebuggerWritePhysicalMemory(
             guestAddress, kind,
@@ -12829,7 +12833,7 @@ static bool ConsumeGuestSoftwareTracepoint(
         }
         if (!it->fired) {
             if (DebuggerWritePhysicalMemory(
-                    guestAddress, it->original.size(),
+                    guestAddress, it->kind,
                     reinterpret_cast<const char *>(
                         it->original.data())) != 0) {
                 fprintf(stderr,
@@ -12925,7 +12929,7 @@ static bool ConsumeGuestSoftwareTracepoint(
     // discard translations that contain the trap.
     cpu->Regs()[Reg::PC] = guestAddress;
     InvalidateAllGuestJits(
-        guestAddress, tracepoint.original.size());
+        guestAddress, tracepoint.kind);
     return true;
 }
 
@@ -13072,7 +13076,7 @@ bool Dynarmic_debugger_set_breakpoint(u64 address, size_t kind) {
             if (DebuggerRangesOverlap(
                     guestAddress, kind,
                     tracepoint.address,
-                    tracepoint.original.size())) {
+                    tracepoint.kind)) {
                 return false;
             }
         }
