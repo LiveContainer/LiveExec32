@@ -67,6 +67,11 @@ void LC32GuestToHostCStringFree(uint64_t string);
 // Copy class name from host to guest
 uint32_t LC32HostToGuestCopyClassName(char *output, size_t length, uint64_t host_input);
 
+// Copies a raw host C string into guest memory and returns the required byte
+// count, including its terminating NUL.
+uint32_t LC32CopyHostCString(uint64_t host_cstring, char *output,
+                            uint32_t capacity);
+
 // Copies a native host NSString's UTF-8 representation into guest memory and
 // returns the required byte count, including its terminating NUL.
 uint32_t LC32CopyHostStringUTF8(uint64_t host_string, char *output,
@@ -171,6 +176,29 @@ static inline uint64_t LC32HostFloatingIndirectArgument(
     return storage
         ? LC32_GUEST_FLOATING_INDIRECT_ARGUMENT_TAG |
             (uint64_t)(uint32_t)(uintptr_t)storage
+        : 0;
+}
+
+/*
+ * Stage an explicitly sized pointer argument.  This is used when `void *`
+ * hides the native pointee size from the Objective-C method encoding, as it
+ * does for NSValue's byte-oriented API.  The descriptor and its storage need
+ * only remain alive for the synchronous host invocation.
+ */
+static inline void LC32InitializeHostSizedIndirectDescriptor(
+        LC32HostSizedIndirectDescriptor *descriptor, void *storage,
+        uint32_t size) {
+    descriptor->storage = (uint32_t)(uintptr_t)storage;
+    descriptor->size = size;
+    descriptor->magic = LC32_HOST_SIZED_INDIRECT_MAGIC;
+    descriptor->reserved = 0;
+}
+
+static inline uint64_t LC32HostSizedIndirectArgument(
+        const LC32HostSizedIndirectDescriptor *descriptor) {
+    return descriptor
+        ? LC32_GUEST_SIZED_INDIRECT_ARGUMENT_TAG |
+            (uint64_t)(uint32_t)(uintptr_t)descriptor
         : 0;
 }
 

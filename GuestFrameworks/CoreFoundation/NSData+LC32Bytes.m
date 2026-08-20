@@ -213,7 +213,7 @@ uint64_t LC32SynchronizeMutableDataGuestBytes(NSMutableData *data) {
 - (instancetype)initWithBytesNoCopy:(void *)bytes
                               length:(NSUInteger)length {
     return [self initWithBytesNoCopy:bytes length:length
-                         freeWhenDone:NO];
+                         freeWhenDone:YES];
 }
 
 - (instancetype)initWithBytesNoCopy:(void *)bytes

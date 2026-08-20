@@ -40,6 +40,9 @@ void LC32SetDoubleRegisters(double d0, double d1, double d2, double d3,
                             double d4, double d5, double d6, double d7);
 
 u32 LC32HostToGuestCopyClassName(u32 guest_output, size_t length, u64 host_object);
+// Copies a raw host C string into guest memory, returning the required byte
+// count including the terminating NUL.
+u32 LC32CopyHostCString(u64 host_cstring, u32 guest_output, size_t capacity);
 u32 LC32CopyHostStringUTF8(u64 host_object, u32 guest_output, size_t capacity);
 u32 LC32CopyHostStringBytes(u64 host_object, u32 encoding,
                             u32 guest_output, u32 capacity);

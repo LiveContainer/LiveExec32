@@ -2,6 +2,7 @@
 #include "LC32ObjCBridgeABI.h"
 
 #import <dispatch/dispatch.h>
+#import <mach/vm_map.h>
 
 #include <atomic>
 #include <array>
@@ -707,6 +708,63 @@ u32 LC32HostToGuestCopyClassName(u32 guest_output, size_t length, u64 host_objec
     return length;
 }
 
+u32 LC32CopyHostCString(u64 host_cstring, u32 guest_output,
+                        size_t capacity) {
+    if(!host_cstring) return 0;
+    /*
+     * This SVC receives a native pointer from guest state.  Do not dereference
+     * it with strlen: a stale or malformed value would turn a guest failure
+     * into a host EXC_BAD_ACCESS, and a missing terminator would scan without a
+     * bound.  Reading our own task through Mach gives invalid addresses a
+     * recoverable error and keeps Objective-C type encodings reasonably
+     * bounded.
+     */
+    constexpr size_t maximumByteCount = 4096;
+    std::array<char, maximumByteCount> bytes = {};
+    size_t byteCount = 0;
+    while(byteCount < bytes.size()) {
+        if(host_cstring > UINT64_MAX - byteCount) return 0;
+        const vm_address_t address = (vm_address_t)(host_cstring + byteCount);
+        const size_t pageOffset = address & (vm_page_size - 1);
+        const size_t pageRemaining = vm_page_size - pageOffset;
+        const size_t requested = MIN(
+            pageRemaining, bytes.size() - byteCount);
+        vm_size_t copied = 0;
+        const kern_return_t result = vm_read_overwrite(
+            mach_task_self(), address, requested,
+            reinterpret_cast<vm_address_t>(bytes.data() + byteCount),
+            &copied);
+        if(result != KERN_SUCCESS || copied == 0 || copied > requested) {
+            return 0;
+        }
+        const void *terminator = memchr(
+            bytes.data() + byteCount, '\0', (size_t)copied);
+        if(terminator) {
+            byteCount = static_cast<const char *>(terminator) -
+                bytes.data() + 1;
+            break;
+        }
+        byteCount += (size_t)copied;
+        if(copied != requested) return 0;
+    }
+    if(byteCount == bytes.size() && bytes.back() != '\0') return 0;
+    if(guest_output && capacity) {
+        const size_t copyCount = MIN(byteCount, capacity);
+        if(Dynarmic_mem_1write(
+                guest_output, copyCount, bytes.data()) != 0) {
+            return 0;
+        }
+        if(copyCount < byteCount) {
+            const char terminator = '\0';
+            if(Dynarmic_mem_1write(guest_output + copyCount - 1, 1,
+                                   (char *)&terminator) != 0) {
+                return 0;
+            }
+        }
+    }
+    return (u32)byteCount;
+}
+
 u32 LC32CopyHostStringUTF8(u64 host_object, u32 guest_output,
                            size_t capacity) {
     const char *bytes = [(NSString *)(id)host_object UTF8String];
@@ -934,6 +992,34 @@ static bool LC32NativeNSRangeType(const char *type) {
         fields[3] == '}' && fields[4] == '\0';
 }
 
+static bool LC32SelectorUsesHostStackVarargs(SEL selector) {
+    if(!selector) return false;
+    const char *name = sel_getName(selector);
+    if(!name) return false;
+
+    /*
+     * Darwin's ARM64 ABI puts unnamed variadic arguments on the stack even
+     * when integer argument registers remain unused.  Objective-C method
+     * encodings do not record the trailing ellipsis, so keep the small set of
+     * framework entry points which still cross this bridge explicitly.  The
+     * Foundation collection/string variants are implemented in guest code
+     * and therefore do not normally reach here, but recognizing the
+     * collection selectors makes the fallback path safe as well.
+     */
+    return !strcmp(name,
+               "initWithTitle:message:delegate:cancelButtonTitle:"
+               "otherButtonTitles:") ||
+        !strcmp(name,
+               "initWithTitle:delegate:cancelButtonTitle:"
+               "destructiveButtonTitle:otherButtonTitles:") ||
+        !strcmp(name, "arrayWithObjects:") ||
+        !strcmp(name, "initWithObjects:") ||
+        !strcmp(name, "setWithObjects:") ||
+        !strcmp(name, "orderedSetWithObjects:") ||
+        !strcmp(name, "dictionaryWithObjectsAndKeys:") ||
+        !strcmp(name, "initWithObjectsAndKeys:");
+}
+
 // guest to host call of objc_msgSend*
 u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
     // ARMv7 stores parameters in r0-r3 and stack pointer. r0-r3 is already reserved for self and cmd, so we read the rest from stack pointer
@@ -977,6 +1063,10 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
      */
     u32 indirectGuestStorage[9] = {};
     u64 indirectHostStorage[9] = {};
+    u32 sizedIndirectGuestStorage[9] = {};
+    u32 sizedIndirectSize[9] = {};
+    alignas(16) std::array<u8,
+        LC32_HOST_SIZED_INDIRECT_MAX_SIZE> sizedIndirectHostStorage[9] = {};
     enum class LC32FloatingIndirectType : u8 {
         None,
         Float,
@@ -1093,6 +1183,11 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
                 argumentTag ==
                     LC32_GUEST_FLOATING_INDIRECT_ARGUMENT_TAG &&
                 (u32)args[index] != 0;
+            const bool isTaggedSizedPointer =
+                *unqualifiedType == '^' &&
+                argumentTag ==
+                    LC32_GUEST_SIZED_INDIRECT_ARGUMENT_TAG &&
+                (u32)args[index] != 0;
             const bool isTaggedObjectArray =
                 unqualifiedType[0] == '^' &&
                 unqualifiedType[1] == '@' &&
@@ -1147,6 +1242,15 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
                !isTaggedFloatingPointer) {
                 printf("LC32: refusing floating-indirect argument %u for "
                        "non-floating-pointer selector %s\n", index,
+                       sel_getName(selector));
+                free(argumentType);
+                return 0;
+            }
+            if(argumentTag ==
+                    LC32_GUEST_SIZED_INDIRECT_ARGUMENT_TAG &&
+               !isTaggedSizedPointer) {
+                printf("LC32: refusing sized-indirect argument %u for "
+                       "non-pointer selector %s\n", index,
                        sel_getName(selector));
                 free(argumentType);
                 return 0;
@@ -1260,6 +1364,35 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
                 free(argumentType);
                 continue;
             }
+            if(isTaggedSizedPointer) {
+                LC32HostSizedIndirectDescriptor descriptor = {};
+                const u32 descriptorAddress = (u32)args[index];
+                const bool validDescriptor =
+                    Dynarmic_mem_1read(descriptorAddress,
+                        sizeof(descriptor), reinterpret_cast<char *>(
+                            &descriptor)) == 0 &&
+                    descriptor.magic == LC32_HOST_SIZED_INDIRECT_MAGIC &&
+                    descriptor.reserved == 0 && descriptor.storage != 0 &&
+                    descriptor.size != 0 &&
+                    descriptor.size <=
+                        LC32_HOST_SIZED_INDIRECT_MAX_SIZE &&
+                    (u64)descriptor.storage + descriptor.size <=
+                        UINT64_C(0x100000000) &&
+                    Dynarmic_mem_1read(descriptor.storage, descriptor.size,
+                        reinterpret_cast<char *>(
+                            sizedIndirectHostStorage[index].data())) == 0;
+                if(!validDescriptor) {
+                    printf("LC32: invalid sized-indirect argument %u of %s\n",
+                           index, sel_getName(selector));
+                    free(argumentType);
+                    return 0;
+                }
+                sizedIndirectGuestStorage[index] = descriptor.storage;
+                sizedIndirectSize[index] = descriptor.size;
+                args[index] = (u64)sizedIndirectHostStorage[index].data();
+                free(argumentType);
+                continue;
+            }
             if(isTaggedFloatingPointer) {
                 const u32 guestStorage = (u32)args[index];
                 double canonicalValue = 0.0;
@@ -1309,6 +1442,8 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
             if((argumentTag != LC32_GUEST_INDIRECT_ARGUMENT_TAG &&
                 argumentTag !=
                     LC32_GUEST_FLOATING_INDIRECT_ARGUMENT_TAG &&
+                argumentTag !=
+                    LC32_GUEST_SIZED_INDIRECT_ARGUMENT_TAG &&
                 argumentTag != LC32_GUEST_OBJECT_ARRAY_ARGUMENT_TAG &&
                 argumentTag != LC32_GUEST_AGGREGATE_ARGUMENT_TAG &&
                 argumentTag != LC32_GUEST_INVOCATION_ARGUMENT_TAG) ||
@@ -1324,6 +1459,14 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
 
     auto finishIndirectArguments = [&](u64 result) -> u64 {
         for(size_t index = 0; index < 9; index++) {
+            if(sizedIndirectGuestStorage[index]) {
+                (void)Dynarmic_mem_1write(
+                    sizedIndirectGuestStorage[index],
+                    sizedIndirectSize[index],
+                    reinterpret_cast<char *>(
+                        sizedIndirectHostStorage[index].data()));
+                continue;
+            }
             if(!indirectGuestStorage[index]) continue;
             if(floatingIndirectType[index] ==
                     LC32FloatingIndirectType::Float) {
@@ -1499,10 +1642,18 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
         if(useTypedScalarArguments) {
             /*
              * Objective-C metadata describes only the fixed portion of a
-             * variadic method. Unnamed AAPCS64 arguments use the integer
-             * vararg stream, so preserve the shim's remaining raw slots (and
+             * variadic method. Preserve the shim's remaining raw slots (and
              * its explicit zero terminator) after the typed fixed arguments.
+             * On Darwin ARM64, unnamed variadic arguments start on the stack,
+             * not in unused x registers.  The fixed trampoline below places
+             * integerArguments[0...5] in x2...x7 and begins its stack payload
+             * at integerArguments[6], so leave the unused register slots
+             * empty for the variadic selectors known to cross this bridge.
              */
+            if(LC32SelectorUsesHostStackVarargs(selector) &&
+               integerArgumentCount < 6) {
+                integerArgumentCount = 6;
+            }
             for(size_t index = argumentCount;
                     index < 9 && integerArgumentCount < 9; index++) {
                 integerArguments[integerArgumentCount++] = args[index];
@@ -2505,63 +2656,110 @@ static double LC32InvokeGuestSelectorGuestDoubleHostDouble(
     return LC32GuestDoubleReturn(guestResult);
 }
 
+/*
+ * Selector names are process-global, while the same selector can refer to a
+ * different backing ivar in every class.  Keep each synthetic accessor bound
+ * to the class where it was installed and walk the receiver's superclass
+ * chain for inherited accessors.
+ */
+struct LC32GuestIvarBinding {
+    std::string name;
+    u32 offset = 0;
+    char type = '\0';
+};
+
+static std::mutex LC32GuestIvarGetterMutex;
+static std::unordered_map<Class,
+    std::unordered_map<SEL, LC32GuestIvarBinding>>
+    LC32GuestIvarBindings;
+
+static void LC32RegisterGuestIvarAccessor(Class cls, SEL selector,
+                                           const char *ivarName,
+                                           u32 offset, char type) {
+    if(!cls || !selector || !ivarName || !*ivarName || !type) return;
+    std::lock_guard<std::mutex> lock(LC32GuestIvarGetterMutex);
+    LC32GuestIvarBindings[cls][selector] = {
+        std::string(ivarName), offset, type
+    };
+}
+
+static bool LC32GuestIvarBindingForReceiver(
+        id receiver, SEL selector, LC32GuestIvarBinding *result) {
+    if(!receiver || !selector || !result) return false;
+    std::lock_guard<std::mutex> lock(LC32GuestIvarGetterMutex);
+    for(Class cls = object_getClass(receiver); cls;
+            cls = class_getSuperclass(cls)) {
+        auto classIt = LC32GuestIvarBindings.find(cls);
+        if(classIt == LC32GuestIvarBindings.end()) continue;
+        auto bindingIt = classIt->second.find(selector);
+        if(bindingIt == classIt->second.end()) continue;
+        *result = bindingIt->second;
+        return true;
+    }
+    return false;
+}
+
+static u64 LC32ReadGuestScalarIvar(
+        u32 guestObject, const LC32GuestIvarBinding &binding) {
+    auto *callbacks = Dynarmic_current_user_callbacks();
+    const u32 address = guestObject + binding.offset;
+    switch(binding.type) {
+        case 'B':
+        case 'C': return callbacks->MemoryRead8(address);
+        case 'c': return (u64)(int64_t)(int8_t)
+            callbacks->MemoryRead8(address);
+        case 'S': return callbacks->MemoryRead16(address);
+        case 's': return (u64)(int64_t)(int16_t)
+            callbacks->MemoryRead16(address);
+        case 'I':
+        case 'L': return callbacks->MemoryRead32(address);
+        case 'i':
+        case 'l': return (u64)(int64_t)(int32_t)
+            callbacks->MemoryRead32(address);
+        case 'Q': return callbacks->MemoryRead64(address);
+        case 'q': return (u64)(int64_t)callbacks->MemoryRead64(address);
+        default: return 0;
+    }
+}
+
+static void LC32WriteGuestScalarIvar(
+        u32 guestObject, const LC32GuestIvarBinding &binding, u64 value) {
+    auto *callbacks = Dynarmic_current_user_callbacks();
+    const u32 address = guestObject + binding.offset;
+    switch(binding.type) {
+        case 'B':
+        case 'C':
+        case 'c': callbacks->MemoryWrite8(address, (u8)value); break;
+        case 'S':
+        case 's': callbacks->MemoryWrite16(address, (u16)value); break;
+        case 'I':
+        case 'L':
+        case 'i':
+        case 'l': callbacks->MemoryWrite32(address, (u32)value); break;
+        case 'Q':
+        case 'q': callbacks->MemoryWrite64(address, value); break;
+        default: break;
+    }
+}
+
 void LC32SetGuestScalarIvar(id self, SEL _cmd, u64 value) {
-    const char *setterName = sel_getName(_cmd);
-    char ivarName[0x50];
-    const bool hasLeadingUnderscore =
-        !strncmp(setterName, "_set", sizeof("_set") - 1);
-    const char *propertyName = setterName +
-        (hasLeadingUnderscore ? sizeof("_set") - 1 : sizeof("set") - 1);
-    const size_t propertyLength = strlen(propertyName);
-    if(propertyLength < 2 || propertyName[propertyLength - 1] != ':') {
-        printf("LC32: invalid synthetic ivar setter %s\n", setterName);
-        return;
-    }
-    const int written = snprintf(ivarName, sizeof(ivarName), "%s%c%.*s",
-        hasLeadingUnderscore ? "_" : "", tolower(propertyName[0]),
-        (int)propertyLength - 2, propertyName + 1);
-    if(written <= 0 || (size_t)written >= sizeof(ivarName)) {
-        printf("LC32: synthetic ivar setter name too long: %s\n",
-               setterName);
-        return;
-    }
-    guest_object_setInstanceVariable([self guest_self], ivarName,
-                                     (u32)value);
+    LC32GuestIvarBinding binding;
+    if(!LC32GuestIvarBindingForReceiver(self, _cmd, &binding)) return;
+    LC32WriteGuestScalarIvar([self guest_self], binding, value);
 }
 
 void LC32SetGuestNSObjectIvar(id self, SEL _cmd, id value) {
-    LC32SetGuestScalarIvar(self, _cmd, (u64)[value guest_self]);
-}
-
-/*
- * A getter selector spelling does not always determine its guest ivar: the
- * property-cased getter (pendingRequests) may back the underscored ivar
- * (_pendingRequests).  Record the exact ivar name while addGuestIvar installs
- * each synthetic getter.  Selectors are interned by the runtime and outlive
- * the class, so the cstring key is stable.
- */
-static std::mutex LC32GuestIvarGetterMutex;
-static std::unordered_map<const char *, std::string> LC32GuestIvarNameForGetter;
-
-static void LC32RegisterGuestIvarGetter(SEL getter, const char *ivarName) {
-    if(!getter || !ivarName || !*ivarName) return;
-    std::lock_guard<std::mutex> lock(LC32GuestIvarGetterMutex);
-    LC32GuestIvarNameForGetter[sel_getName(getter)] = ivarName;
-}
-
-static const char *LC32GuestIvarNameForGetterSelector(SEL getter) {
-    if(!getter) return nullptr;
-    std::lock_guard<std::mutex> lock(LC32GuestIvarGetterMutex);
-    auto iterator = LC32GuestIvarNameForGetter.find(sel_getName(getter));
-    return iterator == LC32GuestIvarNameForGetter.end()
-        ? nullptr : iterator->second.c_str();
+    LC32GuestIvarBinding binding;
+    if(!LC32GuestIvarBindingForReceiver(self, _cmd, &binding)) return;
+    guest_object_setInstanceVariable([self guest_self], binding.name.c_str(),
+                                     (u32)(u64)[value guest_self]);
 }
 
 id LC32GetGuestNSObjectIvar(id self, SEL _cmd) {
-    const char *ivarName = LC32GuestIvarNameForGetterSelector(_cmd);
-    if(!ivarName) return nil;
+    LC32GuestIvarBinding binding;
+    if(!LC32GuestIvarBindingForReceiver(self, _cmd, &binding)) return nil;
     u32 guestValue = 0;
-    guest_object_getInstanceVariable([self guest_self], ivarName,
+    guest_object_getInstanceVariable([self guest_self], binding.name.c_str(),
                                      &guestValue);
     if(!guestValue) return nil;
     /* Resolve the guest object to its native peer (creating one if needed). */
@@ -2569,12 +2767,9 @@ id LC32GetGuestNSObjectIvar(id self, SEL _cmd) {
 }
 
 u64 LC32GetGuestScalarIvar(id self, SEL _cmd) {
-    const char *ivarName = LC32GuestIvarNameForGetterSelector(_cmd);
-    if(!ivarName) return 0;
-    u32 guestValue = 0;
-    guest_object_getInstanceVariable([self guest_self], ivarName,
-                                     &guestValue);
-    return (u64)(u32)guestValue;
+    LC32GuestIvarBinding binding;
+    if(!LC32GuestIvarBindingForReceiver(self, _cmd, &binding)) return 0;
+    return LC32ReadGuestScalarIvar([self guest_self], binding);
 }
 
 u32 guest_dlsym(const char *host_name) {
@@ -3443,6 +3638,13 @@ static const char *LC32ExpectedHostMethodTypes(Class cls, SEL selector) {
 + (void)addGuestIvar:(u32)guest_ivar toClass:(Class)cls {
     DynarmicHostString name(guest_ivar_getName(guest_ivar));
     DynarmicHostString typeEncoding(guest_ivar_getTypeEncoding(guest_ivar));
+    const char *guestType = typeEncoding.hostPtr;
+    while(*guestType && strchr("rnNoORVA", *guestType)) guestType++;
+    const u32 guestOffsetPointer =
+        Dynarmic_current_user_callbacks()->MemoryRead32(guest_ivar);
+    const u32 guestOffset = guestOffsetPointer
+        ? Dynarmic_current_user_callbacks()->MemoryRead32(guestOffsetPointer)
+        : 0;
 
     // According to https://github.com/Quotation/LongestCocoa#longest-objective-c-property-names, the longest public property has 56 characters
     // still, we need to add an assert
@@ -3462,10 +3664,11 @@ static const char *LC32ExpectedHostMethodTypes(Class cls, SEL selector) {
     }
 
     char setterTypeEncoding[10];
-    snprintf(setterTypeEncoding, sizeof(setterTypeEncoding)-1, "v@:%c", typeEncoding.hostPtr[0]);
+    snprintf(setterTypeEncoding, sizeof(setterTypeEncoding)-1,
+             "v@:%c", *guestType);
 
     IMP setterImplementation = nullptr;
-    switch(typeEncoding.hostPtr[0]) {
+    switch(*guestType) {
         case '@':
         case '#':
             setterImplementation = (IMP)&LC32SetGuestNSObjectIvar;
@@ -3476,7 +3679,6 @@ static const char *LC32ExpectedHostMethodTypes(Class cls, SEL selector) {
         case 'L':
         case 'Q':
         case 'S':
-        case 'b':
         case 'c':
         case 'i':
         case 'l':
@@ -3489,11 +3691,21 @@ static const char *LC32ExpectedHostMethodTypes(Class cls, SEL selector) {
             break;
     }
     if(setterImplementation) {
-        class_addMethod(cls, sel_registerName(setterName),
-                        setterImplementation, setterTypeEncoding);
+        SEL setterSelector = sel_registerName(setterName);
+        if(class_addMethod(cls, setterSelector, setterImplementation,
+                           setterTypeEncoding)) {
+            LC32RegisterGuestIvarAccessor(
+                cls, setterSelector, name.hostPtr, guestOffset, *guestType);
+        }
         if(literalIvarSetterName[0]) {
-            class_addMethod(cls, sel_registerName(literalIvarSetterName),
-                            setterImplementation, setterTypeEncoding);
+            SEL literalSetterSelector =
+                sel_registerName(literalIvarSetterName);
+            if(class_addMethod(cls, literalSetterSelector,
+                               setterImplementation, setterTypeEncoding)) {
+                LC32RegisterGuestIvarAccessor(
+                    cls, literalSetterSelector, name.hostPtr,
+                    guestOffset, *guestType);
+            }
         }
     }
 
@@ -3510,17 +3722,17 @@ static const char *LC32ExpectedHostMethodTypes(Class cls, SEL selector) {
     if(name.hostPtr[0] == '_') {
         snprintf(getterName, sizeof(getterName)-1, "%s", name.hostPtr);
         snprintf(propertyGetterName, sizeof(propertyGetterName)-1,
-                 "%c%s", toupper(name.hostPtr[1]), &name.hostPtr[2]);
+                 "%c%s", tolower(name.hostPtr[1]), &name.hostPtr[2]);
     } else {
         snprintf(getterName, sizeof(getterName)-1, "%s", name.hostPtr);
     }
 
     char getterTypeEncoding[10];
     snprintf(getterTypeEncoding, sizeof(getterTypeEncoding)-1,
-             "%c@:", typeEncoding.hostPtr[0]);
+             "%c@:", *guestType);
 
     IMP getterImplementation = nullptr;
-    switch(typeEncoding.hostPtr[0]) {
+    switch(*guestType) {
         case '@':
         case '#':
             getterImplementation = (IMP)&LC32GetGuestNSObjectIvar;
@@ -3531,7 +3743,6 @@ static const char *LC32ExpectedHostMethodTypes(Class cls, SEL selector) {
         case 'L':
         case 'Q':
         case 'S':
-        case 'b':
         case 'c':
         case 'i':
         case 'l':
@@ -3544,15 +3755,21 @@ static const char *LC32ExpectedHostMethodTypes(Class cls, SEL selector) {
     }
     if(getterImplementation) {
         SEL rawGetterSelector = sel_registerName(getterName);
-        class_addMethod(cls, rawGetterSelector, getterImplementation,
-                        getterTypeEncoding);
-        LC32RegisterGuestIvarGetter(rawGetterSelector, name.hostPtr);
+        if(class_addMethod(cls, rawGetterSelector, getterImplementation,
+                           getterTypeEncoding)) {
+            LC32RegisterGuestIvarAccessor(
+                cls, rawGetterSelector, name.hostPtr,
+                guestOffset, *guestType);
+        }
         if(propertyGetterName[0]) {
             SEL propertyGetterSelector =
                 sel_registerName(propertyGetterName);
-            class_addMethod(cls, propertyGetterSelector, getterImplementation,
-                            getterTypeEncoding);
-            LC32RegisterGuestIvarGetter(propertyGetterSelector, name.hostPtr);
+            if(class_addMethod(cls, propertyGetterSelector,
+                               getterImplementation, getterTypeEncoding)) {
+                LC32RegisterGuestIvarAccessor(
+                    cls, propertyGetterSelector, name.hostPtr,
+                    guestOffset, *guestType);
+            }
         }
     }
 

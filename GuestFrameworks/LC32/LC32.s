@@ -101,6 +101,12 @@ _LC32InvokeHostObjectSelector:
     svc #0x80
     bx lr
 
+.global _LC32CopyHostCString
+_LC32CopyHostCString:
+    movw r12, #1020
+    svc #0x80
+    bx lr
+
 .global _LC32GetHostObject
 _LC32GetHostObject:
     movw r12, #1007

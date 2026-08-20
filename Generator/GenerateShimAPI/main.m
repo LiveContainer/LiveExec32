@@ -19,6 +19,36 @@ typedef NS_ENUM(NSUInteger, LC32KnownStruct) {
     LC32KnownStructUIEdgeInsets,
 };
 
+static const char *LC32UnqualifiedEncoding(const char *encoding) {
+    while(encoding && *encoding && strchr("rnNoORVA", *encoding)) {
+        encoding++;
+    }
+    return encoding;
+}
+
+/*
+ * Objective-C encodings do not retain typedef names: both a CF-style opaque
+ * reference and an ordinary pointer to a private structure appear as
+ * `^{Name=...}`.  Only opt known CFType families into object-proxy bridging.
+ * Treating every double-underscore structure as an object also catches raw
+ * UIKit event/GL/C++ structures (notably __GSEvent), and generated methods
+ * then send -host_self to arbitrary guest memory.
+ */
+static BOOL LC32EncodingIsOpaqueCFObjectPointer(const char *encoding) {
+    encoding = LC32UnqualifiedEncoding(encoding);
+    if(!encoding || encoding[0] != '^' || encoding[1] != '{') return NO;
+
+    const char *name = encoding + 2;
+    static const char *const prefixes[] = {
+        "__C3D", "__CF", "__CLClient", "__CN", "__CT", "__CV",
+        "__IOHID", "__IOSurface", "__SC", "__Sec",
+    };
+    for(size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
+        if(!strncmp(name, prefixes[i], strlen(prefixes[i]))) return YES;
+    }
+    return NO;
+}
+
 static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
     if(!encoding) return LC32KnownStructNone;
 
@@ -60,6 +90,12 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
 // FIXME: will need to parse header to return correctly. On 64bit, NS*Integer and CGFloat are not distinguishable from 32bit
 + (NSString *)readableTypeForSignature:(const char *)signature {
     if(!signature || !*signature) return @"?";
+    if(LC32EncodingIsOpaqueCFObjectPointer(signature)) {
+        /* Runtime qualifiers can precede the pointer encoding (for example
+         * r^{__CF...}).  Generated code only needs an address-sized token;
+         * the bridge still treats it as an object proxy. */
+        return @"void *";
+    }
     if(LC32KnownStructForEncoding(signature) == LC32KnownStructNSRange) {
         return @"NSRange";
     }
@@ -79,6 +115,15 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
                 return @"int32_t *";
             case 'q':
                 return @"int64_t *";
+            case '{':
+                /* Opaque CF pointers (^{__CFRunLoop=} etc.) have no public
+                 * struct typedef, so name them as void * in generated code.
+                 * The guest-side proxy still round-trips through the bridge;
+                 * the type is only used for casts and declarations. */
+                if(LC32EncodingIsOpaqueCFObjectPointer(signature)) {
+                    return @"void *";
+                }
+                break;
         }
     }
 
@@ -126,10 +171,7 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
 }
 
 + (const char *)unqualifiedType:(const char *)signature {
-    while(signature && *signature && strchr("rnNoORVA", *signature)) {
-        signature++;
-    }
-    return signature;
+    return LC32UnqualifiedEncoding(signature);
 }
 
 - (const char *)scalarPointerSignature {
@@ -207,6 +249,11 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
             @"void *host_arg%1$d = LC32CreateHostObjectArray(guest_arg%1$d, (uint32_t)guest_arg%2$d, %2$d);",
             self.index, self.objectArrayCountIndex];
     }
+    if(LC32EncodingIsOpaqueCFObjectPointer(self.signature)) {
+        return [NSString stringWithFormat:
+            @"uint64_t host_arg%1$d = [(__bridge id)guest_arg%1$d host_self];",
+            self.index];
+    }
     /* Indirect bridge cells are always eight bytes. Match the generator's
      * ordinary scalar widening: ARM32 integers use a uint64_t cell and an
      * ARM32 `float` (notably CGFloat in captured iOS APIs) uses a native
@@ -246,6 +293,14 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
             } else if ([self.type isEqualToString:@"_NSZone *"]) {
                 return [NSString stringWithFormat:@"uint64_t host_arg%d = 0;", self.index];
             }
+            /* Known CF-style opaque pointers are represented guest-side by
+             * proxy objects, so pass the proxy's host mirror through. Plain
+             * structure pointers remain guest buffers. */
+            if(LC32EncodingIsOpaqueCFObjectPointer(self.signature)) {
+                return [NSString stringWithFormat:
+                    @"uint64_t host_arg%1$d = [(__bridge id)guest_arg%1$d host_self];",
+                    self.index];
+            }
             // FIXME ???? else if([MethodParameter isFloatingType:self.signature[0]]) {
             break;
         case 'r': // const
@@ -277,6 +332,9 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
         return [NSString stringWithFormat:
             @"LC32HostObjectArrayArgument(host_arg%d)", self.index];
     }
+    if(LC32EncodingIsOpaqueCFObjectPointer(self.signature)) {
+        return [NSString stringWithFormat:@"host_arg%d", self.index];
+    }
     if(self.scalarPointerSignature) {
         const char scalarPointerPointee =
             self.scalarPointerPointeeEncoding;
@@ -299,7 +357,9 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
         case '^':
             returnPointer = self.signature[1] == '@' ||
                             self.signature[1] == '#';
-            returnDirect |= [self.type isEqualToString:@"_NSZone *"];
+            returnDirect |= [self.type isEqualToString:@"_NSZone *"] ||
+                            LC32EncodingIsOpaqueCFObjectPointer(
+                                self.signature);
             break;
         case 'r':
             // const char *, void too?
@@ -330,6 +390,11 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
         return [NSString stringWithFormat:
             @"LC32DestroyHostObjectArray(host_arg%d);", self.index];
     }
+    if(LC32EncodingIsOpaqueCFObjectPointer(self.signature)) {
+        return [NSString stringWithFormat:
+            @"// Opaque CF pointer guest_arg%d needs no copyback",
+            self.index];
+    }
     if(self.scalarPointerSignature) {
         if(!self.scalarPointerWritesGuestValue) {
             return [NSString stringWithFormat:
@@ -359,6 +424,14 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
         //    return [NSString stringWithFormat:@"LC32GuestToHostCStringFree(host_arg%1$d);", self.index];
         case '^':
             // handle it below
+            if(LC32EncodingIsOpaqueCFObjectPointer(self.signature)) {
+                /* Opaque CF pointer tokens are passed by value; the guest
+                 * proxy owns the underlying host object, so nothing to copy
+                 * back after the call. */
+                return [NSString stringWithFormat:
+                    @"// Opaque CF pointer guest_arg%d needs no copyback",
+                    self.index];
+            }
             if(![self.type isEqualToString:@"_NSZone *"]) {
                 break;
             }
@@ -603,6 +676,20 @@ static BOOL LC32MethodReturnsOwnedResult(NSString *className,
                 self.returnType];
     }
     
+    if(LC32EncodingIsOpaqueCFObjectPointer(self.method.returnType)) {
+        /* Opaque CF pointers (__SecTrust *, __SecIdentity *, __CFRunLoop *
+         * etc.) are bridged as guest proxy objects so they can round-trip
+         * back into host methods as arguments. */
+        if(LC32MethodReturnsOwnedResult(self.className, self.method)) {
+            return [NSString stringWithFormat:
+                @"return (__bridge %@)LC32HostToGuestOwnedObject(host_ret);",
+                self.returnType];
+        }
+        return [NSString stringWithFormat:
+            @"return (__bridge %@)LC32HostToGuestObject(host_ret);",
+            self.returnType];
+    }
+
     const LC32KnownStruct knownStruct =
         LC32KnownStructForEncoding(self.method.returnType);
     if(knownStruct == LC32KnownStructNSRange) {
@@ -716,6 +803,14 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
     if([className isEqualToString:@"UIView"] &&
        !method.isInstanceMethod &&
        [selector isEqualToString:@"beginAnimations:context:"]) {
+        return YES;
+    }
+    /* UIDevice uniqueIdentifier was removed from the host SDK (iOS 7), so
+     * forwarding to the host UIDevice raises NSInvalidArgumentException.
+     * The guest adapter fabricates a stable legacy identifier instead. */
+    if([className isEqualToString:@"UIDevice"] &&
+       method.isInstanceMethod &&
+       [selector isEqualToString:@"uniqueIdentifier"]) {
         return YES;
     }
     return [className isEqualToString:@"NSMutableString"] &&

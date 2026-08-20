@@ -20,6 +20,8 @@
     UINT64_C(0x4c43320300000000)
 #define LC32_GUEST_FLOATING_INDIRECT_ARGUMENT_TAG \
     UINT64_C(0x4c43320400000000)
+#define LC32_GUEST_SIZED_INDIRECT_ARGUMENT_TAG \
+    UINT64_C(0x4c43320500000000)
 
 /*
  * Selector flag consumed by LC32InvokeHostSelector.  An Objective-C object
@@ -35,6 +37,8 @@
 
 #define LC32_HOST_OBJECT_ARRAY_MAGIC UINT32_C(0x4f413332) /* "OA32" */
 #define LC32_HOST_OBJECT_ARRAY_MAX_COUNT UINT32_C(1048576)
+#define LC32_HOST_SIZED_INDIRECT_MAGIC UINT32_C(0x53493332) /* "SI32" */
+#define LC32_HOST_SIZED_INDIRECT_MAX_SIZE UINT32_C(64)
 
 /*
  * Result of SVC 1019.  A mapped success transfers one native +1 to the
@@ -55,5 +59,17 @@ typedef struct LC32HostObjectArrayDescriptor {
     uint32_t reserved;
     uint64_t objects[];
 } LC32HostObjectArrayDescriptor;
+
+/*
+ * Describes guest storage whose native pointee is larger or smaller than the
+ * bridge's ordinary eight-byte indirect cell.  The bridge copies exactly
+ * `size` bytes in both directions around the synchronous host invocation.
+ */
+typedef struct LC32HostSizedIndirectDescriptor {
+    uint32_t storage;
+    uint32_t size;
+    uint32_t magic;
+    uint32_t reserved;
+} LC32HostSizedIndirectDescriptor;
 
 #endif

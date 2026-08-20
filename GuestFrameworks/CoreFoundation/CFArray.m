@@ -53,6 +53,32 @@ CFArrayRef CFArrayCreate(CFAllocatorRef allocator, const void **values, CFIndex 
     return (CFArrayRef)result;
 }
 
+static Boolean LC32ArrayRetainCallbackIsNoOp(
+        CFArrayRetainCallBack callback) {
+    if(!callback) return true;
+    const uintptr_t address = (uintptr_t)callback;
+    if(address & 1) {
+        const uint16_t *code = (const uint16_t *)(address & ~(uintptr_t)1);
+        /* mov r0, r1; bx lr */
+        return code[0] == 0x4608 && code[1] == 0x4770;
+    }
+    const uint32_t *code = (const uint32_t *)address;
+    /* mov r0, r1; bx lr */
+    return code[0] == 0xe1a00001 && code[1] == 0xe12fff1e;
+}
+
+static Boolean LC32ArrayReleaseCallbackIsNoOp(
+        CFArrayReleaseCallBack callback) {
+    if(!callback) return true;
+    const uintptr_t address = (uintptr_t)callback;
+    if(address & 1) {
+        const uint16_t *code = (const uint16_t *)(address & ~(uintptr_t)1);
+        return code[0] == 0x4770; /* bx lr */
+    }
+    const uint32_t *code = (const uint32_t *)address;
+    return code[0] == 0xe12fff1e; /* bx lr */
+}
+
 static LC32CoreFoundationCallbacksMode LC32ArrayCallbacksMode(
         const CFArrayCallBacks *callbacks) {
     if(!callbacks) return LC32CoreFoundationCallbacksNull;
@@ -69,10 +95,17 @@ static LC32CoreFoundationCallbacksMode LC32ArrayCallbacksMode(
      * CF objects without owning them.  The callback function addresses are
      * guest addresses, so classify the semantics here and let the host use
      * its native CFCopyDescription/CFEqual implementations.
+     *
+     * Legacy SDKs (notably Facebook's FBCreateNonRetainingArray) sometimes
+     * supply tiny no-op retain/release functions rather than NULL. Recognize
+     * the canonical ARM/Thumb stubs, but do not silently turn arbitrary
+     * owning callbacks into weak storage.
      */
-    if(callbacks->version == 0 && !callbacks->retain &&
-       !callbacks->release &&
-       callbacks->equal == CFEqual) {
+    const Boolean callbacksAreNonOwning =
+        LC32ArrayRetainCallbackIsNoOp(callbacks->retain) &&
+        LC32ArrayReleaseCallbackIsNoOp(callbacks->release);
+    if(callbacks->version == 0 && callbacksAreNonOwning &&
+            callbacks->equal == CFEqual) {
         if(callbacks->copyDescription == CFCopyDescription)
             return LC32CoreFoundationCallbacksWeakCFType;
         if(!callbacks->copyDescription)

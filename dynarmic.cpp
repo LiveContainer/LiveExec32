@@ -440,6 +440,7 @@ static void InterruptNativeThreadStateHostCalls(
     gdb_thread_id_t threadId);
 static void ScheduleMainGuestWorkqueueTransition();
 namespace {
+bool NativeDebuggerActive();
 bool NativeThreadStatePauseHostWaitIfNeeded();
 bool NativeThreadStatePauseRequestedForCurrent();
 void NativeGuestHostCallEnter();
@@ -6464,6 +6465,20 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 }
                 cpu->Regs()[0] = (u32)result;
                 cpu->Regs()[1] = (u32)(result >> 32);
+                break;
+            }
+            case 1020: { // LC32CopyHostCString
+                if(cpu->IsExecuting()) {
+                    cpu->HaltExecution(LC32HaltReasonSVC);
+                    return;
+                }
+                const u64 host_cstring = (u64)cpu->Regs()[0] |
+                    ((u64)cpu->Regs()[1] << 32);
+                const u32 result = InvokeNativeGuestHostCall([&] {
+                    return LC32CopyHostCString(
+                        host_cstring, cpu->Regs()[2], cpu->Regs()[3]);
+                });
+                cpu->Regs()[0] = result;
                 break;
             }
             case 1015: { // LC32CreateHostBlock
