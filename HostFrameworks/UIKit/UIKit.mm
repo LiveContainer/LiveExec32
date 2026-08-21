@@ -33,8 +33,8 @@ typedef NS_ENUM(NSUInteger, LC32LegacyIPadGeometryMode) {
                           geometryMode:(LC32LegacyIPadGeometryMode)mode;
 - (void)setGuestContentController:(UIViewController *)controller
                       geometryMode:(LC32LegacyIPadGeometryMode)mode;
-- (void)fitGuestContentForViewportSize:(CGSize)viewportSize
-                       hostOrientation:(UIInterfaceOrientation)orientation;
+- (void)fitGuestContentForViewport:(CGRect)viewport
+                   hostOrientation:(UIInterfaceOrientation)orientation;
 - (void)scheduleGuestLayout;
 @end
 
@@ -309,6 +309,8 @@ BOOL LC32LegacyPrefersStatusBarHidden(UIViewController *, SEL) {
 
 void LC32ScaleLegacyIPadWindow(UIWindow *window);
 CGRect LC32WindowSceneBounds(UIWindow *window);
+bool LC32UsesClassicFullScreenViewport(UIWindow *window);
+CGRect LC32LegacyViewportInView(UIWindow *window, UIView *view);
 UIInterfaceOrientation LC32WindowSceneOrientation(
     UIWindow *window, CGRect sceneBounds);
 UIInterfaceOrientationMask LC32SupportedOrientationsForController(
@@ -472,15 +474,64 @@ void LC32InstallGuestWindowRootViewController(
 
 CGRect LC32WindowSceneBounds(UIWindow *window) {
     UIWindowScene *scene = window.windowScene;
+    /* Keep this helper in scene coordinates for eligibility and orientation
+     * policy. Canvas placement uses LC32LegacyViewportInView below, which
+     * preserves the source coordinate space instead of copying raw numbers. */
+    id<UICoordinateSpace> coordinateSpace = nil;
     if(@available(iOS 26.0, *)) {
-        id<UICoordinateSpace> coordinateSpace =
+        coordinateSpace =
             scene.effectiveGeometry.coordinateSpace;
         if(coordinateSpace) return coordinateSpace.bounds;
     }
-    id<UICoordinateSpace> coordinateSpace = scene.coordinateSpace;
-    return coordinateSpace
-        ? coordinateSpace.bounds
-        : (window.screen ?: UIScreen.mainScreen).bounds;
+    coordinateSpace = scene.coordinateSpace;
+    if(coordinateSpace) return coordinateSpace.bounds;
+    return (window.screen ?: UIScreen.mainScreen).bounds;
+}
+
+bool LC32UsesClassicFullScreenViewport(UIWindow *window) {
+    UIScreen *screen = window.screen ?: UIScreen.mainScreen;
+    const CGRect screenBounds = screen.bounds;
+    const CGFloat screenShortEdge = MIN(
+        screenBounds.size.width, screenBounds.size.height);
+    return LC32GuestIsIPadOnly() &&
+           LC32GuestInterfacePolicy().statusBarHidden &&
+           screenShortEdge > 0 && screenShortEdge < 600;
+}
+
+CGRect LC32LegacyViewportInView(UIWindow *window, UIView *view) {
+    const CGRect fallback = LC32NativeViewBounds(view);
+    if(!window || !view || !window.windowScene) return fallback;
+
+    id<UICoordinateSpace> sourceSpace = nil;
+    CGRect sourceBounds = CGRectZero;
+    UIScreen *screen = window.screen ?: UIScreen.mainScreen;
+    const CGRect screenBounds = screen.bounds;
+    if(LC32UsesClassicFullScreenViewport(window)) {
+        /* Full-screen legacy games draw behind modern safe-area insets. The
+         * compatibility root is translated relative to UIScreen, so convert
+         * the complete display rect instead of copying its origin and size. */
+        sourceSpace = screen.coordinateSpace;
+        sourceBounds = screenBounds;
+    } else {
+        UIWindowScene *scene = window.windowScene;
+        if(@available(iOS 26.0, *)) {
+            sourceSpace = scene.effectiveGeometry.coordinateSpace;
+        }
+        if(!sourceSpace) sourceSpace = scene.coordinateSpace;
+        sourceBounds = sourceSpace.bounds;
+    }
+    if(!sourceSpace || !(sourceBounds.size.width > 0) ||
+            !(sourceBounds.size.height > 0)) {
+        return fallback;
+    }
+
+    const CGRect viewport = [view convertRect:sourceBounds
+                           fromCoordinateSpace:sourceSpace];
+    return isfinite(viewport.origin.x) && isfinite(viewport.origin.y) &&
+           isfinite(viewport.size.width) &&
+           isfinite(viewport.size.height) &&
+           viewport.size.width > 0 && viewport.size.height > 0
+        ? viewport : fallback;
 }
 
 UIInterfaceOrientation LC32WindowSceneOrientation(
@@ -530,12 +581,16 @@ void LC32ScaleLegacyIPadWindow(UIWindow *window) {
     }
     if(!container) return;
 
-    /* UIWindow and the native container remain in UIWindowScene coordinates.
-     * Only the native child canvas is fitted into the compatibility viewport. */
-    const CGRect viewport = container.view.bounds;
-    [container fitGuestContentForViewportSize:viewport.size
+    /* A pre-controller guest can construct its UIWindow and root view from
+     * the virtual 768x1024 UIScreen bounds before a scene is attached. Keep
+     * those guest-visible bounds intact, but fit the native child canvas to
+     * the settled scene instead of the oversized archived root. */
+    const CGRect sceneBounds = LC32WindowSceneBounds(window);
+    const CGRect viewport = LC32LegacyViewportInView(
+        window, container.view);
+    [container fitGuestContentForViewport:viewport
         hostOrientation:LC32WindowSceneOrientation(
-            window, LC32WindowSceneBounds(window))];
+            window, sceneBounds)];
 }
 
 bool LC32ObjectUsesGuestClass(id object) {
@@ -817,7 +872,7 @@ void LC32AdoptLegacyRootViewControllers(void) {
     if(controller == _guestContentController) {
         if(_geometryMode != mode) {
             _geometryMode = mode;
-            [self fitGuestContentForViewportSize:self.view.bounds.size
+            [self fitGuestContentForViewport:self.view.bounds
                 hostOrientation:UIInterfaceOrientationUnknown];
         }
         return;
@@ -859,19 +914,31 @@ void LC32AdoptLegacyRootViewControllers(void) {
     [_canvasView addSubview:contentView];
     [controller didMoveToParentViewController:self];
     LC32NativeSetViewAutoresizingMask(contentView, UIViewAutoresizingNone);
-    [self fitGuestContentForViewportSize:self.view.bounds.size
+    [self fitGuestContentForViewport:self.view.bounds
         hostOrientation:UIInterfaceOrientationUnknown];
     [self scheduleGuestLayout];
 }
 
-- (void)fitGuestContentForViewportSize:(CGSize)viewportSize
-                       hostOrientation:(UIInterfaceOrientation)orientation {
+- (void)fitGuestContentForViewport:(CGRect)viewport
+                   hostOrientation:(UIInterfaceOrientation)orientation {
     UIView *contentView = _guestContentView;
     UIView *canvasView = _canvasView;
     if(!contentView || !canvasView || _fittingGuestContent) return;
-    if(!(viewportSize.width > 0) || !(viewportSize.height > 0)) {
-        viewportSize = self.view.bounds.size;
+    /* Layout callbacks can still report the archived 768x1024 root bounds
+     * even after the window is attached to a smaller compatibility scene.
+     * For settled refits, always prefer that scene's visible extent. The
+     * transition callback supplies a concrete future size and is retained as
+     * the pre-settlement fallback until its completion runs. */
+    if(orientation == UIInterfaceOrientationUnknown) {
+        UIWindow *window = self.view.window;
+        if(window.windowScene) {
+            viewport = LC32LegacyViewportInView(window, self.view);
+        }
     }
+    if(!(viewport.size.width > 0) || !(viewport.size.height > 0)) {
+        viewport = self.view.bounds;
+    }
+    const CGSize viewportSize = viewport.size;
     if(!(viewportSize.width > 0) || !(viewportSize.height > 0)) return;
 
     _fittingGuestContent = YES;
@@ -937,7 +1004,7 @@ void LC32AdoptLegacyRootViewControllers(void) {
         canvasView.bounds = CGRectMake(
             0, 0, logicalSize.width, logicalSize.height);
         canvasView.center = CGPointMake(
-            viewportSize.width * 0.5, viewportSize.height * 0.5);
+            CGRectGetMidX(viewport), CGRectGetMidY(viewport));
         canvasView.transform = CGAffineTransformScale(rotation, scale, scale);
 
         /* Use UIView's native implementations so a mirrored guest subclass
@@ -980,7 +1047,7 @@ void LC32AdoptLegacyRootViewControllers(void) {
 
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
-    [self fitGuestContentForViewportSize:self.view.bounds.size
+    [self fitGuestContentForViewport:self.view.bounds
         hostOrientation:UIInterfaceOrientationUnknown];
 }
 
@@ -1016,10 +1083,19 @@ void LC32AdoptLegacyRootViewControllers(void) {
     [super viewWillTransitionToSize:size
          withTransitionCoordinator:coordinator];
     UIInterfaceOrientation targetOrientation = LC32LegacyTargetOrientation();
-    [self fitGuestContentForViewportSize:size
+    CGRect targetViewport = self.view.bounds;
+    UIWindow *window = self.view.window;
+    if(window.windowScene) {
+        targetViewport = LC32LegacyViewportInView(window, self.view);
+    }
+    if(!window.windowScene ||
+            !LC32UsesClassicFullScreenViewport(window)) {
+        targetViewport.size = size;
+    }
+    [self fitGuestContentForViewport:targetViewport
         hostOrientation:targetOrientation];
     void (^refitActualBounds)(void) = ^{
-        [self fitGuestContentForViewportSize:self.view.bounds.size
+        [self fitGuestContentForViewport:self.view.bounds
             hostOrientation:UIInterfaceOrientationUnknown];
     };
     BOOL scheduled = NO;
@@ -1118,8 +1194,8 @@ extern "C" void LC32UIKitHandleLegacyStatusBarOrientation(
     LC32AdoptLegacyRootViewController(self);
     [self lc32_makeKeyAndVisible];
     /* UIWindowScene geometry is authoritative only after makeKeyAndVisible.
-     * Refit the native child canvas against that settled viewport while
-     * leaving UIWindow's bounds, frame, center, and transform untouched. */
+     * Refit the virtual child canvas against that settled viewport without
+     * changing guest-visible UIWindow bounds. */
     LC32ApplyLegacyWindowPolicy(self);
     LC32ScaleLegacyIPadWindow(self);
 }
