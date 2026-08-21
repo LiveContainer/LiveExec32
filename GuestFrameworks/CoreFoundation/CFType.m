@@ -76,6 +76,11 @@ CFComparisonResult CFNumberCompare(CFNumberRef number,
         compare:(NSNumber *)otherNumber];
 }
 
+CFNumberType CFNumberGetType(CFNumberRef number) {
+    return number ? (CFNumberType)LC32_CF_CALL(
+        LC32CoreFoundationOpNumberGetType, LC32_CF_HOST(number)) : 0;
+}
+
 CFTypeRef CFMakeCollectable(CFTypeRef object) {
     return object;
 }

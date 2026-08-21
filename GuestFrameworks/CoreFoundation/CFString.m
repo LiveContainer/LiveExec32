@@ -379,3 +379,31 @@ void CFStringTrimWhitespace(CFMutableStringRef string) {
     LC32_CF_CALL(LC32CoreFoundationOpStringTrimWhitespace,
         LC32_CF_HOST(string));
 }
+
+unsigned long CFStringConvertEncodingToNSStringEncoding(
+        CFStringEncoding encoding) {
+    return (unsigned long)LC32_CF_CALL(
+        LC32CoreFoundationOpStringConvertEncodingToNSStringEncoding,
+        LC32_CF_U32(encoding));
+}
+
+CFStringEncoding CFStringConvertNSStringEncodingToEncoding(
+        unsigned long encoding) {
+    return (CFStringEncoding)LC32_CF_CALL(
+        LC32CoreFoundationOpStringConvertNSStringEncodingToEncoding,
+        LC32_CF_U32(encoding));
+}
+
+CFStringEncoding CFStringConvertIANACharSetNameToEncoding(
+        CFStringRef string) {
+    return string ? (CFStringEncoding)LC32_CF_CALL(
+        LC32CoreFoundationOpStringConvertIANACharSetNameToEncoding,
+        LC32_CF_HOST(string)) : kCFStringEncodingInvalidId;
+}
+
+CFStringRef CFStringConvertEncodingToIANACharSetName(
+        CFStringEncoding encoding) {
+    return (CFStringRef)LC32_CF_CALL(
+        LC32CoreFoundationOpStringConvertEncodingToIANACharSetName,
+        LC32_CF_U32(encoding));
+}

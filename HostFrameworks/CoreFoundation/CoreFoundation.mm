@@ -1273,6 +1273,27 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             CFStringUppercase(string, SlotHostObject<CFLocaleRef>(call, 1));
             return 1;
         }
+        case LC32CoreFoundationOpStringConvertEncodingToNSStringEncoding:
+            if(!RequireSlots(call, 1)) return kCFStringEncodingInvalidId;
+            return static_cast<u32>(
+                CFStringConvertEncodingToNSStringEncoding(
+                    static_cast<CFStringEncoding>(SlotU32(call, 0))));
+        case LC32CoreFoundationOpStringConvertNSStringEncodingToEncoding:
+            if(!RequireSlots(call, 1)) return kCFStringEncodingInvalidId;
+            return CFStringConvertNSStringEncodingToEncoding(
+                static_cast<unsigned long>(SlotU32(call, 0)));
+        case LC32CoreFoundationOpStringConvertIANACharSetNameToEncoding: {
+            if(!RequireSlots(call, 1)) return kCFStringEncodingInvalidId;
+            CFStringRef string = SlotHostObject<CFStringRef>(call, 0);
+            return string ? CFStringConvertIANACharSetNameToEncoding(string)
+                          : kCFStringEncodingInvalidId;
+        }
+        case LC32CoreFoundationOpStringConvertEncodingToIANACharSetName: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFStringRef string = CFStringConvertEncodingToIANACharSetName(
+                static_cast<CFStringEncoding>(SlotU32(call, 0)));
+            return string ? [(id)string guest_self] : 0;
+        }
         case LC32CoreFoundationOpURLCreateStringByAddingPercentEscapes: {
             if(!RequireSlots(call, 4)) return 0;
             CFStringRef original = SlotHostObject<CFStringRef>(call, 0);
@@ -1322,6 +1343,11 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
         }
         case LC32CoreFoundationOpNumberGetValue:
             return DispatchNumberGetValue(call);
+        case LC32CoreFoundationOpNumberGetType: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFNumberRef number = SlotHostObject<CFNumberRef>(call, 0);
+            return number ? static_cast<u32>(CFNumberGetType(number)) : 0;
+        }
         case LC32CoreFoundationOpBundleGetMainBundle: {
             if(!RequireSlots(call, 0)) return 0;
             const char *guestExecutable = getenv("LC32_GUEST_EXECUTABLE");
@@ -2658,6 +2684,46 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
                 CFPropertyListCreateDeepCopy(kCFAllocatorDefault,
                     propertyList,
                     static_cast<CFOptionFlags>(SlotU32(call, 1)))) : 0;
+        }
+        case LC32CoreFoundationOpBitVectorCreate: {
+            if(!RequireSlots(call, 2) || SlotU32(call, 1) > INT32_MAX)
+                return 0;
+            const u32 bitCount = SlotU32(call, 1);
+            const u32 byteCount = (bitCount + 7u) / 8u;
+            std::vector<UInt8> bytes;
+            if(!ReadGuestBytes(SlotU32(call, 0), byteCount, bytes)) return 0;
+            return GuestForCreatedObject(CFBitVectorCreate(
+                kCFAllocatorDefault,
+                bytes.empty() ? nullptr : bytes.data(), bitCount));
+        }
+        case LC32CoreFoundationOpBitVectorCreateMutableCopy: {
+            if(!RequireSlots(call, 2) || SlotU32(call, 0) > INT32_MAX)
+                return 0;
+            CFBitVectorRef bitVector =
+                SlotHostObject<CFBitVectorRef>(call, 1);
+            return bitVector ? GuestForCreatedObject(
+                CFBitVectorCreateMutableCopy(kCFAllocatorDefault,
+                    static_cast<CFIndex>(SlotU32(call, 0)), bitVector)) : 0;
+        }
+        case LC32CoreFoundationOpBitVectorGetBitAtIndex: {
+            if(!RequireSlots(call, 2) || SlotU32(call, 1) > INT32_MAX)
+                return 0;
+            CFBitVectorRef bitVector =
+                SlotHostObject<CFBitVectorRef>(call, 0);
+            const CFIndex index = static_cast<CFIndex>(SlotU32(call, 1));
+            return bitVector && index < CFBitVectorGetCount(bitVector)
+                ? CFBitVectorGetBitAtIndex(bitVector, index) : 0;
+        }
+        case LC32CoreFoundationOpBitVectorSetBitAtIndex: {
+            if(!RequireSlots(call, 3) || SlotU32(call, 1) > INT32_MAX)
+                return 0;
+            CFMutableBitVectorRef bitVector =
+                SlotHostObject<CFMutableBitVectorRef>(call, 0);
+            const CFIndex index = static_cast<CFIndex>(SlotU32(call, 1));
+            if(!bitVector || index >= CFBitVectorGetCount(bitVector)) return 0;
+            CFBitVectorSetBitAtIndex(bitVector, index,
+                                     SlotU32(call, 2) != 0);
+            return 1;
         }
         case LC32CoreFoundationOpURLCreateFromFileSystemRepresentation: {
             if(!RequireSlots(call, 3)) return 0;

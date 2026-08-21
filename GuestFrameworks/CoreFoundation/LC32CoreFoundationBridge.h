@@ -65,6 +65,7 @@ typedef enum : uint32_t {
     LC32CoreFoundationOpURLCreateWithBytes = 42,
     LC32CoreFoundationOpURLCreateStringByReplacingPercentEscapes = 43,
     LC32CoreFoundationOpStringTrimWhitespace = 44,
+    LC32CoreFoundationOpNumberGetType = 45,
 
     /* String operations use an isolated range so parallel bridge work can
      * add lower-valued opcode families without changing this guest ABI. */
@@ -83,6 +84,10 @@ typedef enum : uint32_t {
     LC32CoreFoundationOpStringGetCharacters = 112,
     LC32CoreFoundationOpStringGetIntValue = 113,
     LC32CoreFoundationOpStringUppercase = 114,
+    LC32CoreFoundationOpStringConvertEncodingToNSStringEncoding = 115,
+    LC32CoreFoundationOpStringConvertNSStringEncodingToEncoding = 116,
+    LC32CoreFoundationOpStringConvertIANACharSetNameToEncoding = 117,
+    LC32CoreFoundationOpStringConvertEncodingToIANACharSetName = 118,
 
     /* Date, error, locale, and preferences operations used by Security. */
     LC32CoreFoundationOpDateCreate = 200,
@@ -181,6 +186,12 @@ typedef enum : uint32_t {
     LC32CoreFoundationOpSocketCreateRunLoopSource = 702,
     LC32CoreFoundationOpSocketGetNative = 703,
     LC32CoreFoundationOpSocketInvalidate = 704,
+
+    /* Legacy CFBitVector operations. */
+    LC32CoreFoundationOpBitVectorCreate = 800,
+    LC32CoreFoundationOpBitVectorCreateMutableCopy = 801,
+    LC32CoreFoundationOpBitVectorGetBitAtIndex = 802,
+    LC32CoreFoundationOpBitVectorSetBitAtIndex = 803,
 } LC32CoreFoundationOpcode;
 
 typedef enum : uint32_t {
