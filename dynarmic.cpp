@@ -3631,6 +3631,38 @@ int guest_mkdir(u32 guest_path, mode_t mode) {
     return syscallRetCarry(SYS_mkdir, host_path, mode, 0,0,0,0,0);
 }
 
+int guest_setxattr(u32 guest_path, u32 guest_name, u32 guest_value,
+        size_t size, u_int32_t position, int options) {
+    char host_path[PATH_MAX];
+    sharedHandle.fs->pathGuestToHost(guest_path, host_path);
+    DynarmicHostString name(guest_name);
+    if(!name.hostPtr || (!guest_value && size != 0)) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+
+    std::vector<uint8_t> value;
+    if(size != 0) {
+        if(!guest_memory_range_has_permissions(
+                guest_value, size, PROT_READ)) {
+            return return_with_carry_direct(EFAULT, true);
+        }
+        try {
+            value.resize(size);
+        } catch(const std::bad_alloc &) {
+            return return_with_carry_direct(ENOMEM, true);
+        }
+        if(!read_guest_memory_with_permissions(
+                guest_value, value.data(), size, PROT_READ)) {
+            return return_with_carry_direct(EFAULT, true);
+        }
+    }
+
+    return syscallRetCarry(
+        SYS_setxattr, host_path, name.hostPtr,
+        value.empty() ? nullptr : value.data(), size,
+        position, options, 0);
+}
+
 int guest_sigaction(int sig, u32 guest_act, u32 guest_oact) {
     static sigaction_32 host_actions[SIGUSR2 + 1];
     if (guest_oact) {
@@ -6349,6 +6381,15 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             case SYS_mkdir: // 136
                 cpu->Regs()[0] = guest_mkdir(
                     cpu->Regs()[0], cpu->Regs()[1]);
+                break;
+            case SYS_setxattr: // 236
+                /* libsystem_kernel's ARM wrapper moves arguments five and
+                 * six (position and options) from the caller stack into
+                 * r4/r5 before issuing the SVC. */
+                cpu->Regs()[0] = guest_setxattr(
+                    cpu->Regs()[0], cpu->Regs()[1],
+                    cpu->Regs()[2], cpu->Regs()[3],
+                    cpu->Regs()[4], cpu->Regs()[5]);
                 break;
             case 153:
             case SYS_pread_nocancel:
