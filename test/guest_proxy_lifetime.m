@@ -3,11 +3,26 @@
 #include <stdio.h>
 
 static NSUInteger deallocCount;
+static NSUInteger cleanupDeallocCount;
+static NSUInteger cleanupCallbackCount;
+static NSMutableArray *cleanupArray;
 
 @interface LC32GuestProxyLifetimeProbe : NSObject {
     NSUInteger marker;
 }
 - (NSUInteger)marker;
+@end
+
+@interface LC32GuestProxyDeallocCleanupProbe : NSObject
+@end
+
+@implementation LC32GuestProxyDeallocCleanupProbe
+- (void)dealloc {
+    cleanupCallbackCount++;
+    [cleanupArray removeObject:self];
+    cleanupDeallocCount++;
+    [super dealloc];
+}
 @end
 
 @implementation LC32GuestProxyLifetimeProbe
@@ -83,10 +98,45 @@ int main(void) {
         autoreleasedProxyDeallocatedOnce ? "PASS" : "FAIL",
         (unsigned long)deallocCount);
 
+    cleanupArray = [[NSMutableArray alloc] init];
+
+    /* The guest is the last logical owner. Its -dealloc still sends `self`
+     * through a host collection, so the synthesized native mirror must remain
+     * retainable until guest teardown completes. */
+    LC32GuestProxyDeallocCleanupProbe *guestFinalProbe =
+        [[LC32GuestProxyDeallocCleanupProbe alloc] init];
+    [cleanupArray addObject:guestFinalProbe];
+    [cleanupArray removeObject:guestFinalProbe];
+    [guestFinalProbe release];
+    const BOOL guestFinalCleanupPassed =
+        cleanupArray.count == 0 && cleanupCallbackCount == 1 &&
+        cleanupDeallocCount == 1;
+    printf("guest-final-release-keeps-host-peer-alive: %s\n",
+        guestFinalCleanupPassed ? "PASS" : "FAIL");
+
+    /* The native collection is now the last owner. removeAllObjects empties
+     * its storage before releasing members; the guest dealloc's defensive
+     * duplicate remove therefore exercises reentrant native retain/release
+     * without using a released guest variable. */
+    LC32GuestProxyDeallocCleanupProbe *nativeFinalProbe =
+        [[LC32GuestProxyDeallocCleanupProbe alloc] init];
+    [cleanupArray addObject:nativeFinalProbe];
+    [nativeFinalProbe release];
+    [cleanupArray removeAllObjects];
+    const BOOL nativeFinalCleanupPassed =
+        cleanupArray.count == 0 && cleanupCallbackCount == 2 &&
+        cleanupDeallocCount == 2;
+    printf("native-final-release-keeps-host-peer-alive: %s\n",
+        nativeFinalCleanupPassed ? "PASS" : "FAIL");
+
+    [cleanupArray release];
+    cleanupArray = nil;
+
     [hostBackedArray release];
     [pool drain];
     return !(guestOnlyObjectStayedLocal && survivedHostOwnership &&
              releasedWithHostOwnership &&
              survivedGuestAutoreleasePool &&
-             autoreleasedProxyDeallocatedOnce);
+             autoreleasedProxyDeallocatedOnce &&
+             guestFinalCleanupPassed && nativeFinalCleanupPassed);
 }

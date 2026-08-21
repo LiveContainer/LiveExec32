@@ -31,6 +31,12 @@ NSNotificationName const UIApplicationWillTerminateNotification =
     @"UIApplicationWillTerminateNotification";
 NSNotificationName const UIDeviceOrientationDidChangeNotification =
     @"UIDeviceOrientationDidChangeNotification";
+NSNotificationName const UIDeviceBatteryLevelDidChangeNotification =
+    @"UIDeviceBatteryLevelDidChangeNotification";
+NSNotificationName const UIDeviceBatteryStateDidChangeNotification =
+    @"UIDeviceBatteryStateDidChangeNotification";
+
+const UIBackgroundTaskIdentifier UIBackgroundTaskInvalid = 0;
 
 NSString *const UIImagePickerControllerEditedImage =
     @"UIImagePickerControllerEditedImage";
@@ -41,6 +47,8 @@ NSString *const UIKeyboardAnimationCurveUserInfoKey =
     @"UIKeyboardAnimationCurveUserInfoKey";
 NSString *const UIKeyboardAnimationDurationUserInfoKey =
     @"UIKeyboardAnimationDurationUserInfoKey";
+NSString *const UIKeyboardBoundsUserInfoKey =
+    @"UIKeyboardBoundsUserInfoKey";
 NSNotificationName const UIKeyboardDidHideNotification =
     @"UIKeyboardDidHideNotification";
 NSNotificationName const UIKeyboardDidShowNotification =
@@ -70,6 +78,8 @@ NSNotificationName const UITextViewTextDidChangeNotification =
 
 NSNotificationName const UIWindowDidBecomeVisibleNotification =
     @"UIWindowDidBecomeVisibleNotification";
+NSNotificationName const UIWindowDidBecomeKeyNotification =
+    @"UIWindowDidBecomeKeyNotification";
 
 const UIEdgeInsets UIEdgeInsetsZero = {0,0,0,0};
 const UIOffset UIOffsetZero = {0,0};
@@ -207,6 +217,7 @@ static uint64_t LC32UIKitGetImageFromCurrentImageContext;
 static uint64_t LC32UIKitJPEGRepresentation;
 static uint64_t LC32UIKitPNGRepresentation;
 static uint64_t LC32UIKitNSStringFromCGRect;
+static uint64_t LC32UIKitGetWindowRootViewController;
 static uint64_t LC32UIKitSetWindowRootViewController;
 static void LC32UIImageResolveCGImageSelector(void) {
     LC32UIImageCGImageSelector = LC32GetHostSelector(@selector(CGImage));
@@ -235,6 +246,8 @@ static void LC32UIKitResolveGeometryFunctions(void) {
         LC32Dlsym("LC32_UIKit_UIImagePNGRepresentation", YES);
     LC32UIKitNSStringFromCGRect =
         LC32Dlsym("LC32_UIKit_NSStringFromCGRect", YES);
+    LC32UIKitGetWindowRootViewController = LC32Dlsym(
+        "LC32_UIKit_GetWindowRootViewController", YES);
     LC32UIKitSetWindowRootViewController = LC32Dlsym(
         "LC32_UIKit_SetWindowRootViewController", YES);
 }
@@ -366,6 +379,15 @@ NSData *UIImagePNGRepresentation(UIImage *image) {
 }
 
 @implementation UIWindow (LC32MainThreadRootViewController)
+
+- (UIViewController *)rootViewController {
+    pthread_once(&LC32UIKitGeometryOnce,
+        LC32UIKitResolveGeometryFunctions);
+    if(!LC32UIKitGetWindowRootViewController) return nil;
+    const uint32_t guestController = LC32InvokeHostCRet32(
+        LC32UIKitGetWindowRootViewController, self.host_self);
+    return (__bridge UIViewController *)(void *)(uintptr_t)guestController;
+}
 
 - (void)setRootViewController:(UIViewController *)rootViewController {
     pthread_once(&LC32UIKitGeometryOnce,

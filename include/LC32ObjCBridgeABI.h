@@ -41,15 +41,17 @@
 #define LC32_HOST_SIZED_INDIRECT_MAX_SIZE UINT32_C(64)
 
 /*
- * Result of SVC 1019.  A mapped success transfers one native +1 to the
- * guest's matching weak retain.  NoMapping means the object is guest-only;
+ * Result of SVC 1019. Values above the sentinels are opaque pending-retain
+ * tokens. SVC 1021 commits the token to a successful guest weak retain or
+ * rolls its exact native +1 back. NoMapping means the object is guest-only;
  * MappedDead means it had a native peer which can no longer be retained.
  */
-typedef uint32_t LC32HostWeakRetainStatus;
+typedef uint32_t LC32HostWeakRetainResult;
 enum {
     LC32HostWeakRetainNoMapping = 0,
-    LC32HostWeakRetainRetained = 1,
+    LC32HostWeakRetainReserved = 1,
     LC32HostWeakRetainMappedDead = 2,
+    LC32HostWeakRetainFirstToken = 3,
 };
 
 typedef struct LC32HostObjectArrayDescriptor {

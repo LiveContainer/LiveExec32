@@ -8,9 +8,9 @@
  * so without these class-specific overrides the native peer remains an alloc
  * placeholder and crashes on its first real operation.
  *
- * Immutable empty clusters are intentionally excluded: several return shared
- * singletons, which require the initializer shim to return an existing
- * canonical guest proxy rather than the just-allocated self.
+ * Empty immutable clusters can return shared singletons. The common
+ * initializer adopter handles that by transferring the caller's ownership to
+ * the singleton's existing canonical guest proxy.
  */
 static id LC32InitializeHostPeer(id self) {
     static uint64_t hostInitSelector __attribute__((aligned(8)));
@@ -37,6 +37,12 @@ LC32_IMPLEMENT_PLAIN_INIT(NSMutableSet)
 LC32_IMPLEMENT_PLAIN_INIT(NSMutableOrderedSet)
 LC32_IMPLEMENT_PLAIN_INIT(NSMutableData)
 LC32_IMPLEMENT_PLAIN_INIT(NSMutableString)
+LC32_IMPLEMENT_PLAIN_INIT(NSArray)
+LC32_IMPLEMENT_PLAIN_INIT(NSDictionary)
+LC32_IMPLEMENT_PLAIN_INIT(NSSet)
+LC32_IMPLEMENT_PLAIN_INIT(NSOrderedSet)
+LC32_IMPLEMENT_PLAIN_INIT(NSData)
+LC32_IMPLEMENT_PLAIN_INIT(NSString)
 LC32_IMPLEMENT_PLAIN_INIT(NSDate)
 
 #pragma clang diagnostic pop

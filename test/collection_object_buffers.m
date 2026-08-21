@@ -42,6 +42,33 @@ static int check(const char *name, BOOL passed) {
 int main(void) {
     int failed = 0;
 
+    /*
+     * Prime the host's empty class-cluster singletons through convenience
+     * constructors, then initialize new guest allocations. The latter must
+     * adopt an initialized native object (and safely reuse the canonical guest
+     * proxy when the host returns the same singleton).
+     */
+    NSArray *convenienceEmptyArray = [NSArray array];
+    NSArray *initializedEmptyArray = [[NSArray alloc] init];
+    failed += check("plain-empty-array-init",
+                    initializedEmptyArray == convenienceEmptyArray &&
+                    initializedEmptyArray.count == 0 &&
+                    convenienceEmptyArray.count == 0);
+    [initializedEmptyArray release];
+    failed += check("plain-empty-array-canonical-survives",
+                    convenienceEmptyArray.count == 0);
+
+    NSDictionary *convenienceEmptyDictionary = [NSDictionary dictionary];
+    NSDictionary *initializedEmptyDictionary = [[NSDictionary alloc] init];
+    failed += check("plain-empty-dictionary-init",
+                    initializedEmptyDictionary == convenienceEmptyDictionary &&
+                    initializedEmptyDictionary.count == 0 &&
+                    [initializedEmptyDictionary objectForKey:@"missing"] == nil &&
+                    convenienceEmptyDictionary.count == 0);
+    [initializedEmptyDictionary release];
+    failed += check("plain-empty-dictionary-canonical-survives",
+                    [convenienceEmptyDictionary objectForKey:@"missing"] == nil);
+
     id objects[] = {@"zero", @"one", @"two"};
     NSArray *array = [NSArray arrayWithObjects:objects count:3];
     failed += check("counted-array", array.count == 3 &&

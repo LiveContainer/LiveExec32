@@ -6969,6 +6969,18 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 cpu->Regs()[0] = result;
                 break;
             }
+            case 1021: { // LC32FinishHostWeakRetain
+                if(cpu->IsExecuting()) {
+                    cpu->HaltExecution(LC32HaltReasonSVC);
+                    return;
+                }
+                const u32 result = InvokeNativeGuestHostCall([&] {
+                    return LC32FinishHostWeakRetain(
+                        cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                });
+                cpu->Regs()[0] = result;
+                break;
+            }
             default:
                 printf("Unhandled svc number: %d\n", NR);
                 SetPendingGuestCrashMessage(

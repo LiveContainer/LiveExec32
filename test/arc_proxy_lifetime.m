@@ -17,6 +17,63 @@ extern BOOL LC32TestBorrowedReturnWithoutImmediateRetain(void);
 extern BOOL LC32TestRetainedFamilyReturnExclusion(void);
 extern BOOL LC32TestDirectObjCRetainBridgesHost(void);
 
+@interface NSObject (LC32InitializerAdoptionTests)
+- (uint64_t)host_self;
+@end
+
+extern uint64_t LC32GetHostSelector(SEL selector);
+extern uint64_t LC32InvokeHostSelector(
+    uint64_t object, uint64_t selector, ...);
+extern id LC32AdoptHostInitializerResultARC(
+    id object, uint64_t hostResult) NS_RETURNS_RETAINED;
+
+static id LC32CreateARCAdoptedObject(Class cls) NS_RETURNS_RETAINED;
+
+static id LC32CreateARCAdoptedObject(Class cls) {
+    id allocatedObject = [cls alloc];
+    const uint64_t hostResult = LC32InvokeHostSelector(
+        [allocatedObject host_self], LC32GetHostSelector(@selector(init)),
+        (uint64_t)0);
+    return LC32AdoptHostInitializerResultARC(allocatedObject, hostResult);
+}
+
+static BOOL LC32TestARCInitializerAdoption(void) {
+    /* Prime NSDictionary's native empty singleton so the explicit initializer
+     * must return an existing canonical guest proxy rather than its freshly
+     * allocated receiver. */
+    __strong NSDictionary *convenienceDictionary =
+        [NSDictionary dictionary];
+    __strong NSDictionary *initializedDictionary =
+        LC32CreateARCAdoptedObject(NSDictionary.class);
+    const BOOL canonicalPassed =
+        initializedDictionary == convenienceDictionary &&
+        initializedDictionary.count == 0 &&
+        [initializedDictionary objectForKey:@"missing"] == nil;
+    initializedDictionary = nil;
+    const BOOL canonicalSurvivedRelease =
+        [convenienceDictionary objectForKey:@"missing"] == nil;
+
+    /* A mutable dictionary initializer returns a unique native instance, so
+     * its result binds to the allocated guest receiver. This exercises the ARC
+     * helper's paired retain which is balanced by strong-local cleanup. */
+    __strong NSMutableDictionary *initializedMutableDictionary =
+        LC32CreateARCAdoptedObject(NSMutableDictionary.class);
+    const uint64_t reverseMappedGuest = LC32InvokeHostSelector(
+        [initializedMutableDictionary host_self],
+        LC32GetHostSelector(@selector(guest_self)),
+        (uint64_t)0);
+    const BOOL directPassed = initializedMutableDictionary.count == 0 &&
+        (uint32_t)reverseMappedGuest ==
+            (uint32_t)(uintptr_t)initializedMutableDictionary;
+    initializedMutableDictionary = nil;
+
+    printf("arc-initializer-canonical-adoption: %s\n",
+           canonicalPassed && canonicalSurvivedRelease ? "PASS" : "FAIL");
+    printf("arc-initializer-direct-adoption: %s\n",
+           directPassed ? "PASS" : "FAIL");
+    return canonicalPassed && canonicalSurvivedRelease && directPassed;
+}
+
 static BOOL LC32TestARCGeneratedBorrowedReturn(void) {
     __strong UIBezierPath *path = nil;
 
@@ -157,7 +214,10 @@ int main(void) {
         LC32TestARCReleaseBeforeNativePoolDrain();
     const BOOL arcWeakOnlyPassed =
         LC32TestARCWeakOnlyBorrowedReturn();
+    const BOOL arcInitializerAdoptionPassed =
+        LC32TestARCInitializerAdoption();
     return passed && unretainedBorrowedPassed && directObjCRetainPassed &&
         retainedFamilyPassed && arcGeneratedShimPassed &&
-        arcEarlyReleasePassed && arcWeakOnlyPassed ? 0 : 1;
+        arcEarlyReleasePassed && arcWeakOnlyPassed &&
+        arcInitializerAdoptionPassed ? 0 : 1;
 }

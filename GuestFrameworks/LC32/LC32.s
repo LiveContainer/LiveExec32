@@ -185,3 +185,9 @@ _LC32TryRetainHostWeakReference:
     movw r12, #1019
     svc #0x80
     bx lr
+
+.global _LC32FinishHostWeakRetain
+_LC32FinishHostWeakRetain:
+    movw r12, #1021
+    svc #0x80
+    bx lr

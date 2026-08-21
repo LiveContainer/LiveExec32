@@ -327,7 +327,8 @@ u64 LC32Dlsym(u32 guest_name, bool isFunction);
 u64 LC32GetHostObject(u32 guest_self, u32 guest_class, bool returnClass);
 u64 LC32CreateHostBlock(u32 guest_block);
 u32 LC32GuestObjectForOwnedHostObjectAddress(u64 object);
-LC32HostWeakRetainStatus LC32TryRetainHostWeakReference(u32 guest_object);
+LC32HostWeakRetainResult LC32TryRetainHostWeakReference(u32 guest_object);
+u32 LC32FinishHostWeakRetain(u32 token, u32 guest_object, u32 commit);
 u64 LC32GetHostSelector(u32 guest_selector);
 u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args);
 u64 LC32InvokeHostNSStringFormat(u64 host_self,

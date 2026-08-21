@@ -57,9 +57,10 @@ u32 LC32GuestObjectForOwnedHostObject(CFTypeRef object);
 // Objective-C equivalent of LC32GuestObjectForOwnedHostObject. The caller
 // transfers a +1 result from an alloc/new/copy/mutableCopy method family.
 u32 LC32GuestObjectForOwnedHostObjectAddress(u64 object);
-// SVC 1019 host half. A Retained result transfers one native +1 to the
-// guest weak retain; callers must not release it in the SVC handler.
-LC32HostWeakRetainStatus LC32TryRetainHostWeakReference(u32 guest_object);
+// SVC 1019 host half. A non-sentinel result is an opaque pending-retain token.
+LC32HostWeakRetainResult LC32TryRetainHostWeakReference(u32 guest_object);
+// SVC 1021 commits or rolls back the token's exact native +1.
+u32 LC32FinishHostWeakRetain(u32 token, u32 guest_object, u32 commit);
 //u64 LC32Dlsym(u32 guest_name);
 u64 LC32GetHostObject(u32 guest_self, u32 guest_class, bool returnClass);
 u64 LC32GetHostSelector(u32 guest_selector);
@@ -102,5 +103,9 @@ u32 guest_objc_getClass(const char *name);
 Class guest_objc_getClass_retHostClass(const char *name);
 u64 guest_objc_msgSend(int argc, u32 *args);
 BOOL host_hook_getClass(const char *name, Class *outClass);
+// Lets framework bridges add native compatibility entry points after all
+// guest methods have been mirrored but before the class is registered.
+void LC32UIKitPrepareGuestClass(Class cls);
+void LC32UIKitHandleLegacyStatusBarOrientation(u32 orientation);
 
 __END_DECLS

@@ -48,10 +48,15 @@ uint32_t LC32GuestCallbackExecutorWait(
     LC32GuestBlockCallbackDescriptor *descriptor);
 uint32_t LC32GuestCallbackExecutorComplete(uint32_t identifier);
 
-// Atomically acquire the native +1 paired with objc_loadWeakRetained's guest
-// +1. Implemented by private SVC 1019; see LC32HostWeakRetainStatus.
-LC32HostWeakRetainStatus LC32TryRetainHostWeakReference(
+// Acquire the native +1 before objc_loadWeakRetained attempts its guest +1.
+// A result above the LC32HostWeakRetain* sentinels is an opaque pending token.
+// Implemented by private SVC 1019.
+LC32HostWeakRetainResult LC32TryRetainHostWeakReference(
     uint32_t guest_object);
+// Commit or roll back the exact native +1 represented by a SVC 1019 token.
+// Implemented by private SVC 1021.
+uint32_t LC32FinishHostWeakRetain(uint32_t token, uint32_t guest_object,
+                                 uint32_t commit);
 
 // Host lifetime pins call this guest-only root release and use the return
 // value to decide whether a retiring weak-registry tombstone can be removed.
@@ -115,7 +120,20 @@ id LC32DisposeFailedInit(id object);
 // Complete a host initializer using the explicit guest receiver. Foundation
 // alloc placeholders can be shared across threads, so the host result must not
 // infer its reverse mapping from the placeholder's mutable association.
-id LC32AdoptHostInitializerResult(id object, uint64_t hostResult);
+//
+// The MRC entry point consumes the allocated guest receiver itself. ARC keeps
+// `self` strong until the initializer implementation returns, so its entry
+// point leaves that cleanup to the compiler and returns a separate +1. Select
+// the matching ownership contract at compile time while keeping generated
+// initializer bodies identical.
+id LC32AdoptHostInitializerResult(id object, uint64_t hostResult)
+    NS_RETURNS_RETAINED;
+id LC32AdoptHostInitializerResultARC(id object, uint64_t hostResult)
+    NS_RETURNS_RETAINED;
+#if __has_feature(objc_arc)
+#define LC32AdoptHostInitializerResult(object, hostResult) \
+    LC32AdoptHostInitializerResultARC((object), (hostResult))
+#endif
 
 // Returns host SEL address
 uint64_t LC32GetHostSelector(SEL selector);
