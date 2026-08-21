@@ -220,13 +220,15 @@ void SyncBitmapBacking(CGContextRef context,
     }
 }
 
-void ReleaseBitmapBacking(void *releaseInfo, void *data) {
+void ReleaseBitmapBacking(void *releaseInfo, void *) {
     auto *backing = static_cast<BitmapBacking *>(releaseInfo);
     if(!backing) return;
-    if(backing->guestData && backing->byteCount && data) {
-        (void)Dynarmic_mem_1write(backing->guestData, backing->byteCount,
-            static_cast<char *>(data));
-    }
+    /*
+     * Do not copy pixels back here. Core Graphics invokes this callback only
+     * while destroying the context, after the guest is allowed to have freed
+     * the buffer supplied to CGBitmapContextCreate. Mutating operations and
+     * CGBitmapContextGetData synchronize while that guest buffer is live.
+     */
     if(backing->context) {
         std::lock_guard<std::mutex> lock(bitmapBackingsMutex);
         const auto iterator = bitmapBackings.find(backing->context);
@@ -332,7 +334,7 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             if(!RequireCoreGraphicsSlots(call, 1)) return 0;
             CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
             if(!context) return 0;
-            SyncBitmapBacking(context, FindBitmapBacking(context));
+            /* The guest backing may already have been freed before release. */
             return 0;
         }
         case LC32CoreGraphicsOpContextTranslateCTM: {
@@ -624,6 +626,20 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             CGImageRef image = CGBitmapContextCreateImage(context);
             return image ? LC32GuestObjectForOwnedHostObject(image) : 0;
         }
+        case LC32CoreGraphicsOpBitmapContextGetBytesPerRow: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            return context
+                ? static_cast<u32>(CGBitmapContextGetBytesPerRow(context)) : 0;
+        }
+        case LC32CoreGraphicsOpBitmapContextGetData: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            BitmapBacking *backing = context
+                ? FindBitmapBacking(context) : nullptr;
+            if(context && backing) SyncBitmapBacking(context, backing);
+            return backing ? backing->guestData : 0;
+        }
         case LC32CoreGraphicsOpContextSaveGState:
         case LC32CoreGraphicsOpContextRestoreGState:
         case LC32CoreGraphicsOpContextBeginPath:
@@ -663,6 +679,15 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             }
             return 1;
         }
+        case LC32CoreGraphicsOpContextDrawPath: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            if(!context) return 0;
+            CGContextDrawPath(context,
+                static_cast<CGPathDrawingMode>(SlotU32(call, 1)));
+            SyncBitmapBacking(context, FindBitmapBacking(context));
+            return 1;
+        }
         case LC32CoreGraphicsOpContextMoveToPoint:
         case LC32CoreGraphicsOpContextAddLineToPoint:
         case LC32CoreGraphicsOpContextScaleCTM:
@@ -693,6 +718,12 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
                     break;
             }
             return 1;
+        }
+        case LC32CoreGraphicsOpContextRotateCTM: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            if(context) CGContextRotateCTM(context, SlotCGFloat(call, 1));
+            return context ? 1 : 0;
         }
         case LC32CoreGraphicsOpContextAddArc: {
             if(!RequireCoreGraphicsSlots(call, 7)) return 0;
@@ -1016,6 +1047,11 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             if(!RequireCoreGraphicsSlots(call, 1)) return 0;
             CGImageRef image = SlotHostObject<CGImageRef>(call, 0);
             return image ? static_cast<u32>(CGImageGetBitsPerPixel(image)) : 0;
+        }
+        case LC32CoreGraphicsOpImageGetBytesPerRow: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGImageRef image = SlotHostObject<CGImageRef>(call, 0);
+            return image ? static_cast<u32>(CGImageGetBytesPerRow(image)) : 0;
         }
         case LC32CoreGraphicsOpPathCreateCopy: {
             if(!RequireCoreGraphicsSlots(call, 1)) return 0;

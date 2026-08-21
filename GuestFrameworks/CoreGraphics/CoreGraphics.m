@@ -216,6 +216,18 @@ CGImageRef CGBitmapContextCreateImage(CGContextRef context) {
         LC32_CG_HOST(context)) : NULL;
 }
 
+size_t CGBitmapContextGetBytesPerRow(CGContextRef context) {
+    return context ? (size_t)LC32_CG_CALL(
+        LC32CoreGraphicsOpBitmapContextGetBytesPerRow,
+        LC32_CG_HOST(context)) : 0;
+}
+
+void *CGBitmapContextGetData(CGContextRef context) {
+    return context ? (void *)(uintptr_t)LC32_CG_CALL(
+        LC32CoreGraphicsOpBitmapContextGetData,
+        LC32_CG_HOST(context)) : NULL;
+}
+
 void CGContextClearRect(CGContextRef context, CGRect rect) {
     if(!context) return;
     LC32_CG_CALL(LC32CoreGraphicsOpContextClearRect,
@@ -246,9 +258,17 @@ void CGContextDrawLinearGradient(CGContextRef context,
         LC32_CG_U32(options));
 }
 
+void CGContextDrawPath(CGContextRef context, CGPathDrawingMode mode) {
+    if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextDrawPath,
+        LC32_CG_HOST(context), LC32_CG_U32(mode));
+}
+
 void CGContextRelease(CGContextRef context) {
     if(!context) return;
-    // Copy host bitmap bytes back before the final host retain can disappear.
+    /* Tell the host bridge that this is an explicit guest release. Pixel
+     * mutations and CGBitmapContextGetData synchronize while the caller's
+     * buffer is still valid. Some legacy clients free that storage before
+     * releasing the context, so the shim must not touch it here. */
     LC32_CG_CALL(LC32CoreGraphicsOpContextRelease,
         LC32_CG_HOST(context));
     CFRelease(context);
@@ -258,6 +278,11 @@ void CGContextTranslateCTM(CGContextRef context, CGFloat tx, CGFloat ty) {
     if(!context) return;
     LC32_CG_CALL(LC32CoreGraphicsOpContextTranslateCTM,
         LC32_CG_HOST(context), LC32_CG_F32(tx), LC32_CG_F32(ty));
+}
+
+void CGContextRotateCTM(CGContextRef context, CGFloat angle) {
+    if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextRotateCTM,
+        LC32_CG_HOST(context), LC32_CG_F32(angle));
 }
 
 void CGContextSaveGState(CGContextRef context) {
@@ -499,6 +524,12 @@ size_t CGImageGetBitsPerComponent(CGImageRef image) {
 size_t CGImageGetBitsPerPixel(CGImageRef image) {
     return image ? (size_t)LC32_CG_CALL(
         LC32CoreGraphicsOpImageGetBitsPerPixel,
+        LC32_CG_HOST(image)) : 0;
+}
+
+size_t CGImageGetBytesPerRow(CGImageRef image) {
+    return image ? (size_t)LC32_CG_CALL(
+        LC32CoreGraphicsOpImageGetBytesPerRow,
         LC32_CG_HOST(image)) : 0;
 }
 

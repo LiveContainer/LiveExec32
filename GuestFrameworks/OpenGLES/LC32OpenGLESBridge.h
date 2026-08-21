@@ -195,6 +195,8 @@ typedef enum : uint32_t {
     LC32OpenGLESOpMaterialfv = 174,
     LC32OpenGLESOpNormalPointer = 175,
     LC32OpenGLESOpTexEnvi = 176,
+    LC32OpenGLESOpColor4ub = 177,
+    LC32OpenGLESOpTexEnvf = 178,
 } LC32OpenGLESOpcode;
 
 #endif

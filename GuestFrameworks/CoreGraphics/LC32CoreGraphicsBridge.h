@@ -88,6 +88,11 @@ typedef enum : uint32_t {
     LC32CoreGraphicsOpContextSetStrokeColor = 70,
     LC32CoreGraphicsOpContextStrokeLineSegments = 71,
     LC32CoreGraphicsOpImageGetBitsPerPixel = 72,
+    LC32CoreGraphicsOpBitmapContextGetBytesPerRow = 73,
+    LC32CoreGraphicsOpBitmapContextGetData = 74,
+    LC32CoreGraphicsOpContextDrawPath = 75,
+    LC32CoreGraphicsOpContextRotateCTM = 76,
+    LC32CoreGraphicsOpImageGetBytesPerRow = 77,
 } LC32CoreGraphicsOpcode;
 
 #endif

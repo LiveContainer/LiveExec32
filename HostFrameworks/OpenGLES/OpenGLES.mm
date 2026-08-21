@@ -1200,6 +1200,7 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
         case LC32OpenGLESOpViewport: REQUIRE(4); glViewport(I(0), I(1), I(2), I(3)); return 0;
         case LC32OpenGLESOpAlphaFunc: REQUIRE(2); glAlphaFunc(U(0), F(1)); return 0;
         case LC32OpenGLESOpColor4f: REQUIRE(4); glColor4f(F(0), F(1), F(2), F(3)); return 0;
+        case LC32OpenGLESOpColor4ub: REQUIRE(4); glColor4ub(U(0), U(1), U(2), U(3)); return 0;
         case LC32OpenGLESOpDisableClientState:
             REQUIRE(1);
             glDisableClientState(U(0));
@@ -1821,6 +1822,11 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
         case LC32OpenGLESOpTexEnvi: {
             REQUIRE(3);
             glTexEnvi(U(0), U(1), I(2));
+            return 0;
+        }
+        case LC32OpenGLESOpTexEnvf: {
+            REQUIRE(3);
+            glTexEnvf(U(0), U(1), F(2));
             return 0;
         }
         case LC32OpenGLESOpMultMatrixf: {

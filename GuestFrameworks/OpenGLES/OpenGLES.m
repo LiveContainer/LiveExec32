@@ -685,6 +685,11 @@ void glTexParameterfv(GLenum target, GLenum pname, const GLfloat *params) {
         LC32_GL_U32(target), LC32_GL_U32(pname), LC32_GL_PTR(params));
 }
 
+void glTexEnvf(GLenum target, GLenum pname, GLfloat param) {
+    LC32_GL_CALL(LC32OpenGLESOpTexEnvf,
+        LC32_GL_U32(target), LC32_GL_U32(pname), LC32_GL_F32(param));
+}
+
 void glTexEnvi(GLenum target, GLenum pname, GLint param) {
     LC32_GL_CALL(LC32OpenGLESOpTexEnvi,
         LC32_GL_U32(target), LC32_GL_U32(pname), LC32_GL_I32(param));
@@ -864,6 +869,12 @@ void glColor4f(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
     LC32_GL_CALL(LC32OpenGLESOpColor4f,
         LC32_GL_F32(red), LC32_GL_F32(green),
         LC32_GL_F32(blue), LC32_GL_F32(alpha));
+}
+
+void glColor4ub(GLubyte red, GLubyte green, GLubyte blue, GLubyte alpha) {
+    LC32_GL_CALL(LC32OpenGLESOpColor4ub,
+        LC32_GL_U32(red), LC32_GL_U32(green),
+        LC32_GL_U32(blue), LC32_GL_U32(alpha));
 }
 
 void glColorPointer(GLint size, GLenum type, GLsizei stride,
