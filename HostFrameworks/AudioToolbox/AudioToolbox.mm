@@ -24,8 +24,17 @@ struct ExtAudioFileEntry {
     std::mutex mutex;
 };
 
+struct AudioFileCallbackContext {
+    u32 guestClientData = 0;
+    u32 guestReadFunction = 0;
+    u32 guestWriteFunction = 0;
+    u32 guestGetSizeFunction = 0;
+    u32 guestSetSizeFunction = 0;
+};
+
 struct AudioFileEntry {
     AudioFileID file = nullptr;
+    std::unique_ptr<AudioFileCallbackContext> callbackContext;
     std::mutex mutex;
 };
 
@@ -107,6 +116,9 @@ struct AudioQueueEntry {
         std::shared_ptr<AudioQueueBufferEntry>> buffersByNative;
     std::mutex listenersMutex;
     std::vector<std::shared_ptr<AudioQueuePropertyListenerEntry>> listeners;
+    std::mutex timelinesMutex;
+    std::unordered_map<u32, AudioQueueTimelineRef> timelines;
+    u32 nextTimelineToken = 1;
 };
 
 static_assert(sizeof(GuestAudioBuffer) == 12);
@@ -228,6 +240,177 @@ bool WriteGuestBytes(u32 address, size_t byteCount, const void *bytes) {
             static_cast<uint64_t>(UINT32_MAX) + 1 &&
         Dynarmic_mem_1write(address, byteCount,
             const_cast<char *>(reinterpret_cast<const char *>(bytes))) == 0;
+}
+
+u32 AllocateGuestAudioFileCallbackBytes(u32 byteCount) {
+    if(!byteCount || !Dynarmic_guest_thread_is_registered()) return 0;
+    static std::atomic<u32> guestMallocFunction{0};
+    u32 function = guestMallocFunction.load(std::memory_order_acquire);
+    if(!function) {
+        const u32 resolved = guest_dlsym("malloc");
+        if(!resolved) return 0;
+        if(guestMallocFunction.compare_exchange_strong(function, resolved,
+                std::memory_order_release, std::memory_order_acquire)) {
+            function = resolved;
+        }
+    }
+    u32 arguments[] = {byteCount};
+    return static_cast<u32>(LC32InvokeGuestC(
+        function, false, 1, arguments));
+}
+
+class GuestAudioFileCallbackStorage {
+public:
+    explicit GuestAudioFileCallbackStorage(u32 payloadBytes) {
+        const uint64_t alignedPayload =
+            (static_cast<uint64_t>(payloadBytes) + 7u) & ~uint64_t{7};
+        const uint64_t totalBytes = alignedPayload + sizeof(uint64_t);
+        if(totalBytes > UINT32_MAX) return;
+
+        allocation_ = AllocateGuestAudioFileCallbackBytes(
+            static_cast<u32>(totalBytes));
+        if(!allocation_ ||
+           static_cast<uint64_t>(allocation_) + totalBytes >
+               static_cast<uint64_t>(UINT32_MAX) + 1) {
+            if(allocation_) guest_free(allocation_);
+            allocation_ = 0;
+            return;
+        }
+        payload_ = allocation_;
+        actualCount_ = static_cast<u32>(
+            static_cast<uint64_t>(allocation_) + alignedPayload);
+        if(!WriteGuestU32(actualCount_, 0)) {
+            guest_free(allocation_);
+            allocation_ = 0;
+            payload_ = 0;
+            actualCount_ = 0;
+        }
+    }
+
+    ~GuestAudioFileCallbackStorage() {
+        if(allocation_ && Dynarmic_guest_thread_is_registered())
+            guest_free(allocation_);
+    }
+
+    explicit operator bool() const { return allocation_ != 0; }
+    u32 payload() const { return payload_; }
+    u32 actualCount() const { return actualCount_; }
+
+private:
+    u32 allocation_ = 0;
+    u32 payload_ = 0;
+    u32 actualCount_ = 0;
+};
+
+OSStatus AudioFileReadCallbackBridge(
+        void *rawContext, SInt64 position, UInt32 requestCount,
+        void *buffer, UInt32 *actualCount) {
+    if(actualCount) *actualCount = 0;
+    AudioFileCallbackContext *context =
+        static_cast<AudioFileCallbackContext *>(rawContext);
+    if(!context || !context->guestReadFunction || !actualCount ||
+       (requestCount && !buffer) || requestCount > kMaximumAudioBytes ||
+       !Dynarmic_guest_thread_is_registered()) {
+        return kAudio_ParamError;
+    }
+
+    GuestAudioFileCallbackStorage storage(requestCount);
+    if(!storage) return kAudio_MemFullError;
+    const uint64_t positionBits = static_cast<uint64_t>(position);
+    /* Darwin's ARM32 ABI packs the SInt64 second argument into r1:r2.
+     * requestCount then occupies r3 and the pointer arguments start on the
+     * stack. This differs from the 8-byte core-register alignment used by
+     * generic AAPCS32 implementations. */
+    u32 arguments[] = {
+        context->guestClientData,
+        static_cast<u32>(positionBits),
+        static_cast<u32>(positionBits >> 32),
+        requestCount,
+        storage.payload(),
+        storage.actualCount(),
+    };
+    const OSStatus status = static_cast<OSStatus>(LC32InvokeGuestC(
+        context->guestReadFunction, false,
+        sizeof(arguments) / sizeof(arguments[0]), arguments));
+
+    u32 returnedBytes = 0;
+    if(!ReadGuestU32(storage.actualCount(), returnedBytes) ||
+       returnedBytes > requestCount ||
+       (returnedBytes &&
+        !ReadGuestBytes(storage.payload(), returnedBytes, buffer))) {
+        return kAudio_ParamError;
+    }
+    *actualCount = returnedBytes;
+    return status;
+}
+
+OSStatus AudioFileWriteCallbackBridge(
+        void *rawContext, SInt64 position, UInt32 requestCount,
+        const void *buffer, UInt32 *actualCount) {
+    if(actualCount) *actualCount = 0;
+    AudioFileCallbackContext *context =
+        static_cast<AudioFileCallbackContext *>(rawContext);
+    if(!context || !context->guestWriteFunction || !actualCount ||
+       (requestCount && !buffer) || requestCount > kMaximumAudioBytes ||
+       !Dynarmic_guest_thread_is_registered()) {
+        return kAudio_ParamError;
+    }
+
+    GuestAudioFileCallbackStorage storage(requestCount);
+    if(!storage || (requestCount &&
+            !WriteGuestBytes(storage.payload(), requestCount, buffer))) {
+        return kAudio_MemFullError;
+    }
+    const uint64_t positionBits = static_cast<uint64_t>(position);
+    u32 arguments[] = {
+        context->guestClientData,
+        static_cast<u32>(positionBits),
+        static_cast<u32>(positionBits >> 32),
+        requestCount,
+        storage.payload(),
+        storage.actualCount(),
+    };
+    const OSStatus status = static_cast<OSStatus>(LC32InvokeGuestC(
+        context->guestWriteFunction, false,
+        sizeof(arguments) / sizeof(arguments[0]), arguments));
+
+    u32 returnedBytes = 0;
+    if(!ReadGuestU32(storage.actualCount(), returnedBytes) ||
+       returnedBytes > requestCount) {
+        return kAudio_ParamError;
+    }
+    *actualCount = returnedBytes;
+    return status;
+}
+
+SInt64 AudioFileGetSizeCallbackBridge(void *rawContext) {
+    AudioFileCallbackContext *context =
+        static_cast<AudioFileCallbackContext *>(rawContext);
+    if(!context || !context->guestGetSizeFunction ||
+       !Dynarmic_guest_thread_is_registered()) {
+        return -1;
+    }
+    u32 arguments[] = {context->guestClientData};
+    return static_cast<SInt64>(LC32InvokeGuestC(
+        context->guestGetSizeFunction, true, 1, arguments));
+}
+
+OSStatus AudioFileSetSizeCallbackBridge(void *rawContext, SInt64 size) {
+    AudioFileCallbackContext *context =
+        static_cast<AudioFileCallbackContext *>(rawContext);
+    if(!context || !context->guestSetSizeFunction ||
+       !Dynarmic_guest_thread_is_registered()) {
+        return kAudio_ParamError;
+    }
+    const uint64_t sizeBits = static_cast<uint64_t>(size);
+    u32 arguments[] = {
+        context->guestClientData,
+        static_cast<u32>(sizeBits),
+        static_cast<u32>(sizeBits >> 32),
+    };
+    return static_cast<OSStatus>(LC32InvokeGuestC(
+        context->guestSetSizeFunction, false,
+        sizeof(arguments) / sizeof(arguments[0]), arguments));
 }
 
 bool InvokeGuestAudioQueueFunction(u32 function, const u32 *arguments,
@@ -424,6 +607,14 @@ void ClearAudioQueueBuffers(const std::shared_ptr<AudioQueueEntry> &entry) {
     entry->buffersByNative.clear();
 }
 
+void ClearAudioQueueTimelines(
+        const std::shared_ptr<AudioQueueEntry> &entry) {
+    if(!entry) return;
+    std::lock_guard<std::mutex> lock(entry->timelinesMutex);
+    /* AudioQueueDispose owns and disposes every remaining native timeline. */
+    entry->timelines.clear();
+}
+
 void MarkOutputAudioQueueBuffersAvailable(
         const std::shared_ptr<AudioQueueEntry> &entry) {
     if(!entry || entry->direction != AudioQueueDirection::Output) return;
@@ -489,6 +680,7 @@ void ScheduleDeferredAudioQueueDispose(
         const OSStatus status = queue
             ? AudioQueueDispose(queue, immediate)
             : kAudio_ParamError;
+        ClearAudioQueueTimelines(entry);
         {
             std::lock_guard<std::mutex> lock(entry->stateMutex);
             entry->queue = nullptr;
@@ -948,10 +1140,13 @@ std::shared_ptr<AudioFileEntry> FindAudioFile(u32 token) {
     return iterator == audioFiles.end() ? nullptr : iterator->second;
 }
 
-u32 InsertAudioFile(AudioFileID file) {
+u32 InsertAudioFile(
+        AudioFileID file,
+        std::unique_ptr<AudioFileCallbackContext> callbackContext = {}) {
     if(!file) return 0;
     auto entry = std::make_shared<AudioFileEntry>();
     entry->file = file;
+    entry->callbackContext = std::move(callbackContext);
     std::lock_guard<std::mutex> lock(audioFilesMutex);
     for(size_t attempt = 0; attempt < UINT32_MAX; ++attempt) {
         u32 token = nextAudioFileToken.fetch_add(1,
@@ -971,8 +1166,10 @@ std::shared_ptr<AudioFileEntry> TakeAudioFile(u32 token) {
     return entry;
 }
 
-OSStatus PublishAudioFile(AudioFileID file, u32 guestOutAudioFile) {
-    const u32 token = InsertAudioFile(file);
+OSStatus PublishAudioFile(
+        AudioFileID file, u32 guestOutAudioFile,
+        std::unique_ptr<AudioFileCallbackContext> callbackContext = {}) {
+    const u32 token = InsertAudioFile(file, std::move(callbackContext));
     if(token && WriteGuestU32(guestOutAudioFile, token)) return noErr;
 
     auto entry = token ? TakeAudioFile(token) : nullptr;
@@ -1175,6 +1372,64 @@ OSStatus DispatchAudioFileReadPackets(
             sizeof(GuestAudioStreamPacketDescription);
         if(Dynarmic_mem_1write(SlotU32(call, 3), descriptorBytes,
                 reinterpret_cast<char *>(packetDescriptions.data())) != 0) {
+            return kAudio_ParamError;
+        }
+    }
+    return status;
+}
+
+OSStatus DispatchAudioFileReadPacketData(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 7) || !SlotU32(call, 2) ||
+       !SlotU32(call, 5)) {
+        return kAudio_ParamError;
+    }
+    auto entry = FindAudioFile(SlotU32(call, 0));
+    if(!entry) return kAudio_ParamError;
+
+    u32 requestedBytes = 0;
+    u32 requestedPackets = 0;
+    if(!ReadGuestU32(SlotU32(call, 2), requestedBytes) ||
+       !ReadGuestU32(SlotU32(call, 5), requestedPackets) ||
+       requestedBytes > kMaximumAudioBytes ||
+       (requestedBytes && !SlotU32(call, 6)) ||
+       (SlotU32(call, 3) && requestedPackets >
+            kMaximumAudioBytes /
+                sizeof(AudioStreamPacketDescription))) {
+        return kAudio_ParamError;
+    }
+
+    std::vector<uint8_t> bytes(requestedBytes ? requestedBytes : 1);
+    std::vector<AudioStreamPacketDescription> packetDescriptions;
+    if(SlotU32(call, 3)) packetDescriptions.resize(requestedPackets);
+
+    UInt32 returnedBytes = requestedBytes;
+    UInt32 returnedPackets = requestedPackets;
+    OSStatus status;
+    {
+        std::lock_guard<std::mutex> lock(entry->mutex);
+        if(!entry->file) return kAudio_ParamError;
+        status = AudioFileReadPacketData(entry->file,
+            static_cast<Boolean>(SlotU32(call, 1)), &returnedBytes,
+            packetDescriptions.empty() ? nullptr : packetDescriptions.data(),
+            static_cast<SInt64>(call.slots[4]), &returnedPackets,
+            requestedBytes ? bytes.data() : nullptr);
+    }
+
+    if(returnedBytes > requestedBytes ||
+       returnedPackets > requestedPackets ||
+       !WriteGuestU32(SlotU32(call, 2), returnedBytes) ||
+       !WriteGuestU32(SlotU32(call, 5), returnedPackets) ||
+       (returnedBytes && !WriteGuestBytes(
+            SlotU32(call, 6), returnedBytes, bytes.data()))) {
+        return kAudio_ParamError;
+    }
+    if(!packetDescriptions.empty() && returnedPackets) {
+        const size_t descriptorBytes =
+            static_cast<size_t>(returnedPackets) *
+                sizeof(GuestAudioStreamPacketDescription);
+        if(!WriteGuestBytes(SlotU32(call, 3), descriptorBytes,
+                packetDescriptions.data())) {
             return kAudio_ParamError;
         }
     }
@@ -1888,6 +2143,98 @@ OSStatus DispatchAudioQueueDeviceGetCurrentTime(
     return status;
 }
 
+OSStatus DispatchAudioQueueCreateTimeline(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 2) || !SlotU32(call, 1) ||
+       !WriteGuestU32(SlotU32(call, 1), 0)) {
+        return kAudio_ParamError;
+    }
+    auto entry = FindAudioQueue(SlotU32(call, 0));
+    AudioQueueUse queueUse(entry);
+    if(!queueUse) return kAudio_ParamError;
+
+    AudioQueueTimelineRef timeline = nullptr;
+    const OSStatus status =
+        AudioQueueCreateTimeline(queueUse.queue(), &timeline);
+    if(status != noErr) return status;
+    if(!timeline) return kAudio_ParamError;
+
+    u32 token = 0;
+    {
+        std::lock_guard<std::mutex> lock(entry->timelinesMutex);
+        for(size_t attempt = 0; attempt < UINT32_MAX; ++attempt) {
+            const u32 candidate = entry->nextTimelineToken++;
+            if(!candidate) continue;
+            if(entry->timelines.emplace(candidate, timeline).second) {
+                token = candidate;
+                break;
+            }
+        }
+    }
+    if(!token || !WriteGuestU32(SlotU32(call, 1), token)) {
+        if(token) {
+            std::lock_guard<std::mutex> lock(entry->timelinesMutex);
+            entry->timelines.erase(token);
+        }
+        (void)AudioQueueDisposeTimeline(queueUse.queue(), timeline);
+        return token ? kAudio_ParamError : kAudio_MemFullError;
+    }
+    return noErr;
+}
+
+OSStatus DispatchAudioQueueDisposeTimeline(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 2) || !SlotU32(call, 1))
+        return kAudio_ParamError;
+    auto entry = FindAudioQueue(SlotU32(call, 0));
+    AudioQueueUse queueUse(entry);
+    if(!queueUse) return kAudio_ParamError;
+
+    std::lock_guard<std::mutex> lock(entry->timelinesMutex);
+    const auto iterator = entry->timelines.find(SlotU32(call, 1));
+    if(iterator == entry->timelines.end()) return kAudio_ParamError;
+    const OSStatus status = AudioQueueDisposeTimeline(
+        queueUse.queue(), iterator->second);
+    if(status == noErr) entry->timelines.erase(iterator);
+    return status;
+}
+
+OSStatus DispatchAudioQueueGetCurrentTime(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 4) ||
+       (!SlotU32(call, 2) && !SlotU32(call, 3)) ||
+       (!SlotU32(call, 1) && SlotU32(call, 3))) {
+        return kAudio_ParamError;
+    }
+    auto entry = FindAudioQueue(SlotU32(call, 0));
+    AudioQueueUse queueUse(entry);
+    if(!queueUse) return kAudio_ParamError;
+
+    AudioTimeStamp timeStamp = {};
+    Boolean discontinuity = false;
+    OSStatus status = noErr;
+    if(SlotU32(call, 1)) {
+        std::lock_guard<std::mutex> lock(entry->timelinesMutex);
+        const auto iterator = entry->timelines.find(SlotU32(call, 1));
+        if(iterator == entry->timelines.end()) return kAudio_ParamError;
+        status = AudioQueueGetCurrentTime(queueUse.queue(),
+            iterator->second,
+            SlotU32(call, 2) ? &timeStamp : nullptr,
+            SlotU32(call, 3) ? &discontinuity : nullptr);
+    } else {
+        status = AudioQueueGetCurrentTime(queueUse.queue(), nullptr,
+            SlotU32(call, 2) ? &timeStamp : nullptr, nullptr);
+    }
+    if(status != noErr) return status;
+    if((SlotU32(call, 2) && !WriteGuestBytes(
+            SlotU32(call, 2), sizeof(timeStamp), &timeStamp)) ||
+       (SlotU32(call, 3) && !WriteGuestBytes(
+            SlotU32(call, 3), sizeof(discontinuity), &discontinuity))) {
+        return kAudio_ParamError;
+    }
+    return noErr;
+}
+
 OSStatus DispatchAudioQueueStart(const LC32AudioToolboxCall &call) {
     if(!RequireSlots(call, 2)) return kAudio_ParamError;
     auto entry = FindAudioQueue(SlotU32(call, 0));
@@ -2026,6 +2373,7 @@ OSStatus DispatchAudioQueueDispose(const LC32AudioToolboxCall &call) {
     const OSStatus status = queue
         ? AudioQueueDispose(queue, immediate)
         : kAudio_ParamError;
+    ClearAudioQueueTimelines(entry);
     {
         std::lock_guard<std::mutex> lock(entry->stateMutex);
         entry->queue = nullptr;
@@ -2115,6 +2463,32 @@ extern "C" u32 LC32_AudioToolbox_Dispatch(u32 opcode, u32 guestCall, u32) {
             return static_cast<u32>(
                 PublishAudioFile(file, SlotU32(call, 3)));
         }
+        case LC32AudioToolboxOpAudioFileOpenWithCallbacks: {
+            if(!RequireSlots(call, 7) || !SlotU32(call, 1) ||
+               !SlotU32(call, 3) || !SlotU32(call, 6) ||
+               !WriteGuestU32(SlotU32(call, 6), 0)) {
+                return static_cast<u32>(kAudio_ParamError);
+            }
+            auto context = std::make_unique<AudioFileCallbackContext>();
+            context->guestClientData = SlotU32(call, 0);
+            context->guestReadFunction = SlotU32(call, 1);
+            context->guestWriteFunction = SlotU32(call, 2);
+            context->guestGetSizeFunction = SlotU32(call, 3);
+            context->guestSetSizeFunction = SlotU32(call, 4);
+
+            AudioFileID file = nullptr;
+            const OSStatus status = AudioFileOpenWithCallbacks(
+                context.get(), AudioFileReadCallbackBridge,
+                context->guestWriteFunction
+                    ? AudioFileWriteCallbackBridge : nullptr,
+                AudioFileGetSizeCallbackBridge,
+                context->guestSetSizeFunction
+                    ? AudioFileSetSizeCallbackBridge : nullptr,
+                SlotU32(call, 5), &file);
+            if(status != noErr) return static_cast<u32>(status);
+            return static_cast<u32>(PublishAudioFile(
+                file, SlotU32(call, 6), std::move(context)));
+        }
         case LC32AudioToolboxOpAudioFileGetProperty:
             return static_cast<u32>(DispatchAudioFileGetProperty(call));
         case LC32AudioToolboxOpAudioFileReadBytes:
@@ -2155,6 +2529,9 @@ extern "C" u32 LC32_AudioToolbox_Dispatch(u32 opcode, u32 guestCall, u32) {
         case LC32AudioToolboxOpAudioFileReadPackets:
             return static_cast<u32>(
                 DispatchAudioFileReadPackets(call));
+        case LC32AudioToolboxOpAudioFileReadPacketData:
+            return static_cast<u32>(
+                DispatchAudioFileReadPacketData(call));
         case LC32AudioToolboxOpAudioFileWriteBytes:
             return static_cast<u32>(
                 DispatchAudioFileWriteBytes(call));
@@ -2194,6 +2571,15 @@ extern "C" u32 LC32_AudioToolbox_Dispatch(u32 opcode, u32 guestCall, u32) {
         case LC32AudioToolboxOpAudioQueueDeviceGetCurrentTime:
             return static_cast<u32>(
                 DispatchAudioQueueDeviceGetCurrentTime(call));
+        case LC32AudioToolboxOpAudioQueueCreateTimeline:
+            return static_cast<u32>(
+                DispatchAudioQueueCreateTimeline(call));
+        case LC32AudioToolboxOpAudioQueueDisposeTimeline:
+            return static_cast<u32>(
+                DispatchAudioQueueDisposeTimeline(call));
+        case LC32AudioToolboxOpAudioQueueGetCurrentTime:
+            return static_cast<u32>(
+                DispatchAudioQueueGetCurrentTime(call));
         case LC32AudioToolboxOpAudioQueueStart:
             return static_cast<u32>(DispatchAudioQueueStart(call));
         case LC32AudioToolboxOpAudioQueueStop:

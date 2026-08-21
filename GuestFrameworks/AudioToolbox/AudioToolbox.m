@@ -563,6 +563,43 @@ OSStatus AudioQueueDeviceGetCurrentTime(
         LC32_AUDIO_U32((uintptr_t)outTimeStamp));
 }
 
+OSStatus AudioQueueCreateTimeline(AudioQueueRef inAQ,
+                                  AudioQueueTimelineRef *outTimeline) {
+    if(outTimeline) *outTimeline = NULL;
+    if(!inAQ || !outTimeline) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioQueueCreateTimeline,
+        LC32_AUDIO_U32((uintptr_t)inAQ),
+        LC32_AUDIO_U32((uintptr_t)outTimeline));
+}
+
+OSStatus AudioQueueDisposeTimeline(AudioQueueRef inAQ,
+                                   AudioQueueTimelineRef inTimeline) {
+    if(!inAQ || !inTimeline) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioQueueDisposeTimeline,
+        LC32_AUDIO_U32((uintptr_t)inAQ),
+        LC32_AUDIO_U32((uintptr_t)inTimeline));
+}
+
+OSStatus AudioQueueGetCurrentTime(
+        AudioQueueRef inAQ, AudioQueueTimelineRef inTimeline,
+        AudioTimeStamp *outTimeStamp,
+        Boolean *outTimelineDiscontinuity) {
+    if(outTimeStamp) memset(outTimeStamp, 0, sizeof(*outTimeStamp));
+    if(outTimelineDiscontinuity) *outTimelineDiscontinuity = false;
+    if(!inAQ || (!outTimeStamp && !outTimelineDiscontinuity))
+        return kAudio_ParamError;
+    if(!inTimeline && outTimelineDiscontinuity)
+        return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioQueueGetCurrentTime,
+        LC32_AUDIO_U32((uintptr_t)inAQ),
+        LC32_AUDIO_U32((uintptr_t)inTimeline),
+        LC32_AUDIO_U32((uintptr_t)outTimeStamp),
+        LC32_AUDIO_U32((uintptr_t)outTimelineDiscontinuity));
+}
+
 OSStatus AudioQueueEnqueueBufferWithParameters(
         AudioQueueRef inAQ, AudioQueueBufferRef inBuffer,
         UInt32 inNumPacketDescs,
@@ -715,6 +752,26 @@ OSStatus AudioFileOpenURL(CFURLRef fileURL,
         LC32_AUDIO_U32((uintptr_t)outAudioFile));
 }
 
+OSStatus AudioFileOpenWithCallbacks(
+        void *clientData, AudioFile_ReadProc readFunction,
+        AudioFile_WriteProc writeFunction,
+        AudioFile_GetSizeProc getSizeFunction,
+        AudioFile_SetSizeProc setSizeFunction,
+        AudioFileTypeID fileTypeHint, AudioFileID *outAudioFile) {
+    if(outAudioFile) *outAudioFile = NULL;
+    if(!readFunction || !getSizeFunction || !outAudioFile)
+        return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioFileOpenWithCallbacks,
+        LC32_AUDIO_U32((uintptr_t)clientData),
+        LC32_AUDIO_U32((uintptr_t)readFunction),
+        LC32_AUDIO_U32((uintptr_t)writeFunction),
+        LC32_AUDIO_U32((uintptr_t)getSizeFunction),
+        LC32_AUDIO_U32((uintptr_t)setSizeFunction),
+        LC32_AUDIO_U32(fileTypeHint),
+        LC32_AUDIO_U32((uintptr_t)outAudioFile));
+}
+
 OSStatus AudioFileGetProperty(AudioFileID audioFile,
                               AudioFilePropertyID property,
                               UInt32 *ioDataSize,
@@ -769,6 +826,25 @@ OSStatus AudioFileReadPackets(
         LC32AudioToolboxOpAudioFileReadPackets,
         LC32_AUDIO_U32((uintptr_t)audioFile), LC32_AUDIO_U32(useCache),
         LC32_AUDIO_U32((uintptr_t)outNumBytes),
+        LC32_AUDIO_U32((uintptr_t)outPacketDescriptions),
+        (uint64_t)startingPacket,
+        LC32_AUDIO_U32((uintptr_t)ioNumPackets),
+        LC32_AUDIO_U32((uintptr_t)outBuffer));
+}
+
+OSStatus AudioFileReadPacketData(
+        AudioFileID audioFile, Boolean useCache,
+        UInt32 *ioNumBytes,
+        AudioStreamPacketDescription *outPacketDescriptions,
+        SInt64 startingPacket, UInt32 *ioNumPackets,
+        void *outBuffer) {
+    if(!audioFile || !ioNumBytes || !ioNumPackets)
+        return kAudio_ParamError;
+    if(*ioNumBytes && !outBuffer) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioFileReadPacketData,
+        LC32_AUDIO_U32((uintptr_t)audioFile), LC32_AUDIO_U32(useCache),
+        LC32_AUDIO_U32((uintptr_t)ioNumBytes),
         LC32_AUDIO_U32((uintptr_t)outPacketDescriptions),
         (uint64_t)startingPacket,
         LC32_AUDIO_U32((uintptr_t)ioNumPackets),

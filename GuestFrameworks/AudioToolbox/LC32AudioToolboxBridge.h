@@ -61,6 +61,11 @@ typedef enum : uint32_t {
      * executor, whose host pthread differs from the native AudioQueue thread. */
     LC32AudioToolboxOpAudioQueueCallbackEnter = 34,
     LC32AudioToolboxOpAudioQueueCallbackLeave = 35,
+    LC32AudioToolboxOpAudioFileOpenWithCallbacks = 36,
+    LC32AudioToolboxOpAudioFileReadPacketData = 37,
+    LC32AudioToolboxOpAudioQueueCreateTimeline = 38,
+    LC32AudioToolboxOpAudioQueueDisposeTimeline = 39,
+    LC32AudioToolboxOpAudioQueueGetCurrentTime = 40,
 } LC32AudioToolboxOpcode;
 
 #endif
