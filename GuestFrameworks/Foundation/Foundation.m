@@ -78,6 +78,10 @@ NSString * const NSDefaultRunLoopMode = @"kCFRunLoopDefaultMode";
 NSString * const NSUserDefaultsDidChangeNotification =
     @"NSUserDefaultsDidChangeNotification";
 NSString * const NSUserActivityTypeBrowsingWeb = @"NSUserActivityTypeBrowsingWeb";
+NSNotificationName const NSUbiquitousKeyValueStoreDidChangeExternallyNotification =
+    @"NSUbiquitousKeyValueStoreDidChangeExternallyNotification";
+NSString * const NSUbiquitousKeyValueStoreChangeReasonKey =
+    @"NSUbiquitousKeyValueStoreChangeReasonKey";
 
 /* Match Foundation shipped by iOS 10.3.3 rather than the host runtime. */
 double NSFoundationVersionNumber = 1350.0;

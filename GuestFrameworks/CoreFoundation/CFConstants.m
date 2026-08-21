@@ -94,6 +94,7 @@ NSString * const NSInvalidArgumentException = @"NSInvalidArgumentException";
 NSString * const NSRangeException = @"NSRangeException";
 NSString * const NSLocaleCountryCode = @"kCFLocaleCountryCodeKey";
 NSString * const NSLocaleIdentifier = @"kCFLocaleIdentifierKey";
+NSString * const NSLocaleLanguageCode = @"kCFLocaleLanguageCodeKey";
 NSString * const NSRunLoopCommonModes = @"kCFRunLoopCommonModes";
 NSString * const NSURLIsExcludedFromBackupKey =
     @"NSURLIsExcludedFromBackupKey";

@@ -37,10 +37,16 @@ LC32_CONST_STR_DECL(NSString * const kCAMediaTimingFunctionEaseOut)
 LC32_CONST_STR_DECL(NSString * const kCAMediaTimingFunctionEaseInEaseOut)
 LC32_CONST_STR_DECL(NSString * const kCAMediaTimingFunctionDefault)
 
+LC32_CONST_STR_DECL(NSString * const kCATransactionDisableActions)
+
 LC32_CONST_STR_DECL(NSString * const kCATransitionFade);
 LC32_CONST_STR_DECL(NSString * const kCATransitionMoveIn);
 LC32_CONST_STR_DECL(NSString * const kCATransitionPush);
 LC32_CONST_STR_DECL(NSString * const kCATransitionReveal);
+LC32_CONST_STR_DECL(NSString * const kCATransitionFromRight);
+LC32_CONST_STR_DECL(NSString * const kCATransitionFromLeft);
+LC32_CONST_STR_DECL(NSString * const kCATransitionFromTop);
+LC32_CONST_STR_DECL(NSString * const kCATransitionFromBottom);
 
 __attribute__((constructor)) void QuartzCoreInit() {
     LC32_CONST_STR_INIT(kCAFillModeBoth);
@@ -67,8 +73,14 @@ __attribute__((constructor)) void QuartzCoreInit() {
     LC32_CONST_STR_INIT(kCAMediaTimingFunctionEaseInEaseOut);
     LC32_CONST_STR_INIT(kCAMediaTimingFunctionDefault);
 
+    LC32_CONST_STR_INIT(kCATransactionDisableActions);
+
     LC32_CONST_STR_INIT(kCATransitionFade);
     LC32_CONST_STR_INIT(kCATransitionMoveIn);
     LC32_CONST_STR_INIT(kCATransitionPush);
     LC32_CONST_STR_INIT(kCATransitionReveal);
+    LC32_CONST_STR_INIT(kCATransitionFromRight);
+    LC32_CONST_STR_INIT(kCATransitionFromLeft);
+    LC32_CONST_STR_INIT(kCATransitionFromTop);
+    LC32_CONST_STR_INIT(kCATransitionFromBottom);
 }
