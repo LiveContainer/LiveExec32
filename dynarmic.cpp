@@ -100,6 +100,13 @@ static std::atomic<bool> guestDebuggerEnabled{false};
 static std::atomic<bool> debuggerInterruptRequested{false};
 static std::atomic<bool> debuggerAllStopRequested{false};
 /*
+ * D/EOF can be handled inside a reverse callback while the outer protocol
+ * frame is suspended below UIApplicationMain.  This one-shot condition asks
+ * the UIKit shim to return to the outer JIT so that frame can observe the
+ * nested protocol's terminal marker and close its sole socket reader.
+ */
+static std::atomic<bool> debuggerSessionUnwindRequested{false};
+/*
  * Registered by the host UIKit shim while the guest main thread is parked
  * inside the host UIApplicationMain run loop. When an all-stop is requested
  * (worker crash, ^C, breakpoint) the run loop's blocking mach_msg is not one
@@ -1018,6 +1025,12 @@ bool LC32DebuggerActive() {
 extern "C"
 bool LC32DebuggerAllStopRequested() {
     return debuggerAllStopRequested.load(std::memory_order_acquire);
+}
+
+extern "C"
+bool LC32DebuggerSessionUnwindRequested() {
+    return debuggerSessionUnwindRequested.load(
+        std::memory_order_acquire);
 }
 
 extern "C"
@@ -7997,6 +8010,7 @@ struct NativeThreadStateSlot {
     bool snapshotValid = false;
     bool ownerExited = false;
     size_t hostCallDepth = 0;
+    size_t hostCallQuiescenceDepth = 0;
     size_t guestCallbackDepth = 0;
     bool hostRegistersQuiescent = false;
 };
@@ -8017,6 +8031,15 @@ struct NativeGuestJit {
     bool startAllowed = false;
     bool debuggerExecuting = false;
     bool debuggerHostWaitPaused = false;
+    /*
+     * An outer InvokeNativeGuestHostCall owns a stable guest register file
+     * while arbitrary native code runs.  It may block in a host framework
+     * call which cannot be interrupted through debuggerMachCalls, so publish
+     * that interval as a cooperative all-stop acknowledgement.  Returning
+     * from the host call (or entering a reverse guest callback) reacquires a
+     * debugger execution epoch before the register file can change.
+     */
+    bool debuggerHostCallQuiescent = false;
     bool hostThreadCreated = false;
     bool exited = false;
     bool workqueue = false;
@@ -8073,6 +8096,9 @@ thread_local NativeGuestJit *nativeGuestRuntime;
 thread_local size_t nativeGuestWorkqueueHostBlockDepth;
 thread_local bool nativeDebuggerHostWaitStep;
 thread_local uint64_t nativeDebuggerHostWaitStepGeneration;
+/* Only the main JIT may own a re-entrant RSP loop.  A depth is required because
+ * guest -> host -> guest callbacks can nest while an inner continue runs. */
+thread_local size_t nativeDebuggerMainCallbackStopDepth;
 thread_local gdb_thread_id_t
     cooperativeDebuggerResumeThread =
         GDB_THREAD_ID_ALL;
@@ -8445,12 +8471,101 @@ static NativeThreadStateSlot *CurrentNativeThreadStateSlot() {
 }
 
 /*
- * A deferred host call runs after Jit::Run has returned, so its architectural
- * register file is stable even if the host call owns the thread indefinitely
- * (UIApplicationMain is the important case).  Publish that state under a
- * small gate. A nested host-to-guest callback revokes quiescence before it
- * saves or changes any registers and restores it only after the outer guest
- * context has been put back.
+ * Generic Objective-C/C host calls are not necessarily backed by one of the
+ * interruptible Mach waits tracked elsewhere in this file.  Once an outer
+ * host call has published a quiescent register file, it can stop counting as
+ * an executing worker without forcing the native call to return.  This is
+ * safe only until either the call returns or native code re-enters the guest.
+ */
+static void NativeDebuggerParkQuiescentHostCall() {
+    NativeGuestJit *runtime = nativeGuestRuntime;
+    if (runtime == nullptr || !NativeDebuggerActive()) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(
+            nativeDebugger.mutex);
+        if (runtime->debuggerHostCallQuiescent) {
+            return;
+        }
+        runtime->debuggerHostCallQuiescent = true;
+        NativeDebuggerSetWorkerExecutingLocked(
+            runtime, false);
+    }
+    nativeDebugger.condition.notify_all();
+}
+
+/*
+ * Keep the guest register file untouched while an all-stop is closed.  A
+ * selected single-step first lets the native call copy its result out, then
+ * reuses the existing host-wait handoff to unwind the old Jit::Run and issue
+ * one real Jit::Step from the post-SVC PC.
+ */
+static bool NativeDebuggerResumeQuiescentHostCall(
+        bool prepareDeferredStep) {
+    NativeGuestJit *runtime = nativeGuestRuntime;
+    if (runtime == nullptr) {
+        return true;
+    }
+
+    std::unique_lock<std::mutex> lock(nativeDebugger.mutex);
+    if (!runtime->debuggerHostCallQuiescent) {
+        return true;
+    }
+    nativeDebugger.condition.wait(lock, [runtime] {
+        return !NativeDebuggerActive() ||
+            nativeGuestThreadRetiring ||
+            nativeShutdownRequested.load(
+                std::memory_order_acquire) ||
+            guestProcessExitRequested.load(
+                std::memory_order_acquire) ||
+            nativeDebugger.state ==
+                NativeDebuggerRunState::ShuttingDown ||
+            (nativeDebugger.state ==
+                NativeDebuggerRunState::Running &&
+             NativeDebuggerRunsThreadLocked(
+                 runtime->debuggerId));
+    });
+
+    runtime->debuggerHostCallQuiescent = false;
+    if (!NativeDebuggerActive() ||
+            nativeGuestThreadRetiring ||
+            nativeShutdownRequested.load(
+                std::memory_order_acquire) ||
+            guestProcessExitRequested.load(
+                std::memory_order_acquire) ||
+            nativeDebugger.state ==
+                NativeDebuggerRunState::ShuttingDown) {
+        nativeDebuggerHostWaitStep = false;
+        nativeDebuggerHostWaitStepGeneration = 0;
+        return false;
+    }
+
+    if (prepareDeferredStep) {
+        nativeDebuggerHostWaitStep =
+            NativeDebuggerStepsThreadLocked(
+                runtime->debuggerId);
+        nativeDebuggerHostWaitStepGeneration =
+            nativeDebuggerHostWaitStep
+            ? nativeDebugger.generation
+            : 0;
+        if (nativeDebuggerHostWaitStep &&
+                runtime->jit != nullptr) {
+            runtime->jit->HaltExecution(
+                LC32HaltReasonDebuggerPause);
+        }
+    }
+    NativeDebuggerSetWorkerExecutingLocked(runtime, true);
+    return true;
+}
+
+/*
+ * A deferred host call runs after Jit::Run has returned. Track its outer
+ * scope here, but leave argument marshalling counted as guest work. The
+ * bridge publishes the stable register interval only around the exact native
+ * invocation; a nested host-to-guest callback temporarily revokes it before
+ * saving or changing registers.
  */
 void NativeGuestHostCallEnter() {
     NativeThreadStateSlot *slot =
@@ -8461,8 +8576,9 @@ void NativeGuestHostCallEnter() {
     std::lock_guard<std::mutex> lock(
         slot->registerAccessMutex);
     ++slot->hostCallDepth;
-    slot->hostRegistersQuiescent =
-        slot->guestCallbackDepth == 0;
+    /* Argument marshalling is still guest work.  The bridge explicitly
+     * publishes quiescence only around the actual native invocation. */
+    slot->hostRegistersQuiescent = false;
 }
 
 void NativeGuestHostCallExit() {
@@ -8474,9 +8590,70 @@ void NativeGuestHostCallExit() {
     std::lock_guard<std::mutex> lock(
         slot->registerAccessMutex);
     assert(slot->hostCallDepth != 0);
+    /* A host-to-guest callback may contain a nested host call while the
+     * outer native invocation's quiescence scope remains on its stack. */
+    assert(slot->hostCallQuiescenceDepth <
+        slot->hostCallDepth);
     --slot->hostCallDepth;
     /* The host return value has not yet been written to the guest JIT. */
     slot->hostRegistersQuiescent = false;
+}
+
+extern "C"
+bool Dynarmic_guest_host_call_quiescence_begin() {
+    NativeThreadStateSlot *slot =
+        CurrentNativeThreadStateSlot();
+    if (slot == nullptr) {
+        return false;
+    }
+
+    bool registersQuiescent;
+    {
+        std::lock_guard<std::mutex> lock(
+            slot->registerAccessMutex);
+        if (slot->hostCallDepth == 0) {
+            return false;
+        }
+        ++slot->hostCallQuiescenceDepth;
+        slot->hostRegistersQuiescent =
+            slot->guestCallbackDepth == 0;
+        registersQuiescent =
+            slot->hostRegistersQuiescent;
+    }
+    if (registersQuiescent) {
+        NativeDebuggerParkQuiescentHostCall();
+    }
+    return true;
+}
+
+extern "C"
+void Dynarmic_guest_host_call_quiescence_end() {
+    NativeThreadStateSlot *slot =
+        CurrentNativeThreadStateSlot();
+    if (slot == nullptr) {
+        return;
+    }
+
+    bool registersQuiescent;
+    {
+        std::lock_guard<std::mutex> lock(
+            slot->registerAccessMutex);
+        assert(slot->hostCallQuiescenceDepth != 0);
+        registersQuiescent =
+            slot->guestCallbackDepth == 0 &&
+            slot->hostRegistersQuiescent;
+    }
+    if (registersQuiescent) {
+        /* Copyout after the native call belongs to an open guest epoch. */
+        (void)NativeDebuggerResumeQuiescentHostCall(true);
+    }
+    {
+        std::lock_guard<std::mutex> lock(
+            slot->registerAccessMutex);
+        assert(slot->hostCallQuiescenceDepth != 0);
+        --slot->hostCallQuiescenceDepth;
+        slot->hostRegistersQuiescent = false;
+    }
 }
 
 static void NativeGuestCallbackRegisterAccessBegin() {
@@ -8485,10 +8662,14 @@ static void NativeGuestCallbackRegisterAccessBegin() {
     if (slot == nullptr) {
         return;
     }
-    std::lock_guard<std::mutex> lock(
-        slot->registerAccessMutex);
-    ++slot->guestCallbackDepth;
-    slot->hostRegistersQuiescent = false;
+    /* A reverse callback is guest execution, so it must own an open epoch. */
+    (void)NativeDebuggerResumeQuiescentHostCall(false);
+    {
+        std::lock_guard<std::mutex> lock(
+            slot->registerAccessMutex);
+        ++slot->guestCallbackDepth;
+        slot->hostRegistersQuiescent = false;
+    }
 }
 
 static void NativeGuestCallbackRegisterAccessEnd() {
@@ -8497,13 +8678,21 @@ static void NativeGuestCallbackRegisterAccessEnd() {
     if (slot == nullptr) {
         return;
     }
-    std::lock_guard<std::mutex> lock(
-        slot->registerAccessMutex);
-    assert(slot->guestCallbackDepth != 0);
-    --slot->guestCallbackDepth;
-    slot->hostRegistersQuiescent =
-        slot->hostCallDepth != 0 &&
-        slot->guestCallbackDepth == 0;
+    bool registersQuiescent;
+    {
+        std::lock_guard<std::mutex> lock(
+            slot->registerAccessMutex);
+        assert(slot->guestCallbackDepth != 0);
+        --slot->guestCallbackDepth;
+        slot->hostRegistersQuiescent =
+            slot->hostCallQuiescenceDepth != 0 &&
+            slot->guestCallbackDepth == 0;
+        registersQuiescent =
+            slot->hostRegistersQuiescent;
+    }
+    if (registersQuiescent) {
+        NativeDebuggerParkQuiescentHostCall();
+    }
 }
 
 static bool TryCopyQuiescentNativeThreadState(
@@ -8518,6 +8707,7 @@ static bool TryCopyQuiescentNativeThreadState(
         slot.registerAccessMutex);
     if (!slot.hostRegistersQuiescent ||
             slot.hostCallDepth == 0 ||
+            slot.hostCallQuiescenceDepth == 0 ||
             slot.guestCallbackDepth != 0) {
         return false;
     }
@@ -8669,6 +8859,7 @@ static void ResetNativeThreadStateSlot(
         std::lock_guard<std::mutex> lock(
             slot.registerAccessMutex);
         slot.hostCallDepth = 0;
+        slot.hostCallQuiescenceDepth = 0;
         slot.guestCallbackDepth = 0;
         slot.hostRegistersQuiescent = false;
     }
@@ -13181,12 +13372,6 @@ void Dynarmic_nativeDestroy() {
         guestNativeWorkqueuePendingJobs.clear();
     }
 
-    guestDebuggerEnabled.store(
-        false, std::memory_order_release);
-    debuggerInterruptRequested.store(
-        false, std::memory_order_release);
-    debuggerAllStopRequested.store(
-        false, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(
             nativeDebugger.mutex);
@@ -14444,6 +14629,31 @@ bool Dynarmic_debugger_delete_breakpoint(u64 address, size_t kind) {
     return true;
 }
 
+/*
+ * A software breakpoint is physical guest code patched with BKPT.  Leaving
+ * the debugger must therefore be transactional with respect to execution:
+ * restore every reachable site while the target is still all-stop, retain
+ * failed records so the caller can refuse to run with a planted trap, and
+ * invalidate every JIT which may have translated either byte sequence.
+ */
+bool Dynarmic_debugger_remove_all_breakpoints() {
+    bool restoredAll = true;
+    for (auto it = debuggerSoftwareBreakpoints.begin();
+         it != debuggerSoftwareBreakpoints.end();) {
+        if (DebuggerWritePhysicalMemory(
+                it->address, it->kind,
+                reinterpret_cast<const char *>(
+                    it->original.data())) != 0) {
+            restoredAll = false;
+            ++it;
+            continue;
+        }
+        InvalidateAllGuestJits(it->address, it->kind);
+        it = debuggerSoftwareBreakpoints.erase(it);
+    }
+    return restoredAll && debuggerSoftwareBreakpoints.empty();
+}
+
 size_t Dynarmic_debugger_thread_ids(
         gdb_thread_id_t *ids, size_t capacity) {
     if (threadHandle.jit == nullptr) {
@@ -14754,11 +14964,13 @@ bool Dynarmic_debugger_thread_write_reg(
         Dynarmic::A32::Jit *jit = nullptr;
         if (NativeDebuggerActive()) {
             if (thread.nativeJit != nullptr &&
-                    thread.nativeJit->debuggerHostWaitPaused) {
+                    (thread.nativeJit->debuggerHostWaitPaused ||
+                     thread.nativeJit->debuggerHostCallQuiescent)) {
                 /*
-                 * The stopped host callback has not copied its syscall result
-                 * back to the JIT register file yet. Reject writes instead of
-                 * reporting success and silently overwriting them on resume.
+                 * The stopped host callback has not copied its syscall or
+                 * selector result back to the JIT register file yet. Reject
+                 * writes instead of reporting success and silently
+                 * overwriting them on resume.
                  */
                 return false;
             }
@@ -15273,6 +15485,89 @@ static Dynarmic::HaltReason NativeDebuggerCompleteStop() {
     return reason;
 }
 
+bool Dynarmic_debugger_begin_main_callback_stop(
+        Dynarmic::HaltReason reason) {
+    /*
+     * The normal protocol owner is synchronously below Dynarmic_emu_resume()
+     * on this same host thread.  Completing the stop here is safe only for
+     * the shared main JIT.  A native worker doing this would wait for its own
+     * executingWorkers acknowledgement and deadlock, as well as compete for
+     * the single RSP packet queue.
+     */
+    if (!NativeDebuggerActive() ||
+            threadHandle.jit == nullptr ||
+            sharedHandle.cb == nullptr ||
+            threadHandle.jit != sharedHandle.cb->cpu) {
+        return false;
+    }
+
+    NativeDebuggerRunState state;
+    {
+        std::lock_guard<std::mutex> lock(
+            nativeDebugger.mutex);
+        state = nativeDebugger.state;
+    }
+    if (state != NativeDebuggerRunState::Running &&
+            state != NativeDebuggerRunState::Stopping) {
+        return false;
+    }
+    if (state == NativeDebuggerRunState::Running) {
+        (void)NativeDebuggerRequestStop(
+            ActiveMainDebuggerThread(), reason);
+    }
+    (void)NativeDebuggerCompleteStop();
+
+    {
+        std::lock_guard<std::mutex> lock(
+            nativeDebugger.mutex);
+        if (!NativeDebuggerActive() ||
+                nativeDebugger.state !=
+                    NativeDebuggerRunState::Stopped) {
+            return false;
+        }
+    }
+    ++nativeDebuggerMainCallbackStopDepth;
+    return true;
+}
+
+void Dynarmic_debugger_end_main_callback_stop() {
+    if (nativeDebuggerMainCallbackStopDepth != 0) {
+        --nativeDebuggerMainCallbackStopDepth;
+    }
+}
+
+void Dynarmic_debugger_request_main_callback_step_out() {
+    if (!NativeDebuggerActive() ||
+            threadHandle.jit == nullptr ||
+            sharedHandle.cb == nullptr ||
+            threadHandle.jit != sharedHandle.cb->cpu) {
+        return;
+    }
+    (void)NativeDebuggerRequestStop(
+        ActiveMainDebuggerThread(),
+        Dynarmic::HaltReason::Step,
+        SIGTRAP, false);
+}
+
+void Dynarmic_debugger_request_main_session_unwind() {
+    if (threadHandle.jit == nullptr ||
+            sharedHandle.cb == nullptr ||
+            threadHandle.jit != sharedHandle.cb->cpu) {
+        return;
+    }
+    debuggerSessionUnwindRequested.store(
+        true, std::memory_order_release);
+    /* Planted only after the stopped reverse callback has run through its
+     * normal return and the outer register context has been restored. */
+    threadHandle.jit->HaltExecution(
+        LC32HaltReasonDebuggerPause);
+    if (void (*notifier)(void) =
+            debuggerStopRunLoopNotifier.load(
+                std::memory_order_acquire)) {
+        notifier();
+    }
+}
+
 static Dynarmic::HaltReason NativeDebuggerReemitPendingStop() {
     std::lock_guard<std::mutex> lock(nativeDebugger.mutex);
     nativeDebugger.state =
@@ -15348,6 +15643,15 @@ Dynarmic::HaltReason Dynarmic_debugger_continue(
         }
         const Dynarmic::HaltReason reason =
             Dynarmic_emu_1resume();
+        if (nativeDebuggerMainCallbackStopDepth != 0 &&
+                Dynarmic::Has(
+                    reason,
+                    LC32HaltReasonRetFromGuest)) {
+            /* The preserved host caller, not the all-stop coordinator, owns
+             * this private callback boundary.  Keep the coordinator Running
+             * and let the nested protocol frame return without a fake stop. */
+            return reason;
+        }
         const Dynarmic::HaltReason visibleReason =
             NativeDebuggerVisibleReason(reason);
         if (!!visibleReason) {
@@ -15432,6 +15736,12 @@ Dynarmic::HaltReason Dynarmic_debugger_step(
         thread_id, runMain)) {
         return NativeDebuggerCompleteStop();
     }
+    uint64_t commandGeneration;
+    {
+        std::lock_guard<std::mutex> lock(
+            nativeDebugger.mutex);
+        commandGeneration = nativeDebugger.generation;
+    }
     if (runMain) {
         const gdb_thread_id_t mainOwner =
             ActiveMainDebuggerThread();
@@ -15439,13 +15749,58 @@ Dynarmic::HaltReason Dynarmic_debugger_step(
                 mainOwner)) {
             return NativeDebuggerCompleteStop();
         }
-        const Dynarmic::HaltReason reason =
+        Dynarmic::HaltReason reason =
             stepMain
             ? Dynarmic_emu_1step()
             : Dynarmic_emu_1resume();
+        if (nativeDebuggerMainCallbackStopDepth != 0 &&
+                Dynarmic::Has(
+                    reason,
+                    LC32HaltReasonRetFromGuest)) {
+            return reason;
+        }
+
+        bool enforceOriginalStep = stepMain;
+        if (stepMain) {
+            const gdb_thread_id_t mainOwner =
+                ActiveMainDebuggerThread();
+            bool commandSuperseded;
+            bool latestCommandRunsMain;
+            {
+                std::lock_guard<std::mutex> lock(
+                    nativeDebugger.mutex);
+                commandSuperseded =
+                    nativeDebugger.generation !=
+                        commandGeneration;
+                latestCommandRunsMain =
+                    nativeDebugger.state ==
+                        NativeDebuggerRunState::Running &&
+                    NativeDebuggerRunsThreadLocked(
+                        mainOwner);
+            }
+            if (commandSuperseded) {
+                /* A nested callback stop serviced a newer c/s command while
+                 * this old step frame was inside its host call.  Never
+                 * publish the old step's fallback stop after a nested c. */
+                enforceOriginalStep = false;
+                const Dynarmic::HaltReason visible =
+                    NativeDebuggerVisibleReason(reason);
+                if (latestCommandRunsMain &&
+                        (!visible || visible ==
+                            Dynarmic::HaltReason::Step)) {
+                    reason = Dynarmic_emu_1resume();
+                    if (nativeDebuggerMainCallbackStopDepth != 0 &&
+                            Dynarmic::Has(
+                                reason,
+                                LC32HaltReasonRetFromGuest)) {
+                        return reason;
+                    }
+                }
+            }
+        }
         const Dynarmic::HaltReason visibleReason =
             NativeDebuggerVisibleReason(reason);
-        if (!!visibleReason || stepMain) {
+        if (!!visibleReason || enforceOriginalStep) {
             const gdb_thread_id_t owner =
                 ActiveMainDebuggerThread();
             (void)NativeDebuggerRequestStop(
@@ -15453,12 +15808,31 @@ Dynarmic::HaltReason Dynarmic_debugger_step(
                 !!visibleReason
                     ? visibleReason
                     : Dynarmic::HaltReason::Step);
+        } else {
+            bool stillRunning;
+            {
+                std::lock_guard<std::mutex> lock(
+                    nativeDebugger.mutex);
+                stillRunning =
+                    nativeDebugger.state ==
+                        NativeDebuggerRunState::Running;
+            }
+            if (stillRunning) {
+                (void)NativeDebuggerRequestStop(
+                    ActiveMainDebuggerThread(),
+                    LC32HaltReasonTrap,
+                    SIGTRAP, false);
+            }
         }
     }
     return NativeDebuggerCompleteStop();
 }
 
 void Dynarmic_emu_1set_1debugger_1enabled(bool enabled) {
+    /* A fresh enable or the outer owner's final disable consumes any
+     * callback-terminal request left for the UIKit run-loop shim. */
+    debuggerSessionUnwindRequested.store(
+        false, std::memory_order_release);
     if (enabled && NativeGuestThreadsEnabled()) {
         {
             std::lock_guard<std::mutex> lock(
@@ -15486,16 +15860,23 @@ void Dynarmic_emu_1set_1debugger_1enabled(bool enabled) {
         NotifyGuestCallbackExecutorWaiter();
         return;
     }
-    guestDebuggerEnabled.store(
-        enabled, std::memory_order_release);
     if (enabled) {
+        guestDebuggerEnabled.store(
+            true, std::memory_order_release);
         return;
     }
 
-    debuggerInterruptRequested.store(
-        false, std::memory_order_release);
-    debuggerAllStopRequested.store(
-        false, std::memory_order_release);
+    if (NativeGuestThreadsEnabled()) {
+        /*
+         * Debugger all-stop is level-triggered on every JIT.  A worker which
+         * parked without re-entering Run() still owns the pause bit, so clear
+         * it while guestDebuggerEnabled keeps all workers behind the stopped
+         * coordinator.  Only then publish Disabled and release them; raw
+         * post-detach resume must not immediately rediscover the old stop.
+         */
+        ClearAllGuestJitHalts(
+            LC32HaltReasonDebuggerPause);
+    }
     {
         std::lock_guard<std::mutex> lock(
             nativeDebugger.mutex);
@@ -15505,6 +15886,13 @@ void Dynarmic_emu_1set_1debugger_1enabled(bool enabled) {
                 NativeDebuggerRunState::Disabled;
         }
         nativeDebugger.mainExecuting = false;
+        debuggerInterruptRequested.store(
+            false, std::memory_order_release);
+        debuggerAllStopRequested.store(
+            false, std::memory_order_release);
+        /* Final release: worker predicates may run after this store. */
+        guestDebuggerEnabled.store(
+            false, std::memory_order_release);
     }
     nativeDebugger.condition.notify_all();
     NotifyNativeDebuggerWaiters();

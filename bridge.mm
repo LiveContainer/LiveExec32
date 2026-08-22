@@ -35,6 +35,32 @@ extern "C" id objc_initWeakOrNil(LC32NativeWeakSlot *location, id object);
 extern "C" id objc_loadWeakRetained(LC32NativeWeakSlot *location);
 extern "C" id objc_storeWeakOrNil(LC32NativeWeakSlot *location, id object);
 
+class LC32GuestHostCallQuiescence {
+public:
+    LC32GuestHostCallQuiescence()
+        : active(Dynarmic_guest_host_call_quiescence_begin()) {}
+
+    ~LC32GuestHostCallQuiescence() {
+        finish();
+    }
+
+    void finish() {
+        if (!active) {
+            return;
+        }
+        active = false;
+        Dynarmic_guest_host_call_quiescence_end();
+    }
+
+    LC32GuestHostCallQuiescence(
+        const LC32GuestHostCallQuiescence &) = delete;
+    LC32GuestHostCallQuiescence &operator=(
+        const LC32GuestHostCallQuiescence &) = delete;
+
+private:
+    bool active;
+};
+
 #if __has_feature(objc_arc)
 static void LC32ObjCAutoreleaseWithoutARC(id object) {
     (void)objc_autorelease(object);
@@ -1846,6 +1872,7 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
             floatingArgument(2), floatingArgument(3),
             floatingArgument(4), floatingArgument(5),
             floatingArgument(6), floatingArgument(7));
+        LC32GuestHostCallQuiescence quiescence;
         double floatingResult;
         switch(returnKind) {
             case HostReturnKind::Float:
@@ -1864,14 +1891,19 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
                     integerArguments[6], integerArguments[7],
                     integerArguments[8]);
                 break;
-            case HostReturnKind::Integer:
-                return ((objc_msgSendFunc)function)(target, host_cmd,
+            case HostReturnKind::Integer: {
+                const u64 result =
+                    ((objc_msgSendFunc)function)(target, host_cmd,
                     integerArguments[0], integerArguments[1],
                     integerArguments[2], integerArguments[3],
                     integerArguments[4], integerArguments[5],
                     integerArguments[6], integerArguments[7],
                     integerArguments[8]);
+                quiescence.finish();
+                return result;
+            }
         }
+        quiescence.finish();
         u64 resultBits;
         memcpy(&resultBits, &floatingResult, sizeof(resultBits));
         return resultBits;
@@ -1889,6 +1921,7 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
                        structLen, sel_getName(selector));
                 return;
             }
+            LC32GuestHostCallQuiescence quiescence;
             const LC32_TwoU64 result =
                 ((objc_msgSendTwoU64Func)function)(target,
                     host_cmd, integerArguments[0], integerArguments[1],
@@ -1896,12 +1929,14 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
                     integerArguments[4], integerArguments[5],
                     integerArguments[6], integerArguments[7],
                     integerArguments[8]);
+            quiescence.finish();
             (void)Dynarmic_mem_1write(structPtr, sizeof(result),
                 (char *)&result);
             return;
         }
         switch(structLen) {
             case sizeof(LC32_TwoDoubles): {
+                LC32GuestHostCallQuiescence quiescence;
                 const LC32_TwoDoubles result =
                     ((objc_msgSendTwoDoublesFunc)function)(target,
                         host_cmd, integerArguments[0], integerArguments[1],
@@ -1909,11 +1944,13 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
                         integerArguments[4], integerArguments[5],
                         integerArguments[6], integerArguments[7],
                         integerArguments[8]);
+                quiescence.finish();
                 (void)Dynarmic_mem_1write(structPtr, sizeof(result),
                     (char *)&result);
                 break;
             }
             case sizeof(LC32_FourDoubles): {
+                LC32GuestHostCallQuiescence quiescence;
                 const LC32_FourDoubles result =
                     ((objc_msgSendFourDoublesFunc)function)(target,
                         host_cmd, integerArguments[0], integerArguments[1],
@@ -1921,11 +1958,13 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
                         integerArguments[4], integerArguments[5],
                         integerArguments[6], integerArguments[7],
                         integerArguments[8]);
+                quiescence.finish();
                 (void)Dynarmic_mem_1write(structPtr, sizeof(result),
                     (char *)&result);
                 break;
             }
             case sizeof(LC32_SixDoubles): {
+                LC32GuestHostCallQuiescence quiescence;
                 const LC32_SixDoubles result =
                     ((objc_msgSendSixDoublesFunc)function)(target,
                         host_cmd, integerArguments[0], integerArguments[1],
@@ -1933,6 +1972,7 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
                         integerArguments[4], integerArguments[5],
                         integerArguments[6], integerArguments[7],
                         integerArguments[8]);
+                quiescence.finish();
                 (void)Dynarmic_mem_1write(structPtr, sizeof(result),
                     (char *)&result);
                 break;
@@ -2056,9 +2096,69 @@ u64 LC32InvokeGuestC(u32 pc, bool ret64, int argc, u32 *args) {
         Dynarmic_current_user_callbacks()->MemoryWrite32(regs[Reg::SP] -= sizeof(u32), args[i]);
     }
     regs[12] = pc;
-    const Dynarmic::HaltReason reason =
+    Dynarmic::HaltReason reason =
         Dynarmic_emu_1start(sharedHandle.guest_LC32InvokeGuestC);
-    if(reason != LC32HaltReasonRetFromGuest) {
+    bool callbackSteppedOut = false;
+    bool debuggerSessionEnded = false;
+    bool debuggerTargetExited = false;
+    if(!Dynarmic::Has(reason, LC32HaltReasonRetFromGuest) &&
+            !Dynarmic::Has(reason, LC32HaltReasonExit) &&
+            LC32DebuggerActive() &&
+            Dynarmic_debugger_begin_main_callback_stop(reason)) {
+        /*
+         * The outer gdbstub target callback is below UIApplicationMain on
+         * this same host stack, so it cannot publish this stop itself.  Pump
+         * the existing reader/packet queue re-entrantly while preserving the
+         * callback register file and native call stack.
+         */
+        const gdbstub_run_reason_t nestedReason =
+            gdbstub_run_nested_stop(
+                &sharedHandle.gdbstub,
+                (void *)&sharedHandle);
+        callbackSteppedOut =
+            nestedReason ==
+                GDBSTUB_RUN_REASON_CALLBACK_STEPPED_OUT;
+        if(nestedReason ==
+                GDBSTUB_RUN_REASON_CALLBACK_RETURNED ||
+                callbackSteppedOut) {
+            reason = LC32HaltReasonRetFromGuest;
+        } else if(nestedReason ==
+                GDBSTUB_RUN_REASON_TARGET_EXITED) {
+            reason = LC32HaltReasonExit;
+            debuggerTargetExited = true;
+        } else {
+            /*
+             * D, EOF, and protocol failure all abandon this stopped session.
+             * Restore physical BKPTs before releasing all-stop, then finish
+             * the preserved callback through its real guest return boundary.
+             */
+            if(!Dynarmic_debugger_remove_all_breakpoints()) {
+                fprintf(stderr,
+                    "LC32: cannot leave nested debugger stop: "
+                    "one or more guest breakpoints could not be restored\n");
+                fflush(stderr);
+                abort();
+            }
+            Dynarmic_emu_1set_1debugger_1enabled(false);
+            reason = Dynarmic_emu_1resume();
+            if(!Dynarmic::Has(
+                    reason, LC32HaltReasonRetFromGuest) &&
+                    !Dynarmic::Has(
+                        reason, LC32HaltReasonExit)) {
+                fprintf(stderr,
+                    "LC32: detached guest callback could not unwind: "
+                    "entry=0x%08x reason=0x%08x pc=0x%08x\n",
+                    pc, static_cast<unsigned>(reason),
+                    regs[Reg::PC]);
+                fflush(stderr);
+                abort();
+            }
+            debuggerSessionEnded = true;
+        }
+        Dynarmic_debugger_end_main_callback_stop();
+    }
+    if(!Dynarmic::Has(reason, LC32HaltReasonRetFromGuest) &&
+            !Dynarmic::Has(reason, LC32HaltReasonExit)) {
         fprintf(stderr,
             "LC32: guest callback stopped unexpectedly: entry=0x%08x "
             "reason=0x%08x pc=0x%08x lr=0x%08x sp=0x%08x "
@@ -2068,10 +2168,28 @@ u64 LC32InvokeGuestC(u32 pc, bool ret64, int argc, u32 *args) {
             threadHandle.jit->Cpsr());
         fflush(stderr);
     }
-    u64 result = (u64)regs[0];
-    if(ret64) result |= (u64)regs[1] << 32;
+    /* An inferior exit has no callback return value.  Restore the saved
+     * register owner only to unwind the native bridge stack; never sample
+     * the partially terminated callback's r0/r1 as a fabricated result. */
+    u64 result = 0;
+    if(!debuggerTargetExited) {
+        result = (u64)regs[0];
+        if(ret64) result |= (u64)regs[1] << 32;
+    }
 
     Dynarmic_context_1restore(&ctx);
+    if(callbackSteppedOut && LC32DebuggerActive()) {
+        /* The single-step crossed the callback's private return sentinel.
+         * Stop only after exposing the restored outer guest context; the
+         * suspended outer protocol frame will publish that stop reply. */
+        Dynarmic_debugger_request_main_callback_step_out();
+    }
+    if(debuggerSessionEnded || debuggerTargetExited) {
+        /* Wake the enclosing host run loop and plant a private outer-JIT
+         * boundary so the original protocol frame can consume the nested
+         * terminal marker without creating another socket reader. */
+        Dynarmic_debugger_request_main_session_unwind();
+    }
     return result;
 }
 

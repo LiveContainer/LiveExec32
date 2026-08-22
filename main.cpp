@@ -481,12 +481,54 @@ int main(int argc, char* argv[], char* envp[]) {
         Dynarmic_emu_1set_1debugger_1enabled(true);
         const bool gdbstubRan =
             gdbstub_run(&sharedHandle.gdbstub, (void *)&sharedHandle);
-        Dynarmic_emu_1set_1debugger_1enabled(false);
-        gdbstub_close(&sharedHandle.gdbstub);
-        if (!gdbstubRan) {
-            fprintf(stderr, "Fail to run in debug mode.\n");
+        const gdbstub_run_reason_t gdbstubReason =
+            gdbstub_get_run_reason(&sharedHandle.gdbstub);
+
+        /*
+         * D and transport loss leave the inferior stopped but alive.  Remove
+         * physical BKPT patches before releasing debugger all-stop; if even
+         * one mapped site cannot be restored, do not risk executing it as an
+         * application breakpoint.  A target which already exited needs no
+         * resume and keeps the existing clean-exit path.
+         */
+        const bool targetExited =
+            gdbstubReason == GDBSTUB_RUN_REASON_TARGET_EXITED;
+        const bool breakpointsRestored = targetExited ||
+            Dynarmic_debugger_remove_all_breakpoints();
+        if (!breakpointsRestored) {
+            /* Keep debugger all-stop asserted through target teardown. */
+            gdbstub_close(&sharedHandle.gdbstub);
+            fprintf(stderr,
+                "LC32: refusing to resume after debugger shutdown: "
+                "one or more guest breakpoints could not be restored\n");
             return -1;
         }
+        gdbstub_close(&sharedHandle.gdbstub);
+        Dynarmic_emu_1set_1debugger_1enabled(false);
+
+        if (targetExited) {
+            return gdbstubRan ? 0 : -1;
+        }
+        if (!gdbstubRan) {
+            fprintf(stderr,
+                "LC32: debugger stopped with error; resuming guest "
+                "without the debugger\n");
+        } else {
+            fprintf(stderr,
+                "LC32: debugger detached (reason=%d); resuming guest\n",
+                (int)gdbstubReason);
+        }
+        const Dynarmic::HaltReason reason =
+            Dynarmic_emu_1resume();
+        fprintf(stderr,
+            "LC32: top-level guest execution stopped: reason=0x%08x "
+            "pc=0x%08x lr=0x%08x sp=0x%08x cpsr=0x%08x\n",
+            static_cast<unsigned>(reason),
+            threadHandle.jit->Regs()[Reg::PC],
+            threadHandle.jit->Regs()[Reg::LR],
+            threadHandle.jit->Regs()[Reg::SP],
+            threadHandle.jit->Cpsr());
+        fflush(stderr);
     } else {
         const Dynarmic::HaltReason reason =
             Dynarmic_emu_1start(threadHandle.jit->Regs()[15]);

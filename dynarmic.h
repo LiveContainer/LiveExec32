@@ -255,6 +255,10 @@ char *get_memory_page(u64 vaddr);
 void *get_memory(u64 vaddr);
 Dynarmic::A32::UserCallbacks *Dynarmic_current_user_callbacks();
 bool Dynarmic_guest_thread_is_registered();
+/* The bridge brackets only the actual native invocation with these calls.
+ * Guest argument marshalling and result copyout stay in an executing epoch. */
+bool Dynarmic_guest_host_call_quiescence_begin();
+void Dynarmic_guest_host_call_quiescence_end();
 
 // Foreign native threads cannot borrow any guest JIT. In native-thread bridge
 // mode they synchronously hand block work to one serialized registered guest
@@ -281,6 +285,7 @@ int Dynarmic_debugger_mem_read(u64 address, u64 size, char* dest);
 int Dynarmic_debugger_mem_write(u64 address, u64 size, char* src);
 bool Dynarmic_debugger_set_breakpoint(u64 address, size_t kind);
 bool Dynarmic_debugger_delete_breakpoint(u64 address, size_t kind);
+bool Dynarmic_debugger_remove_all_breakpoints();
 bool Dynarmic_debugger_has_breakpoint(u32 address);
 // Installs an opt-in, one-shot Thumb tracepoint.  Unlike debugger
 // breakpoints it logs and immediately replays the original instruction.
@@ -308,9 +313,17 @@ Dynarmic::HaltReason Dynarmic_debugger_continue(
 Dynarmic::HaltReason Dynarmic_debugger_step(
     gdb_thread_id_t thread_id,
     bool continue_other_threads);
+/* A reverse callback on the main JIT has stopped while the outer debugger
+ * target callback is still on this same host stack. */
+bool Dynarmic_debugger_begin_main_callback_stop(
+    Dynarmic::HaltReason reason);
+void Dynarmic_debugger_end_main_callback_stop();
+void Dynarmic_debugger_request_main_callback_step_out();
+void Dynarmic_debugger_request_main_session_unwind();
 void Dynarmic_emu_1set_1debugger_1enabled(bool enabled);
 bool LC32DebuggerActive();
 bool LC32DebuggerAllStopRequested();
+bool LC32DebuggerSessionUnwindRequested();
 void LC32SetDebuggerStopRunLoopNotifier(
     void (*notifier)(void));
 int Dynarmic_emu_1get_1stop_1signal();

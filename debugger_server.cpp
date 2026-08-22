@@ -709,10 +709,22 @@ static bool emu_del_bp(void *args __attribute__((unused)),
     return type == BP_SOFTWARE &&
            Dynarmic_debugger_delete_breakpoint(addr, kind);
 }
-static gdb_action_t emu_action_for_halt(Dynarmic::HaltReason reason) {
-    return Dynarmic::Has(reason, LC32HaltReasonExit)
-        ? ACT_EXIT
-        : ACT_RESUME;
+static bool emu_prepare_detach(void *args __attribute__((unused))) {
+    return Dynarmic_debugger_remove_all_breakpoints();
+}
+static gdb_action_t emu_action_for_halt(
+        Dynarmic::HaltReason reason,
+        bool callbackWasStepped = false) {
+    if (Dynarmic::Has(reason, LC32HaltReasonExit)) {
+        return ACT_EXIT;
+    }
+    if (Dynarmic::Has(
+            reason, LC32HaltReasonRetFromGuest)) {
+        return callbackWasStepped
+            ? ACT_CALLBACK_STEP_OUT
+            : ACT_CALLBACK_RETURN;
+    }
+    return ACT_RESUME;
 }
 static gdb_action_t emu_cont(void *args __attribute__((unused))) {
     gdb_thread_id_t thread = debuggerHasStructuredResumePolicy
@@ -740,11 +752,14 @@ static gdb_action_t emu_stepi(void *args __attribute__((unused))) {
     }
     const bool continueOthers =
         debuggerContinueOthersWhileStepping;
+    const bool stepMain =
+        thread == 1 || thread == 2;
     debuggerHasStructuredResumePolicy = false;
     debuggerContinueOthersWhileStepping = false;
     return emu_action_for_halt(
         Dynarmic_debugger_step(
-            thread, continueOthers));
+            thread, continueOthers),
+        stepMain);
 }
 static void emu_on_interrupt(void *args __attribute__((unused))) {
     Dynarmic_emu_1stop();
@@ -1425,6 +1440,7 @@ struct target_ops emu_ops = {
     .stepi = emu_stepi,
     .set_bp = emu_set_bp,
     .del_bp = emu_del_bp,
+    .prepare_detach = emu_prepare_detach,
     .on_interrupt = emu_on_interrupt,
     .get_libraries_xml = emu_get_libraries_xml,
     .get_offsets = emu_get_offsets,

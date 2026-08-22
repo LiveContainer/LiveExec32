@@ -1234,7 +1234,9 @@ static const int LC32UIKITRunLoopDebuggerStop = 0x1C32DEAD;
 static bool LC32RunLoopExceptionArmed = false;
 
 static void LC32DebuggerStopRunLoopBlock(void) {
-    if(LC32DebuggerAllStopRequested() && LC32RunLoopExceptionArmed) {
+    if((LC32DebuggerAllStopRequested() ||
+            LC32DebuggerSessionUnwindRequested()) &&
+            LC32RunLoopExceptionArmed) {
         @throw [LC32DebuggerStopException
             exceptionWithName:@"LC32DebuggerStopException"
                        reason:@"Guest debugger requested an all-stop"
@@ -1256,7 +1258,8 @@ static int LC32RunDebuggerAwareMainRunLoop(void) {
      * latency even if the wake-up is missed. */
     for(;;) {
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, false);
-        if(LC32DebuggerAllStopRequested()) {
+        if(LC32DebuggerAllStopRequested() ||
+                LC32DebuggerSessionUnwindRequested()) {
             return LC32UIKITRunLoopDebuggerStop;
         }
     }
