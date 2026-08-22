@@ -49,6 +49,7 @@
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/param.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
@@ -831,9 +832,14 @@ static mach_port_t GuestCurrentSyntheticThreadPort();
 static int GuestThreadSigmask(int how, u32 guestSet, u32 guestOldSet);
 static u32 GuestPsynchMutexWait(u32 mutex, u32 generation);
 static u32 GuestPsynchMutexDrop(u32 mutex);
-static u32 GuestPsynchConditionWait(u32 condition, u32 mutex);
+static u32 GuestPsynchConditionWait(
+    u32 condition, u32 conditionSequence,
+    u32 conditionSSequence, u32 mutex,
+    int64_t timeoutSeconds, u32 timeoutNanoseconds);
 static u32 GuestPsynchConditionSignal(
-    u32 condition, mach_port_t targetThread, bool broadcast);
+    u32 condition, u32 conditionSequence,
+    u32 conditionSSequence, u32 conditionUOrDifference,
+    mach_port_t targetThread, bool broadcast);
 static u32 GuestPsynchRwWait(
     u32 rwlock, u32 lgen, u32 rwSequence, bool write);
 static u32 GuestPsynchRwUnlock(
@@ -3356,38 +3362,93 @@ ssize_t guest_recvfrom(int syscall_number, int socket,
         static_cast<int>(result), false);
 }
 
-int guest_connect(int socket, u32 guest_address, socklen_t address_len) {
+int guest_connect(int NR, int socket, u32 guest_address,
+        socklen_t address_len) {
     // See https://developer.apple.com/forums/thread/756756?answerId=790507022#790507022
     // sockaddr_un.sun_path has an artificial limit is 104 bytes, however it allows up to 253 bytes
-    if(address_len > SOCK_MAXADDRLEN) {
+    if (address_len > SOCK_MAXADDRLEN) {
+        return return_with_carry_direct(ENAMETOOLONG, true);
+    }
+    if (address_len < sizeof(__sockaddr_header)) {
         return return_with_carry_direct(EINVAL, true);
     }
-    char host_address[SOCK_MAXADDRLEN];
-    Dynarmic_mem_1read(guest_address, address_len, host_address);
-
-    int type;
-    socklen_t length = sizeof(int);
-    getsockopt(socket, SOL_SOCKET, SO_TYPE, &type, &length);
-    if(type == SOCK_DGRAM) {
-        char host_path[PATH_MAX];
-        sockaddr_un *sock = (sockaddr_un *)host_address;
-        sharedHandle.fs->pathGuestToHost(sock->sun_path, host_path);
-        if(strlen(host_path) > SOCK_MAXADDRLEN - offsetof(sockaddr_un, sun_path)) {
-            return return_with_carry_direct(EINVAL, true);
-        }
-        strcpy(sock->sun_path, host_path);
-        address_len = SUN_LEN(sock);
+    std::array<char, SOCK_MAXADDRLEN> host_address = {};
+    if (guest_address == 0 ||
+            Dynarmic_mem_1read(
+                guest_address, address_len,
+                host_address.data()) != 0) {
+        return return_with_carry_direct(EFAULT, true);
     }
 
-    return debugger_aware_host_wait(
+    constexpr size_t path_offset =
+        offsetof(sockaddr_un, sun_path);
+    if (address_len > path_offset &&
+            reinterpret_cast<const sockaddr *>(
+                host_address.data())->sa_family == AF_UNIX &&
+            host_address[path_offset] != '\0') {
+        std::array<char,
+            SOCK_MAXADDRLEN - path_offset + 1> guest_path = {};
+        memcpy(guest_path.data(),
+            host_address.data() + path_offset,
+            address_len - path_offset);
+
+        char host_path[PATH_MAX] = {};
+        sharedHandle.fs->pathGuestToHost(
+            guest_path.data(), host_path);
+        const size_t host_path_len = strlen(host_path);
+        if (host_path_len > SOCK_MAXADDRLEN - path_offset) {
+            return return_with_carry_direct(ENAMETOOLONG, true);
+        }
+        memset(host_address.data() + path_offset, 0,
+            host_address.size() - path_offset);
+        memcpy(host_address.data() + path_offset,
+            host_path, host_path_len);
+        address_len = static_cast<socklen_t>(
+            path_offset + host_path_len);
+        host_address[0] = static_cast<char>(address_len);
+    }
+
+    const bool workqueue_may_block =
+        NativeGuestWorkqueueIsCurrent();
+    if (workqueue_may_block) {
+        NativeGuestWorkqueueHostBlockEnter();
+    }
+    const int result = debugger_aware_host_wait(
         [&] {
             return syscallRetCarry(
-                SYS_connect, socket,
+                NativeGuestThreadsEnabled()
+                    ? SYS_connect : NR,
+                socket,
                 reinterpret_cast<const sockaddr *>(
-                    host_address),
+                    host_address.data()),
                 address_len, 0, 0, 0, 0);
         },
         return_with_carry_direct(EINTR, true));
+    if (workqueue_may_block) {
+        NativeGuestWorkqueueHostBlockExit();
+    }
+    return result;
+}
+
+static int guest_socketpair(int domain, int type, int protocol,
+        u32 guest_sockets) {
+    int host_sockets[2] = {-1, -1};
+    const int result = syscallRetCarry(
+        SYS_socketpair, domain, type, protocol,
+        host_sockets, 0, 0, 0);
+    if (threadHandle.cpsr->hasCarry()) {
+        return result;
+    }
+
+    if (guest_sockets == 0 ||
+            !write_guest_memory_with_permissions(
+                guest_sockets, host_sockets,
+                sizeof(host_sockets), PROT_WRITE)) {
+        (void)close(host_sockets[0]);
+        (void)close(host_sockets[1]);
+        return return_with_carry_direct(EFAULT, true);
+    }
+    return result;
 }
 
 int guest_gettimeofday(u32 guest_tp, u32 guest_tzp) {
@@ -3417,23 +3478,410 @@ int guest_rename(u32 guest_old, u32 guest_new) {
     return syscallRetCarry(SYS_rename, host_old, host_new, 0,0,0,0,0);
 }
 
-ssize_t guest_sendto(int socket, const u32 guest_buffer, size_t length, int flags, u32 guest_dest_addr, socklen_t dest_len) {
-    char *host_buffer = (char *)malloc(length);
-    char *host_dest_addr = (char *)malloc(dest_len);
-    Dynarmic_mem_1read(guest_buffer, length, host_buffer);
-    Dynarmic_mem_1read(guest_dest_addr, dest_len, host_dest_addr);
-    int result = debugger_aware_host_wait(
+ssize_t guest_sendto(int NR, int socket, u32 guest_buffer,
+        size_t length, int flags, u32 guest_dest_addr,
+        socklen_t dest_len) {
+    if (length > static_cast<size_t>(INT32_MAX)) {
+        return static_cast<ssize_t>(
+            return_with_carry_direct(EINVAL, true));
+    }
+    std::vector<char> host_buffer;
+    try {
+        host_buffer.resize(length);
+    } catch (const std::exception &) {
+        return static_cast<ssize_t>(
+            return_with_carry_direct(ENOMEM, true));
+    }
+    if (length != 0 &&
+            (guest_buffer == 0 ||
+             Dynarmic_mem_1read(
+                 guest_buffer, length,
+                 host_buffer.data()) != 0)) {
+        return static_cast<ssize_t>(
+            return_with_carry_direct(EFAULT, true));
+    }
+
+    std::array<char, SOCK_MAXADDRLEN> host_dest = {};
+    const sockaddr *host_dest_pointer = nullptr;
+    if (guest_dest_addr != 0) {
+        if (dest_len > SOCK_MAXADDRLEN) {
+            return static_cast<ssize_t>(
+                return_with_carry_direct(
+                    ENAMETOOLONG, true));
+        }
+        if (dest_len < sizeof(__sockaddr_header)) {
+            return static_cast<ssize_t>(
+                return_with_carry_direct(EINVAL, true));
+        }
+        if (Dynarmic_mem_1read(
+                guest_dest_addr, dest_len,
+                host_dest.data()) != 0) {
+            return static_cast<ssize_t>(
+                return_with_carry_direct(EFAULT, true));
+        }
+        host_dest_pointer = reinterpret_cast<const sockaddr *>(
+            host_dest.data());
+
+        constexpr size_t path_offset =
+            offsetof(sockaddr_un, sun_path);
+        if (dest_len > path_offset &&
+                host_dest_pointer->sa_family == AF_UNIX &&
+                host_dest[path_offset] != '\0') {
+            std::array<char,
+                SOCK_MAXADDRLEN - path_offset + 1> guest_path = {};
+            memcpy(guest_path.data(),
+                host_dest.data() + path_offset,
+                dest_len - path_offset);
+
+            char host_path[PATH_MAX] = {};
+            sharedHandle.fs->pathGuestToHost(
+                guest_path.data(), host_path);
+            const size_t host_path_len = strlen(host_path);
+            if (host_path_len > SOCK_MAXADDRLEN - path_offset) {
+                return static_cast<ssize_t>(
+                    return_with_carry_direct(
+                        ENAMETOOLONG, true));
+            }
+            memset(host_dest.data() + path_offset, 0,
+                host_dest.size() - path_offset);
+            memcpy(host_dest.data() + path_offset,
+                host_path, host_path_len);
+            dest_len = static_cast<socklen_t>(
+                path_offset + host_path_len);
+            host_dest[0] = static_cast<char>(dest_len);
+        }
+    }
+
+    const bool workqueue_may_block =
+        NativeGuestWorkqueueIsCurrent();
+    if (workqueue_may_block) {
+        NativeGuestWorkqueueHostBlockEnter();
+    }
+    const ssize_t result = debugger_aware_host_wait(
         [&] {
-            return syscallRetCarry(
-                SYS_sendto, socket, host_buffer, length,
+            return static_cast<ssize_t>(syscallRetCarry(
+                NativeGuestThreadsEnabled()
+                    ? SYS_sendto : NR,
+                socket,
+                length != 0 ? host_buffer.data() : nullptr,
+                length,
                 flags,
-                reinterpret_cast<const sockaddr *>(
-                    host_dest_addr),
-                dest_len, 0);
+                host_dest_pointer,
+                dest_len, 0));
         },
+        static_cast<ssize_t>(
+            return_with_carry_direct(EINTR, true)));
+    if (workqueue_may_block) {
+        NativeGuestWorkqueueHostBlockExit();
+    }
+    return result;
+}
+
+struct __attribute__((packed, aligned(4))) GuestIovec32 {
+    u32 base;
+    u32 length;
+};
+
+struct __attribute__((packed, aligned(4))) GuestMsghdr32 {
+    u32 name;
+    u32 nameLength;
+    u32 iov;
+    int32_t iovCount;
+    u32 control;
+    u32 controlLength;
+    int32_t flags;
+};
+
+static_assert(sizeof(GuestIovec32) == 8,
+    "armv7 iovec must be 8 bytes");
+static_assert(sizeof(GuestMsghdr32) == 28,
+    "armv7 msghdr must be 28 bytes");
+
+static ssize_t guest_sendmsg(int NR, int socket,
+        u32 guest_message_address, int flags) {
+    GuestMsghdr32 guest_message = {};
+    if (guest_message_address == 0 ||
+            !read_guest_memory_with_permissions(
+                guest_message_address, &guest_message,
+                sizeof(guest_message), PROT_READ)) {
+        return static_cast<ssize_t>(
+            return_with_carry_direct(EFAULT, true));
+    }
+
+    constexpr int32_t maximum_iov_count = 1024;
+    if (guest_message.iovCount <= 0 ||
+            guest_message.iovCount > maximum_iov_count) {
+        return static_cast<ssize_t>(
+            return_with_carry_direct(EMSGSIZE, true));
+    }
+
+    std::vector<GuestIovec32> guest_iov;
+    std::vector<iovec> host_iov;
+    std::vector<std::vector<char>> host_payloads;
+    try {
+        guest_iov.resize(
+            static_cast<size_t>(guest_message.iovCount));
+        host_iov.resize(
+            static_cast<size_t>(guest_message.iovCount));
+        host_payloads.resize(
+            static_cast<size_t>(guest_message.iovCount));
+    } catch (const std::exception &) {
+        return static_cast<ssize_t>(
+            return_with_carry_direct(ENOMEM, true));
+    }
+    if (!guest_iov.empty() &&
+            (guest_message.iov == 0 ||
+             !read_guest_memory_with_permissions(
+                 guest_message.iov, guest_iov.data(),
+                 guest_iov.size() * sizeof(GuestIovec32),
+                 PROT_READ))) {
+        return static_cast<ssize_t>(
+            return_with_carry_direct(EFAULT, true));
+    }
+
+    u64 total_payload_length = 0;
+    for (size_t index = 0; index < guest_iov.size(); ++index) {
+        const GuestIovec32 &guest = guest_iov[index];
+        total_payload_length += guest.length;
+        if (total_payload_length >
+                static_cast<u64>(INT32_MAX)) {
+            return static_cast<ssize_t>(
+                return_with_carry_direct(EINVAL, true));
+        }
+        try {
+            host_payloads[index].resize(guest.length);
+        } catch (const std::exception &) {
+            return static_cast<ssize_t>(
+                return_with_carry_direct(ENOMEM, true));
+        }
+        if (guest.length != 0 &&
+                (guest.base == 0 ||
+                 !read_guest_memory_with_permissions(
+                     guest.base, host_payloads[index].data(),
+                     guest.length, PROT_READ))) {
+            return static_cast<ssize_t>(
+                return_with_carry_direct(EFAULT, true));
+        }
+        host_iov[index].iov_base = guest.length != 0
+            ? host_payloads[index].data() : nullptr;
+        host_iov[index].iov_len = guest.length;
+    }
+
+    std::array<char, SOCK_MAXADDRLEN> host_name = {};
+    sockaddr *host_name_pointer = nullptr;
+    socklen_t host_name_length = guest_message.nameLength;
+    if (guest_message.name != 0) {
+        if (host_name_length > SOCK_MAXADDRLEN) {
+            return static_cast<ssize_t>(
+                return_with_carry_direct(
+                    ENAMETOOLONG, true));
+        }
+        if (host_name_length < sizeof(__sockaddr_header)) {
+            return static_cast<ssize_t>(
+                return_with_carry_direct(EINVAL, true));
+        }
+        if (!read_guest_memory_with_permissions(
+                guest_message.name, host_name.data(),
+                host_name_length, PROT_READ)) {
+            return static_cast<ssize_t>(
+                return_with_carry_direct(EFAULT, true));
+        }
+        host_name_pointer = reinterpret_cast<sockaddr *>(
+            host_name.data());
+
+        constexpr size_t path_offset =
+            offsetof(sockaddr_un, sun_path);
+        if (host_name_length > path_offset &&
+                host_name_pointer->sa_family == AF_UNIX &&
+                host_name[path_offset] != '\0') {
+            std::array<char,
+                SOCK_MAXADDRLEN - path_offset + 1> guest_path = {};
+            memcpy(guest_path.data(),
+                host_name.data() + path_offset,
+                host_name_length - path_offset);
+
+            char host_path[PATH_MAX] = {};
+            sharedHandle.fs->pathGuestToHost(
+                guest_path.data(), host_path);
+            const size_t host_path_length = strlen(host_path);
+            if (host_path_length >
+                    SOCK_MAXADDRLEN - path_offset) {
+                return static_cast<ssize_t>(
+                    return_with_carry_direct(
+                        ENAMETOOLONG, true));
+            }
+            memset(host_name.data() + path_offset, 0,
+                host_name.size() - path_offset);
+            memcpy(host_name.data() + path_offset,
+                host_path, host_path_length);
+            host_name_length = static_cast<socklen_t>(
+                path_offset + host_path_length);
+            host_name[0] = static_cast<char>(host_name_length);
+        }
+    }
+
+    constexpr u32 maximum_control_length = 1U << 20;
+    u32 staged_control_length = 0;
+    if (guest_message.control != 0) {
+        if (guest_message.controlLength < sizeof(cmsghdr)) {
+            return static_cast<ssize_t>(
+                return_with_carry_direct(EINVAL, true));
+        }
+        if (guest_message.controlLength > maximum_control_length) {
+            return static_cast<ssize_t>(
+                return_with_carry_direct(EMSGSIZE, true));
+        }
+        staged_control_length = guest_message.controlLength;
+    }
+    std::vector<char> host_control;
+    try {
+        host_control.resize(staged_control_length);
+    } catch (const std::exception &) {
+        return static_cast<ssize_t>(
+            return_with_carry_direct(ENOMEM, true));
+    }
+    if (!host_control.empty() &&
+            (guest_message.control == 0 ||
+             !read_guest_memory_with_permissions(
+                 guest_message.control, host_control.data(),
+                 host_control.size(), PROT_READ))) {
+        return static_cast<ssize_t>(
+            return_with_carry_direct(EFAULT, true));
+    }
+
+    msghdr host_message = {};
+    host_message.msg_name = host_name_pointer;
+    host_message.msg_namelen = host_name_pointer != nullptr
+        ? host_name_length : 0;
+    host_message.msg_iov = !host_iov.empty()
+        ? host_iov.data() : nullptr;
+    host_message.msg_iovlen = guest_message.iovCount;
+    host_message.msg_control = !host_control.empty()
+        ? host_control.data() : nullptr;
+    host_message.msg_controllen =
+        static_cast<socklen_t>(host_control.size());
+    host_message.msg_flags = guest_message.flags;
+
+    const bool workqueue_may_block =
+        NativeGuestWorkqueueIsCurrent();
+    if (workqueue_may_block) {
+        NativeGuestWorkqueueHostBlockEnter();
+    }
+    const ssize_t result = debugger_aware_host_wait(
+        [&] {
+            return static_cast<ssize_t>(syscallRetCarry(
+                NativeGuestThreadsEnabled()
+                    ? SYS_sendmsg : NR,
+                socket, &host_message, flags,
+                0, 0, 0, 0));
+        },
+        static_cast<ssize_t>(
+            return_with_carry_direct(EINTR, true)));
+    if (workqueue_may_block) {
+        NativeGuestWorkqueueHostBlockExit();
+    }
+    return result;
+}
+
+int guest_select(int NR, int descriptor_count,
+        u32 guest_read_set, u32 guest_write_set,
+        u32 guest_except_set, u32 guest_timeout) {
+    if (descriptor_count < 0 || descriptor_count > FD_SETSIZE) {
+        return return_with_carry_direct(EINVAL, true);
+    }
+
+    timeval_32 original_guest_timeout = {};
+    struct timeval original_host_timeout = {};
+    const bool has_timeout = guest_timeout != 0;
+    if (has_timeout) {
+        if (Dynarmic_mem_1read(
+                guest_timeout, sizeof(original_guest_timeout),
+                reinterpret_cast<char *>(
+                    &original_guest_timeout)) != 0) {
+            return return_with_carry_direct(EFAULT, true);
+        }
+        if (original_guest_timeout.tv_sec < 0 ||
+                original_guest_timeout.tv_usec < 0 ||
+                original_guest_timeout.tv_usec >= 1000000) {
+            return return_with_carry_direct(EINVAL, true);
+        }
+        original_host_timeout.tv_sec =
+            original_guest_timeout.tv_sec;
+        original_host_timeout.tv_usec =
+            original_guest_timeout.tv_usec;
+    }
+
+    const size_t fd_bytes = static_cast<size_t>(
+        (descriptor_count + __DARWIN_NFDBITS - 1) /
+        __DARWIN_NFDBITS) * sizeof(int32_t);
+    fd_set original_read = {};
+    fd_set original_write = {};
+    fd_set original_except = {};
+    const auto copy_in_set = [&](u32 guest, fd_set &host) {
+        return guest == 0 || fd_bytes == 0 ||
+            Dynarmic_mem_1read(
+                guest, fd_bytes,
+                reinterpret_cast<char *>(&host)) == 0;
+    };
+    if (!copy_in_set(guest_read_set, original_read) ||
+            !copy_in_set(guest_write_set, original_write) ||
+            !copy_in_set(guest_except_set, original_except)) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+
+    fd_set host_read = {};
+    fd_set host_write = {};
+    fd_set host_except = {};
+    struct timeval host_timeout = {};
+    const auto invoke_host = [&](const struct timeval *timeout_override) {
+        host_read = original_read;
+        host_write = original_write;
+        host_except = original_except;
+        host_timeout = original_host_timeout;
+        return syscallRetCarry(
+            NativeGuestThreadsEnabled()
+                ? SYS_select : NR,
+            descriptor_count,
+            guest_read_set != 0 ? &host_read : nullptr,
+            guest_write_set != 0 ? &host_write : nullptr,
+            guest_except_set != 0 ? &host_except : nullptr,
+            timeout_override != nullptr
+                ? timeout_override
+                : (has_timeout ? &host_timeout : nullptr),
+            0, 0);
+    };
+
+    const bool potentially_blocking = !has_timeout ||
+        original_guest_timeout.tv_sec != 0 ||
+        original_guest_timeout.tv_usec != 0;
+    const bool workqueue_may_block = potentially_blocking &&
+        NativeGuestWorkqueueIsCurrent();
+    if (workqueue_may_block) {
+        NativeGuestWorkqueueHostBlockEnter();
+    }
+    const int result = debugger_aware_host_wait(
+        [&] { return invoke_host(nullptr); },
         return_with_carry_direct(EINTR, true));
-    free(host_buffer);
-    free(host_dest_addr);
+    if (workqueue_may_block) {
+        NativeGuestWorkqueueHostBlockExit();
+    }
+    if (threadHandle.cpsr->hasCarry()) {
+        return result;
+    }
+
+    const auto copy_out_set = [&](u32 guest, const fd_set &host) {
+        return guest == 0 || fd_bytes == 0 ||
+            Dynarmic_mem_1write(
+                guest, fd_bytes,
+                reinterpret_cast<char *>(
+                    const_cast<fd_set *>(&host))) == 0;
+    };
+    if (!copy_out_set(guest_read_set, host_read) ||
+            !copy_out_set(guest_write_set, host_write) ||
+            !copy_out_set(guest_except_set, host_except)) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+    /* XNU consumes but does not copy its timeval back to user space. */
     return result;
 }
 
@@ -4657,9 +5105,7 @@ char *get_memory_page(u64 vaddr) {
       char *fastPage = static_cast<char *>(
           __atomic_load_n(
               &page_table[idx], __ATOMIC_ACQUIRE));
-      if (fastPage != nullptr) {
-        return fastPage;
-      }
+      if (fastPage != nullptr) return fastPage;
     }
     std::lock_guard<std::recursive_mutex> lock(guestVmMutex);
     u64 base = vaddr & ~DYN_PAGE_MASK;
@@ -4913,6 +5359,174 @@ static bool write_guest_memory_with_permissions(
         size -= chunk;
     }
     return true;
+}
+
+struct __attribute__((packed, aligned(4))) GuestKevent32 {
+    u32 ident;
+    int16_t filter;
+    uint16_t flags;
+    uint32_t fflags;
+    int32_t data;
+    u32 udata;
+};
+
+struct __attribute__((packed, aligned(4))) GuestTimespec32 {
+    int32_t tv_sec;
+    int32_t tv_nsec;
+};
+
+static_assert(sizeof(GuestKevent32) == 20,
+    "iOS 10 armv7 kevent ABI changed");
+static_assert(sizeof(GuestTimespec32) == 8,
+    "iOS 10 armv7 timespec ABI changed");
+
+static int guest_kevent(int kqueueDescriptor, u32 guestChanges,
+        int changeCount, u32 guestEvents, int eventCount,
+        u32 guestTimeout) {
+    /* XNU treats negative counts as empty lists. Bound host-side staging. */
+    changeCount = std::max(changeCount, 0);
+    eventCount = std::max(eventCount, 0);
+    constexpr int MaximumStagedKevents = 4096;
+    if (changeCount > MaximumStagedKevents ||
+            eventCount > MaximumStagedKevents) {
+        return return_with_carry_direct(EINVAL, true);
+    }
+
+    std::vector<GuestKevent32> guestChangeStorage;
+    std::vector<struct kevent> hostChangeStorage;
+    std::vector<struct kevent> hostEventStorage;
+    try {
+        guestChangeStorage.resize(static_cast<size_t>(changeCount));
+        hostChangeStorage.resize(static_cast<size_t>(changeCount));
+        hostEventStorage.resize(static_cast<size_t>(eventCount));
+    } catch (const std::exception &) {
+        return return_with_carry_direct(ENOMEM, true);
+    }
+
+    if (changeCount != 0) {
+        if (guestChanges == 0 ||
+                !read_guest_memory_with_permissions(
+                    guestChanges, guestChangeStorage.data(),
+                    guestChangeStorage.size() * sizeof(GuestKevent32),
+                    PROT_READ)) {
+            return return_with_carry_direct(EFAULT, true);
+        }
+        for (int index = 0; index < changeCount; ++index) {
+            const GuestKevent32 &guest =
+                guestChangeStorage[static_cast<size_t>(index)];
+            struct kevent &host =
+                hostChangeStorage[static_cast<size_t>(index)];
+            host.ident = static_cast<uintptr_t>(guest.ident);
+            host.filter = guest.filter;
+            host.flags = guest.flags;
+            host.fflags = guest.fflags;
+            host.data = static_cast<intptr_t>(guest.data);
+            host.udata = reinterpret_cast<void *>(
+                static_cast<uintptr_t>(guest.udata));
+        }
+    }
+
+    struct timespec hostTimeout = {};
+    const struct timespec *hostTimeoutPointer = nullptr;
+    if (guestTimeout != 0) {
+        GuestTimespec32 guestTimespec = {};
+        if (!read_guest_memory_with_permissions(
+                guestTimeout, &guestTimespec,
+                sizeof(guestTimespec), PROT_READ)) {
+            return return_with_carry_direct(EFAULT, true);
+        }
+        if (guestTimespec.tv_sec < 0 || guestTimespec.tv_nsec < 0 ||
+                guestTimespec.tv_nsec >= 1000000000) {
+            return return_with_carry_direct(EINVAL, true);
+        }
+        hostTimeout.tv_sec = guestTimespec.tv_sec;
+        hostTimeout.tv_nsec = guestTimespec.tv_nsec;
+        hostTimeoutPointer = &hostTimeout;
+    }
+
+    const bool potentiallyBlocking = eventCount > 0 &&
+        (hostTimeoutPointer == nullptr || hostTimeout.tv_sec != 0 ||
+         hostTimeout.tv_nsec != 0);
+    const auto invokeHost = [&](const struct timespec *timeout,
+                                bool includeChanges = true) {
+        return syscallRetCarry(
+            SYS_kevent, kqueueDescriptor,
+            includeChanges && changeCount != 0
+                ? hostChangeStorage.data() : nullptr,
+            includeChanges ? changeCount : 0,
+            eventCount != 0 ? hostEventStorage.data() : nullptr,
+            eventCount, timeout, 0);
+    };
+    const auto invokeBlockingHost = [&](bool includeChanges = true) {
+        const bool workqueueMayBlock =
+            NativeGuestWorkqueueIsCurrent();
+        if (workqueueMayBlock) {
+            NativeGuestWorkqueueHostBlockEnter();
+        }
+        const int hostResult = debugger_aware_host_wait(
+            [&] {
+                return invokeHost(
+                    hostTimeoutPointer, includeChanges);
+            },
+            return_with_carry_direct(EINTR, true));
+        if (workqueueMayBlock) {
+            NativeGuestWorkqueueHostBlockExit();
+        }
+        return hostResult;
+    };
+
+    int result;
+    if (potentiallyBlocking && GuestThreadCanYieldBeforeBlocking()) {
+        const struct timespec immediate = {};
+        result = invokeHost(&immediate);
+        if (!threadHandle.cpsr->hasCarry() && result == 0) {
+            if (GuestThreadYieldBeforeBlocking()) {
+                return return_with_carry_direct(EINTR, true);
+            }
+            /* The last runnable peer retired between the probe and yield. */
+            result = invokeBlockingHost(false);
+        }
+    } else {
+        if (potentiallyBlocking) {
+            result = invokeBlockingHost();
+        } else {
+            result = invokeHost(hostTimeoutPointer);
+        }
+    }
+
+    if (threadHandle.cpsr->hasCarry() || result <= 0) {
+        return result;
+    }
+    if (result > eventCount || guestEvents == 0) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+
+    std::vector<GuestKevent32> guestEventStorage;
+    try {
+        guestEventStorage.resize(static_cast<size_t>(result));
+    } catch (const std::exception &) {
+        return return_with_carry_direct(ENOMEM, true);
+    }
+    for (int index = 0; index < result; ++index) {
+        const struct kevent &host =
+            hostEventStorage[static_cast<size_t>(index)];
+        GuestKevent32 &guest =
+            guestEventStorage[static_cast<size_t>(index)];
+        guest.ident = static_cast<u32>(host.ident);
+        guest.filter = host.filter;
+        guest.flags = host.flags;
+        guest.fflags = host.fflags;
+        guest.data = static_cast<int32_t>(host.data);
+        guest.udata = static_cast<u32>(
+            reinterpret_cast<uintptr_t>(host.udata));
+    }
+    if (!write_guest_memory_with_permissions(
+            guestEvents, guestEventStorage.data(),
+            guestEventStorage.size() * sizeof(GuestKevent32),
+            PROT_WRITE)) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+    return result;
 }
 
 enum class ExclusiveGuestWriteResult {
@@ -6331,8 +6945,19 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             case SYS_fcntl_nocancel:
                 cpu->Regs()[0] = guest_fcntl(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
                 break;
-            case 98:
-                cpu->Regs()[0] = guest_connect(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+            case SYS_connect: // 98
+            case SYS_connect_nocancel: // 409
+                cpu->Regs()[0] = guest_connect(
+                    NR, static_cast<int>(cpu->Regs()[0]),
+                    cpu->Regs()[1], cpu->Regs()[2]);
+                break;
+            case SYS_select: // 93
+            case SYS_select_nocancel: // 407
+                /* The armv7 wrapper places timeval * in r4. */
+                cpu->Regs()[0] = guest_select(
+                    NR, static_cast<int>(cpu->Regs()[0]),
+                    cpu->Regs()[1], cpu->Regs()[2],
+                    cpu->Regs()[3], cpu->Regs()[4]);
                 break;
             case SYS_bind: // 104
                 cpu->Regs()[0] = guest_bind(
@@ -6375,8 +7000,28 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             case 128:
                 cpu->Regs()[0] = guest_rename(cpu->Regs()[0], cpu->Regs()[1]);
                 break;
-            case 133:
-                cpu->Regs()[0] = guest_sendto(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5]);
+            case SYS_sendto: // 133
+            case SYS_sendto_nocancel: // 413
+                /* The armv7 wrapper places destination/length in r4/r5. */
+                cpu->Regs()[0] = static_cast<u32>(guest_sendto(
+                    NR, static_cast<int>(cpu->Regs()[0]),
+                    cpu->Regs()[1], cpu->Regs()[2],
+                    static_cast<int>(cpu->Regs()[3]),
+                    cpu->Regs()[4], cpu->Regs()[5]));
+                break;
+            case SYS_socketpair: // 135
+                cpu->Regs()[0] = guest_socketpair(
+                    static_cast<int>(cpu->Regs()[0]),
+                    static_cast<int>(cpu->Regs()[1]),
+                    static_cast<int>(cpu->Regs()[2]),
+                    cpu->Regs()[3]);
+                break;
+            case SYS_sendmsg: // 28
+            case SYS_sendmsg_nocancel: // 402
+                cpu->Regs()[0] = static_cast<u32>(guest_sendmsg(
+                    NR, static_cast<int>(cpu->Regs()[0]),
+                    cpu->Regs()[1],
+                    static_cast<int>(cpu->Regs()[2])));
                 break;
             case SYS_mkdir: // 136
                 cpu->Regs()[0] = guest_mkdir(
@@ -6502,18 +7147,34 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 break;
             case 303: // psynch_cvbroad
                 cpu->Regs()[0] = GuestPsynchConditionSignal(
-                    cpu->Regs()[0], MACH_PORT_NULL, true);
+                    cpu->Regs()[0], cpu->Regs()[1],
+                    cpu->Regs()[2], cpu->Regs()[3],
+                    MACH_PORT_NULL, true);
                 break;
             case 304: // psynch_cvsignal
                 cpu->Regs()[0] = GuestPsynchConditionSignal(
-                    cpu->Regs()[0],
+                    cpu->Regs()[0], cpu->Regs()[1],
+                    cpu->Regs()[2], cpu->Regs()[3],
                     static_cast<mach_port_t>(cpu->Regs()[4]),
                     false);
                 break;
-            case 305: // psynch_cvwait
+            case 305: { // psynch_cvwait
+                /* The ARMv7 syscall veneer saves r4-r6/r8.  Relative
+                 * timeout seconds and nanoseconds are therefore at the
+                 * original arguments' stack slots, sp+32 and sp+40. */
+                const u32 stack = cpu->Regs()[Reg::SP];
+                const u64 timeoutSecondsBits =
+                    static_cast<u64>(MemoryRead32(
+                        stack + 32, false)) |
+                    (static_cast<u64>(MemoryRead32(
+                        stack + 36, false)) << 32);
                 cpu->Regs()[0] = GuestPsynchConditionWait(
-                    cpu->Regs()[0], cpu->Regs()[4]);
+                    cpu->Regs()[0], cpu->Regs()[1],
+                    cpu->Regs()[2], cpu->Regs()[4],
+                    static_cast<int64_t>(timeoutSecondsBits),
+                    MemoryRead32(stack + 40, false));
                 break;
+            }
             case 308: // psynch_rw_unlock
             case 309: { // psynch_rw_unlock2
                 const bool tracePsynchRw =
@@ -6615,6 +7276,24 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                     cpu->Regs()[0], cpu->Regs()[1],
                     static_cast<mach_port_t>(cpu->Regs()[2]),
                     static_cast<mach_port_t>(cpu->Regs()[3]));
+                break;
+            case SYS_kqueue: // 362
+                /*
+                 * Guest file descriptors are native descriptors throughout
+                 * the syscall bridge. kqueue has no arguments, so unlike
+                 * kevent there are no pointer-width-dependent structures to
+                 * translate here.
+                 */
+                cpu->Regs()[0] = syscallRetCarry(
+                    SYS_kqueue, 0, 0, 0, 0, 0, 0, 0);
+                break;
+            case SYS_kevent: // 363
+                /* r4/r5 hold arguments five and six in the armv7 SVC ABI. */
+                cpu->Regs()[0] = guest_kevent(
+                    static_cast<int>(cpu->Regs()[0]),
+                    cpu->Regs()[1], static_cast<int>(cpu->Regs()[2]),
+                    cpu->Regs()[3], static_cast<int>(cpu->Regs()[4]),
+                    cpu->Regs()[5]);
                 break;
             case 366:
                 cpu->Regs()[0] = guest_bsdthread_register(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5] | ((u64)cpu->Regs()[6] << 32));
@@ -7180,6 +7859,7 @@ struct GuestThreadContext {
     u32 waitAddress = 0;
     u32 wakeResult = 0;
     u64 waitSequence = 0;
+    u32 conditionSequence = 0;
     GuestRwlockWaitType rwlockWaitType =
         GuestRwlockWaitType::None;
     u32 rwlockSequence = 0;
@@ -7264,8 +7944,24 @@ struct GuestPsynchPrepost {
     u32 address;
     size_t count;
 };
+
+/*
+ * A condition signal is tied to a specific L-word generation.  A plain
+ * address/count prepost lets a waiter from a later generation steal an old
+ * wake, and a broadcast can race with waiters which have updated the guest
+ * condition's L word but have not entered psynch_cvwait yet.  Keep those
+ * condition wakes separate from the generic mutex preposts so the waiter's
+ * generation can be checked before consuming one.
+ */
+struct GuestConditionPrepost {
+    u32 address;
+    u32 throughSequence;
+    size_t count;
+};
+
 std::mutex guestPsynchPrepostMutex;
 std::vector<GuestPsynchPrepost> guestPsynchPreposts;
+std::vector<GuestConditionPrepost> guestConditionPreposts;
 
 struct NativeGuestWaiter {
     GuestThreadWaitKind kind = GuestThreadWaitKind::None;
@@ -7274,6 +7970,7 @@ struct NativeGuestWaiter {
     GuestRwlockWaitType rwlockWaitType =
         GuestRwlockWaitType::None;
     u32 rwlockSequence = 0;
+    u32 conditionSequence = 0;
     mach_port_t threadPort = MACH_PORT_NULL;
     u32 wakeResult = 0;
     u64 sequence = 0;
@@ -8342,7 +9039,8 @@ bool ParkCurrentGuestThread(
         GuestThreadWaitKind kind, u32 address, u32 wakeResult,
         GuestRwlockWaitType rwlockWaitType =
             GuestRwlockWaitType::None,
-        u32 rwlockSequence = 0) {
+        u32 rwlockSequence = 0,
+        u32 conditionSequence = 0) {
     EnsureGuestThreadRegistry();
     if (GuestWorkqueueActiveForCurrentThread()) {
         return false;
@@ -8361,6 +9059,7 @@ bool ParkCurrentGuestThread(
     current->wakeResult = wakeResult;
     current->waitSequence = guestNextWaitSequence.fetch_add(
         1, std::memory_order_relaxed);
+    current->conditionSequence = conditionSequence;
     current->rwlockWaitType = rwlockWaitType;
     current->rwlockSequence = rwlockSequence;
     if (NextGuestThread() == nullptr) {
@@ -8369,6 +9068,7 @@ bool ParkCurrentGuestThread(
         current->waitAddress = 0;
         current->wakeResult = 0;
         current->waitSequence = 0;
+        current->conditionSequence = 0;
         current->rwlockWaitType =
             GuestRwlockWaitType::None;
         current->rwlockSequence = 0;
@@ -8408,12 +9108,65 @@ size_t WakeGuestThreads(
         selected->waitKind = GuestThreadWaitKind::None;
         selected->waitAddress = 0;
         selected->waitSequence = 0;
+        selected->conditionSequence = 0;
         selected->rwlockWaitType =
             GuestRwlockWaitType::None;
         selected->rwlockSequence = 0;
         if (selected->savedValid) {
             selected->saved.regs[Reg::R0] =
                 selected->wakeResult;
+            selected->saved.cpsr &=
+                ~(static_cast<u32>(1) << CARRY_BIT);
+        }
+        selected->wakeResult = 0;
+        ++count;
+        if (!wakeAll || MACH_PORT_VALID(targetThread)) {
+            break;
+        }
+    }
+    return count;
+}
+
+static size_t WakeGuestConditionThreads(
+        u32 address, u32 throughSequence, bool wakeAll,
+        mach_port_t targetThread = MACH_PORT_NULL) {
+    EnsureGuestThreadRegistry();
+    std::lock_guard<std::recursive_mutex> lock(
+        guestThreadMutex);
+    size_t count = 0;
+    for (;;) {
+        GuestThreadContext *selected = nullptr;
+        for (GuestThreadContext &thread : guestThreads) {
+            if (!thread.alive || thread.runnable ||
+                    thread.waitKind !=
+                        GuestThreadWaitKind::Condition ||
+                    thread.waitAddress != address ||
+                    !GuestPsynchSequenceLowerOrEqual(
+                        thread.conditionSequence,
+                        throughSequence) ||
+                    (MACH_PORT_VALID(targetThread) &&
+                     thread.threadPort != targetThread)) {
+                continue;
+            }
+            if (selected == nullptr ||
+                    thread.waitSequence <
+                        selected->waitSequence) {
+                selected = &thread;
+            }
+        }
+        if (selected == nullptr) {
+            break;
+        }
+
+        selected->runnable = true;
+        selected->waitKind = GuestThreadWaitKind::None;
+        selected->waitAddress = 0;
+        selected->waitSequence = 0;
+        selected->conditionSequence = 0;
+        if (selected->savedValid) {
+            /* A registered CV waiter returns zero.  The signal syscall's
+             * update count advances S; only a late prepost returns INC. */
+            selected->saved.regs[Reg::R0] = 0;
             selected->saved.cpsr &=
                 ~(static_cast<u32>(1) << CARRY_BIT);
         }
@@ -8511,6 +9264,7 @@ static u32 GrantCooperativeGuestRwlockThreads(
         thread->waitKind = GuestThreadWaitKind::None;
         thread->waitAddress = 0;
         thread->waitSequence = 0;
+        thread->conditionSequence = 0;
         thread->rwlockWaitType =
             GuestRwlockWaitType::None;
         thread->rwlockSequence = 0;
@@ -8560,6 +9314,82 @@ bool ConsumeGuestPsynchPrepost(
         return true;
     }
     return false;
+}
+
+static void RecordGuestConditionSignalPrepost(
+        u32 address, u32 throughSequence) {
+    std::lock_guard<std::mutex> lock(
+        guestPsynchPrepostMutex);
+    throughSequence &= GuestPsynchCountMask;
+    for (GuestConditionPrepost &prepost :
+            guestConditionPreposts) {
+        if (prepost.address == address &&
+                prepost.throughSequence == throughSequence) {
+            ++prepost.count;
+            return;
+        }
+    }
+    guestConditionPreposts.push_back({
+        .address = address,
+        .throughSequence = throughSequence,
+        .count = 1,
+    });
+}
+
+static void RecordGuestConditionBroadcastPrepost(
+        u32 address, u32 throughSequence, size_t count) {
+    std::lock_guard<std::mutex> lock(
+        guestPsynchPrepostMutex);
+    throughSequence &= GuestPsynchCountMask;
+
+    /* One XNU broadcast marker subsumes older signal/broadcast preposts. */
+    guestConditionPreposts.erase(std::remove_if(
+        guestConditionPreposts.begin(),
+        guestConditionPreposts.end(),
+        [address, throughSequence](
+                const GuestConditionPrepost &prepost) {
+            return prepost.address == address &&
+                GuestPsynchSequenceLowerOrEqual(
+                    prepost.throughSequence,
+                    throughSequence);
+        }), guestConditionPreposts.end());
+    if (count != 0) {
+        guestConditionPreposts.push_back({
+            .address = address,
+            .throughSequence = throughSequence,
+            .count = count,
+        });
+    }
+}
+
+static bool ConsumeGuestConditionPrepost(
+        u32 address, u32 conditionSequence) {
+    std::lock_guard<std::mutex> lock(
+        guestPsynchPrepostMutex);
+    conditionSequence &= GuestPsynchCountMask;
+    auto selected = guestConditionPreposts.end();
+    for (auto it = guestConditionPreposts.begin();
+            it != guestConditionPreposts.end(); ++it) {
+        if (it->address != address ||
+                !GuestPsynchSequenceLowerOrEqual(
+                    conditionSequence,
+                    it->throughSequence)) {
+            continue;
+        }
+        if (selected == guestConditionPreposts.end() ||
+                GuestPsynchSequenceLower(
+                    it->throughSequence,
+                    selected->throughSequence)) {
+            selected = it;
+        }
+    }
+    if (selected == guestConditionPreposts.end()) {
+        return false;
+    }
+    if (--selected->count == 0) {
+        guestConditionPreposts.erase(selected);
+    }
+    return true;
 }
 
 bool EnsureGuestWorkqueueWorker() {
@@ -10714,7 +11544,21 @@ static u32 WaitNativeGuestThread(
         GuestRwlockWaitType rwlockWaitType =
             GuestRwlockWaitType::None,
         u32 rwlockSequence = 0,
-        u32 rwlockStateSequence = 0) {
+        u32 rwlockStateSequence = 0,
+        u32 conditionSequence = 0,
+        u32 conditionSSequence = 0,
+        int64_t timeoutSeconds = 0,
+        u32 timeoutNanoseconds = 0) {
+    const u32 relativeNanoseconds =
+        timeoutNanoseconds & 0x3fffffffu;
+    const bool hasConditionTimeout =
+        kind == GuestThreadWaitKind::Condition &&
+        (timeoutSeconds != 0 || relativeNanoseconds != 0);
+    if (kind == GuestThreadWaitKind::Condition &&
+            (timeoutSeconds < 0 ||
+             relativeNanoseconds >= 1000000000u)) {
+        return return_with_carry_direct(EINVAL, true);
+    }
     NativeGuestWorkqueueHostBlockScope workqueueBlock;
     auto waiter = std::make_shared<NativeGuestWaiter>();
     waiter->kind = kind;
@@ -10723,6 +11567,7 @@ static u32 WaitNativeGuestThread(
     waiter->wakeResult = wakeResult;
     waiter->rwlockWaitType = rwlockWaitType;
     waiter->rwlockSequence = rwlockSequence;
+    waiter->conditionSequence = conditionSequence;
 
     std::unique_lock<std::mutex> lock(nativeGuestWaitMutex);
     if (kind == GuestThreadWaitKind::Rwlock &&
@@ -10735,7 +11580,14 @@ static u32 WaitNativeGuestThread(
                 static_cast<int>(overlapUpdate), false);
         }
     }
+    if (kind == GuestThreadWaitKind::Condition &&
+            ConsumeGuestConditionPrepost(
+                address, conditionSequence)) {
+        return return_with_carry_direct(
+            static_cast<int>(GuestPsynchCountIncrement), false);
+    }
     if (kind != GuestThreadWaitKind::Rwlock &&
+            kind != GuestThreadWaitKind::Condition &&
             ConsumeGuestPsynchPrepost(kind, address)) {
         return return_with_carry_direct(
             static_cast<int>(wakeResult), false);
@@ -10765,8 +11617,22 @@ static u32 WaitNativeGuestThread(
         workqueueBlock.Enter();
         lock.lock();
     }
+    bool timedOut = false;
+    auto deadline = std::chrono::steady_clock::time_point::max();
+    if (hasConditionTimeout) {
+        const auto now = std::chrono::steady_clock::now();
+        const auto maximumSeconds =
+            std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::time_point::max() - now);
+        if (timeoutSeconds >= maximumSeconds.count()) {
+            deadline = std::chrono::steady_clock::time_point::max();
+        } else {
+            deadline = now + std::chrono::seconds(timeoutSeconds) +
+                std::chrono::nanoseconds(relativeNanoseconds);
+        }
+    }
     while (!waiter->signaled) {
-        waiter->condition.wait(lock, [&] {
+        const auto wakePredicate = [&] {
             return waiter->signaled ||
                 NativeThreadStatePauseRequestedForCurrent() ||
                 debuggerAllStopRequested.load(
@@ -10775,10 +11641,21 @@ static u32 WaitNativeGuestThread(
                     std::memory_order_acquire) ||
                 guestProcessExitRequested.load(
                     std::memory_order_acquire);
-        });
+        };
+        if (hasConditionTimeout) {
+            if (!waiter->condition.wait_until(
+                    lock, deadline, wakePredicate)) {
+                timedOut = true;
+                break;
+            }
+        } else {
+            waiter->condition.wait(lock, wakePredicate);
+        }
         if (waiter->signaled) {
             break;
         }
+        const auto pauseStart =
+            std::chrono::steady_clock::now();
         lock.unlock();
         (void)NativeThreadStatePauseHostWaitIfNeeded();
         const bool paused =
@@ -10797,10 +11674,24 @@ static u32 WaitNativeGuestThread(
                 waiter), nativeGuestWaiters.end());
             return return_with_carry_direct(EINTR, true);
         }
+        if (hasConditionTimeout) {
+            deadline += std::chrono::steady_clock::now() -
+                pauseStart;
+        }
     }
     nativeGuestWaiters.erase(std::remove(
         nativeGuestWaiters.begin(), nativeGuestWaiters.end(),
         waiter), nativeGuestWaiters.end());
+    if (timedOut) {
+        int error = ETIMEDOUT;
+        if (GuestPsynchSequenceDistance(
+                conditionSequence, conditionSSequence) <= 1) {
+            /* ECVCERORR tells libpthread that this timeout consumed the last
+             * outstanding generation, allowing it to reset the CV state. */
+            error |= 0x100;
+        }
+        return return_with_carry_direct(error, true);
+    }
     return return_with_carry_direct(
         static_cast<int>(waiter->wakeResult), false);
 }
@@ -10826,6 +11717,48 @@ static size_t WakeNativeGuestThreadsLocked(
         if (!selected) {
             break;
         }
+        selected->signaled = true;
+        selected->condition.notify_one();
+        ++count;
+        if (!wakeAll || MACH_PORT_VALID(targetThread)) {
+            break;
+        }
+    }
+    return count;
+}
+
+/* nativeGuestWaitMutex must be held. */
+static size_t WakeNativeGuestConditionThreadsLocked(
+        u32 address, u32 throughSequence, bool wakeAll,
+        mach_port_t targetThread = MACH_PORT_NULL) {
+    size_t count = 0;
+    for (;;) {
+        std::shared_ptr<NativeGuestWaiter> selected;
+        for (const auto &waiter : nativeGuestWaiters) {
+            if (waiter->signaled ||
+                    waiter->kind !=
+                        GuestThreadWaitKind::Condition ||
+                    waiter->address != address ||
+                    !GuestPsynchSequenceLowerOrEqual(
+                        waiter->conditionSequence,
+                        throughSequence) ||
+                    (MACH_PORT_VALID(targetThread) &&
+                     waiter->threadPort != targetThread)) {
+                continue;
+            }
+            if (!selected ||
+                    waiter->sequence < selected->sequence) {
+                selected = waiter;
+            }
+        }
+        if (!selected) {
+            break;
+        }
+        /* See psynch_cvcontinue: a waiter already present in the kernel
+         * receives zero.  Returning INC here would let registered waiters
+         * consume the generations reserved for waiters still racing into
+         * psynch_cvwait. */
+        selected->wakeResult = 0;
         selected->signaled = true;
         selected->condition.notify_one();
         ++count;
@@ -10887,7 +11820,9 @@ static u32 GuestPsynchMutexDrop(u32 mutex) {
 }
 
 static u32 GuestPsynchConditionWait(
-        u32 condition, u32 mutex) {
+        u32 condition, u32 conditionSequence,
+        u32 conditionSSequence, u32 mutex,
+        int64_t timeoutSeconds, u32 timeoutNanoseconds) {
     if (mutex != 0) {
         if (NativeGuestThreadIsCurrent()) {
             (void)WakeNativeGuestThreads(
@@ -10899,52 +11834,98 @@ static u32 GuestPsynchConditionWait(
     }
     if (NativeGuestThreadIsCurrent()) {
         return WaitNativeGuestThread(
-            GuestThreadWaitKind::Condition, condition, 0x100);
+            GuestThreadWaitKind::Condition, condition, 0,
+            GuestRwlockWaitType::None, 0, 0,
+            conditionSequence, conditionSSequence,
+            timeoutSeconds, timeoutNanoseconds);
     }
-    if (ConsumeGuestPsynchPrepost(
-            GuestThreadWaitKind::Condition, condition)) {
-        return return_with_carry_direct(0x100, false);
+    if (ConsumeGuestConditionPrepost(
+            condition, conditionSequence)) {
+        return return_with_carry_direct(
+            static_cast<int>(GuestPsynchCountIncrement), false);
+    }
+    if (timeoutSeconds != 0 ||
+            (timeoutNanoseconds & 0x3fffffffu) != 0) {
+        /* Cooperative mode has no independent timer source.  Mirroring the
+         * ulock fallback, return a timeout instead of parking forever. */
+        int error = ETIMEDOUT;
+        if (GuestPsynchSequenceDistance(
+                conditionSequence, conditionSSequence) <= 1) {
+            error |= 0x100;
+        }
+        return return_with_carry_direct(error, true);
     }
     if (ParkCurrentGuestThread(
-            GuestThreadWaitKind::Condition, condition, 0)) {
+            GuestThreadWaitKind::Condition, condition, 0,
+            GuestRwlockWaitType::None, 0,
+            conditionSequence)) {
         return return_with_carry_direct(0, false);
     }
     return return_with_carry_direct(EINTR, true);
 }
 
 static u32 GuestPsynchConditionSignal(
-        u32 condition, mach_port_t targetThread,
-        bool broadcast) {
+        u32 condition, u32 conditionSequence,
+        u32 conditionSSequence, u32 conditionUOrDifference,
+        mach_port_t targetThread, bool broadcast) {
+    const u32 throughSequence =
+        conditionSequence & GuestPsynchCountMask;
+    const size_t outstanding = GuestPsynchSequenceDistance(
+        conditionSequence, conditionSSequence);
     const bool native = NativeGuestThreadIsCurrent();
     size_t woken;
     if (native) {
         std::lock_guard<std::mutex> lock(nativeGuestWaitMutex);
-        woken = WakeNativeGuestThreadsLocked(
-            GuestThreadWaitKind::Condition, condition,
-            broadcast, targetThread);
-        if (woken == 0 && !MACH_PORT_VALID(targetThread)) {
-            RecordGuestPsynchPrepost(
-                GuestThreadWaitKind::Condition, condition);
+        woken = WakeNativeGuestConditionThreadsLocked(
+            condition, throughSequence, broadcast,
+            targetThread);
+        if (!MACH_PORT_VALID(targetThread)) {
+            if (broadcast) {
+                const size_t missing = outstanding > woken
+                    ? outstanding - woken : 0;
+                RecordGuestConditionBroadcastPrepost(
+                    condition, throughSequence, missing);
+            } else if (woken == 0) {
+                RecordGuestConditionSignalPrepost(
+                    condition, throughSequence);
+            }
         }
     } else {
-        woken = WakeGuestThreads(
-            GuestThreadWaitKind::Condition, condition,
-            broadcast, targetThread);
+        woken = WakeGuestConditionThreads(
+            condition, throughSequence, broadcast,
+            targetThread);
     }
     if (MACH_PORT_VALID(targetThread) && woken == 0) {
         return return_with_carry_direct(ESRCH, true);
     }
-    if (!native && woken == 0 &&
-            !MACH_PORT_VALID(targetThread)) {
-        RecordGuestPsynchPrepost(
-            GuestThreadWaitKind::Condition, condition);
+    bool hasPrepost = false;
+    if (!native && !MACH_PORT_VALID(targetThread)) {
+        if (broadcast) {
+            const size_t missing = outstanding > woken
+                ? outstanding - woken : 0;
+            RecordGuestConditionBroadcastPrepost(
+                condition, throughSequence, missing);
+            hasPrepost = missing != 0;
+        } else if (woken == 0) {
+            RecordGuestConditionSignalPrepost(
+                condition, throughSequence);
+            hasPrepost = true;
+        }
+    } else if (!MACH_PORT_VALID(targetThread)) {
+        hasPrepost = broadcast
+            ? outstanding > woken
+            : woken == 0;
     }
     const u64 update =
-        static_cast<u64>(woken) * 0x100u;
-    const u32 updateBits =
-        static_cast<u32>(std::min<u64>(
-            update, UINT32_MAX)) |
-        (woken != 0 ? 0x01u : 0u);
+        static_cast<u64>(woken) * GuestPsynchCountIncrement;
+    u32 updateBits = static_cast<u32>(std::min<u64>(
+        update, GuestPsynchCountMask));
+    if (hasPrepost) {
+        updateBits |= 0x02u; /* PTH_RWS_CV_PBIT */
+    } else if (outstanding != 0 && woken >= outstanding) {
+        updateBits |= 0x01u; /* PTH_RWS_CV_CBIT */
+    }
+    (void)conditionUOrDifference;
     return return_with_carry_direct(
         static_cast<int>(updateBits), false);
 }
@@ -11941,6 +12922,7 @@ void Dynarmic_nativeDestroy() {
         std::lock_guard<std::mutex> lock(
             guestPsynchPrepostMutex);
         guestPsynchPreposts.clear();
+        guestConditionPreposts.clear();
     }
     {
         std::lock_guard<std::recursive_mutex> lock(

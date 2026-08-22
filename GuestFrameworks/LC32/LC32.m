@@ -194,7 +194,11 @@ id LC32AdoptHostInitializerResultARC(id object, uint64_t hostResult) {
     return [object retain];
 }
 
-// We cannot use NSValue or NSInteger here since they're proxied aswell
+/* We cannot use NSValue or NSInteger here since they're proxied as well.
+ * Keep this state associated with its owner: bytes beyond the declared
+ * instance size are not reserved for LC32 and may hold subclass, indexed, or
+ * class-cluster storage. The C helpers avoid a second emulated objc_msgSend on
+ * every host_self lookup without relying on allocator padding. */
 @interface LC32HostObjectPointer : NSObject {
 @public
     uint32_t _sequence;
@@ -203,48 +207,66 @@ id LC32AdoptHostInitializerResultARC(id object, uint64_t hostResult) {
 }
 @property(nonatomic) uint64_t value;
 @end
-@implementation LC32HostObjectPointer
-- (uint64_t)value {
+
+static inline __attribute__((always_inline))
+uint64_t LC32LoadHostObjectPointer(
+        LC32HostObjectPointer *pointer) {
+    if(!pointer) return 0;
     for(;;) {
         const uint32_t before = __atomic_load_n(
-            &_sequence, __ATOMIC_ACQUIRE);
+            &pointer->_sequence, __ATOMIC_ACQUIRE);
         if(before & 1) {
             sched_yield();
             continue;
         }
         const uint32_t low = __atomic_load_n(
-            &_low, __ATOMIC_RELAXED);
+            &pointer->_low, __ATOMIC_RELAXED);
         const uint32_t high = __atomic_load_n(
-            &_high, __ATOMIC_RELAXED);
+            &pointer->_high, __ATOMIC_RELAXED);
         /* An acquire load orders operations which follow it, not the data
          * loads which precede the second sequence sample.  Keep the pointer
          * halves ahead of that sample on weakly ordered ARMv7 so accepting an
          * unchanged even sequence also proves both halves came from it. */
         __atomic_thread_fence(__ATOMIC_SEQ_CST);
         const uint32_t after = __atomic_load_n(
-            &_sequence, __ATOMIC_ACQUIRE);
+            &pointer->_sequence, __ATOMIC_ACQUIRE);
         if(before == after && !(after & 1)) {
             return ((uint64_t)high << 32) | low;
         }
     }
 }
-- (void)setValue:(uint64_t)value {
+
+static void LC32StoreHostObjectPointer(
+        LC32HostObjectPointer *pointer, uint64_t value) {
+    if(!pointer) abort();
     const uint32_t sequence = __atomic_load_n(
-        &_sequence, __ATOMIC_RELAXED);
+        &pointer->_sequence, __ATOMIC_RELAXED);
     if((sequence & 1) || sequence == UINT32_MAX - 1) abort();
     /* Writers are serialized by the owning guest object's monitor.  Publish
      * an odd sequence around the two 32-bit pointer halves so lock-free
      * readers can reject both torn and superseded values.  The generic
      * ARMv7 `__atomic_store` helper used for uint64_t silently wrote zero in
      * the emulated iOS runtime, while these native-width atomics stay inline. */
-    __atomic_store_n(&_sequence, sequence + 1, __ATOMIC_SEQ_CST);
-    __atomic_store_n(&_low, (uint32_t)value, __ATOMIC_RELAXED);
-    __atomic_store_n(&_high, (uint32_t)(value >> 32), __ATOMIC_RELAXED);
-    __atomic_store_n(&_sequence, sequence + 2, __ATOMIC_SEQ_CST);
+    __atomic_store_n(
+        &pointer->_sequence, sequence + 1, __ATOMIC_SEQ_CST);
+    __atomic_store_n(
+        &pointer->_low, (uint32_t)value, __ATOMIC_RELAXED);
+    __atomic_store_n(
+        &pointer->_high, (uint32_t)(value >> 32), __ATOMIC_RELAXED);
+    __atomic_store_n(
+        &pointer->_sequence, sequence + 2, __ATOMIC_SEQ_CST);
+}
+
+@implementation LC32HostObjectPointer
+- (uint64_t)value {
+    return LC32LoadHostObjectPointer(self);
+}
+- (void)setValue:(uint64_t)value {
+    LC32StoreHostObjectPointer(self, value);
 }
 + (instancetype)pointerWithValue:(uint64_t)value {
     LC32HostObjectPointer *pointer = [LC32HostObjectPointer new];
-    pointer.value = value;
+    LC32StoreHostObjectPointer(pointer, value);
     return pointer;
 }
 @end
@@ -373,7 +395,7 @@ static void LC32LeaveOwnershipWriter(uint32_t token) {
 static uint64_t LC32ExistingHostSelf(id object) {
     LC32HostObjectPointer *pointer =
         objc_getAssociatedObject(object, kHostSelf);
-    return pointer.value;
+    return LC32LoadHostObjectPointer(pointer);
 }
 
 static LC32HostObjectPointer *LC32HostObjectState(id object, BOOL create) {
@@ -524,7 +546,8 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
 // Only call this if host's guest_self has already been set
 - (void)setHost_self:(uint64_t)ptr {
     @synchronized(self) {
-        LC32HostObjectState(self, YES).value = ptr;
+        LC32StoreHostObjectPointer(
+            LC32HostObjectState(self, YES), ptr);
     }
 }
 
@@ -558,7 +581,7 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
                 @try {
                     LC32HostObjectPointer *state =
                         LC32HostObjectState(self, YES);
-                    ptr = state.value;
+                    ptr = LC32LoadHostObjectPointer(state);
                     if(!ptr) {
                         /*
                          * Retains performed while an object is guest-only
@@ -593,7 +616,7 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
 
                         /* Publish only after the peer contains every native +1
                          * represented by the captured guest retain count. */
-                        state.value = ptr;
+                        LC32StoreHostObjectPointer(state, ptr);
                     }
                 } @finally {
                     LC32LeaveOwnershipWriter(writer);
