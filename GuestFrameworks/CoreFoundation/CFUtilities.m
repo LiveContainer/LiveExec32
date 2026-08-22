@@ -83,6 +83,36 @@ CFUUIDRef CFUUIDCreate(CFAllocatorRef allocator) {
     return (CFUUIDRef)[[NSUUID alloc] init];
 }
 
+CFUUIDRef CFUUIDCreateFromUUIDBytes(CFAllocatorRef allocator,
+                                    CFUUIDBytes bytes) {
+    static const char digits[] = "0123456789ABCDEF";
+    const UInt8 rawBytes[16] = {
+        bytes.byte0, bytes.byte1, bytes.byte2, bytes.byte3,
+        bytes.byte4, bytes.byte5, bytes.byte6, bytes.byte7,
+        bytes.byte8, bytes.byte9, bytes.byte10, bytes.byte11,
+        bytes.byte12, bytes.byte13, bytes.byte14, bytes.byte15,
+    };
+    char text[37];
+    size_t output = 0;
+    for(size_t index = 0; index < sizeof(rawBytes); ++index) {
+        if(index == 4 || index == 6 || index == 8 || index == 10) {
+            text[output++] = '-';
+        }
+        text[output++] = digits[rawBytes[index] >> 4];
+        text[output++] = digits[rawBytes[index] & 0x0f];
+    }
+    text[output] = '\0';
+
+    CFStringRef string = CFStringCreateWithBytes(
+        allocator, (const UInt8 *)text, (CFIndex)output,
+        kCFStringEncodingASCII, false);
+    if(!string) return NULL;
+    CFUUIDRef uuid = (CFUUIDRef)[[NSUUID alloc]
+        initWithUUIDString:(NSString *)string];
+    CFRelease(string);
+    return uuid;
+}
+
 CFStringRef CFUUIDCreateString(CFAllocatorRef allocator, CFUUIDRef uuid) {
     (void)allocator;
     return uuid ? (CFStringRef)[[(NSUUID *)uuid UUIDString] copy] : NULL;

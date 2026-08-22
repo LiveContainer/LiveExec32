@@ -199,6 +199,19 @@ const void * CFArrayGetValueAtIndex(CFArrayRef theArray, CFIndex idx) {
     return ((NSArray *)theArray)[idx];
 }
 
+void CFArrayGetValues(CFArrayRef array, CFRange range,
+                      const void **values) {
+    if(!array || !values || range.location < 0 || range.length < 0)
+        return;
+    const CFIndex count = CFArrayGetCount(array);
+    if(range.location > count || range.length > count - range.location)
+        return;
+    for(CFIndex offset = 0; offset < range.length; ++offset) {
+        values[offset] = CFArrayGetValueAtIndex(
+            array, range.location + offset);
+    }
+}
+
 void CFArrayApplyFunction(CFArrayRef array, CFRange range,
                           CFArrayApplierFunction applier,
                           void *context) {

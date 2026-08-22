@@ -156,6 +156,42 @@ const CFDictionaryValueCallBacks *DictionaryValueCallbacks(uint32_t mode) {
     return reinterpret_cast<const CFDictionaryValueCallBacks *>(UINTPTR_MAX);
 }
 
+bool DictionaryCallbacksModeIsValid(uint32_t mode) {
+    switch(static_cast<LC32CoreFoundationCallbacksMode>(mode)) {
+        case LC32CoreFoundationCallbacksCFType:
+        case LC32CoreFoundationCallbacksNull:
+        case LC32CoreFoundationCallbacksWeakCFType:
+        case LC32CoreFoundationCallbacksWeakCFTypeNoDescription:
+        case LC32CoreFoundationCallbacksCopyString:
+            return true;
+        case LC32CoreFoundationCallbacksInvalid:
+            return false;
+    }
+    return false;
+}
+
+const void *DictionaryOperand(
+        const LC32CoreFoundationCall &call,
+        size_t modeIndex, size_t valueIndex) {
+    const uint32_t mode = SlotU32(call, modeIndex);
+    if(!DictionaryCallbacksModeIsValid(mode)) return nullptr;
+    if(mode == LC32CoreFoundationCallbacksNull) {
+        return reinterpret_cast<const void *>(
+            static_cast<uintptr_t>(SlotU32(call, valueIndex)));
+    }
+    return SlotHostObject<const void *>(call, valueIndex);
+}
+
+u32 GuestDictionaryOperand(
+        const void *value, uint32_t mode) {
+    if(!value || !DictionaryCallbacksModeIsValid(mode)) return 0;
+    if(mode == LC32CoreFoundationCallbacksNull) {
+        const uintptr_t raw = reinterpret_cast<uintptr_t>(value);
+        return raw <= UINT32_MAX ? static_cast<u32>(raw) : 0;
+    }
+    return [(id)value guest_self];
+}
+
 u32 GuestForCreatedObject(CFTypeRef object) {
     return LC32GuestObjectForOwnedHostObject(object);
 }
@@ -1729,37 +1765,37 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             return 1;
         }
         case LC32CoreFoundationOpDictionaryGetValue: {
-            if(!RequireSlots(call, 2)) return 0;
+            if(!RequireSlots(call, 4)) return 0;
             CFDictionaryRef dictionary =
                 SlotHostObject<CFDictionaryRef>(call, 0);
-            const void *key = SlotHostObject<const void *>(call, 1);
+            const void *key = DictionaryOperand(call, 1, 2);
             if(!dictionary || !key) return 0;
             const void *value = CFDictionaryGetValue(dictionary, key);
-            return value ? [(id)value guest_self] : 0;
+            return GuestDictionaryOperand(value, SlotU32(call, 3));
         }
         case LC32CoreFoundationOpDictionarySetValue: {
-            if(!RequireSlots(call, 3)) return 0;
+            if(!RequireSlots(call, 5)) return 0;
             CFMutableDictionaryRef dictionary =
                 SlotHostObject<CFMutableDictionaryRef>(call, 0);
-            const void *key = SlotHostObject<const void *>(call, 1);
-            const void *value = SlotHostObject<const void *>(call, 2);
+            const void *key = DictionaryOperand(call, 1, 2);
+            const void *value = DictionaryOperand(call, 3, 4);
             if(dictionary && key && value)
                 CFDictionarySetValue(dictionary, key, value);
             return 0;
         }
         case LC32CoreFoundationOpDictionaryRemoveValue: {
-            if(!RequireSlots(call, 2)) return 0;
+            if(!RequireSlots(call, 3)) return 0;
             CFMutableDictionaryRef dictionary =
                 SlotHostObject<CFMutableDictionaryRef>(call, 0);
-            const void *key = SlotHostObject<const void *>(call, 1);
+            const void *key = DictionaryOperand(call, 1, 2);
             if(dictionary && key) CFDictionaryRemoveValue(dictionary, key);
             return 0;
         }
         case LC32CoreFoundationOpDictionaryContainsKey: {
-            if(!RequireSlots(call, 2)) return 0;
+            if(!RequireSlots(call, 3)) return 0;
             CFDictionaryRef dictionary =
                 SlotHostObject<CFDictionaryRef>(call, 0);
-            const void *key = SlotHostObject<const void *>(call, 1);
+            const void *key = DictionaryOperand(call, 1, 2);
             return dictionary && key &&
                 CFDictionaryContainsKey(dictionary, key);
         }
@@ -1772,12 +1808,16 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             return count > UINT32_MAX ? UINT32_MAX : static_cast<u32>(count);
         }
         case LC32CoreFoundationOpDictionaryGetKeysAndValues: {
-            if(!RequireSlots(call, 3)) return 0;
+            if(!RequireSlots(call, 5)) return 0;
             CFDictionaryRef dictionary =
                 SlotHostObject<CFDictionaryRef>(call, 0);
             const u32 guestKeys = SlotU32(call, 1);
             const u32 guestValues = SlotU32(call, 2);
+            const u32 keyMode = SlotU32(call, 3);
+            const u32 valueMode = SlotU32(call, 4);
             if(!dictionary || (!guestKeys && !guestValues)) return 0;
+            if(!DictionaryCallbacksModeIsValid(keyMode) ||
+               !DictionaryCallbacksModeIsValid(valueMode)) return 0;
 
             const CFIndex count = CFDictionaryGetCount(dictionary);
             if(count < 0 || static_cast<uint64_t>(count) >
@@ -1799,8 +1839,8 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             std::vector<u32> guestObjects(count);
             if(guestKeys) {
                 for(CFIndex index = 0; index < count; ++index) {
-                    guestObjects[index] = keys[index]
-                        ? [(id)keys[index] guest_self] : 0;
+                    guestObjects[index] =
+                        GuestDictionaryOperand(keys[index], keyMode);
                     if(keys[index] && !guestObjects[index]) return 0;
                 }
                 if(byteCount && Dynarmic_mem_1write(guestKeys, byteCount,
@@ -1810,8 +1850,8 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             }
             if(guestValues) {
                 for(CFIndex index = 0; index < count; ++index) {
-                    guestObjects[index] = values[index]
-                        ? [(id)values[index] guest_self] : 0;
+                    guestObjects[index] =
+                        GuestDictionaryOperand(values[index], valueMode);
                     if(values[index] && !guestObjects[index]) return 0;
                 }
                 if(byteCount && Dynarmic_mem_1write(guestValues, byteCount,

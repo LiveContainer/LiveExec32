@@ -214,6 +214,12 @@ CFIndex CFStringGetLength(CFStringRef string) {
     return (CFIndex)[(NSString *)string length];
 }
 
+CFStringEncoding CFStringGetFastestEncoding(CFStringRef string) {
+    if(!string) return kCFStringEncodingInvalidId;
+    return CFStringConvertNSStringEncodingToEncoding(
+        [(NSString *)string fastestEncoding]);
+}
+
 UniChar CFStringGetCharacterAtIndex(CFStringRef string, CFIndex index) {
     if(!string || index < 0 || index >= CFStringGetLength(string)) return 0;
     return (UniChar)LC32_CF_CALL(

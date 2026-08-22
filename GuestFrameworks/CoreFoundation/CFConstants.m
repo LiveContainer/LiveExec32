@@ -91,6 +91,7 @@ NSString * const NSGenericException = @"NSGenericException";
 NSString * const NSInternalInconsistencyException =
     @"NSInternalInconsistencyException";
 NSString * const NSInvalidArgumentException = @"NSInvalidArgumentException";
+NSString * const NSMallocException = @"NSMallocException";
 NSString * const NSRangeException = @"NSRangeException";
 NSString * const NSLocaleCountryCode = @"kCFLocaleCountryCodeKey";
 NSString * const NSLocaleIdentifier = @"kCFLocaleIdentifierKey";

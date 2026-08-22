@@ -1,9 +1,27 @@
 #import <Foundation/Foundation+LC32.h>
+#import <CoreFoundation/CoreFoundation.h>
 
 #include <stdint.h>
 #include <string.h>
 
 @implementation NSString (LC32CString)
+
+- (BOOL)getCString:(char *)buffer
+          maxLength:(NSUInteger)maximumLength
+           encoding:(NSStringEncoding)encoding {
+    /*
+     * The generated selector bridge cannot pass an ARM32 output pointer to
+     * native Foundation.  CoreFoundation already stages the destination in
+     * guest memory, including the terminating NUL required by this method.
+     */
+    if(!buffer || maximumLength == 0 || maximumLength > INT32_MAX)
+        return NO;
+    const CFStringEncoding cfEncoding =
+        CFStringConvertNSStringEncodingToEncoding(encoding);
+    if(cfEncoding == kCFStringEncodingInvalidId) return NO;
+    return CFStringGetCString((CFStringRef)self, buffer,
+                              (CFIndex)maximumLength, cfEncoding);
+}
 
 - (const char *)UTF8String {
     uint32_t required = LC32CopyHostStringUTF8(self.host_self, NULL, 0);

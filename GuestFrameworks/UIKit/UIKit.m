@@ -399,6 +399,24 @@ NSData *UIImagePNGRepresentation(UIImage *image) {
 
 @end
 
+@implementation UIColor (LC32CoreGraphics)
+
+- (CGColorRef)CGColor {
+    /*
+     * CGColorRef is an Objective-C-compatible CF object, but the generator
+     * sees its opaque C pointer spelling and omits this selector.  Convert
+     * the native borrowed result to its guest proxy while it is still
+     * protected by the host call's +0 return convention.
+     */
+    static uint64_t hostSelector __attribute__((aligned(8)));
+    const uint64_t selector = LC32CachedHostSelector(
+        &hostSelector, _cmd, NO);
+    return (__bridge CGColorRef)LC32InvokeHostObjectSelector(
+        self.host_self, selector);
+}
+
+@end
+
 @implementation UIImage (LC32CoreGraphics)
 
 + (UIImage *)imageNamed:(NSString *)name {

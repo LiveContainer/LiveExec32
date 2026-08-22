@@ -29,6 +29,7 @@
 #include <mach/thread_act.h>
 #include <mach/arm/thread_status.h>
 #include <mach/mig_errors.h>
+#include <mach/task_info.h>
 #include <mach/vm_map.h>
 #include <mach/vm_page_size.h>
 #include <mach/vm_region.h>
@@ -51,6 +52,7 @@
 #include <sys/param.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/sysctl.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -1203,6 +1205,87 @@ int guest___sysctl(u32 guest_name, u_int namelen, u32 guest_oldp,
         return return_with_carry_direct(EFAULT, true);
     }
 
+    /*
+     * KERN_PROC returns a kinfo_proc whose layout contains pointers, longs,
+     * timevals, and other ABI-sized fields.  Forwarding an armv7 caller's
+     * 492-byte buffer to the arm64 kernel returns ENOMEM (and copying a
+     * native result verbatim would be corrupt even if it fit).  Old crash
+     * reporters commonly use KERN_PROC_PID only to inspect p_flag, so stage
+     * a native query and publish the stable leading armv7 scalar fields.
+     * Keep the rest zero until a consumer needs a complete field-by-field
+     * kinfo_proc translation.
+     */
+    constexpr int GuestCtlKern = 1;
+    constexpr int GuestKernProc = 14;
+    constexpr int GuestKernProcPid = 1;
+    constexpr u32 GuestKinfoProc32Size = 492;
+    constexpr size_t GuestExternProcFlagOffset = 16;
+    constexpr size_t GuestExternProcStatusOffset = 20;
+    constexpr size_t GuestExternProcPidOffset = 24;
+    constexpr size_t GuestExternProcOriginalParentPidOffset = 28;
+    constexpr int GuestProcessFlagLp64 = 0x00000004;
+    constexpr int GuestProcessFlagTraced = 0x00000800;
+    if(namelen == 4 && host_name[0] == GuestCtlKern &&
+            host_name[1] == GuestKernProc &&
+            host_name[2] == GuestKernProcPid && !guest_newp && newlen == 0) {
+        if(guest_oldp && !guest_oldlenp) {
+            return return_with_carry_direct(EFAULT, true);
+        }
+
+        u32 guestCapacity = 0;
+        if(guest_oldp && Dynarmic_mem_1read(
+                guest_oldlenp, sizeof(guestCapacity),
+                reinterpret_cast<char *>(&guestCapacity)) != 0) {
+            return return_with_carry_direct(EFAULT, true);
+        }
+
+        struct kinfo_proc hostProcess = {};
+        size_t hostLength = sizeof(hostProcess);
+        const int hostResult = syscallRetCarry(
+            SYS_sysctl, host_name, namelen,
+            &hostProcess, &hostLength, nullptr, 0, 0);
+        if(threadHandle.cpsr->hasCarry()) return hostResult;
+
+        u32 guestLength = hostLength == 0
+            ? 0 : GuestKinfoProc32Size;
+        if(guest_oldlenp && Dynarmic_mem_1write(
+                guest_oldlenp, sizeof(guestLength),
+                reinterpret_cast<char *>(&guestLength)) != 0) {
+            return return_with_carry_direct(EFAULT, true);
+        }
+        if(!guest_oldp || guestLength == 0) {
+            return return_with_carry_direct(0, false);
+        }
+        if(guestCapacity < guestLength) {
+            return return_with_carry_direct(ENOMEM, true);
+        }
+
+        std::array<uint8_t, GuestKinfoProc32Size> guestProcess = {};
+        int32_t guestFlags = hostProcess.kp_proc.p_flag &
+            ~(GuestProcessFlagLp64 | GuestProcessFlagTraced);
+        if(guestDebuggerEnabled.load(std::memory_order_acquire)) {
+            guestFlags |= GuestProcessFlagTraced;
+        }
+        const int32_t guestStatus = hostProcess.kp_proc.p_stat;
+        const int32_t guestPid = hostProcess.kp_proc.p_pid;
+        const int32_t guestOriginalParentPid = hostProcess.kp_proc.p_oppid;
+        memcpy(guestProcess.data() + GuestExternProcFlagOffset,
+            &guestFlags, sizeof(guestFlags));
+        memcpy(guestProcess.data() + GuestExternProcStatusOffset,
+            &guestStatus, sizeof(guestStatus));
+        memcpy(guestProcess.data() + GuestExternProcPidOffset,
+            &guestPid, sizeof(guestPid));
+        memcpy(guestProcess.data() +
+            GuestExternProcOriginalParentPidOffset,
+            &guestOriginalParentPid, sizeof(guestOriginalParentPid));
+        if(Dynarmic_mem_1write(
+                guest_oldp, guestProcess.size(),
+                reinterpret_cast<char *>(guestProcess.data())) != 0) {
+            return return_with_carry_direct(EFAULT, true);
+        }
+        return return_with_carry_direct(0, false);
+    }
+
     GuestSysctlStorage storage;
     const int prepareError = PrepareGuestSysctlStorage(
         guest_oldp, guest_oldlenp, guest_newp, newlen, storage);
@@ -2082,6 +2165,99 @@ guest_mach_msg_trap(u32 guest_msg,
             reply->act_list.type = MACH_MSG_OOL_PORTS_DESCRIPTOR;
             reply->NDR = NDR_record;
             reply->act_listCnt = threadCount;
+            break;
+        }
+        case 3405: { // task_info
+            /*
+             * The task_info payload is an array of natural_t, but forwarding
+             * the old request to a current kernel would also forward the
+             * current SDK's maximum-sized reply union.  Marshal only the
+             * TASK_BASIC_INFO_32 flavor used by 32-bit applications so the
+             * guest receives the eight-word layout its MIG stub expects.
+             */
+            struct __attribute__((packed, aligned(4))) TaskInfoRequest32 {
+                mach_msg_header_t Head;
+                NDR_record_t NDR;
+                task_flavor_t flavor;
+                mach_msg_type_number_t task_info_outCnt;
+            };
+            struct __attribute__((packed, aligned(4))) TaskInfoReply32 {
+                mach_msg_header_t Head;
+                NDR_record_t NDR;
+                kern_return_t RetCode;
+                mach_msg_type_number_t task_info_outCnt;
+                integer_t task_info_out[TASK_BASIC_INFO_32_COUNT];
+            };
+            static_assert(sizeof(TaskInfoRequest32) == 40,
+                "unexpected 32-bit task_info request layout");
+            static_assert(sizeof(TaskInfoReply32) == 72,
+                "unexpected 32-bit TASK_BASIC_INFO_32 reply layout");
+
+            if (send_size != sizeof(TaskInfoRequest32)) {
+                if (rcv_size < sizeof(mig_reply_error_t)) {
+                    host_header->msgh_size = sizeof(mig_reply_error_t);
+                    result = MACH_RCV_TOO_LARGE;
+                } else {
+                    auto *error = reinterpret_cast<mig_reply_error_t *>(
+                        host_header);
+                    host_header->msgh_size = sizeof(*error);
+                    error->NDR = NDR_record;
+                    error->RetCode = MIG_BAD_ARGUMENTS;
+                }
+                break;
+            }
+
+            auto *request = reinterpret_cast<TaskInfoRequest32 *>(
+                host_header);
+            const bool validBasicInfoRequest =
+                request->flavor == TASK_BASIC_INFO_32 &&
+                request->task_info_outCnt >= TASK_BASIC_INFO_32_COUNT;
+            if (!validBasicInfoRequest) {
+                if (rcv_size < sizeof(mig_reply_error_t)) {
+                    host_header->msgh_size = sizeof(mig_reply_error_t);
+                    result = MACH_RCV_TOO_LARGE;
+                } else {
+                    auto *error = reinterpret_cast<mig_reply_error_t *>(
+                        host_header);
+                    host_header->msgh_size = sizeof(*error);
+                    error->NDR = NDR_record;
+                    error->RetCode = KERN_INVALID_ARGUMENT;
+                }
+                break;
+            }
+            if (rcv_size < sizeof(TaskInfoReply32)) {
+                host_header->msgh_size = sizeof(TaskInfoReply32);
+                result = MACH_RCV_TOO_LARGE;
+                break;
+            }
+
+            task_basic_info_32_data_t basicInfo = {};
+            mach_msg_type_number_t basicInfoCount =
+                TASK_BASIC_INFO_32_COUNT;
+            kern_return_t kr = task_info(
+                request->Head.msgh_request_port,
+                TASK_BASIC_INFO_32,
+                reinterpret_cast<task_info_t>(&basicInfo),
+                &basicInfoCount);
+            if (kr == KERN_SUCCESS &&
+                    basicInfoCount != TASK_BASIC_INFO_32_COUNT) {
+                kr = KERN_FAILURE;
+            }
+            if (kr != KERN_SUCCESS) {
+                auto *error = reinterpret_cast<mig_reply_error_t *>(
+                    host_header);
+                host_header->msgh_size = sizeof(*error);
+                error->NDR = NDR_record;
+                error->RetCode = kr;
+                break;
+            }
+
+            auto *reply = reinterpret_cast<TaskInfoReply32 *>(host_header);
+            reply->NDR = NDR_record;
+            reply->RetCode = KERN_SUCCESS;
+            reply->task_info_outCnt = TASK_BASIC_INFO_32_COUNT;
+            memcpy(reply->task_info_out, &basicInfo, sizeof(basicInfo));
+            host_header->msgh_size = sizeof(*reply);
             break;
         }
         case 3603: { // thread_get_state
@@ -4135,6 +4311,10 @@ int guest_sigprocmask(int how, u32 guest_set, u32 guest_oldset) {
             guest_oldset, host_oldset);
     }
     return result;
+}
+
+namespace {
+u32 GuestSigaltstack(u32 guestStack, u32 guestOldStack);
 }
 
 /*
@@ -6926,6 +7106,10 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             case 48:
                 cpu->Regs()[0] = guest_sigprocmask(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
                 break;
+            case SYS_sigaltstack: // 53
+                cpu->Regs()[0] = GuestSigaltstack(
+                    cpu->Regs()[0], cpu->Regs()[1]);
+                break;
             case 54:
                 cpu->Regs()[0] = guest_ioctl(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
                 break;
@@ -7855,6 +8039,9 @@ struct GuestThreadContext {
     u32 retirementFreeSize = 0;
     context32 saved = {};
     u32 signalMask = 0;
+    u32 alternateSignalStackPointer = 0;
+    u32 alternateSignalStackSize = 0;
+    int32_t alternateSignalStackFlags = SS_DISABLE;
     GuestThreadWaitKind waitKind = GuestThreadWaitKind::None;
     u32 waitAddress = 0;
     u32 wakeResult = 0;
@@ -8723,6 +8910,70 @@ GuestThreadContext *FindGuestThread(
         }
     }
     return nullptr;
+}
+
+struct GuestSignalStack32 {
+    u32 stackPointer;
+    u32 stackSize;
+    int32_t flags;
+};
+static_assert(sizeof(GuestSignalStack32) == 12);
+
+u32 GuestSigaltstack(u32 guestStack, u32 guestOldStack) {
+    /* XNU preserves OLDMINSIGSTKSZ for the syscall ABI even though the
+     * public SDK's modern MINSIGSTKSZ is larger. */
+    constexpr u32 GuestMinimumSignalStackSize = 8 * 1024;
+
+    GuestSignalStack32 requested = {};
+    if(guestStack && Dynarmic_mem_1read(
+            guestStack, sizeof(requested),
+            reinterpret_cast<char *>(&requested)) != 0) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+    if(guestStack && requested.flags != 0 &&
+            requested.flags != SS_DISABLE) {
+        return return_with_carry_direct(EINVAL, true);
+    }
+    if(guestStack && requested.flags == 0 &&
+            requested.stackSize < GuestMinimumSignalStackSize) {
+        return return_with_carry_direct(ENOMEM, true);
+    }
+
+    EnsureGuestThreadRegistry();
+    std::lock_guard<std::recursive_mutex> lock(guestThreadMutex);
+    GuestThreadContext *thread =
+        FindGuestThread(CurrentGuestThreadId(), true);
+    if(!thread) {
+        return return_with_carry_direct(ESRCH, true);
+    }
+
+    GuestSignalStack32 previous = {
+        .stackPointer = thread->alternateSignalStackPointer,
+        .stackSize = thread->alternateSignalStackSize,
+        .flags = thread->alternateSignalStackFlags,
+    };
+    if(guestOldStack && Dynarmic_mem_1write(
+            guestOldStack, sizeof(previous),
+            reinterpret_cast<char *>(&previous)) != 0) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+    if(!guestStack) {
+        return return_with_carry_direct(0, false);
+    }
+    if((thread->alternateSignalStackFlags & SS_ONSTACK) != 0) {
+        return return_with_carry_direct(
+            requested.flags == SS_DISABLE ? EINVAL : EPERM, true);
+    }
+
+    if(requested.flags == SS_DISABLE) {
+        /* Darwin preserves the configured address and size while disabled. */
+        thread->alternateSignalStackFlags = SS_DISABLE;
+    } else {
+        thread->alternateSignalStackPointer = requested.stackPointer;
+        thread->alternateSignalStackSize = requested.stackSize;
+        thread->alternateSignalStackFlags = 0;
+    }
+    return return_with_carry_direct(0, false);
 }
 
 size_t LiveGuestThreadCount() {

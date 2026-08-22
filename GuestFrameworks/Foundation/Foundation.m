@@ -93,6 +93,17 @@ NSRange NSIntersectionRange(NSRange range1, NSRange range2) {
     return NSMakeRange(start, end - start);
 }
 
+NSRange NSRangeFromString(NSString *string) {
+    const char *text = string.UTF8String;
+    if(!text) return NSMakeRange(0, 0);
+
+    unsigned long location = 0;
+    unsigned long length = 0;
+    if(sscanf(text, " { %lu , %lu } ", &location, &length) != 2)
+        return NSMakeRange(0, 0);
+    return NSMakeRange((NSUInteger)location, (NSUInteger)length);
+}
+
 @implementation NSPlaceholderString : NSString
 @end
 

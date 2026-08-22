@@ -1,4 +1,5 @@
 #import <CoreFoundation/CoreFoundation+LC32.h>
+#import <objc/runtime.h>
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -7,6 +8,59 @@
 enum {
     LC32MaximumDictionaryApplyEntries = 1024 * 1024,
 };
+
+@interface LC32CFDictionaryCallbackModes : NSObject {
+@public
+    LC32CoreFoundationCallbacksMode keyMode;
+    LC32CoreFoundationCallbacksMode valueMode;
+}
+@end
+
+@implementation LC32CFDictionaryCallbackModes
+@end
+
+static char LC32DictionaryCallbackModesAssociationKey;
+
+static void LC32SetDictionaryCallbackModes(
+        CFDictionaryRef dictionary,
+        LC32CoreFoundationCallbacksMode keyMode,
+        LC32CoreFoundationCallbacksMode valueMode) {
+    if(!dictionary) return;
+    LC32CFDictionaryCallbackModes *modes =
+        [LC32CFDictionaryCallbackModes new];
+    modes->keyMode = keyMode;
+    modes->valueMode = valueMode;
+    objc_setAssociatedObject((id)dictionary,
+        &LC32DictionaryCallbackModesAssociationKey, modes,
+        OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [modes release];
+}
+
+static LC32CFDictionaryCallbackModes *LC32DictionaryCallbackModes(
+        CFDictionaryRef dictionary) {
+    return dictionary ? objc_getAssociatedObject((id)dictionary,
+        &LC32DictionaryCallbackModesAssociationKey) : nil;
+}
+
+static LC32CoreFoundationCallbacksMode LC32DictionaryKeyMode(
+        CFDictionaryRef dictionary) {
+    LC32CFDictionaryCallbackModes *modes =
+        LC32DictionaryCallbackModes(dictionary);
+    return modes ? modes->keyMode : LC32CoreFoundationCallbacksCFType;
+}
+
+static LC32CoreFoundationCallbacksMode LC32DictionaryValueMode(
+        CFDictionaryRef dictionary) {
+    LC32CFDictionaryCallbackModes *modes =
+        LC32DictionaryCallbackModes(dictionary);
+    return modes ? modes->valueMode : LC32CoreFoundationCallbacksCFType;
+}
+
+static uint64_t LC32DictionaryOperand(
+        const void *value, LC32CoreFoundationCallbacksMode mode) {
+    return mode == LC32CoreFoundationCallbacksNull
+        ? LC32_CF_U32((uintptr_t)value) : LC32_CF_HOST(value);
+}
 
 extern const void *__CFTypeCollectionRetain(CFAllocatorRef allocator,
                                              const void *ptr);
@@ -83,6 +137,9 @@ CFDictionaryRef CFDictionaryCreate(
 
     CFDictionaryRef dictionary =
         (CFDictionaryRef)[(NSDictionary *)mutableDictionary copy];
+    LC32SetDictionaryCallbackModes(dictionary,
+        LC32DictionaryKeyMode(mutableDictionary),
+        LC32DictionaryValueMode(mutableDictionary));
     CFRelease(mutableDictionary);
     return dictionary;
 }
@@ -127,18 +184,25 @@ CFMutableDictionaryRef CFDictionaryCreateMutable(
             "LC32: CFDictionaryCreateMutable called with custom callbacks");
         HALT;
     }
-    return (CFMutableDictionaryRef)LC32_CF_CALL(
+    CFMutableDictionaryRef dictionary =
+        (CFMutableDictionaryRef)LC32_CF_CALL(
         LC32CoreFoundationOpDictionaryCreateMutable,
         LC32_CF_U32(capacity), LC32_CF_U32(keyMode),
         LC32_CF_U32(valueMode));
+    LC32SetDictionaryCallbackModes(dictionary, keyMode, valueMode);
+    return dictionary;
 }
 
 CFDictionaryRef CFDictionaryCreateCopy(CFAllocatorRef allocator,
                                        CFDictionaryRef dictionary) {
     (void)allocator;
-    return dictionary
-        ? (CFDictionaryRef)[(NSDictionary *)dictionary copy]
-        : NULL;
+    if(!dictionary) return NULL;
+    CFDictionaryRef copy =
+        (CFDictionaryRef)[(NSDictionary *)dictionary copy];
+    LC32SetDictionaryCallbackModes(copy,
+        LC32DictionaryKeyMode(dictionary),
+        LC32DictionaryValueMode(dictionary));
+    return copy;
 }
 
 CFMutableDictionaryRef CFDictionaryCreateMutableCopy(
@@ -146,8 +210,12 @@ CFMutableDictionaryRef CFDictionaryCreateMutableCopy(
         CFDictionaryRef dictionary) {
     (void)allocator;
     if(capacity < 0 || !dictionary) return NULL;
-    return (CFMutableDictionaryRef)
+    CFMutableDictionaryRef copy = (CFMutableDictionaryRef)
         [(NSDictionary *)dictionary mutableCopy];
+    LC32SetDictionaryCallbackModes(copy,
+        LC32DictionaryKeyMode(dictionary),
+        LC32DictionaryValueMode(dictionary));
+    return copy;
 }
 
 CFIndex CFDictionaryGetCount(CFDictionaryRef dictionary) {
@@ -159,16 +227,24 @@ CFIndex CFDictionaryGetCount(CFDictionaryRef dictionary) {
 Boolean CFDictionaryContainsKey(CFDictionaryRef dictionary,
                                 const void *key) {
     if(!dictionary || !key) return false;
+    const LC32CoreFoundationCallbacksMode keyMode =
+        LC32DictionaryKeyMode(dictionary);
     return LC32_CF_CALL(LC32CoreFoundationOpDictionaryContainsKey,
-        LC32_CF_HOST(dictionary), LC32_CF_HOST(key)) != 0;
+        LC32_CF_HOST(dictionary), LC32_CF_U32(keyMode),
+        LC32DictionaryOperand(key, keyMode)) != 0;
 }
 
 const void *CFDictionaryGetValue(CFDictionaryRef dictionary,
                                  const void *key) {
     if(!dictionary || !key) return NULL;
+    const LC32CoreFoundationCallbacksMode keyMode =
+        LC32DictionaryKeyMode(dictionary);
+    const LC32CoreFoundationCallbacksMode valueMode =
+        LC32DictionaryValueMode(dictionary);
     return (const void *)LC32_CF_CALL(
         LC32CoreFoundationOpDictionaryGetValue,
-        LC32_CF_HOST(dictionary), LC32_CF_HOST(key));
+        LC32_CF_HOST(dictionary), LC32_CF_U32(keyMode),
+        LC32DictionaryOperand(key, keyMode), LC32_CF_U32(valueMode));
 }
 
 Boolean CFDictionaryGetValueIfPresent(CFDictionaryRef dictionary,
@@ -186,7 +262,9 @@ void CFDictionaryGetKeysAndValues(CFDictionaryRef dictionary,
     if(!dictionary || (!keys && !values)) return;
     LC32_CF_CALL(LC32CoreFoundationOpDictionaryGetKeysAndValues,
         LC32_CF_HOST(dictionary), LC32_CF_U32((uintptr_t)keys),
-        LC32_CF_U32((uintptr_t)values));
+        LC32_CF_U32((uintptr_t)values),
+        LC32_CF_U32(LC32DictionaryKeyMode(dictionary)),
+        LC32_CF_U32(LC32DictionaryValueMode(dictionary)));
 }
 
 void CFDictionaryApplyFunction(CFDictionaryRef dictionary,
@@ -222,7 +300,9 @@ void CFDictionaryApplyFunction(CFDictionaryRef dictionary,
     const uint32_t snapshotOK = LC32_CF_CALL(
         LC32CoreFoundationOpDictionaryGetKeysAndValues,
         LC32_CF_HOST(dictionary), LC32_CF_U32((uintptr_t)keys),
-        LC32_CF_U32((uintptr_t)values));
+        LC32_CF_U32((uintptr_t)values),
+        LC32_CF_U32(LC32DictionaryKeyMode(dictionary)),
+        LC32_CF_U32(LC32DictionaryValueMode(dictionary)));
     if(!snapshotOK) {
         CFRelease(dictionary);
         free(entries);
@@ -244,15 +324,24 @@ void CFDictionaryAddValue(CFMutableDictionaryRef dictionary,
 void CFDictionarySetValue(CFMutableDictionaryRef dictionary,
                           const void *key, const void *value) {
     if(!dictionary || !key || !value) return;
+    const LC32CoreFoundationCallbacksMode keyMode =
+        LC32DictionaryKeyMode(dictionary);
+    const LC32CoreFoundationCallbacksMode valueMode =
+        LC32DictionaryValueMode(dictionary);
     LC32_CF_CALL(LC32CoreFoundationOpDictionarySetValue,
-        LC32_CF_HOST(dictionary), LC32_CF_HOST(key), LC32_CF_HOST(value));
+        LC32_CF_HOST(dictionary), LC32_CF_U32(keyMode),
+        LC32DictionaryOperand(key, keyMode), LC32_CF_U32(valueMode),
+        LC32DictionaryOperand(value, valueMode));
 }
 
 void CFDictionaryRemoveValue(CFMutableDictionaryRef dictionary,
                              const void *key) {
     if(!dictionary || !key) return;
+    const LC32CoreFoundationCallbacksMode keyMode =
+        LC32DictionaryKeyMode(dictionary);
     LC32_CF_CALL(LC32CoreFoundationOpDictionaryRemoveValue,
-        LC32_CF_HOST(dictionary), LC32_CF_HOST(key));
+        LC32_CF_HOST(dictionary), LC32_CF_U32(keyMode),
+        LC32DictionaryOperand(key, keyMode));
 }
 
 void CFDictionaryRemoveAllValues(CFMutableDictionaryRef dictionary) {
