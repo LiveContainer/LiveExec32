@@ -5,6 +5,7 @@
 #include "../../GuestFrameworks/CoreGraphics/LC32CoreGraphicsBridge.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <dlfcn.h>
 #include <cmath>
 #include <memory>
@@ -22,7 +23,10 @@ constexpr size_t kMaximumGradientComponentsPerStop = 64;
 struct BitmapBacking {
     CGContextRef context = nullptr;
     u32 guestData = 0;
-    size_t byteCount = 0;
+    size_t guestBytesPerRow = 0;
+    size_t hostBytesPerRow = 0;
+    size_t height = 0;
+    size_t guestByteCount = 0;
     std::unique_ptr<uint8_t[]> bytes;
 };
 
@@ -211,18 +215,38 @@ BitmapBacking *FindBitmapBacking(CGContextRef context) {
 
 void SyncBitmapBacking(CGContextRef context,
                        BitmapBacking *backing) {
-    if(!backing || !backing->guestData || !backing->byteCount) return;
+    if(!backing || !backing->guestData || !backing->guestByteCount) return;
     CGContextFlush(context);
-    void *data = CGBitmapContextGetData(context);
-    if(data) {
-        (void)Dynarmic_mem_1write(backing->guestData, backing->byteCount,
-            static_cast<char *>(data));
+    auto *data = static_cast<uint8_t *>(CGBitmapContextGetData(context));
+    if(!data) return;
+    if(backing->guestBytesPerRow == backing->hostBytesPerRow) {
+        (void)Dynarmic_mem_1write(backing->guestData,
+            backing->guestByteCount, reinterpret_cast<char *>(data));
+        return;
+    }
+    for(size_t row = 0; row < backing->height; ++row) {
+        const u32 guestRow = backing->guestData +
+            static_cast<u32>(row * backing->guestBytesPerRow);
+        (void)Dynarmic_mem_1write(guestRow, backing->guestBytesPerRow,
+            reinterpret_cast<char *>(data + row * backing->hostBytesPerRow));
     }
 }
 
 void ReleaseBitmapBacking(void *releaseInfo, void *) {
     auto *backing = static_cast<BitmapBacking *>(releaseInfo);
     if(!backing) return;
+#ifdef LC32_TRACE_COREGRAPHICS
+    {
+        std::fprintf(stderr,
+            "LC32 CG: release bitmap backing=%p context=%p guest=0x%08x bytes=%zu\n",
+            backing, backing->context, backing->guestData,
+            backing->guestByteCount);
+    }
+#endif
+    /* A failed CGBitmapContextCreateWithData can synchronously invoke the
+     * release callback before returning NULL. The creator still owns the
+     * bookkeeping object until it has observed that return value. */
+    if(!backing->context) return;
     /*
      * Do not copy pixels back here. Core Graphics invokes this callback only
      * while destroying the context, after the guest is allowed to have freed
@@ -261,37 +285,81 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             const size_t byteCount = bytesPerRow * height;
             if(byteCount > kMaximumBitmapBytes) return 0;
             const u32 guestData = SlotU32(call, 0);
+#ifdef LC32_TRACE_COREGRAPHICS
+            {
+                std::fprintf(stderr,
+                    "LC32 CG: bitmap create guest=0x%08x size=%zux%zu bpc=%u bpr=%zu cs=%p info=0x%08x bytes=%zu\n",
+                    guestData, width, height, SlotU32(call, 3), bytesPerRow,
+                    SlotHostObject<CGColorSpaceRef>(call, 5),
+                    SlotU32(call, 6), byteCount);
+            }
+#endif
             if(guestData && static_cast<uint64_t>(guestData) + byteCount >
                     static_cast<uint64_t>(UINT32_MAX) + 1)
                 return 0;
 
             BitmapBacking *backing = nullptr;
             void *hostData = nullptr;
+            CGColorSpaceRef colorSpace =
+                SlotHostObject<CGColorSpaceRef>(call, 5);
+            size_t hostBytesPerRow = bytesPerRow;
+            const u32 alphaInfo = SlotU32(call, 6) &
+                static_cast<u32>(kCGBitmapAlphaInfoMask);
+            const bool isEightBitRGBA = SlotU32(call, 3) == 8 &&
+                colorSpace &&
+                CGColorSpaceGetModel(colorSpace) == kCGColorSpaceModelRGB &&
+                alphaInfo >= kCGImageAlphaPremultipliedLast &&
+                alphaInfo <= kCGImageAlphaNoneSkipFirst &&
+                bytesPerRow >= width * 4;
+            if(guestData && isEightBitRGBA && hostBytesPerRow % 16) {
+                hostBytesPerRow = (hostBytesPerRow + 15) & ~size_t(15);
+            }
+            if(height && hostBytesPerRow > kMaximumBitmapBytes / height)
+                return 0;
+            const size_t hostByteCount = hostBytesPerRow * height;
             if(guestData) {
                 backing = new BitmapBacking();
                 backing->guestData = guestData;
-                backing->byteCount = byteCount;
-                if(byteCount) {
-                    backing->bytes = std::make_unique<uint8_t[]>(byteCount);
-                    if(Dynarmic_mem_1read(backing->guestData, byteCount,
-                            reinterpret_cast<char *>(backing->bytes.get())) != 0)
-                        {
+                backing->guestBytesPerRow = bytesPerRow;
+                backing->hostBytesPerRow = hostBytesPerRow;
+                backing->height = height;
+                backing->guestByteCount = byteCount;
+                if(hostByteCount) {
+                    backing->bytes = std::make_unique<uint8_t[]>(hostByteCount);
+                    memset(backing->bytes.get(), 0, hostByteCount);
+                    bool copied = true;
+                    for(size_t row = 0; row < height; ++row) {
+                        const u32 guestRow = guestData +
+                            static_cast<u32>(row * bytesPerRow);
+                        if(Dynarmic_mem_1read(guestRow, bytesPerRow,
+                                reinterpret_cast<char *>(backing->bytes.get() +
+                                    row * hostBytesPerRow)) != 0) {
+                            copied = false;
+                            break;
+                        }
+                    }
+                    if(!copied) {
                             delete backing;
                             return 0;
-                        }
+                    }
                     hostData = backing->bytes.get();
                 }
             }
 
-            CGColorSpaceRef colorSpace =
-                SlotHostObject<CGColorSpaceRef>(call, 5);
             CGContextRef context = backing
                 ? CGBitmapContextCreateWithData(hostData, width, height,
-                    SlotU32(call, 3), bytesPerRow, colorSpace,
+                    SlotU32(call, 3), hostBytesPerRow, colorSpace,
                     SlotU32(call, 6), ReleaseBitmapBacking, backing)
                 : CGBitmapContextCreate(nullptr, width, height,
                     SlotU32(call, 3), bytesPerRow, colorSpace,
                     SlotU32(call, 6));
+#ifdef LC32_TRACE_COREGRAPHICS
+            {
+                std::fprintf(stderr,
+                    "LC32 CG: bitmap result context=%p backing=%p guest-bpr=%zu host-bpr=%zu\n",
+                    context, backing, bytesPerRow, hostBytesPerRow);
+            }
+#endif
             if(!context) {
                 delete backing;
                 return 0;
@@ -629,8 +697,11 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
         case LC32CoreGraphicsOpBitmapContextGetBytesPerRow: {
             if(!RequireCoreGraphicsSlots(call, 1)) return 0;
             CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
-            return context
-                ? static_cast<u32>(CGBitmapContextGetBytesPerRow(context)) : 0;
+            BitmapBacking *backing = context
+                ? FindBitmapBacking(context) : nullptr;
+            return backing ? static_cast<u32>(backing->guestBytesPerRow)
+                : context ? static_cast<u32>(CGBitmapContextGetBytesPerRow(context))
+                : 0;
         }
         case LC32CoreGraphicsOpBitmapContextGetData: {
             if(!RequireCoreGraphicsSlots(call, 1)) return 0;
@@ -810,6 +881,53 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             SyncBitmapBacking(context, FindBitmapBacking(context));
             return 1;
         }
+        case LC32CoreGraphicsOpContextDrawRadialGradient: {
+            if(!RequireCoreGraphicsSlots(call, 9)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            CGGradientRef gradient =
+                SlotHostObject<CGGradientRef>(call, 1);
+            if(!context || !gradient) return 0;
+            const u32 options = SlotU32(call, 8);
+            const u32 validOptions = kCGGradientDrawsBeforeStartLocation |
+                kCGGradientDrawsAfterEndLocation;
+            if(options & ~validOptions) return 0;
+            CGContextDrawRadialGradient(context, gradient,
+                CGPointMake(SlotCGFloat(call, 2), SlotCGFloat(call, 3)),
+                SlotCGFloat(call, 4),
+                CGPointMake(SlotCGFloat(call, 5), SlotCGFloat(call, 6)),
+                SlotCGFloat(call, 7),
+                static_cast<CGGradientDrawingOptions>(options));
+            SyncBitmapBacking(context, FindBitmapBacking(context));
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextAddEllipseInRect:
+        case LC32CoreGraphicsOpContextClipToRect:
+        case LC32CoreGraphicsOpContextFillEllipseInRect:
+        case LC32CoreGraphicsOpContextStrokeEllipseInRect: {
+            if(!RequireCoreGraphicsSlots(call, 5)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            if(!context) return 0;
+            const CGRect rect = SlotRect(call, 1);
+            switch(static_cast<LC32CoreGraphicsOpcode>(opcode)) {
+                case LC32CoreGraphicsOpContextAddEllipseInRect:
+                    CGContextAddEllipseInRect(context, rect);
+                    break;
+                case LC32CoreGraphicsOpContextClipToRect:
+                    CGContextClipToRect(context, rect);
+                    break;
+                case LC32CoreGraphicsOpContextFillEllipseInRect:
+                    CGContextFillEllipseInRect(context, rect);
+                    SyncBitmapBacking(context, FindBitmapBacking(context));
+                    break;
+                case LC32CoreGraphicsOpContextStrokeEllipseInRect:
+                    CGContextStrokeEllipseInRect(context, rect);
+                    SyncBitmapBacking(context, FindBitmapBacking(context));
+                    break;
+                default:
+                    break;
+            }
+            return 1;
+        }
         case LC32CoreGraphicsOpContextSetFillColorWithColor:
         case LC32CoreGraphicsOpContextSetStrokeColorWithColor: {
             if(!RequireCoreGraphicsSlots(call, 2)) return 0;
@@ -822,6 +940,33 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             } else {
                 CGContextSetStrokeColorWithColor(context, color);
             }
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextSetRGBFillColor:
+        case LC32CoreGraphicsOpContextSetRGBStrokeColor: {
+            if(!RequireCoreGraphicsSlots(call, 5)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            if(!context) return 0;
+            if(static_cast<LC32CoreGraphicsOpcode>(opcode) ==
+                    LC32CoreGraphicsOpContextSetRGBFillColor) {
+                CGContextSetRGBFillColor(context, SlotCGFloat(call, 1),
+                    SlotCGFloat(call, 2), SlotCGFloat(call, 3),
+                    SlotCGFloat(call, 4));
+            } else {
+                CGContextSetRGBStrokeColor(context, SlotCGFloat(call, 1),
+                    SlotCGFloat(call, 2), SlotCGFloat(call, 3),
+                    SlotCGFloat(call, 4));
+            }
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextSetShadowWithColor: {
+            if(!RequireCoreGraphicsSlots(call, 5)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            CGColorRef color = SlotHostObject<CGColorRef>(call, 4);
+            if(!context) return 0;
+            CGContextSetShadowWithColor(context,
+                CGSizeMake(SlotCGFloat(call, 1), SlotCGFloat(call, 2)),
+                SlotCGFloat(call, 3), color);
             return 1;
         }
         case LC32CoreGraphicsOpContextSetFillColor: {

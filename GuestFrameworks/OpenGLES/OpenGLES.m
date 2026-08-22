@@ -326,10 +326,14 @@ LC32_GL_ARRAY_VOID(glDeleteFramebuffers, LC32OpenGLESOpDeleteFramebuffers,
 LC32_GL_ARRAY_VOID(glDeleteRenderbuffers, LC32OpenGLESOpDeleteRenderbuffers,
     GLuint)
 LC32_GL_ARRAY_VOID(glDeleteTextures, LC32OpenGLESOpDeleteTextures, GLuint)
+LC32_GL_ARRAY_VOID(glDeleteVertexArraysOES,
+    LC32OpenGLESOpDeleteVertexArraysOES, GLuint)
 LC32_GL_ARRAY_OUT(glGenBuffers, LC32OpenGLESOpGenBuffers, GLuint)
 LC32_GL_ARRAY_OUT(glGenFramebuffers, LC32OpenGLESOpGenFramebuffers, GLuint)
 LC32_GL_ARRAY_OUT(glGenRenderbuffers, LC32OpenGLESOpGenRenderbuffers, GLuint)
 LC32_GL_ARRAY_OUT(glGenTextures, LC32OpenGLESOpGenTextures, GLuint)
+LC32_GL_ARRAY_OUT(glGenVertexArraysOES,
+    LC32OpenGLESOpGenVertexArraysOES, GLuint)
 
 void glDeleteProgram(GLuint program) {
     LC32_GL_CALL(LC32OpenGLESOpDeleteProgram, LC32_GL_U32(program));
@@ -865,6 +869,10 @@ void glBindRenderbufferOES(GLenum target, GLuint renderbuffer) {
         LC32_GL_U32(target), LC32_GL_U32(renderbuffer));
 }
 
+void glBindVertexArrayOES(GLuint array) {
+    LC32_GL_CALL(LC32OpenGLESOpBindVertexArrayOES, LC32_GL_U32(array));
+}
+
 void glColor4f(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
     LC32_GL_CALL(LC32OpenGLESOpColor4f,
         LC32_GL_F32(red), LC32_GL_F32(green),
@@ -983,6 +991,19 @@ void glRenderbufferStorageOES(GLenum target, GLenum internalFormat,
     LC32_GL_CALL(LC32OpenGLESOpRenderbufferStorageOES,
         LC32_GL_U32(target), LC32_GL_U32(internalFormat),
         LC32_GL_I32(width), LC32_GL_I32(height));
+}
+
+void glRenderbufferStorageMultisampleAPPLE(GLenum target, GLsizei samples,
+                                            GLenum internalFormat,
+                                            GLsizei width, GLsizei height) {
+    LC32_GL_CALL(LC32OpenGLESOpRenderbufferStorageMultisampleAPPLE,
+        LC32_GL_U32(target), LC32_GL_I32(samples),
+        LC32_GL_U32(internalFormat), LC32_GL_I32(width),
+        LC32_GL_I32(height));
+}
+
+void glResolveMultisampleFramebufferAPPLE(void) {
+    LC32_GL_CALL0(LC32OpenGLESOpResolveMultisampleFramebufferAPPLE);
 }
 
 /* Legacy OES aliases.  These were the only names exposed by the iOS 2.x-era

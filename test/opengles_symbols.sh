@@ -13,6 +13,7 @@ LC_ALL=C sort -c -u "$MANIFEST"
 
 xcrun --sdk iphoneos clang -target armv7s-apple-ios10.3 \
     -isysroot "$SDKROOT" -I"$REPO_ROOT/GuestFrameworks" \
+    -I"$REPO_ROOT/include" \
     -fmodules -fmodules-cache-path="$TEMP_DIR/modules" \
     -Wno-deprecated-module-dot-map -Wno-deprecated-declarations \
     -c "$SOURCE" -o "$TEMP_DIR/OpenGLES.o"

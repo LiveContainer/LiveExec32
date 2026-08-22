@@ -6,9 +6,45 @@
 #include <string.h>
 
 extern UInt8 *LC32GetMutableDataGuestBytes(NSMutableData *data);
+extern BOOL LC32ReserveMutableDataGuestCapacity(NSMutableData *data,
+                                                uint32_t capacity);
 extern uint64_t LC32SynchronizeMutableDataGuestBytes(NSMutableData *data);
 
+enum {
+    LC32MaximumMutableDataCapacity = 256u * 1024u * 1024u,
+};
+
 @implementation NSMutableData (LC32MutableBytes)
+
++ (instancetype)dataWithCapacity:(NSUInteger)capacity {
+    /* Use alloc/init so an inherited call on a concrete guest subclass keeps
+     * that subclass instead of unconditionally manufacturing a Foundation
+     * class-cluster object. */
+    return [[[self alloc] initWithCapacity:capacity] autorelease];
+}
+
+- (instancetype)initWithCapacity:(NSUInteger)capacity {
+    /* Guest-defined NSMutableData subclasses own their storage and primitive
+     * methods.  As with the plain class-cluster initializer, do not attach a
+     * native class-cluster peer to an inherited initializer on such an object. */
+    if(object_getClass(self) != objc_getClass("NSMutableData")) return self;
+    if(capacity > LC32MaximumMutableDataCapacity) {
+        return LC32DisposeFailedInit(self);
+    }
+
+    static uint64_t hostSelector __attribute__((aligned(8)));
+    const uint64_t selector = LC32CachedHostSelector(
+        &hostSelector, _cmd, NO);
+    const uint64_t hostResult = LC32InvokeHostSelector(
+        [self host_self], selector, (uint64_t)capacity, (uint64_t)0);
+    NSMutableData *result = LC32AdoptHostInitializerResult(self, hostResult);
+    if(result && !LC32ReserveMutableDataGuestCapacity(
+            result, (uint32_t)capacity)) {
+        [result release];
+        return nil;
+    }
+    return result;
+}
 
 - (uint64_t)host_self {
     return LC32SynchronizeMutableDataGuestBytes(self);

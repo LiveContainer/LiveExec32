@@ -743,6 +743,16 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
                (method.isInstanceMethod && [selector
                     isEqualToString:@"initWithObjectsAndKeys:"]);
     }
+    if([className isEqualToString:@"NSScanner"]) {
+        return method.isInstanceMethod &&
+               [selector isEqualToString:@"scanDecimal:"];
+    }
+    if([className isEqualToString:@"NSDecimalNumber"]) {
+        return (!method.isInstanceMethod &&
+                [selector isEqualToString:@"decimalNumberWithDecimal:"]) ||
+               (method.isInstanceMethod &&
+                [selector isEqualToString:@"initWithDecimal:"]);
+    }
     if([className isEqualToString:@"NSString"]) {
         if(!method.isInstanceMethod) {
             return [selector isEqualToString:@"stringWithFormat:"] ||

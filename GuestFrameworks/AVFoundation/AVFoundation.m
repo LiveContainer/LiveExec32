@@ -17,3 +17,11 @@ NSString *const AVAudioSessionInterruptionOptionKey =
     @"AVAudioSessionInterruptionOptionKey";
 NSString *const AVAudioSessionInterruptionTypeKey =
     @"AVAudioSessionInterruptionTypeKey";
+NSString *const AVEncoderAudioQualityKey =
+    @"AVEncoderQualityKey";
+NSString *const AVFormatIDKey =
+    @"AVFormatIDKey";
+NSString *const AVNumberOfChannelsKey =
+    @"AVNumberOfChannelsKey";
+NSString *const AVSampleRateKey =
+    @"AVSampleRateKey";

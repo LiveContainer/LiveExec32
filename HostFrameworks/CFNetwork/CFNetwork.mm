@@ -211,6 +211,11 @@ u32 LC32_CFNetwork_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
         case LC32CFNetworkOpCopySystemProxySettings:
             return RequireSlots(call, 0) ? GuestForCreatedObject(
                 CFNetworkCopySystemProxySettings()) : 0;
+        case LC32CFNetworkOpCopyProxiesForURL:
+            return RequireSlots(call, 2) ? GuestForCreatedObject(
+                CFNetworkCopyProxiesForURL(
+                    SlotHostObject<CFURLRef>(call, 0),
+                    SlotHostObject<CFDictionaryRef>(call, 1))) : 0;
         case LC32CFNetworkOpReadStreamCreateForHTTPRequest:
             return RequireSlots(call, 1) ? GuestForCreatedObject(
                 CFReadStreamCreateForHTTPRequest(kCFAllocatorDefault,

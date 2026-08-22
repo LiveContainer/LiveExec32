@@ -3,6 +3,8 @@
 #include <stdint.h>
 
 extern UInt8 *LC32GetMutableDataGuestBytes(NSMutableData *data);
+extern BOOL LC32ReserveMutableDataGuestCapacity(NSMutableData *data,
+                                                uint32_t capacity);
 extern void LC32InvalidateDataGuestBuffer(NSData *data);
 
 enum {
@@ -50,8 +52,14 @@ CFMutableDataRef CFDataCreateMutable(CFAllocatorRef allocator,
                                      CFIndex capacity) {
     (void)allocator;
     if(!LC32CFDataValidLength(capacity)) return NULL;
-    return (CFMutableDataRef)LC32_CF_CALL(
+    CFMutableDataRef data = (CFMutableDataRef)LC32_CF_CALL(
         LC32CoreFoundationOpDataCreateMutable, LC32_CF_U32(capacity));
+    if(data && !LC32ReserveMutableDataGuestCapacity(
+            (NSMutableData *)data, (uint32_t)capacity)) {
+        CFRelease(data);
+        return NULL;
+    }
+    return data;
 }
 
 CFMutableDataRef CFDataCreateMutableCopy(CFAllocatorRef allocator,
@@ -59,9 +67,15 @@ CFMutableDataRef CFDataCreateMutableCopy(CFAllocatorRef allocator,
                                          CFDataRef data) {
     (void)allocator;
     if(!data || !LC32CFDataValidLength(capacity)) return NULL;
-    return (CFMutableDataRef)LC32_CF_CALL(
+    CFMutableDataRef copy = (CFMutableDataRef)LC32_CF_CALL(
         LC32CoreFoundationOpDataCreateMutableCopy,
         LC32_CF_U32(capacity), LC32_CF_HOST(data));
+    if(copy && !LC32ReserveMutableDataGuestCapacity(
+            (NSMutableData *)copy, (uint32_t)capacity)) {
+        CFRelease(copy);
+        return NULL;
+    }
+    return copy;
 }
 
 CFIndex CFDataGetLength(CFDataRef data) {

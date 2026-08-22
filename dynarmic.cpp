@@ -28,6 +28,7 @@
 
 #include <mach/thread_act.h>
 #include <mach/arm/thread_status.h>
+#include <mach/clock.h>
 #include <mach/mig_errors.h>
 #include <mach/task_info.h>
 #include <mach/vm_map.h>
@@ -400,6 +401,54 @@ static bool NativeGuestThreadsRequested() {
 static bool NativeGuestThreadsEnabled() {
     return NativeGuestThreadsRequested();
 }
+
+/*
+ * Compile-time diagnostic for tracking corruption of one guest word.
+ * Dynarmic's
+ * normal page-table path intentionally bypasses MemoryWrite* callbacks, so a
+ * watched page must remain unpublished there for the duration of the run.
+ * The authoritative khash mapping remains present and services callbacks.
+ */
+#ifdef LC32_GUEST_MEMORY_WATCH_ADDRESS
+#ifndef LC32_GUEST_MEMORY_WATCH_FORCE_CALLBACKS
+#define LC32_GUEST_MEMORY_WATCH_FORCE_CALLBACKS 1
+#endif
+static constexpr u64 guestMemoryWatchAddress =
+    static_cast<u64>(LC32_GUEST_MEMORY_WATCH_ADDRESS);
+static constexpr bool guestMemoryWatchForceCallbacks =
+    LC32_GUEST_MEMORY_WATCH_FORCE_CALLBACKS != 0;
+static_assert(guestMemoryWatchAddress <=
+        UINT32_MAX - sizeof(u32) + 1,
+    "LC32_GUEST_MEMORY_WATCH_ADDRESS must name a 32-bit guest word");
+
+static void ConfigureGuestMemoryWatch() {
+    fprintf(stderr,
+        "LC32: watching guest writes at 0x%08llx-0x%08llx "
+        "(%s page-table callbacks)\n",
+        guestMemoryWatchAddress,
+        guestMemoryWatchAddress + sizeof(u32),
+        guestMemoryWatchForceCallbacks ? "forcing" : "not forcing");
+}
+
+static bool GuestMemoryWatchOverlaps(u64 address, size_t size) {
+    return size != 0 &&
+        address < guestMemoryWatchAddress + sizeof(u32) &&
+        guestMemoryWatchAddress < address + size;
+}
+
+static bool GuestMemoryWatchContainsPage(u64 guestPageAddress) {
+    if (!guestMemoryWatchForceCallbacks) {
+        return false;
+    }
+    const u64 watchedStart =
+        guestMemoryWatchAddress & ~u64(DYN_PAGE_MASK);
+    const u64 watchedEnd =
+        (guestMemoryWatchAddress + sizeof(u32) - 1) &
+        ~u64(DYN_PAGE_MASK);
+    const u64 page = guestPageAddress & ~u64(DYN_PAGE_MASK);
+    return page == watchedStart || page == watchedEnd;
+}
+#endif
 
 static Dynarmic::A32::UserCallbacks *CurrentUserCallbacks();
 
@@ -839,8 +888,10 @@ static u32 GuestBsdthreadTerminate(
 static u64 GuestCurrentThreadSelfId();
 static mach_port_t GuestCurrentSyntheticThreadPort();
 static int GuestThreadSigmask(int how, u32 guestSet, u32 guestOldSet);
-static u32 GuestPsynchMutexWait(u32 mutex, u32 generation);
-static u32 GuestPsynchMutexDrop(u32 mutex);
+static u32 GuestPsynchMutexWait(
+    u32 mutex, u32 mgen, u32 ugen, u32 flags);
+static u32 GuestPsynchMutexDrop(
+    u32 mutex, u32 mgen, u32 ugen, u32 flags);
 static u32 GuestPsynchConditionWait(
     u32 condition, u32 conditionSequence,
     u32 conditionSSequence, u32 mutex,
@@ -1930,6 +1981,60 @@ guest_mach_msg_trap(u32 guest_msg,
             Mess->Out.port.type = MACH_MSG_PORT_DESCRIPTOR;
             Mess->Out.port.disposition = 17;
             Mess->Out.msgh_body.msgh_descriptor_count = 1;
+            break;
+        }
+        case 1000: { // clock_get_time
+            /*
+             * The clock service port returned by host_get_clock_service is a
+             * real host port, but forwarding an iOS 10 MIG request would tie
+             * the guest to the host SDK's generated wire declarations.  The
+             * clock_get_time request is header-only and its ARM32 reply has a
+             * fixed 44-byte layout, so invoke the host API and marshal that
+             * stable payload explicitly.
+             */
+            struct __attribute__((packed, aligned(4))) ClockGetTimeReply32 {
+                mach_msg_header_t Head;
+                NDR_record_t NDR;
+                kern_return_t RetCode;
+                mach_timespec_t cur_time;
+            };
+            static_assert(sizeof(mach_msg_header_t) == 24,
+                "unexpected Mach message header layout");
+            static_assert(sizeof(ClockGetTimeReply32) == 44,
+                "unexpected 32-bit clock_get_time reply layout");
+
+            if (send_size != sizeof(mach_msg_header_t)) {
+                if (rcv_size < sizeof(mig_reply_error_t)) {
+                    host_header->msgh_size = sizeof(mig_reply_error_t);
+                    result = MACH_RCV_TOO_LARGE;
+                } else {
+                    auto *error = reinterpret_cast<mig_reply_error_t *>(
+                        host_header);
+                    host_header->msgh_size = sizeof(*error);
+                    error->NDR = NDR_record;
+                    error->RetCode = MIG_BAD_ARGUMENTS;
+                }
+                break;
+            }
+            if (rcv_size < sizeof(ClockGetTimeReply32)) {
+                host_header->msgh_size = sizeof(ClockGetTimeReply32);
+                result = MACH_RCV_TOO_LARGE;
+                break;
+            }
+
+            auto *reply = reinterpret_cast<ClockGetTimeReply32 *>(
+                host_header);
+            mach_timespec_t currentTime = {};
+            const kern_return_t kr = clock_get_time(
+                host_header->msgh_request_port, &currentTime);
+            reply->NDR = NDR_record;
+            reply->RetCode = kr;
+            if (kr == KERN_SUCCESS) {
+                reply->cur_time = currentTime;
+                host_header->msgh_size = sizeof(*reply);
+            } else {
+                host_header->msgh_size = sizeof(mig_reply_error_t);
+            }
             break;
         }
         case DYLD_PROCESS_INFO_NOTIFY_LOAD_ID: {
@@ -4850,32 +4955,86 @@ kern_return_t guest_mk_timer_cancel(
     return result;
 }
 
+static bool GuestVmRangeHasMappingLocked(
+        u64 address, u64 size) {
+    if (sharedHandle.memory == nullptr || size == 0 ||
+            (address & DYN_PAGE_MASK) != 0 ||
+            (size & DYN_PAGE_MASK) != 0 ||
+            !GuestAddressRangeIsValid32(address, size)) {
+        return false;
+    }
+
+    khash_t(memory) *memory = sharedHandle.memory;
+    const u64 end = address + size;
+    for (u64 page = address; page < end;
+            page += DYN_PAGE_SIZE) {
+        if (kh_get(memory, memory, page) != kh_end(memory)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 kern_return_t guest__kernelrpc_mach_vm_allocate_trap(u32 target, u32 guest_address, mach_vm_size_t size, int flags) {
     if (target != mach_task_self()) {
         return KERN_FAILURE;
     }
 
-    // FIXME: change the behavior of this to ensure re-mmapping works
-    //int tag = flags >> 24;
-    bool anywhere = (flags & VM_FLAGS_ANYWHERE) != 0;
+    const bool anywhere = (flags & VM_FLAGS_ANYWHERE) != 0;
+    const bool overwrite = (flags & VM_FLAGS_OVERWRITE) != 0;
+    const u32 suppliedAddress =
+        CurrentUserCallbacks()->MemoryRead32(guest_address);
     if (anywhere) {
         // Sometimes the address pointer will contain garbage value, change it to 0
         CurrentUserCallbacks()->MemoryWrite32(
             guest_address, 0);
     }
-    u32 result = Dynarmic_mmap(
-        CurrentUserCallbacks()->MemoryRead32(guest_address),
-        size, PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | MAP_ANONYMOUS |
-            (anywhere ? 0 : MAP_FIXED),
-        -1, 0);
-    if (result == -1) {
-/*
-        if (!anywhere && tag != VM_MEMORY_REALLOC) {
-            printf("IllegalStateException\n");
-            abort();
+
+    if (size == 0) {
+        CurrentUserCallbacks()->MemoryWrite32(
+            guest_address, 0);
+        return KERN_SUCCESS;
+    }
+    if (size > UINT64_MAX - DYN_PAGE_MASK) {
+        return KERN_NO_SPACE;
+    }
+
+    const u64 allocationSize =
+        (size + DYN_PAGE_MASK) & ~u64(DYN_PAGE_MASK);
+    const u32 requestedAddress = anywhere ? 0 :
+        suppliedAddress & ~u32(DYN_PAGE_MASK);
+    if (!GuestAddressRangeIsValid32(
+            requestedAddress, allocationSize)) {
+        return KERN_NO_SPACE;
+    }
+
+    u32 result;
+    if (!anywhere && !overwrite) {
+        /*
+         * Unlike mmap(MAP_FIXED), fixed-address vm_allocate does not replace
+         * existing mappings unless VM_FLAGS_OVERWRITE was explicitly passed.
+         * Keep the collision preflight and mapping atomic so another native
+         * guest thread cannot claim a page between the two operations.
+         */
+        std::lock_guard<std::recursive_mutex> lock(guestVmMutex);
+        if (GuestVmRangeHasMappingLocked(
+                requestedAddress, allocationSize)) {
+            return KERN_NO_SPACE;
         }
-*/
+        result = Dynarmic_mmap(
+            requestedAddress, allocationSize,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+            -1, 0);
+    } else {
+        result = Dynarmic_mmap(
+            requestedAddress, allocationSize,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS |
+                (anywhere ? 0 : MAP_FIXED),
+            -1, 0);
+    }
+    if (result == -1) {
         return KERN_NO_SPACE;
     }
     CurrentUserCallbacks()->MemoryWrite32(
@@ -5331,10 +5490,16 @@ static int HostProtectionForGuestPermissions(
 }
 
 static void *GuestPageTablePointer(
+        u64 guestPageAddress,
         const t_memory_page page) {
     if (page == nullptr || page->addr == nullptr) {
         return nullptr;
     }
+#ifdef LC32_GUEST_MEMORY_WATCH_ADDRESS
+    if (GuestMemoryWatchContainsPage(guestPageAddress)) {
+        return nullptr;
+    }
+#endif
     if (page->enforceDataPermissions &&
             (page->perms &
                 (PROT_READ | PROT_WRITE)) !=
@@ -5343,6 +5508,121 @@ static void *GuestPageTablePointer(
     }
     return page->addr;
 }
+
+#ifdef LC32_GUEST_MEMORY_WATCH_ADDRESS
+static bool SnapshotGuestMemoryWatchLocked(u32 *value) {
+    if (value == nullptr || sharedHandle.memory == nullptr) {
+        return false;
+    }
+
+    u32 snapshot = 0;
+    auto *output = reinterpret_cast<uint8_t *>(&snapshot);
+    u64 address = guestMemoryWatchAddress;
+    size_t remaining = sizeof(snapshot);
+    while (remaining != 0) {
+        const u64 pageAddress = address & ~u64(DYN_PAGE_MASK);
+        const khiter_t iterator = kh_get(
+            memory, sharedHandle.memory, pageAddress);
+        if (iterator == kh_end(sharedHandle.memory)) {
+            return false;
+        }
+        const t_memory_page page =
+            kh_value(sharedHandle.memory, iterator);
+        if (page == nullptr || page->addr == nullptr) {
+            return false;
+        }
+        const size_t pageOffset = address & DYN_PAGE_MASK;
+        const size_t chunk = std::min(
+            remaining,
+            static_cast<size_t>(DYN_PAGE_SIZE - pageOffset));
+        memcpy(output,
+            static_cast<const uint8_t *>(page->addr) + pageOffset,
+            chunk);
+        output += chunk;
+        address += chunk;
+        remaining -= chunk;
+    }
+    *value = snapshot;
+    return true;
+}
+
+static void LogGuestMemoryWatchConsistencyLocked(
+        const char *reason) {
+    const u64 pageAddress =
+        guestMemoryWatchAddress & ~u64(DYN_PAGE_MASK);
+    const u64 pageIndex = pageAddress >> DYN_PAGE_BITS;
+    void *pageTablePointer = nullptr;
+    if (sharedHandle.page_table != nullptr &&
+            pageIndex < sharedHandle.num_page_table_entries) {
+        pageTablePointer = __atomic_load_n(
+            &sharedHandle.page_table[pageIndex],
+            __ATOMIC_ACQUIRE);
+    }
+
+    t_memory_page page = nullptr;
+    if (sharedHandle.memory != nullptr) {
+        const khiter_t iterator = kh_get(
+            memory, sharedHandle.memory, pageAddress);
+        if (iterator != kh_end(sharedHandle.memory)) {
+            page = kh_value(sharedHandle.memory, iterator);
+        }
+    }
+
+    u32 authoritativeValue = 0;
+    const bool hasAuthoritativeValue =
+        SnapshotGuestMemoryWatchLocked(&authoritativeValue);
+    fprintf(stderr,
+        "LC32 guest memory watch snapshot: reason=%s "
+        "guest=0x%08llx page=0x%08llx index=0x%llx "
+        "pte=%p khash_page=%p khash_addr=%p "
+        "perms=0x%x enforce=%d backing=%p backing_addr=%p "
+        "backing_size=0x%zx value=%s%08x match=%d\n",
+        reason != nullptr ? reason : "unknown",
+        guestMemoryWatchAddress, pageAddress, pageIndex,
+        pageTablePointer, static_cast<void *>(page),
+        page != nullptr ? page->addr : nullptr,
+        page != nullptr ? page->perms : 0,
+        page != nullptr ? page->enforceDataPermissions : false,
+        page != nullptr
+            ? static_cast<void *>(page->backing) : nullptr,
+        page != nullptr && page->backing != nullptr
+            ? page->backing->addr : nullptr,
+        page != nullptr && page->backing != nullptr
+            ? page->backing->size : 0,
+        hasAuthoritativeValue ? "" : "unmapped/",
+        authoritativeValue,
+        page != nullptr && pageTablePointer == page->addr);
+}
+
+static void LogGuestMemoryWatchConsistency(
+        const char *reason) {
+    std::lock_guard<std::recursive_mutex> lock(
+        guestVmMutex);
+    LogGuestMemoryWatchConsistencyLocked(reason);
+}
+
+static void LogGuestMemoryWatchWriteLocked(
+        const char *operation, u64 address, size_t size,
+        bool hadOldValue, u32 oldValue) {
+    if (!GuestMemoryWatchOverlaps(address, size)) {
+        return;
+    }
+    u32 newValue = 0;
+    const bool hasNewValue =
+        SnapshotGuestMemoryWatchLocked(&newValue);
+    const u32 pc = threadHandle.jit != nullptr
+        ? threadHandle.jit->Regs()[Reg::PC] : 0;
+    const u32 lr = threadHandle.jit != nullptr
+        ? threadHandle.jit->Regs()[Reg::LR] : 0;
+    fprintf(stderr,
+        "LC32 guest memory watch: op=%s write=0x%08llx+0x%zx "
+        "old=%s%08x new=%s%08x pc=%08x lr=%08x host_thread=%u\n",
+        operation, address, size,
+        hadOldValue ? "" : "unmapped/", oldValue,
+        hasNewValue ? "" : "unmapped/", newValue,
+        pc, lr, pthread_mach_thread_np(pthread_self()));
+}
+#endif
 
 static char *get_memory_page_with_permissions(
         u64 vaddr, int requiredPermissions) {
@@ -5507,6 +5787,10 @@ static bool write_guest_memory_with_permissions(
     }
     std::lock_guard<std::recursive_mutex> lock(
         guestVmMutex);
+#ifdef LC32_GUEST_MEMORY_WATCH_ADDRESS
+    const u64 originalAddress = address;
+    const size_t originalSize = size;
+#endif
     /*
      * Validate the complete range before modifying it. An unaligned scalar
      * store may span two guest pages; discovering a protected second page
@@ -5533,6 +5817,12 @@ static bool write_guest_memory_with_permissions(
 
     const auto *input =
         static_cast<const uint8_t *>(source);
+#ifdef LC32_GUEST_MEMORY_WATCH_ADDRESS
+    u32 oldWatchedValue = 0;
+    const bool hadOldWatchedValue =
+        GuestMemoryWatchOverlaps(address, size) &&
+        SnapshotGuestMemoryWatchLocked(&oldWatchedValue);
+#endif
     while (size != 0) {
         char *page =
             get_memory_page_with_permissions(
@@ -5551,6 +5841,11 @@ static bool write_guest_memory_with_permissions(
         address += chunk;
         size -= chunk;
     }
+#ifdef LC32_GUEST_MEMORY_WATCH_ADDRESS
+    LogGuestMemoryWatchWriteLocked(
+        "permissioned", originalAddress, originalSize,
+        hadOldWatchedValue, oldWatchedValue);
+#endif
     return true;
 }
 
@@ -5795,6 +6090,12 @@ compare_exchange_guest_memory_with_permissions(
             ComparisonFailed;
     }
 
+#ifdef LC32_GUEST_MEMORY_WATCH_ADDRESS
+    u32 oldWatchedValue = 0;
+    const bool hadOldWatchedValue =
+        GuestMemoryWatchOverlaps(address, sizeof(T)) &&
+        SnapshotGuestMemoryWatchLocked(&oldWatchedValue);
+#endif
     const auto *valueBytes =
         reinterpret_cast<const uint8_t *>(&value);
     u64 writeAddress = address;
@@ -5814,6 +6115,11 @@ compare_exchange_guest_memory_with_permissions(
         writeAddress += chunk;
         remaining -= chunk;
     }
+#ifdef LC32_GUEST_MEMORY_WATCH_ADDRESS
+    LogGuestMemoryWatchWriteLocked(
+        "exclusive", address, sizeof(T),
+        hadOldWatchedValue, oldWatchedValue);
+#endif
     return ExclusiveGuestWriteResult::Committed;
 }
 
@@ -6326,6 +6632,9 @@ public:
     }
 
     void DumpCrashReport(int signal = SIGABRT, bool pendingSignal = true) {
+#ifdef LC32_GUEST_MEMORY_WATCH_ADDRESS
+        LogGuestMemoryWatchConsistency("crash");
+#endif
         if (guestDebuggerEnabled.load(std::memory_order_acquire)) {
             pendingGuestAbortMetadata = {};
             pendingGuestCrashMessage.clear();
@@ -7336,11 +7645,13 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             }
             case 301: // psynch_mutexwait
                 cpu->Regs()[0] = GuestPsynchMutexWait(
-                    cpu->Regs()[0], cpu->Regs()[1]);
+                    cpu->Regs()[0], cpu->Regs()[1],
+                    cpu->Regs()[2], cpu->Regs()[5]);
                 break;
             case 302: // psynch_mutexdrop
-                cpu->Regs()[0] =
-                    GuestPsynchMutexDrop(cpu->Regs()[0]);
+                cpu->Regs()[0] = GuestPsynchMutexDrop(
+                    cpu->Regs()[0], cpu->Regs()[1],
+                    cpu->Regs()[2], cpu->Regs()[5]);
                 break;
             case 303: // psynch_cvbroad
                 cpu->Regs()[0] = GuestPsynchConditionSignal(
@@ -7857,6 +8168,31 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 cpu->Regs()[0] = result;
                 break;
             }
+            case 1022: { // LC32LookupHostMapping
+                const u64 result = LC32LookupHostMapping(cpu->Regs()[0]);
+                cpu->Regs()[0] = static_cast<u32>(result);
+                cpu->Regs()[1] = static_cast<u32>(result >> 32);
+                break;
+            }
+            case 1023: { // LC32UpdateHostMapping
+                if(cpu->IsExecuting()) {
+                    /* Publishing may initialize native Objective-C weak
+                     * storage, so unwind the JIT before entering libobjc. */
+                    cpu->HaltExecution(LC32HaltReasonSVC);
+                    return;
+                }
+                const u32 guestObject = cpu->Regs()[0];
+                const auto operation =
+                    static_cast<LC32HostMappingOperation>(cpu->Regs()[1]);
+                const u64 hostObject = static_cast<u64>(cpu->Regs()[2]) |
+                    (static_cast<u64>(cpu->Regs()[3]) << 32);
+                const u32 result = InvokeNativeGuestHostCall([&] {
+                    return LC32UpdateHostMapping(
+                        guestObject, operation, hostObject);
+                });
+                cpu->Regs()[0] = result;
+                break;
+            }
             default:
                 printf("Unhandled svc number: %d\n", NR);
                 SetPendingGuestCrashMessage(
@@ -7972,6 +8308,13 @@ constexpr u32 GuestPsynchRwExclusiveBit = 0x02u;
 constexpr u32 GuestPsynchRwWriterBit = 0x04u;
 constexpr u32 GuestPsynchRwSequenceSavedWriterBit = 0x04u;
 constexpr u32 GuestPsynchRwOverlapBit = 0x40u;
+constexpr u32 GuestPthreadPolicyFlagsMask = 0x1c0u;
+constexpr u32 GuestPthreadMutexPolicyFirstFit = 0x080u;
+
+static bool GuestPsynchMutexIsFirstFit(u32 flags) {
+    return (flags & GuestPthreadPolicyFlagsMask) ==
+        GuestPthreadMutexPolicyFirstFit;
+}
 
 static bool GuestPsynchSequenceLower(u32 lhs, u32 rhs) {
     lhs &= GuestPsynchCountMask;
@@ -8069,6 +8412,7 @@ struct GuestThreadContext {
     u32 waitAddress = 0;
     u32 wakeResult = 0;
     u64 waitSequence = 0;
+    u32 mutexSequence = 0;
     u32 conditionSequence = 0;
     GuestRwlockWaitType rwlockWaitType =
         GuestRwlockWaitType::None;
@@ -8152,9 +8496,9 @@ struct NativeDebuggerCoordinator {
 
 NativeDebuggerCoordinator nativeDebugger;
 
-struct GuestPsynchPrepost {
-    GuestThreadWaitKind kind;
+struct GuestMutexPrepost {
     u32 address;
+    u32 sequence;
     size_t count;
 };
 
@@ -8173,7 +8517,7 @@ struct GuestConditionPrepost {
 };
 
 std::mutex guestPsynchPrepostMutex;
-std::vector<GuestPsynchPrepost> guestPsynchPreposts;
+std::vector<GuestMutexPrepost> guestMutexPreposts;
 std::vector<GuestConditionPrepost> guestConditionPreposts;
 
 struct NativeGuestWaiter {
@@ -8183,6 +8527,7 @@ struct NativeGuestWaiter {
     GuestRwlockWaitType rwlockWaitType =
         GuestRwlockWaitType::None;
     u32 rwlockSequence = 0;
+    u32 mutexSequence = 0;
     u32 conditionSequence = 0;
     mach_port_t threadPort = MACH_PORT_NULL;
     u32 wakeResult = 0;
@@ -9482,7 +9827,8 @@ bool ParkCurrentGuestThread(
         GuestRwlockWaitType rwlockWaitType =
             GuestRwlockWaitType::None,
         u32 rwlockSequence = 0,
-        u32 conditionSequence = 0) {
+        u32 conditionSequence = 0,
+        u32 mutexSequence = 0) {
     EnsureGuestThreadRegistry();
     if (GuestWorkqueueActiveForCurrentThread()) {
         return false;
@@ -9501,6 +9847,7 @@ bool ParkCurrentGuestThread(
     current->wakeResult = wakeResult;
     current->waitSequence = guestNextWaitSequence.fetch_add(
         1, std::memory_order_relaxed);
+    current->mutexSequence = mutexSequence;
     current->conditionSequence = conditionSequence;
     current->rwlockWaitType = rwlockWaitType;
     current->rwlockSequence = rwlockSequence;
@@ -9510,6 +9857,7 @@ bool ParkCurrentGuestThread(
         current->waitAddress = 0;
         current->wakeResult = 0;
         current->waitSequence = 0;
+        current->mutexSequence = 0;
         current->conditionSequence = 0;
         current->rwlockWaitType =
             GuestRwlockWaitType::None;
@@ -9550,6 +9898,7 @@ size_t WakeGuestThreads(
         selected->waitKind = GuestThreadWaitKind::None;
         selected->waitAddress = 0;
         selected->waitSequence = 0;
+        selected->mutexSequence = 0;
         selected->conditionSequence = 0;
         selected->rwlockWaitType =
             GuestRwlockWaitType::None;
@@ -9567,6 +9916,46 @@ size_t WakeGuestThreads(
         }
     }
     return count;
+}
+
+static size_t WakeGuestMutexThread(
+        u32 address, u32 targetSequence, bool firstFit) {
+    EnsureGuestThreadRegistry();
+    std::lock_guard<std::recursive_mutex> lock(
+        guestThreadMutex);
+    GuestThreadContext *selected = nullptr;
+    for (GuestThreadContext &thread : guestThreads) {
+        if (!thread.alive || thread.runnable ||
+                thread.waitKind != GuestThreadWaitKind::Mutex ||
+                thread.waitAddress != address ||
+                (!firstFit &&
+                 thread.mutexSequence != targetSequence)) {
+            continue;
+        }
+        if (selected == nullptr ||
+                thread.waitSequence < selected->waitSequence) {
+            selected = &thread;
+        }
+    }
+    if (selected == nullptr) {
+        return 0;
+    }
+
+    selected->runnable = true;
+    selected->waitKind = GuestThreadWaitKind::None;
+    selected->waitAddress = 0;
+    selected->waitSequence = 0;
+    selected->mutexSequence = 0;
+    selected->conditionSequence = 0;
+    selected->rwlockWaitType = GuestRwlockWaitType::None;
+    selected->rwlockSequence = 0;
+    if (selected->savedValid) {
+        selected->saved.regs[Reg::R0] = selected->wakeResult;
+        selected->saved.cpsr &=
+            ~(static_cast<u32>(1) << CARRY_BIT);
+    }
+    selected->wakeResult = 0;
+    return 1;
 }
 
 static size_t WakeGuestConditionThreads(
@@ -9604,6 +9993,7 @@ static size_t WakeGuestConditionThreads(
         selected->waitKind = GuestThreadWaitKind::None;
         selected->waitAddress = 0;
         selected->waitSequence = 0;
+        selected->mutexSequence = 0;
         selected->conditionSequence = 0;
         if (selected->savedValid) {
             /* A registered CV waiter returns zero.  The signal syscall's
@@ -9706,6 +10096,7 @@ static u32 GrantCooperativeGuestRwlockThreads(
         thread->waitKind = GuestThreadWaitKind::None;
         thread->waitAddress = 0;
         thread->waitSequence = 0;
+        thread->mutexSequence = 0;
         thread->conditionSequence = 0;
         thread->rwlockWaitType =
             GuestRwlockWaitType::None;
@@ -9723,35 +10114,38 @@ static u32 GrantCooperativeGuestRwlockThreads(
     return update;
 }
 
-void RecordGuestPsynchPrepost(
-        GuestThreadWaitKind kind, u32 address) {
+static void RecordGuestMutexPrepost(
+        u32 address, u32 sequence) {
     std::lock_guard<std::mutex> lock(
         guestPsynchPrepostMutex);
-    for (GuestPsynchPrepost &prepost : guestPsynchPreposts) {
-        if (prepost.kind == kind &&
-                prepost.address == address) {
+    sequence &= GuestPsynchCountMask;
+    for (GuestMutexPrepost &prepost : guestMutexPreposts) {
+        if (prepost.address == address &&
+                prepost.sequence == sequence) {
             ++prepost.count;
             return;
         }
     }
-    guestPsynchPreposts.push_back({
-        .kind = kind,
+    guestMutexPreposts.push_back({
         .address = address,
+        .sequence = sequence,
         .count = 1,
     });
 }
 
-bool ConsumeGuestPsynchPrepost(
-        GuestThreadWaitKind kind, u32 address) {
+static bool ConsumeGuestMutexPrepost(
+        u32 address, u32 sequence, bool firstFit) {
     std::lock_guard<std::mutex> lock(
         guestPsynchPrepostMutex);
-    for (auto it = guestPsynchPreposts.begin();
-            it != guestPsynchPreposts.end(); ++it) {
-        if (it->kind != kind || it->address != address) {
+    sequence &= GuestPsynchCountMask;
+    for (auto it = guestMutexPreposts.begin();
+            it != guestMutexPreposts.end(); ++it) {
+        if (it->address != address ||
+                (!firstFit && it->sequence != sequence)) {
             continue;
         }
         if (--it->count == 0) {
-            guestPsynchPreposts.erase(it);
+            guestMutexPreposts.erase(it);
         }
         return true;
     }
@@ -11983,6 +12377,8 @@ static u32 PostNativeGuestRwlockUnlockLocked(
 static u32 WaitNativeGuestThread(
         GuestThreadWaitKind kind, u32 address,
         u32 wakeResult,
+        u32 mutexSequence = 0,
+        bool mutexFirstFit = false,
         GuestRwlockWaitType rwlockWaitType =
             GuestRwlockWaitType::None,
         u32 rwlockSequence = 0,
@@ -12007,6 +12403,7 @@ static u32 WaitNativeGuestThread(
     waiter->address = address;
     waiter->threadPort = GuestCurrentSyntheticThreadPort();
     waiter->wakeResult = wakeResult;
+    waiter->mutexSequence = mutexSequence;
     waiter->rwlockWaitType = rwlockWaitType;
     waiter->rwlockSequence = rwlockSequence;
     waiter->conditionSequence = conditionSequence;
@@ -12028,9 +12425,9 @@ static u32 WaitNativeGuestThread(
         return return_with_carry_direct(
             static_cast<int>(GuestPsynchCountIncrement), false);
     }
-    if (kind != GuestThreadWaitKind::Rwlock &&
-            kind != GuestThreadWaitKind::Condition &&
-            ConsumeGuestPsynchPrepost(kind, address)) {
+    if (kind == GuestThreadWaitKind::Mutex &&
+            ConsumeGuestMutexPrepost(
+                address, mutexSequence, mutexFirstFit)) {
         return return_with_carry_direct(
             static_cast<int>(wakeResult), false);
     }
@@ -12170,6 +12567,30 @@ static size_t WakeNativeGuestThreadsLocked(
 }
 
 /* nativeGuestWaitMutex must be held. */
+static size_t WakeNativeGuestMutexThreadLocked(
+        u32 address, u32 targetSequence, bool firstFit) {
+    std::shared_ptr<NativeGuestWaiter> selected;
+    for (const auto &waiter : nativeGuestWaiters) {
+        if (waiter->signaled ||
+                waiter->kind != GuestThreadWaitKind::Mutex ||
+                waiter->address != address ||
+                (!firstFit &&
+                 waiter->mutexSequence != targetSequence)) {
+            continue;
+        }
+        if (!selected || waiter->sequence < selected->sequence) {
+            selected = waiter;
+        }
+    }
+    if (!selected) {
+        return 0;
+    }
+    selected->signaled = true;
+    selected->condition.notify_one();
+    return 1;
+}
+
+/* nativeGuestWaitMutex must be held. */
 static size_t WakeNativeGuestConditionThreadsLocked(
         u32 address, u32 throughSequence, bool wakeAll,
         mach_port_t targetThread = MACH_PORT_NULL) {
@@ -12220,44 +12641,77 @@ static size_t WakeNativeGuestThreads(
 }
 
 static u32 GuestPsynchMutexWait(
-        u32 mutex, u32 generation) {
-    const u32 wakeResult =
-        (generation & ~0xffu) | 0x03u;
+        u32 mutex, u32 mgen, u32 ugen, u32 flags) {
+    const u32 lockSequence = mgen & GuestPsynchCountMask;
+    const bool firstFit = GuestPsynchMutexIsFirstFit(flags);
+    const u32 wakeResult = lockSequence |
+        GuestPsynchRwKernelBit | GuestPsynchRwExclusiveBit;
+#ifdef LC32_TRACE_PSYNCH_MUTEX
+    fprintf(stderr,
+        "LC32: psynch_mutexwait tid=%llu addr=%08x "
+        "mgen=%08x ugen=%08x flags=%08x policy=%s\n",
+        static_cast<unsigned long long>(
+            CurrentGuestThreadId()),
+        mutex, mgen, ugen, flags,
+        firstFit ? "firstfit" : "fairshare");
+    fflush(stderr);
+#endif
     if (NativeGuestThreadIsCurrent()) {
         return WaitNativeGuestThread(
-            GuestThreadWaitKind::Mutex, mutex, wakeResult);
+            GuestThreadWaitKind::Mutex, mutex, wakeResult,
+            lockSequence, firstFit);
     }
-    if (ConsumeGuestPsynchPrepost(
-            GuestThreadWaitKind::Mutex, mutex)) {
+    if (ConsumeGuestMutexPrepost(
+            mutex, lockSequence, firstFit)) {
         return return_with_carry_direct(
             static_cast<int>(wakeResult), false);
     }
     if (ParkCurrentGuestThread(
-            GuestThreadWaitKind::Mutex, mutex, wakeResult)) {
+            GuestThreadWaitKind::Mutex, mutex, wakeResult,
+            GuestRwlockWaitType::None, 0, 0,
+            lockSequence)) {
         return return_with_carry_direct(0, false);
     }
     return return_with_carry_direct(EINTR, true);
 }
 
-static u32 GuestPsynchMutexDrop(u32 mutex) {
+static u32 GuestPsynchMutexDrop(
+        u32 mutex, u32 mgen, u32 ugen, u32 flags) {
+    const bool firstFit = GuestPsynchMutexIsFirstFit(flags);
+    /* XNU fair-share mutexdrop grants U+1 exactly.  First-fit instead
+     * signals the oldest waiter and keeps an address-wide prepost. */
+    const u32 targetSequence = firstFit
+        ? mgen & GuestPsynchCountMask
+        : (ugen + GuestPsynchCountIncrement) &
+            GuestPsynchCountMask;
     const bool native = NativeGuestThreadIsCurrent();
     size_t woken;
     if (native) {
         std::lock_guard<std::mutex> lock(nativeGuestWaitMutex);
-        woken = WakeNativeGuestThreadsLocked(
-            GuestThreadWaitKind::Mutex, mutex, false);
+        woken = WakeNativeGuestMutexThreadLocked(
+            mutex, targetSequence, firstFit);
         if (woken == 0) {
-            RecordGuestPsynchPrepost(
-                GuestThreadWaitKind::Mutex, mutex);
+            RecordGuestMutexPrepost(mutex, targetSequence);
         }
     } else {
-        woken = WakeGuestThreads(
-            GuestThreadWaitKind::Mutex, mutex, false);
+        woken = WakeGuestMutexThread(
+            mutex, targetSequence, firstFit);
     }
     if (!native && woken == 0) {
-        RecordGuestPsynchPrepost(
-            GuestThreadWaitKind::Mutex, mutex);
+        RecordGuestMutexPrepost(mutex, targetSequence);
     }
+#ifdef LC32_TRACE_PSYNCH_MUTEX
+    fprintf(stderr,
+        "LC32: psynch_mutexdrop tid=%llu addr=%08x "
+        "mgen=%08x ugen=%08x target=%08x flags=%08x "
+        "policy=%s action=%s\n",
+        static_cast<unsigned long long>(
+            CurrentGuestThreadId()),
+        mutex, mgen, ugen, targetSequence, flags,
+        firstFit ? "firstfit" : "fairshare",
+        woken != 0 ? "wake" : "prepost");
+    fflush(stderr);
+#endif
     return return_with_carry_direct(0, false);
 }
 
@@ -12277,7 +12731,7 @@ static u32 GuestPsynchConditionWait(
     if (NativeGuestThreadIsCurrent()) {
         return WaitNativeGuestThread(
             GuestThreadWaitKind::Condition, condition, 0,
-            GuestRwlockWaitType::None, 0, 0,
+            0, false, GuestRwlockWaitType::None, 0, 0,
             conditionSequence, conditionSSequence,
             timeoutSeconds, timeoutNanoseconds);
     }
@@ -12381,7 +12835,7 @@ static u32 GuestPsynchRwWait(
     if (NativeGuestThreadIsCurrent()) {
         return WaitNativeGuestThread(
             GuestThreadWaitKind::Rwlock, rwlock, 0,
-            waitType, lgen, rwSequence);
+            0, false, waitType, lgen, rwSequence);
     }
     if (ParkCurrentGuestThread(
             GuestThreadWaitKind::Rwlock, rwlock, 0,
@@ -13104,6 +13558,9 @@ bool Dynarmic_nativeInitialize() {
         false, std::memory_order_release);
     guestProcessExitCode.store(
         0, std::memory_order_release);
+#ifdef LC32_GUEST_MEMORY_WATCH_ADDRESS
+    ConfigureGuestMemoryWatch();
+#endif
     ResetGuestCallbackExecutor();
     ResetNativeThreadStateSlot(mainNativeThreadState);
 
@@ -13363,7 +13820,7 @@ void Dynarmic_nativeDestroy() {
     {
         std::lock_guard<std::mutex> lock(
             guestPsynchPrepostMutex);
-        guestPsynchPreposts.clear();
+        guestMutexPreposts.clear();
         guestConditionPreposts.clear();
     }
     {
@@ -13451,6 +13908,55 @@ int Dynarmic_munmap(u64 address, u64 size) {
     }
     khash_t(memory) *memory = sharedHandle.memory;
     const u64 end = address + size;
+
+#ifdef LC32_GUEST_MEMORY_WATCH_ADDRESS
+    if (GuestMemoryWatchOverlaps(
+            address, static_cast<size_t>(size))) {
+        const u32 pc = threadHandle.jit != nullptr
+            ? threadHandle.jit->Regs()[Reg::PC] : 0;
+        const u32 lr = threadHandle.jit != nullptr
+            ? threadHandle.jit->Regs()[Reg::LR] : 0;
+        fprintf(stderr,
+            "LC32 guest memory watch mapping: op=munmap "
+            "range=0x%08llx+0x%llx pc=%08x lr=%08x "
+            "host_thread=%u\n",
+            address, size, pc, lr,
+            pthread_mach_thread_np(pthread_self()));
+        if (threadHandle.jit != nullptr) {
+            u32 framePointer = threadHandle.jit->Regs()[7];
+            fprintf(stderr,
+                "LC32 guest memory watch munmap frames:");
+            for (unsigned frame = 0;
+                    frame < 16 && framePointer != 0;
+                    ++frame) {
+                if ((framePointer & 3) != 0 ||
+                        framePointer > UINT32_MAX - 8) {
+                    fprintf(stderr, " invalid-fp=%08x", framePointer);
+                    break;
+                }
+                u32 nextFramePointer = 0;
+                u32 returnAddress = 0;
+                if (!read_guest_memory_with_permissions(
+                            framePointer, &nextFramePointer,
+                            sizeof(nextFramePointer), PROT_READ) ||
+                        !read_guest_memory_with_permissions(
+                            framePointer + 4, &returnAddress,
+                            sizeof(returnAddress), PROT_READ)) {
+                    fprintf(stderr, " unreadable-fp=%08x", framePointer);
+                    break;
+                }
+                fprintf(stderr, " %08x", returnAddress);
+                if (nextFramePointer == framePointer) {
+                    fprintf(stderr, " cyclic");
+                    break;
+                }
+                framePointer = nextFramePointer;
+            }
+            fprintf(stderr, "\n");
+        }
+        LogGuestMemoryWatchConsistencyLocked("before munmap");
+    }
+#endif
 
     for(u64 vaddr = address; vaddr < end;
             vaddr += DYN_PAGE_SIZE) {
@@ -13729,7 +14235,7 @@ u32 Dynarmic_direct_mmap(
         if(sharedHandle.page_table && idx < sharedHandle.num_page_table_entries) {
             __atomic_store_n(
                 &sharedHandle.page_table[idx],
-                GuestPageTablePointer(page),
+                GuestPageTablePointer(vaddr, page),
                 __ATOMIC_RELEASE);
         } else {
             // 0xffffff80001f0000ULL: 0x10000
@@ -13834,6 +14340,22 @@ u32 Dynarmic_mmap(
     
     printf("DBG: mmaping host 0x%llx to 0x%x\n", addr, address);
 
+#ifdef LC32_GUEST_MEMORY_WATCH_ADDRESS
+    if (GuestMemoryWatchOverlaps(
+            reservedAddress, static_cast<size_t>(size))) {
+        const u32 pc = threadHandle.jit != nullptr
+            ? threadHandle.jit->Regs()[Reg::PC] : 0;
+        const u32 lr = threadHandle.jit != nullptr
+            ? threadHandle.jit->Regs()[Reg::LR] : 0;
+        fprintf(stderr,
+            "LC32 guest memory watch mapping: op=mmap "
+            "range=0x%08llx+0x%llx prot=0x%x flags=0x%x "
+            "pc=%08x lr=%08x host_thread=%u\n",
+            reservedAddress, size, guestProtection, flags,
+            pc, lr, pthread_mach_thread_np(pthread_self()));
+    }
+#endif
+
     const u64 end = reservedAddress + size;
     for(u64 vaddr = reservedAddress; vaddr < end;
             vaddr += DYN_PAGE_SIZE) {
@@ -13856,7 +14378,7 @@ u32 Dynarmic_mmap(
         if(sharedHandle.page_table && idx < sharedHandle.num_page_table_entries) {
             __atomic_store_n(
                 &sharedHandle.page_table[idx],
-                GuestPageTablePointer(page),
+                GuestPageTablePointer(vaddr, page),
                 __ATOMIC_RELEASE);
         } else {
             // 0xffffff80001f0000ULL: 0x10000
@@ -13867,6 +14389,12 @@ u32 Dynarmic_mmap(
         addr += DYN_PAGE_SIZE;
     }
     reservations.clear();
+#ifdef LC32_GUEST_MEMORY_WATCH_ADDRESS
+    if (GuestMemoryWatchOverlaps(
+            reservedAddress, static_cast<size_t>(size))) {
+        LogGuestMemoryWatchConsistencyLocked("after mmap");
+    }
+#endif
     lock.unlock();
     InvalidateAllGuestJits(
         address, static_cast<size_t>(size));
@@ -14006,6 +14534,7 @@ int Dynarmic_mprotect(u64 address, u64 size, int perms) {
                         &sharedHandle
                             .page_table[index],
                         GuestPageTablePointer(
+                            protectedPage.address,
                             protectedPage.page),
                         __ATOMIC_RELEASE);
                 }
@@ -14030,6 +14559,7 @@ int Dynarmic_mprotect(u64 address, u64 size, int perms) {
             __atomic_store_n(
                 &sharedHandle.page_table[index],
                 GuestPageTablePointer(
+                    protectedPage.address,
                     protectedPage.page),
                 __ATOMIC_RELEASE);
         }
@@ -14056,6 +14586,14 @@ int Dynarmic_mem_1write(u64 address, u64 size, char* src) {
         return 1;
     }
     std::lock_guard<std::recursive_mutex> lock(guestVmMutex);
+#ifdef LC32_GUEST_MEMORY_WATCH_ADDRESS
+    const u64 originalAddress = address;
+    const size_t originalSize = static_cast<size_t>(size);
+    u32 oldWatchedValue = 0;
+    const bool hadOldWatchedValue =
+        GuestMemoryWatchOverlaps(address, originalSize) &&
+        SnapshotGuestMemoryWatchLocked(&oldWatchedValue);
+#endif
     u64 vaddr_end = address + size;
     for(u64 vaddr = address & ~DYN_PAGE_MASK; vaddr < vaddr_end; vaddr += DYN_PAGE_SIZE) {
         u64 start = vaddr < address ? address - vaddr : 0;
@@ -14071,6 +14609,11 @@ int Dynarmic_mem_1write(u64 address, u64 size, char* src) {
         memcpy(dest, src, len);
         src += len;
     }
+#ifdef LC32_GUEST_MEMORY_WATCH_ADDRESS
+    LogGuestMemoryWatchWriteLocked(
+        "raw", originalAddress, originalSize,
+        hadOldWatchedValue, oldWatchedValue);
+#endif
     return 0;
 }
 
@@ -14352,6 +14895,24 @@ static bool ConsumeGuestSoftwareTracepoint(
                 r0Words[0], r0Words[1], r0Words[2], r0Words[3],
                 r0Words[4], r0Words[5], r0Words[6], r0Words[7],
                 r0Words[8], r0Words[9]);
+
+#ifdef LC32_TRACE_GUEST_TRACEPOINT_ISA
+            std::array<u32, 8> r0IsaWords = {};
+            if (r0Words[0] != 0 &&
+                    Dynarmic_mem_1read(
+                        r0Words[0], sizeof(r0IsaWords),
+                        reinterpret_cast<char *>(
+                            r0IsaWords.data())) == 0) {
+                fprintf(stderr,
+                    "LC32 guest tracepoint 0x%08x r0_isa=%08x "
+                    "isa_words=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
+                    guestAddress, r0Words[0],
+                    r0IsaWords[0], r0IsaWords[1],
+                    r0IsaWords[2], r0IsaWords[3],
+                    r0IsaWords[4], r0IsaWords[5],
+                    r0IsaWords[6], r0IsaWords[7]);
+            }
+#endif
         }
         std::array<u32, 10> r2Words = {};
         if (registers[Reg::R2] != 0 &&

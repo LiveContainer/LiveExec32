@@ -27,6 +27,12 @@ CFStringRef CFBundleGetIdentifier(CFBundleRef bundle) {
         LC32_CF_HOST(bundle)) : NULL;
 }
 
+UInt32 CFBundleGetVersionNumber(CFBundleRef bundle) {
+    return bundle ? LC32_CF_CALL(
+        LC32CoreFoundationOpBundleGetVersionNumber,
+        LC32_CF_HOST(bundle)) : 0;
+}
+
 CFStringRef CFBundleCopyLocalizedString(
         CFBundleRef bundle, CFStringRef key, CFStringRef value,
         CFStringRef tableName) {

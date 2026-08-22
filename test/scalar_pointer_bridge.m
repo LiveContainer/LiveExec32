@@ -4,6 +4,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 @interface NSObject (LC32ScalarPointerBridgeTest)
 - (uint64_t)host_self;
@@ -46,6 +47,45 @@ int main(void) {
             nullScanner, @selector(scanFloat:), NULL);
         failed += LC32Check("nullable-floating-pointer",
             scannedWithNull, scannedWithNull);
+
+        NSScanner *decimalScanner =
+            [NSScanner scannerWithString:@"12.75 invalid"];
+        NSDecimal decimal = {};
+        const BOOL scannedDecimal = [decimalScanner scanDecimal:&decimal];
+        failed += LC32Check("native-decimal-pointer",
+            scannedDecimal && decimal._exponent == -2 &&
+                decimal._length == 1 && !decimal._isNegative &&
+                decimal._mantissa[0] == 1275,
+            decimal._mantissa[0]);
+
+        NSDecimalNumber *decimalNumber =
+            [NSDecimalNumber decimalNumberWithDecimal:decimal];
+        failed += LC32Check("decimal-aggregate-argument",
+            fabs(decimalNumber.doubleValue - 12.75) < 0.0000001,
+            decimalNumber.doubleValue);
+
+        NSDecimalNumber *initializedDecimalNumber =
+            [[NSDecimalNumber alloc] initWithDecimal:decimal];
+        failed += LC32Check("decimal-init-aggregate-argument",
+            fabs(initializedDecimalNumber.doubleValue - 12.75) < 0.0000001,
+            initializedDecimalNumber.doubleValue);
+        [initializedDecimalNumber release];
+
+        NSDecimal unchangedDecimal = decimal;
+        const BOOL scannedInvalidDecimal =
+            [decimalScanner scanDecimal:&unchangedDecimal];
+        failed += LC32Check("failed-decimal-preserves-output",
+            !scannedInvalidDecimal &&
+                memcmp(&decimal, &unchangedDecimal, sizeof(decimal)) == 0,
+            unchangedDecimal._mantissa[0]);
+
+        NSScanner *nullDecimalScanner =
+            [NSScanner scannerWithString:@"88"];
+        const BOOL scannedNullDecimal =
+            [nullDecimalScanner scanDecimal:NULL];
+        failed += LC32Check("nullable-decimal-pointer",
+            scannedNullDecimal && nullDecimalScanner.isAtEnd,
+            scannedNullDecimal);
 
         /* This is the original generator regression: ARM32 declares the
          * CGFloat output as ^f, while the native ARM64 UIKit method is ^d. */

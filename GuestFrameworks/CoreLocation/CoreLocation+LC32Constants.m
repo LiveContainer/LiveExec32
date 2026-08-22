@@ -6,4 +6,5 @@
 #import <CoreLocation/CoreLocation.h>
 
 // CLLocationAccuracy is `double` on both ABIs.
+const CLLocationAccuracy kCLLocationAccuracyBest = -1.0;
 const CLLocationAccuracy kCLLocationAccuracyKilometer = 1000.0;

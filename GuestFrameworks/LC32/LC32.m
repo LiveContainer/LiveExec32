@@ -124,6 +124,7 @@ id LC32HostToGuestOwnedObject(uint64_t host_object) {
 }
 
 id LC32DisposeFailedInit(id object) {
+    [object setHost_self:0];
     return object_dispose(object);
 }
 
@@ -157,6 +158,7 @@ id LC32AdoptHostInitializerResult(id object, uint64_t hostResult) {
     }
     if(canonicalObject != object) {
         _objc_rootRetain(canonicalObject);
+        [object setHost_self:0];
         object_dispose(object);
         return canonicalObject;
     }
@@ -193,85 +195,6 @@ id LC32AdoptHostInitializerResultARC(id object, uint64_t hostResult) {
      * is balanced by that release, leaving the initializer's original +1. */
     return [object retain];
 }
-
-/* We cannot use NSValue or NSInteger here since they're proxied as well.
- * Keep this state associated with its owner: bytes beyond the declared
- * instance size are not reserved for LC32 and may hold subclass, indexed, or
- * class-cluster storage. The C helpers avoid a second emulated objc_msgSend on
- * every host_self lookup without relying on allocator padding. */
-@interface LC32HostObjectPointer : NSObject {
-@public
-    uint32_t _sequence;
-    uint32_t _low;
-    uint32_t _high;
-}
-@property(nonatomic) uint64_t value;
-@end
-
-static inline __attribute__((always_inline))
-uint64_t LC32LoadHostObjectPointer(
-        LC32HostObjectPointer *pointer) {
-    if(!pointer) return 0;
-    for(;;) {
-        const uint32_t before = __atomic_load_n(
-            &pointer->_sequence, __ATOMIC_ACQUIRE);
-        if(before & 1) {
-            sched_yield();
-            continue;
-        }
-        const uint32_t low = __atomic_load_n(
-            &pointer->_low, __ATOMIC_RELAXED);
-        const uint32_t high = __atomic_load_n(
-            &pointer->_high, __ATOMIC_RELAXED);
-        /* An acquire load orders operations which follow it, not the data
-         * loads which precede the second sequence sample.  Keep the pointer
-         * halves ahead of that sample on weakly ordered ARMv7 so accepting an
-         * unchanged even sequence also proves both halves came from it. */
-        __atomic_thread_fence(__ATOMIC_SEQ_CST);
-        const uint32_t after = __atomic_load_n(
-            &pointer->_sequence, __ATOMIC_ACQUIRE);
-        if(before == after && !(after & 1)) {
-            return ((uint64_t)high << 32) | low;
-        }
-    }
-}
-
-static void LC32StoreHostObjectPointer(
-        LC32HostObjectPointer *pointer, uint64_t value) {
-    if(!pointer) abort();
-    const uint32_t sequence = __atomic_load_n(
-        &pointer->_sequence, __ATOMIC_RELAXED);
-    if((sequence & 1) || sequence == UINT32_MAX - 1) abort();
-    /* Writers are serialized by the owning guest object's monitor.  Publish
-     * an odd sequence around the two 32-bit pointer halves so lock-free
-     * readers can reject both torn and superseded values.  The generic
-     * ARMv7 `__atomic_store` helper used for uint64_t silently wrote zero in
-     * the emulated iOS runtime, while these native-width atomics stay inline. */
-    __atomic_store_n(
-        &pointer->_sequence, sequence + 1, __ATOMIC_SEQ_CST);
-    __atomic_store_n(
-        &pointer->_low, (uint32_t)value, __ATOMIC_RELAXED);
-    __atomic_store_n(
-        &pointer->_high, (uint32_t)(value >> 32), __ATOMIC_RELAXED);
-    __atomic_store_n(
-        &pointer->_sequence, sequence + 2, __ATOMIC_SEQ_CST);
-}
-
-@implementation LC32HostObjectPointer
-- (uint64_t)value {
-    return LC32LoadHostObjectPointer(self);
-}
-- (void)setValue:(uint64_t)value {
-    LC32StoreHostObjectPointer(self, value);
-}
-+ (instancetype)pointerWithValue:(uint64_t)value {
-    LC32HostObjectPointer *pointer = [LC32HostObjectPointer new];
-    LC32StoreHostObjectPointer(pointer, value);
-    return pointer;
-}
-@end
-
-static const void *kHostSelf = &kHostSelf;
 
 /*
  * A guest object can gain ordinary or weak ownership while another native
@@ -393,21 +316,9 @@ static void LC32LeaveOwnershipWriter(uint32_t token) {
 }
 
 static uint64_t LC32ExistingHostSelf(id object) {
-    LC32HostObjectPointer *pointer =
-        objc_getAssociatedObject(object, kHostSelf);
-    return LC32LoadHostObjectPointer(pointer);
-}
-
-static LC32HostObjectPointer *LC32HostObjectState(id object, BOOL create) {
-    LC32HostObjectPointer *pointer =
-        objc_getAssociatedObject(object, kHostSelf);
-    if(!pointer && create) {
-        pointer = [LC32HostObjectPointer new];
-        objc_setAssociatedObject(object, kHostSelf, pointer,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [pointer release];
-    }
-    return pointer;
+    return object
+        ? LC32LookupHostMapping((uint32_t)(uintptr_t)object)
+        : 0;
 }
 
 @implementation LC32GuestBuffer
@@ -546,14 +457,32 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
 // Only call this if host's guest_self has already been set
 - (void)setHost_self:(uint64_t)ptr {
     @synchronized(self) {
-        LC32StoreHostObjectPointer(
-            LC32HostObjectState(self, YES), ptr);
+        const uint32_t guestObject = (uint32_t)(uintptr_t)self;
+        const uint64_t existing = LC32LookupHostMapping(guestObject);
+        if(existing == ptr) return;
+        if(ptr) {
+            if(!LC32UpdateHostMapping(
+                    guestObject,
+                    LC32HostMappingPublishProvisional,
+                    ptr)) abort();
+        } else if(existing) {
+            if(!LC32UpdateHostMapping(
+                    guestObject,
+                    LC32HostMappingClearIfEqual,
+                    existing)) abort();
+        }
     }
 }
 
 // Set the equivalent host pointer for statically-initialized object (eg NSString constants)
 - (void)bindHostSelf:(uint64_t)ptr {
-    self.host_self = ptr;
+    if(!ptr) abort();
+    @synchronized(self) {
+        if(!LC32UpdateHostMapping(
+                (uint32_t)(uintptr_t)self,
+                LC32HostMappingPublishPermanent,
+                ptr)) abort();
+    }
     // make a trip to host to set guest_self
     static uint64_t hostPtr = 0;
     uint64_t selector = LC32CachedHostSelector(
@@ -579,9 +508,7 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
                 const uint32_t writer =
                     LC32EnterOwnershipWriter(self);
                 @try {
-                    LC32HostObjectPointer *state =
-                        LC32HostObjectState(self, YES);
-                    ptr = LC32LoadHostObjectPointer(state);
+                    ptr = LC32ExistingHostSelf(self);
                     if(!ptr) {
                         /*
                          * Retains performed while an object is guest-only
@@ -616,7 +543,14 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
 
                         /* Publish only after the peer contains every native +1
                          * represented by the captured guest retain count. */
-                        LC32StoreHostObjectPointer(state, ptr);
+                        const LC32HostMappingOperation operation =
+                            object_isClass(self) ||
+                                    guestRetainCount == NSUIntegerMax
+                                ? LC32HostMappingPublishPermanent
+                                : LC32HostMappingPublishProvisional;
+                        if(!LC32UpdateHostMapping(
+                                (uint32_t)(uintptr_t)self,
+                                operation, ptr)) abort();
                     }
                 } @finally {
                     LC32LeaveOwnershipWriter(writer);
@@ -652,17 +586,18 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
     }
 
     // Unlike the lifetime-pin release, this is an ordinary guest ownership
-    // decrement. Clear a surviving native mirror's reverse mapping if this is
-    // the guest object's final logical reference, but do not decrement the
-    // host here: the native autorelease token owns that paired operation.
-    if([self LC32_retainCount] == 1) {
-        static uint64_t _clear_guest_cmd;
-        uint64_t clear_guest_cmd = LC32CachedHostSelector(
-            &_clear_guest_cmd, @selector(LC32_clearGuestSelfIfEqual:), NO);
-        LC32InvokeHostSelector(hostSelf, clear_guest_cmd,
-                               (uint64_t)(uintptr_t)self);
+    // decrement, but the native autorelease token owns the paired host +1.
+    const uint32_t guestSelf = (uint32_t)(uintptr_t)self;
+    const BOOL releasedToZero = _objc_rootReleaseWasZero(self);
+    if(releasedToZero) {
+        const uint32_t token = LC32UpdateHostMapping(
+            guestSelf, LC32HostMappingBeginGuestTeardown, hostSelf);
+        if(!token) abort();
+        [self dealloc];
+        if(!LC32UpdateHostMapping(
+                guestSelf, LC32HostMappingFinishGuestTeardown,
+                token)) abort();
     }
-    [self LC32_release];
 }
 - (void)LC32_release {
     uint64_t hostSelf = LC32ExistingHostSelf(self);
@@ -688,20 +623,19 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
     LC32_OPERATION_TRACE("release", self, hostSelf);
 
     const uint32_t guestSelf = (uint32_t)(uintptr_t)self;
-    const BOOL guestReferenceWasFinal = [self LC32_retainCount] == 1;
-
-    /* Drop guest logical ownership first. A synthesized host mirror owns a
-     * separate lifetime pin, so its coordinated final -release can then run
-     * guest -dealloc while the native peer is protected by a root guard. This
-     * method must not dereference `self` after the root release. */
-    [self LC32_release];
-
-    if(guestReferenceWasFinal) {
-        static uint64_t _clear_guest_cmd;
-        uint64_t clear_guest_cmd = LC32CachedHostSelector(
-            &_clear_guest_cmd, @selector(LC32_clearGuestSelfIfEqual:), NO);
-        LC32InvokeHostSelector(hostSelf, clear_guest_cmd,
-                               (uint64_t)guestSelf);
+    /* The zero-reporting root primitive makes the final-release decision
+     * atomic with racing strong/weak retains.  Keep the Retiring mapping
+     * available through arbitrary guest -dealloc code, then erase only its
+     * exact generation so a reused ARM address cannot lose its new peer. */
+    const BOOL releasedToZero = _objc_rootReleaseWasZero(self);
+    if(releasedToZero) {
+        const uint32_t token = LC32UpdateHostMapping(
+            guestSelf, LC32HostMappingBeginGuestTeardown, hostSelf);
+        if(!token) abort();
+        [self dealloc];
+        if(!LC32UpdateHostMapping(
+                guestSelf, LC32HostMappingFinishGuestTeardown,
+                token)) abort();
     }
 
     static uint64_t _host_cmd;
@@ -1042,16 +976,7 @@ static void LC32StartGuestCallbackExecutorIfSupported(void) {
 }
 
 __attribute__((constructor)) void LC32FrameworkInit() {
-    // Ensure LC32HostObjectPointer doesn't inherit swizzled ARC methods
-    Class clsLC32HostObjectPointer = objc_getClass("LC32HostObjectPointer");
     Class clsNSObject = objc_getClass("NSObject");
-    addMethodToClass(clsLC32HostObjectPointer, class_getInstanceMethod(clsNSObject, @selector(autorelease)));
-    addMethodToClass(clsLC32HostObjectPointer, class_getInstanceMethod(clsNSObject, @selector(release)));
-    addMethodToClass(clsLC32HostObjectPointer, class_getInstanceMethod(clsNSObject, @selector(retain)));
-    addMethodToClass(clsLC32HostObjectPointer, class_getInstanceMethod(clsNSObject, @selector(retainCount)));
-    addMethodToClass(clsLC32HostObjectPointer,
-        class_getInstanceMethod(clsNSObject,
-            sel_registerName("retainWeakReference")));
 
     // Associated guest buffers are native guest-only objects as well. Keep
     // their ownership traffic out of the host proxy retain/release bridge.

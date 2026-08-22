@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <SystemConfiguration/CaptiveNetwork.h>
 #import <SystemConfiguration/SystemConfiguration.h>
 
 #include <stdlib.h>
@@ -6,6 +7,19 @@
 
 static const SCNetworkReachabilityFlags LC32ReachableFlags =
     kSCNetworkReachabilityFlagsReachable;
+
+const CFStringRef kCNNetworkInfoKeyBSSID = CFSTR("BSSID");
+const CFStringRef kCNNetworkInfoKeySSID = CFSTR("SSID");
+
+CFArrayRef CNCopySupportedInterfaces(void) {
+    return CFArrayCreate(kCFAllocatorDefault, NULL, 0,
+                         &kCFTypeArrayCallBacks);
+}
+
+CFDictionaryRef CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
+    (void)interfaceName;
+    return NULL;
+}
 
 typedef struct LC32SCNetworkReachabilityRegistration {
     CFRunLoopRef runLoop;

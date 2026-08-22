@@ -49,6 +49,10 @@ u32 LC32_Foundation_NSTemporaryDirectory() {
     return NSTemporaryDirectory().guest_self;
 }
 
+u32 LC32_Foundation_NSHomeDirectory() {
+    return LC32GuestHomeDirectory().guest_self;
+}
+
 u32 LC32_Foundation_NSClassFromString(u32 low, u32 high, u32) {
     NSString *name = reinterpret_cast<NSString *>(
         static_cast<uintptr_t>(low | (static_cast<u64>(high) << 32)));

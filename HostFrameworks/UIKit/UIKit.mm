@@ -2,6 +2,7 @@
 @import UIKit;
 #import <objc/runtime.h>
 #include "bridge.h"
+#include "../CoreGraphics/LC32CoreGraphicsHost.h"
 
 #include <atomic>
 #include <dispatch/dispatch.h>
@@ -1325,6 +1326,14 @@ u32 LC32_UIKit_NSStringFromCGSize(u32 widthBits, u32 heightBits, u32) {
     return NSStringFromCGSize(CGSizeMake(width, height)).guest_self;
 }
 
+u32 LC32_UIKit_NSStringFromCGPoint(u32 xBits, u32 yBits, u32) {
+    float x;
+    float y;
+    memcpy(&x, &xBits, sizeof(x));
+    memcpy(&y, &yBits, sizeof(y));
+    return NSStringFromCGPoint(CGPointMake(x, y)).guest_self;
+}
+
 u32 LC32_UIKit_CGSizeFromString(u32 stringLow, u32 stringHigh, u32 sp) {
     NSString *string = reinterpret_cast<NSString *>(
         static_cast<uintptr_t>(stringLow |
@@ -1399,6 +1408,19 @@ void LC32_UIKit_UIGraphicsEndImageContext(u32, u32, u32) {
     UIGraphicsEndImageContext();
 }
 
+void LC32_UIKit_UIGraphicsPushContext(
+        u32 contextLow, u32 contextHigh, u32) {
+    CGContextRef context = reinterpret_cast<CGContextRef>(
+        static_cast<uintptr_t>(contextLow |
+            (static_cast<u64>(contextHigh) << 32)));
+    if(context) UIGraphicsPushContext(context);
+}
+
+void LC32_UIKit_UIGraphicsPopContext(u32, u32, u32) {
+    LC32CoreGraphicsSyncBitmapBacking(UIGraphicsGetCurrentContext());
+    UIGraphicsPopContext();
+}
+
 u32 LC32_UIKit_UIGraphicsGetCurrentContext(u32, u32, u32) {
     CGContextRef context = UIGraphicsGetCurrentContext();
     return context ? [(id)context guest_self] : 0;
@@ -1428,6 +1450,26 @@ u32 LC32_UIKit_UIImagePNGRepresentation(u32 imageLow, u32 imageHigh, u32) {
         imageLow | (static_cast<u64>(imageHigh) << 32)));
     NSData *data = image ? UIImagePNGRepresentation(image) : nil;
     return data ? data.guest_self : 0;
+}
+
+void LC32_UIKit_UIImageWriteToSavedPhotosAlbum(
+        u32 imageLow, u32 imageHigh, u32 sp) {
+    UIImage *image = reinterpret_cast<UIImage *>(static_cast<uintptr_t>(
+        imageLow | (static_cast<u64>(imageHigh) << 32)));
+    id completionTarget = reinterpret_cast<id>(static_cast<uintptr_t>(
+        Dynarmic_current_user_callbacks()->MemoryRead32(sp) |
+        (static_cast<u64>(
+            Dynarmic_current_user_callbacks()->MemoryRead32(sp + 4))
+            << 32)));
+    SEL completionSelector = reinterpret_cast<SEL>(static_cast<uintptr_t>(
+        Dynarmic_current_user_callbacks()->MemoryRead32(sp + 8) |
+        (static_cast<u64>(
+            Dynarmic_current_user_callbacks()->MemoryRead32(sp + 12))
+            << 32)));
+    void *contextInfo = reinterpret_cast<void *>(static_cast<uintptr_t>(
+        Dynarmic_current_user_callbacks()->MemoryRead32(sp + 16)));
+    if(image) UIImageWriteToSavedPhotosAlbum(
+        image, completionTarget, completionSelector, contextInfo);
 }
 
 u32 LC32_UIKit_NSStringFromCGRect(

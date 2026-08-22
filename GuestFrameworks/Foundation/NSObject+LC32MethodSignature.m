@@ -4,6 +4,28 @@
 
 @implementation NSObject (LC32MethodSignature)
 
++ (NSMethodSignature *)instanceMethodSignatureForSelector:(SEL)selector {
+    if(!selector) return nil;
+
+    /*
+     * libobjc leaves this Foundation class hook as a fatal stub.  Resolve the
+     * requested instance method in the guest runtime so callers receive the
+     * ARM32 method encoding, including inherited methods.
+     */
+    const Method method = class_getInstanceMethod(self, selector);
+    const char *types = method ? method_getTypeEncoding(method) : NULL;
+    return types ? [NSMethodSignature signatureWithObjCTypes:types] : nil;
+}
+
++ (NSMethodSignature *)methodSignatureForSelector:(SEL)selector {
+    if(!selector) return nil;
+
+    /* Class receivers dispatch through a separate fatal libobjc stub. */
+    const Method method = class_getClassMethod(self, selector);
+    const char *types = method ? method_getTypeEncoding(method) : NULL;
+    return types ? [NSMethodSignature signatureWithObjCTypes:types] : nil;
+}
+
 - (NSMethodSignature *)methodSignatureForSelector:(SEL)selector {
     if(!selector) return nil;
 

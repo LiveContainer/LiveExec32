@@ -65,6 +65,23 @@ static BOOL LC32GrowDataGuestBuffer(LC32DataGuestBuffer *buffer,
     return YES;
 }
 
+BOOL LC32ReserveMutableDataGuestCapacity(NSMutableData *data,
+                                         uint32_t capacity) {
+    if(!data || capacity > LC32MaximumDataGuestBufferBytes) return NO;
+
+    /* CFDataCreateMutable's capacity is observable through the pointer
+     * returned by CFDataGetMutableBytePtr even while logical length is zero.
+     * Materialize the current contents first, then retain at least that
+     * requested allocation capacity in guest memory. */
+    (void)[data bytes];
+    objc_sync_enter(data);
+    LC32DataGuestBuffer *buffer = LC32GetDataGuestBuffer(data, NO);
+    const BOOL reserved = buffer && buffer->_valid &&
+        LC32GrowDataGuestBuffer(buffer, capacity);
+    objc_sync_exit(data);
+    return reserved;
+}
+
 void LC32InvalidateDataGuestBuffer(NSData *data) {
     if(!data) return;
     objc_sync_enter(data);

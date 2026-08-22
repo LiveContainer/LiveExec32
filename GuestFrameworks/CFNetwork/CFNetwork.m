@@ -35,6 +35,11 @@ const CFStringRef kCFHTTPVersion1_1 = CFSTR("HTTP/1.1");
 
 const SInt32 kCFStreamErrorDomainHTTP = 4;
 
+const CFStringRef kCFProxyHostNameKey =
+    CFSTR("kCFProxyHostNameKey");
+const CFStringRef kCFProxyPortNumberKey =
+    CFSTR("kCFProxyPortNumberKey");
+
 const CFStringRef kCFStreamNetworkServiceType =
     CFSTR("kCFStreamNetworkServiceType");
 const CFStringRef kCFStreamNetworkServiceTypeVoIP =
@@ -183,6 +188,15 @@ void CFHTTPMessageSetHeaderFieldValue(
 CFDictionaryRef CFNetworkCopySystemProxySettings(void) {
     return (CFDictionaryRef)LC32_CFNETWORK_CALL0(
         LC32CFNetworkOpCopySystemProxySettings);
+}
+
+CFArrayRef CFNetworkCopyProxiesForURL(CFURLRef url,
+                                      CFDictionaryRef proxySettings) {
+    if(!url || !proxySettings) return NULL;
+    return (CFArrayRef)LC32_CFNETWORK_CALL(
+        LC32CFNetworkOpCopyProxiesForURL,
+        LC32_CFNETWORK_HOST(url),
+        LC32_CFNETWORK_HOST(proxySettings));
 }
 
 CFReadStreamRef CFReadStreamCreateForHTTPRequest(

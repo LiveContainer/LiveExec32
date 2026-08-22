@@ -168,6 +168,7 @@ static uint64_t LC32FoundationNSClassFromString;
 static uint64_t LC32FoundationNSSelectorFromString;
 static uint64_t LC32FoundationNSSearchPath;
 static uint64_t LC32FoundationNSTemporaryDirectory;
+static uint64_t LC32FoundationNSHomeDirectory;
 
 static void LC32FoundationResolveFunctions(void) {
     LC32FoundationNSClassFromString =
@@ -178,6 +179,8 @@ static void LC32FoundationResolveFunctions(void) {
         "LC32_Foundation_NSSearchPathForDirectoriesInDomains", YES);
     LC32FoundationNSTemporaryDirectory =
         LC32Dlsym("LC32_Foundation_NSTemporaryDirectory", YES);
+    LC32FoundationNSHomeDirectory =
+        LC32Dlsym("LC32_Foundation_NSHomeDirectory", YES);
 }
 
 Class NSClassFromString(NSString *aClassName) {
@@ -249,4 +252,12 @@ NSString *NSTemporaryDirectory() {
     if(!LC32FoundationNSTemporaryDirectory) return nil;
     return (NSString *)LC32InvokeHostCRet32(
         LC32FoundationNSTemporaryDirectory);
+}
+
+NSString *NSHomeDirectory() {
+    pthread_once(&LC32FoundationFunctionsOnce,
+        LC32FoundationResolveFunctions);
+    if(!LC32FoundationNSHomeDirectory) return nil;
+    return (NSString *)LC32InvokeHostCRet32(
+        LC32FoundationNSHomeDirectory);
 }

@@ -12,7 +12,21 @@
  * initializer adopter handles that by transferring the caller's ownership to
  * the singleton's existing canonical guest proxy.
  */
-static id LC32InitializeHostPeer(id self) {
+static id LC32InitializeHostPeer(id self, Class clusterClass) {
+    /*
+     * A concrete guest subclass owns its own instance layout and initializer.
+     * In particular, JSONKit directly allocates its NSMutableArray and
+     * NSMutableDictionary subclasses with calloc, installs their isa, then
+     * calls inherited -init.  Manufacturing a native class-cluster peer for
+     * such an object changes its ownership model and re-enters the guest
+     * runtime while that hand-built instance is only partially initialized.
+     *
+     * These shims are only for allocations of the cluster roots themselves.
+     * A guest subclass can still acquire a native mirror lazily if it is later
+     * passed across the bridge.
+     */
+    if(object_getClass(self) != clusterClass) return self;
+
     static uint64_t hostInitSelector __attribute__((aligned(8)));
     const uint64_t selector = LC32CachedHostSelector(
         &hostInitSelector, @selector(init), NO);
@@ -27,7 +41,7 @@ static id LC32InitializeHostPeer(id self) {
 #define LC32_IMPLEMENT_PLAIN_INIT(className) \
     @implementation className (LC32PlainInit) \
     - (instancetype)init { \
-        return LC32InitializeHostPeer(self); \
+        return LC32InitializeHostPeer(self, objc_getClass(#className)); \
     } \
     @end
 

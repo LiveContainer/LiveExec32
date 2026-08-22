@@ -342,6 +342,10 @@ u64 LC32CreateHostBlock(u32 guest_block);
 u32 LC32GuestObjectForOwnedHostObjectAddress(u64 object);
 LC32HostWeakRetainResult LC32TryRetainHostWeakReference(u32 guest_object);
 u32 LC32FinishHostWeakRetain(u32 token, u32 guest_object, u32 commit);
+u64 LC32LookupHostMapping(u32 guest_object);
+u32 LC32UpdateHostMapping(u32 guest_object,
+                          LC32HostMappingOperation operation,
+                          u64 host_object);
 u64 LC32GetHostSelector(u32 guest_selector);
 u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args);
 u64 LC32InvokeHostNSStringFormat(u64 host_self,

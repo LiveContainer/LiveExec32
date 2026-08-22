@@ -15,5 +15,23 @@ NSString * const MPMediaItemPropertyTitle = @"title";
 
 NSString * const MPMoviePlayerContentPreloadDidFinishNotification =
     @"MPMoviePlayerContentPreloadDidFinishNotification";
+NSString * const MPMovieDurationAvailableNotification =
+    @"MPMovieDurationAvailableNotification";
+NSString * const MPMoviePlayerDidEnterFullscreenNotification =
+    @"MPMoviePlayerDidEnterFullscreenNotification";
+NSString * const MPMoviePlayerDidExitFullscreenNotification =
+    @"MPMoviePlayerDidExitFullscreenNotification";
+NSString * const MPMoviePlayerLoadStateDidChangeNotification =
+    @"MPMoviePlayerLoadStateDidChangeNotification";
 NSString * const MPMoviePlayerPlaybackDidFinishNotification =
     @"MPMoviePlayerPlaybackDidFinishNotification";
+NSString * const MPMoviePlayerPlaybackDidFinishReasonUserInfoKey =
+    @"MPMoviePlayerPlaybackDidFinishReasonUserInfoKey";
+NSString * const MPMoviePlayerPlaybackStateDidChangeNotification =
+    @"MPMoviePlayerPlaybackStateDidChangeNotification";
+NSString * const MPMoviePlayerScalingModeDidChangeNotification =
+    @"MPMoviePlayerScalingModeDidChangeNotification";
+NSString * const MPMoviePlayerWillEnterFullscreenNotification =
+    @"MPMoviePlayerWillEnterFullscreenNotification";
+NSString * const MPMoviePlayerWillExitFullscreenNotification =
+    @"MPMoviePlayerWillExitFullscreenNotification";

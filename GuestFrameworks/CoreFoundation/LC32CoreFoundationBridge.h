@@ -66,6 +66,10 @@ typedef enum : uint32_t {
     LC32CoreFoundationOpURLCreateStringByReplacingPercentEscapes = 43,
     LC32CoreFoundationOpStringTrimWhitespace = 44,
     LC32CoreFoundationOpNumberGetType = 45,
+    LC32CoreFoundationOpBundleGetVersionNumber = 46,
+    LC32CoreFoundationOpLocaleGetSystem = 47,
+    LC32CoreFoundationOpStringLowercase = 48,
+    LC32CoreFoundationOpURLCopyPathExtension = 49,
 
     /* String operations use an isolated range so parallel bridge work can
      * add lower-valued opcode families without changing this guest ABI. */

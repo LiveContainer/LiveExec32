@@ -15,6 +15,8 @@ NSNotificationName const UIApplicationDidBecomeActiveNotification =
     @"UIApplicationDidBecomeActiveNotification";
 NSNotificationName const UIApplicationDidChangeStatusBarOrientationNotification =
     @"UIApplicationDidChangeStatusBarOrientationNotification";
+NSNotificationName const UIApplicationDidChangeStatusBarFrameNotification =
+    @"UIApplicationDidChangeStatusBarFrameNotification";
 NSNotificationName const UIApplicationDidFinishLaunchingNotification =
     @"UIApplicationDidFinishLaunchingNotification";
 NSNotificationName const UIApplicationDidEnterBackgroundNotification =
@@ -29,6 +31,10 @@ NSNotificationName const UIApplicationWillEnterForegroundNotification =
     @"UIApplicationWillEnterForegroundNotification";
 NSNotificationName const UIApplicationWillTerminateNotification =
     @"UIApplicationWillTerminateNotification";
+NSString *const UIApplicationStatusBarOrientationUserInfoKey =
+    @"UIApplicationStatusBarOrientationUserInfoKey";
+NSNotificationName const UIApplicationWillChangeStatusBarOrientationNotification =
+    @"UIApplicationWillChangeStatusBarOrientationNotification";
 NSNotificationName const UIDeviceOrientationDidChangeNotification =
     @"UIDeviceOrientationDidChangeNotification";
 NSNotificationName const UIDeviceBatteryLevelDidChangeNotification =
@@ -84,11 +90,15 @@ NSNotificationName const UIWindowDidBecomeKeyNotification =
 const UIEdgeInsets UIEdgeInsetsZero = {0,0,0,0};
 const UIOffset UIOffsetZero = {0,0};
 const UIWindowLevel UIWindowLevelAlert = 2000.0f;
+const UIWindowLevel UIWindowLevelNormal = 0.0f;
 const UIWindowLevel UIWindowLevelStatusBar = 1000.0f;
+const CGFloat UIScrollViewDecelerationRateNormal = 0.998f;
 
 static pthread_once_t LC32LegacyAdMobOnce = PTHREAD_ONCE_INIT;
 static pthread_once_t LC32VoiceOverOnce = PTHREAD_ONCE_INIT;
 static uint64_t LC32HostUIAccessibilityIsVoiceOverRunning;
+static pthread_once_t LC32GuidedAccessOnce = PTHREAD_ONCE_INIT;
+static uint64_t LC32HostUIAccessibilityIsGuidedAccessEnabled;
 static pthread_once_t LC32LegacyIPadCanvasOnce = PTHREAD_ONCE_INIT;
 static BOOL LC32LegacyIPadCanvasRequired;
 static BOOL LC32LegacyIPadStatusBarHidden;
@@ -151,6 +161,18 @@ BOOL UIAccessibilityIsVoiceOverRunning(void) {
         LC32HostUIAccessibilityIsVoiceOverRunning);
 }
 
+static void LC32ResolveGuidedAccessFunction(void) {
+    LC32HostUIAccessibilityIsGuidedAccessEnabled =
+        LC32Dlsym("UIAccessibilityIsGuidedAccessEnabled", YES);
+}
+
+BOOL UIAccessibilityIsGuidedAccessEnabled(void) {
+    pthread_once(&LC32GuidedAccessOnce, LC32ResolveGuidedAccessFunction);
+    if(!LC32HostUIAccessibilityIsGuidedAccessEnabled) return NO;
+    return (BOOL)LC32InvokeHostCRet32(
+        LC32HostUIAccessibilityIsGuidedAccessEnabled);
+}
+
 static void LC32NoopLegacyGADBannerLoadRequest(id self, SEL _cmd,
                                                id request) {
     (void)self;
@@ -207,15 +229,19 @@ static pthread_once_t LC32UIImageCGImageOnce = PTHREAD_ONCE_INIT;
 static uint64_t LC32UIImageCGImageSelector;
 static pthread_once_t LC32UIKitGeometryOnce = PTHREAD_ONCE_INIT;
 static uint64_t LC32UIKitNSStringFromCGSize;
+static uint64_t LC32UIKitNSStringFromCGPoint;
 static uint64_t LC32UIKitCGSizeFromString;
 static uint64_t LC32UIKitCGRectFromString;
 static uint64_t LC32UIKitBeginImageContext;
 static uint64_t LC32UIKitBeginImageContextWithOptions;
 static uint64_t LC32UIKitEndImageContext;
+static uint64_t LC32UIKitPushContext;
+static uint64_t LC32UIKitPopContext;
 static uint64_t LC32UIKitGetCurrentContext;
 static uint64_t LC32UIKitGetImageFromCurrentImageContext;
 static uint64_t LC32UIKitJPEGRepresentation;
 static uint64_t LC32UIKitPNGRepresentation;
+static uint64_t LC32UIKitWriteImageToSavedPhotosAlbum;
 static uint64_t LC32UIKitNSStringFromCGRect;
 static uint64_t LC32UIKitGetWindowRootViewController;
 static uint64_t LC32UIKitSetWindowRootViewController;
@@ -226,6 +252,8 @@ static void LC32UIImageResolveCGImageSelector(void) {
 static void LC32UIKitResolveGeometryFunctions(void) {
     LC32UIKitNSStringFromCGSize =
         LC32Dlsym("LC32_UIKit_NSStringFromCGSize", YES);
+    LC32UIKitNSStringFromCGPoint =
+        LC32Dlsym("LC32_UIKit_NSStringFromCGPoint", YES);
     LC32UIKitCGSizeFromString =
         LC32Dlsym("LC32_UIKit_CGSizeFromString", YES);
     LC32UIKitCGRectFromString =
@@ -236,6 +264,10 @@ static void LC32UIKitResolveGeometryFunctions(void) {
         "LC32_UIKit_UIGraphicsBeginImageContextWithOptions", YES);
     LC32UIKitEndImageContext =
         LC32Dlsym("LC32_UIKit_UIGraphicsEndImageContext", YES);
+    LC32UIKitPushContext =
+        LC32Dlsym("LC32_UIKit_UIGraphicsPushContext", YES);
+    LC32UIKitPopContext =
+        LC32Dlsym("LC32_UIKit_UIGraphicsPopContext", YES);
     LC32UIKitGetCurrentContext =
         LC32Dlsym("LC32_UIKit_UIGraphicsGetCurrentContext", YES);
     LC32UIKitGetImageFromCurrentImageContext = LC32Dlsym(
@@ -244,6 +276,8 @@ static void LC32UIKitResolveGeometryFunctions(void) {
         LC32Dlsym("LC32_UIKit_UIImageJPEGRepresentation", YES);
     LC32UIKitPNGRepresentation =
         LC32Dlsym("LC32_UIKit_UIImagePNGRepresentation", YES);
+    LC32UIKitWriteImageToSavedPhotosAlbum = LC32Dlsym(
+        "LC32_UIKit_UIImageWriteToSavedPhotosAlbum", YES);
     LC32UIKitNSStringFromCGRect =
         LC32Dlsym("LC32_UIKit_NSStringFromCGRect", YES);
     LC32UIKitGetWindowRootViewController = LC32Dlsym(
@@ -268,6 +302,17 @@ NSString *NSStringFromCGSize(CGSize size) {
         LC32UIKitNSStringFromCGSize,
         LC32UIKitFloatBits(size.width),
         LC32UIKitFloatBits(size.height));
+    return (__bridge NSString *)(void *)(uintptr_t)guestString;
+}
+
+NSString *NSStringFromCGPoint(CGPoint point) {
+    pthread_once(&LC32UIKitGeometryOnce,
+        LC32UIKitResolveGeometryFunctions);
+    if(!LC32UIKitNSStringFromCGPoint) return nil;
+    const uint32_t guestString = LC32InvokeHostCRet32(
+        LC32UIKitNSStringFromCGPoint,
+        LC32UIKitFloatBits(point.x),
+        LC32UIKitFloatBits(point.y));
     return (__bridge NSString *)(void *)(uintptr_t)guestString;
 }
 
@@ -339,6 +384,23 @@ void UIGraphicsEndImageContext(void) {
         LC32InvokeHostCRet32(LC32UIKitEndImageContext);
 }
 
+void UIGraphicsPushContext(CGContextRef context) {
+    if(!context) return;
+    pthread_once(&LC32UIKitGeometryOnce,
+        LC32UIKitResolveGeometryFunctions);
+    if(LC32UIKitPushContext) {
+        LC32InvokeHostCRet32(LC32UIKitPushContext,
+            [(__bridge id)context host_self]);
+    }
+}
+
+void UIGraphicsPopContext(void) {
+    pthread_once(&LC32UIKitGeometryOnce,
+        LC32UIKitResolveGeometryFunctions);
+    if(LC32UIKitPopContext)
+        LC32InvokeHostCRet32(LC32UIKitPopContext);
+}
+
 CGContextRef UIGraphicsGetCurrentContext(void) {
     pthread_once(&LC32UIKitGeometryOnce,
         LC32UIKitResolveGeometryFunctions);
@@ -376,6 +438,23 @@ NSData *UIImagePNGRepresentation(UIImage *image) {
     const uint32_t guestData = LC32InvokeHostCRet32(
         LC32UIKitPNGRepresentation, image.host_self);
     return (__bridge NSData *)(void *)(uintptr_t)guestData;
+}
+
+void UIImageWriteToSavedPhotosAlbum(UIImage *image,
+                                    id completionTarget,
+                                    SEL completionSelector,
+                                    void *contextInfo) {
+    if(!image) return;
+    pthread_once(&LC32UIKitGeometryOnce,
+        LC32UIKitResolveGeometryFunctions);
+    if(!LC32UIKitWriteImageToSavedPhotosAlbum) return;
+    const uint64_t hostSelector = completionSelector
+        ? LC32GetHostSelector(completionSelector) : 0;
+    LC32InvokeHostCRet32(LC32UIKitWriteImageToSavedPhotosAlbum,
+        image.host_self,
+        [completionTarget host_self],
+        hostSelector,
+        (uint32_t)(uintptr_t)contextInfo);
 }
 
 @implementation UIWindow (LC32MainThreadRootViewController)

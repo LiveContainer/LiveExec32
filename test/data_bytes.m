@@ -1,7 +1,14 @@
 #import <Foundation/Foundation.h>
+#import <objc/runtime.h>
 
 #include <stdio.h>
 #include <string.h>
+
+@interface LC32CapacityMutableData : NSMutableData
+@end
+
+@implementation LC32CapacityMutableData
+@end
 
 int main(void) {
     NSAutoreleasePool *pool = [NSAutoreleasePool new];
@@ -39,7 +46,73 @@ int main(void) {
     printf("mutable-subdata-range: %s\n",
         subdataPassed ? "PASS" : "FAIL");
 
+    /* JSONKit and other iOS-era clients use CFData's requested capacity as
+     * writable storage before increasing its logical length. */
+    CFMutableDataRef capacityData = CFDataCreateMutable(NULL, 513);
+    BOOL mutableCapacityLengthBefore = capacityData &&
+        CFDataGetLength(capacityData) == 0;
+    UInt8 *capacityBytes = capacityData
+        ? CFDataGetMutableBytePtr(capacityData) : NULL;
+    if(capacityBytes) memset(capacityBytes, 0xa5, 513);
+    BOOL mutableCapacityPassed = capacityBytes != NULL &&
+        mutableCapacityLengthBefore && CFDataGetLength(capacityData) == 0;
+    printf("mutable-capacity-bytes: %s\n",
+        mutableCapacityPassed ? "PASS" : "FAIL");
+    if(capacityData) CFRelease(capacityData);
+
+    const UInt8 mutableCopySource[] = {0x11, 0x22, 0x33};
+    CFDataRef immutableSource = CFDataCreate(NULL, mutableCopySource,
+                                             sizeof(mutableCopySource));
+    CFMutableDataRef capacityCopy = CFDataCreateMutableCopy(NULL, 513,
+                                                            immutableSource);
+    UInt8 *capacityCopyBytes = capacityCopy
+        ? CFDataGetMutableBytePtr(capacityCopy) : NULL;
+    BOOL mutableCopyCapacityPassed = capacityCopyBytes &&
+        CFDataGetLength(capacityCopy) == sizeof(mutableCopySource) &&
+        !memcmp(capacityCopyBytes, mutableCopySource,
+                sizeof(mutableCopySource));
+    if(capacityCopyBytes) capacityCopyBytes[512] = 0x5a;
+    mutableCopyCapacityPassed = mutableCopyCapacityPassed &&
+        CFDataGetLength(capacityCopy) == sizeof(mutableCopySource);
+    printf("mutable-copy-capacity-bytes: %s\n",
+        mutableCopyCapacityPassed ? "PASS" : "FAIL");
+    if(capacityCopy) CFRelease(capacityCopy);
+    if(immutableSource) CFRelease(immutableSource);
+
+    NSMutableData *objcCapacity = [NSMutableData dataWithCapacity:515];
+    UInt8 *objcCapacityBytes = objcCapacity.mutableBytes;
+    if(objcCapacityBytes) memset(objcCapacityBytes, 0x3c, 515);
+    BOOL objcCapacityPassed = objcCapacityBytes != NULL &&
+        objcCapacity.length == 0;
+    printf("mutable-objc-capacity-bytes: %s\n",
+        objcCapacityPassed ? "PASS" : "FAIL");
+
+    NSMutableData *initializedCapacity =
+        [[NSMutableData alloc] initWithCapacity:517];
+    UInt8 *initializedCapacityBytes = initializedCapacity.mutableBytes;
+    if(initializedCapacityBytes) memset(initializedCapacityBytes, 0x69, 517);
+    BOOL initializedCapacityPassed = initializedCapacityBytes != NULL &&
+        initializedCapacity.length == 0;
+    printf("mutable-init-capacity-bytes: %s\n",
+        initializedCapacityPassed ? "PASS" : "FAIL");
+    [initializedCapacity release];
+
+    LC32CapacityMutableData *subclassCapacity =
+        [LC32CapacityMutableData dataWithCapacity:521];
+    BOOL subclassCapacityPassed = subclassCapacity != nil &&
+        object_getClass(subclassCapacity) == [LC32CapacityMutableData class];
+    printf("mutable-capacity-subclass: %s\n",
+        subclassCapacityPassed ? "PASS" : "FAIL");
+
+    BOOL boundedCapacityPassed =
+        [NSMutableData dataWithCapacity:(256u * 1024u * 1024u) + 1u] == nil;
+    printf("mutable-capacity-bound: %s\n",
+        boundedCapacityPassed ? "PASS" : "FAIL");
+
     [pool drain];
     return !(constructorPassed && bytesPassed && wholePassed && rangePassed &&
-             subdataPassed);
+             subdataPassed && mutableCapacityPassed &&
+             mutableCopyCapacityPassed && objcCapacityPassed &&
+             initializedCapacityPassed && subclassCapacityPassed &&
+             boundedCapacityPassed);
 }

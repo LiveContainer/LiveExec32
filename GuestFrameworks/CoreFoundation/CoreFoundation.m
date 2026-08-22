@@ -106,6 +106,12 @@ CFURLRef CFURLCreateWithBytes(CFAllocatorRef allocator,
         LC32_CF_U32(encoding), LC32_CF_HOST(baseURL));
 }
 
+CFStringRef CFURLCopyPathExtension(CFURLRef url) {
+    return url ? (CFStringRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCopyPathExtension,
+        LC32_CF_HOST(url)) : NULL;
+}
+
 void CFRelease(CFTypeRef ref) {
     [(id)ref release];
 }

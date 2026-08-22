@@ -258,6 +258,20 @@ void CGContextDrawLinearGradient(CGContextRef context,
         LC32_CG_U32(options));
 }
 
+void CGContextDrawRadialGradient(CGContextRef context,
+                                 CGGradientRef gradient,
+                                 CGPoint startCenter, CGFloat startRadius,
+                                 CGPoint endCenter, CGFloat endRadius,
+                                 CGGradientDrawingOptions options) {
+    if(!context || !gradient) return;
+    LC32_CG_CALL(LC32CoreGraphicsOpContextDrawRadialGradient,
+        LC32_CG_HOST(context), LC32_CG_HOST(gradient),
+        LC32_CG_F32(startCenter.x), LC32_CG_F32(startCenter.y),
+        LC32_CG_F32(startRadius), LC32_CG_F32(endCenter.x),
+        LC32_CG_F32(endCenter.y), LC32_CG_F32(endRadius),
+        LC32_CG_U32(options));
+}
+
 void CGContextDrawPath(CGContextRef context, CGPathDrawingMode mode) {
     if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextDrawPath,
         LC32_CG_HOST(context), LC32_CG_U32(mode));
@@ -394,6 +408,34 @@ void CGContextConcatCTM(CGContextRef context, CGAffineTransform transform) {
         LC32_CG_F32(transform.ty));
 }
 
+void CGContextAddEllipseInRect(CGContextRef context, CGRect rect) {
+    if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextAddEllipseInRect,
+        LC32_CG_HOST(context), LC32_CG_F32(rect.origin.x),
+        LC32_CG_F32(rect.origin.y), LC32_CG_F32(rect.size.width),
+        LC32_CG_F32(rect.size.height));
+}
+
+void CGContextClipToRect(CGContextRef context, CGRect rect) {
+    if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextClipToRect,
+        LC32_CG_HOST(context), LC32_CG_F32(rect.origin.x),
+        LC32_CG_F32(rect.origin.y), LC32_CG_F32(rect.size.width),
+        LC32_CG_F32(rect.size.height));
+}
+
+void CGContextFillEllipseInRect(CGContextRef context, CGRect rect) {
+    if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextFillEllipseInRect,
+        LC32_CG_HOST(context), LC32_CG_F32(rect.origin.x),
+        LC32_CG_F32(rect.origin.y), LC32_CG_F32(rect.size.width),
+        LC32_CG_F32(rect.size.height));
+}
+
+void CGContextStrokeEllipseInRect(CGContextRef context, CGRect rect) {
+    if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextStrokeEllipseInRect,
+        LC32_CG_HOST(context), LC32_CG_F32(rect.origin.x),
+        LC32_CG_F32(rect.origin.y), LC32_CG_F32(rect.size.width),
+        LC32_CG_F32(rect.size.height));
+}
+
 void CGContextSetFillColorWithColor(CGContextRef context, CGColorRef color) {
     if(context && color) LC32_CG_CALL(
         LC32CoreGraphicsOpContextSetFillColorWithColor,
@@ -443,6 +485,28 @@ void CGContextSetGrayFillColor(CGContextRef context, CGFloat gray,
                                CGFloat alpha) {
     if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextSetGrayFillColor,
         LC32_CG_HOST(context), LC32_CG_F32(gray), LC32_CG_F32(alpha));
+}
+
+void CGContextSetRGBFillColor(CGContextRef context, CGFloat red,
+                              CGFloat green, CGFloat blue, CGFloat alpha) {
+    if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextSetRGBFillColor,
+        LC32_CG_HOST(context), LC32_CG_F32(red), LC32_CG_F32(green),
+        LC32_CG_F32(blue), LC32_CG_F32(alpha));
+}
+
+void CGContextSetRGBStrokeColor(CGContextRef context, CGFloat red,
+                                CGFloat green, CGFloat blue, CGFloat alpha) {
+    if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextSetRGBStrokeColor,
+        LC32_CG_HOST(context), LC32_CG_F32(red), LC32_CG_F32(green),
+        LC32_CG_F32(blue), LC32_CG_F32(alpha));
+}
+
+void CGContextSetShadowWithColor(CGContextRef context, CGSize offset,
+                                 CGFloat blur, CGColorRef color) {
+    if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextSetShadowWithColor,
+        LC32_CG_HOST(context), LC32_CG_F32(offset.width),
+        LC32_CG_F32(offset.height), LC32_CG_F32(blur),
+        LC32_CG_HOST(color));
 }
 
 void CGContextSetBlendMode(CGContextRef context, CGBlendMode mode) {

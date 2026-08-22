@@ -161,6 +161,12 @@ void CFStringAppendCharacters(CFMutableStringRef string,
         LC32_CF_U32(numCharacters));
 }
 
+void CFStringLowercase(CFMutableStringRef string, CFLocaleRef locale) {
+    if(!string) return;
+    LC32_CF_CALL(LC32CoreFoundationOpStringLowercase,
+        LC32_CF_HOST(string), LC32_CF_HOST(locale));
+}
+
 void CFStringAppendFormatAndArguments(CFMutableStringRef string,
                                       CFDictionaryRef formatOptions,
                                       CFStringRef format,

@@ -287,6 +287,9 @@ size_t StateElementCount(GLenum pname) {
         case GL_MAX_CUBE_MAP_TEXTURE_SIZE:
         case GL_MAX_FRAGMENT_UNIFORM_VECTORS:
         case GL_MAX_RENDERBUFFER_SIZE:
+#ifdef GL_MAX_SAMPLES_APPLE
+        case GL_MAX_SAMPLES_APPLE:
+#endif
         case GL_MAX_TEXTURE_IMAGE_UNITS:
         case GL_MAX_TEXTURE_SIZE:
         case GL_MAX_VARYING_VECTORS:
@@ -451,7 +454,7 @@ struct ClientArrayDescriptor {
     bool valid = false;
 };
 
-struct ClientArrayContextState {
+struct VertexArrayClientState {
     std::unordered_map<GLuint, ClientArrayDescriptor> vertexAttribs;
     std::unordered_set<GLuint> enabledVertexAttribs;
     ClientArrayDescriptor vertex;
@@ -459,10 +462,15 @@ struct ClientArrayContextState {
     std::unordered_map<GLenum, ClientArrayDescriptor> texCoords;
     std::unordered_set<GLenum> enabledTexCoords;
     ClientArrayDescriptor normal;
-    GLenum clientActiveTexture = GL_TEXTURE0;
     bool vertexEnabled = false;
     bool colorEnabled = false;
     bool normalEnabled = false;
+};
+
+struct ClientArrayContextState {
+    std::unordered_map<GLuint, VertexArrayClientState> vertexArrays;
+    GLuint currentVertexArray = 0;
+    GLenum clientActiveTexture = GL_TEXTURE0;
 };
 
 std::mutex clientArrayStateMutex;
@@ -491,24 +499,49 @@ uintptr_t CurrentGLContextKey() {
     return contextKey;
 }
 
+VertexArrayClientState &CurrentVertexArrayState(
+        ClientArrayContextState &context) {
+    return context.vertexArrays[context.currentVertexArray];
+}
+
+void SetCurrentVertexArray(GLuint vertexArray) {
+    std::lock_guard<std::mutex> lock(clientArrayStateMutex);
+    clientArrayStates[CurrentGLContextKey()].currentVertexArray = vertexArray;
+}
+
+void ForgetVertexArrayStates(GLsizei count, const GLuint *vertexArrays) {
+    std::lock_guard<std::mutex> lock(clientArrayStateMutex);
+    auto context = clientArrayStates.find(CurrentGLContextKey());
+    if(context == clientArrayStates.end()) return;
+    for(GLsizei i = 0; i < count; ++i) {
+        const GLuint vertexArray = vertexArrays[i];
+        if(!vertexArray) continue;
+        context->second.vertexArrays.erase(vertexArray);
+        if(context->second.currentVertexArray == vertexArray)
+            context->second.currentVertexArray = 0;
+    }
+}
+
 void SetVertexAttribArrayEnabled(GLuint index, bool enabled) {
     std::lock_guard<std::mutex> lock(clientArrayStateMutex);
-    auto &state = clientArrayStates[CurrentGLContextKey()];
+    auto &context = clientArrayStates[CurrentGLContextKey()];
+    auto &state = CurrentVertexArrayState(context);
     if(enabled) state.enabledVertexAttribs.insert(index);
     else state.enabledVertexAttribs.erase(index);
 }
 
 void SetClientStateEnabled(GLenum array, bool enabled) {
     std::lock_guard<std::mutex> lock(clientArrayStateMutex);
-    auto &state = clientArrayStates[CurrentGLContextKey()];
+    auto &context = clientArrayStates[CurrentGLContextKey()];
+    auto &state = CurrentVertexArrayState(context);
     switch(array) {
         case GL_VERTEX_ARRAY: state.vertexEnabled = enabled; break;
         case GL_COLOR_ARRAY: state.colorEnabled = enabled; break;
         case GL_TEXTURE_COORD_ARRAY:
             if(enabled) {
-                state.enabledTexCoords.insert(state.clientActiveTexture);
+                state.enabledTexCoords.insert(context.clientActiveTexture);
             } else {
-                state.enabledTexCoords.erase(state.clientActiveTexture);
+                state.enabledTexCoords.erase(context.clientActiveTexture);
             }
             break;
         case GL_NORMAL_ARRAY: state.normalEnabled = enabled; break;
@@ -524,8 +557,8 @@ void SetClientActiveTexture(GLenum texture) {
 void RememberVertexAttribPointer(const ClientArrayDescriptor *descriptor,
                                  GLuint index) {
     std::lock_guard<std::mutex> lock(clientArrayStateMutex);
-    auto &attributes =
-        clientArrayStates[CurrentGLContextKey()].vertexAttribs;
+    auto &context = clientArrayStates[CurrentGLContextKey()];
+    auto &attributes = CurrentVertexArrayState(context).vertexAttribs;
     if(descriptor) attributes[index] = *descriptor;
     else attributes.erase(index);
 }
@@ -533,9 +566,10 @@ void RememberVertexAttribPointer(const ClientArrayDescriptor *descriptor,
 void RememberClientPointer(const ClientArrayDescriptor *descriptor,
                            ClientArrayKind kind) {
     std::lock_guard<std::mutex> lock(clientArrayStateMutex);
-    auto &state = clientArrayStates[CurrentGLContextKey()];
+    auto &context = clientArrayStates[CurrentGLContextKey()];
+    auto &state = CurrentVertexArrayState(context);
     if(kind == ClientArrayKind::TexCoord) {
-        const GLenum texture = state.clientActiveTexture;
+        const GLenum texture = context.clientActiveTexture;
         if(descriptor) {
             ClientArrayDescriptor saved = *descriptor;
             saved.index = texture;
@@ -560,8 +594,11 @@ bool GuestVertexAttribPointer(GLuint index, uint32_t &guestPointer) {
     std::lock_guard<std::mutex> lock(clientArrayStateMutex);
     auto context = clientArrayStates.find(CurrentGLContextKey());
     if(context == clientArrayStates.end()) return false;
-    auto attribute = context->second.vertexAttribs.find(index);
-    if(attribute == context->second.vertexAttribs.end()) return false;
+    auto vertexArray = context->second.vertexArrays.find(
+        context->second.currentVertexArray);
+    if(vertexArray == context->second.vertexArrays.end()) return false;
+    auto attribute = vertexArray->second.vertexAttribs.find(index);
+    if(attribute == vertexArray->second.vertexAttribs.end()) return false;
     guestPointer = attribute->second.guestPointer;
     return true;
 }
@@ -571,8 +608,11 @@ std::vector<ClientArrayDescriptor> EnabledClientArrays() {
     std::lock_guard<std::mutex> lock(clientArrayStateMutex);
     auto context = clientArrayStates.find(CurrentGLContextKey());
     if(context == clientArrayStates.end()) return descriptors;
+    auto vertexArray = context->second.vertexArrays.find(
+        context->second.currentVertexArray);
+    if(vertexArray == context->second.vertexArrays.end()) return descriptors;
 
-    const auto &state = context->second;
+    const auto &state = vertexArray->second;
     descriptors.reserve(state.enabledVertexAttribs.size() +
         state.enabledTexCoords.size() + 3);
     for(GLuint index : state.enabledVertexAttribs) {
@@ -1083,6 +1123,11 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
         case LC32OpenGLESOpBindFramebuffer: REQUIRE(2); glBindFramebuffer(U(0), U(1)); return 0;
         case LC32OpenGLESOpBindRenderbuffer: REQUIRE(2); glBindRenderbuffer(U(0), U(1)); return 0;
         case LC32OpenGLESOpBindTexture: REQUIRE(2); glBindTexture(U(0), U(1)); return 0;
+        case LC32OpenGLESOpBindVertexArrayOES:
+            REQUIRE(1);
+            glBindVertexArrayOES(U(0));
+            SetCurrentVertexArray(U(0));
+            return 0;
         case LC32OpenGLESOpBlendColor: REQUIRE(4); glBlendColor(F(0), F(1), F(2), F(3)); return 0;
         case LC32OpenGLESOpBlendEquation: REQUIRE(1); glBlendEquation(U(0)); return 0;
         case LC32OpenGLESOpBlendEquationSeparate: REQUIRE(2); glBlendEquationSeparate(U(0), U(1)); return 0;
@@ -1108,6 +1153,11 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
             return DispatchObjectInputArray(call, [](GLsizei n, const GLuint *v) { glDeleteRenderbuffers(n, v); });
         case LC32OpenGLESOpDeleteTextures:
             return DispatchObjectInputArray(call, [](GLsizei n, const GLuint *v) { glDeleteTextures(n, v); });
+        case LC32OpenGLESOpDeleteVertexArraysOES:
+            return DispatchObjectInputArray(call, [](GLsizei n, const GLuint *v) {
+                glDeleteVertexArraysOES(n, v);
+                ForgetVertexArrayStates(n, v);
+            });
         case LC32OpenGLESOpDeleteProgram: REQUIRE(1); glDeleteProgram(U(0)); return 0;
         case LC32OpenGLESOpDeleteShader: REQUIRE(1); glDeleteShader(U(0)); return 0;
         case LC32OpenGLESOpDepthFunc: REQUIRE(1); glDepthFunc(U(0)); return 0;
@@ -1158,6 +1208,8 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
             return DispatchObjectOutputArray(call, [](GLsizei n, GLuint *v) { glGenRenderbuffers(n, v); });
         case LC32OpenGLESOpGenTextures:
             return DispatchObjectOutputArray(call, [](GLsizei n, GLuint *v) { glGenTextures(n, v); });
+        case LC32OpenGLESOpGenVertexArraysOES:
+            return DispatchObjectOutputArray(call, [](GLsizei n, GLuint *v) { glGenVertexArraysOES(n, v); });
         case LC32OpenGLESOpGenerateMipmap: REQUIRE(1); glGenerateMipmap(U(0)); return 0;
         case LC32OpenGLESOpHint: REQUIRE(2); glHint(U(0), U(1)); return 0;
         case LC32OpenGLESOpIsBuffer: REQUIRE(1); return glIsBuffer(U(0));
@@ -1173,6 +1225,8 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
         case LC32OpenGLESOpPolygonOffset: REQUIRE(2); glPolygonOffset(F(0), F(1)); return 0;
         case LC32OpenGLESOpReleaseShaderCompiler: REQUIRE(0); glReleaseShaderCompiler(); return 0;
         case LC32OpenGLESOpRenderbufferStorage: REQUIRE(4); glRenderbufferStorage(U(0), U(1), I(2), I(3)); return 0;
+        case LC32OpenGLESOpRenderbufferStorageMultisampleAPPLE: REQUIRE(5); glRenderbufferStorageMultisampleAPPLE(U(0), I(1), U(2), I(3), I(4)); return 0;
+        case LC32OpenGLESOpResolveMultisampleFramebufferAPPLE: REQUIRE(0); glResolveMultisampleFramebufferAPPLE(); return 0;
         case LC32OpenGLESOpSampleCoverage: REQUIRE(2); glSampleCoverage(F(0), U(1)); return 0;
         case LC32OpenGLESOpScissor: REQUIRE(4); glScissor(I(0), I(1), I(2), I(3)); return 0;
         case LC32OpenGLESOpStencilFunc: REQUIRE(3); glStencilFunc(U(0), I(1), U(2)); return 0;

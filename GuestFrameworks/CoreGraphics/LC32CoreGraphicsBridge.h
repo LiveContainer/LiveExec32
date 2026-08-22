@@ -93,6 +93,14 @@ typedef enum : uint32_t {
     LC32CoreGraphicsOpContextDrawPath = 75,
     LC32CoreGraphicsOpContextRotateCTM = 76,
     LC32CoreGraphicsOpImageGetBytesPerRow = 77,
+    LC32CoreGraphicsOpContextAddEllipseInRect = 78,
+    LC32CoreGraphicsOpContextClipToRect = 79,
+    LC32CoreGraphicsOpContextDrawRadialGradient = 80,
+    LC32CoreGraphicsOpContextFillEllipseInRect = 81,
+    LC32CoreGraphicsOpContextSetRGBFillColor = 82,
+    LC32CoreGraphicsOpContextSetRGBStrokeColor = 83,
+    LC32CoreGraphicsOpContextSetShadowWithColor = 84,
+    LC32CoreGraphicsOpContextStrokeEllipseInRect = 85,
 } LC32CoreGraphicsOpcode;
 
 #endif

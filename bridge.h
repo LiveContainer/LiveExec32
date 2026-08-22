@@ -61,6 +61,12 @@ u32 LC32GuestObjectForOwnedHostObjectAddress(u64 object);
 LC32HostWeakRetainResult LC32TryRetainHostWeakReference(u32 guest_object);
 // SVC 1021 commits or rolls back the token's exact native +1.
 u32 LC32FinishHostWeakRetain(u32 token, u32 guest_object, u32 commit);
+// Native authoritative guest-to-host mapping used instead of guest libobjc's
+// associated-object table. Lookup returns a borrowed raw host address.
+u64 LC32LookupHostMapping(u32 guest_object);
+u32 LC32UpdateHostMapping(u32 guest_object,
+                          LC32HostMappingOperation operation,
+                          u64 host_object);
 //u64 LC32Dlsym(u32 guest_name);
 u64 LC32GetHostObject(u32 guest_self, u32 guest_class, bool returnClass);
 u64 LC32GetHostSelector(u32 guest_selector);

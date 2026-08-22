@@ -94,6 +94,7 @@ NSString * const NSInvalidArgumentException = @"NSInvalidArgumentException";
 NSString * const NSMallocException = @"NSMallocException";
 NSString * const NSRangeException = @"NSRangeException";
 NSString * const NSLocaleCountryCode = @"kCFLocaleCountryCodeKey";
+NSString * const NSLocaleCurrencyCode = @"currency";
 NSString * const NSLocaleIdentifier = @"kCFLocaleIdentifierKey";
 NSString * const NSLocaleLanguageCode = @"kCFLocaleLanguageCodeKey";
 NSString * const NSRunLoopCommonModes = @"kCFRunLoopCommonModes";
@@ -141,6 +142,39 @@ CFBooleanRef LC32CFBooleanTrue __asm__("_kCFBooleanTrue");
 CFBooleanRef LC32CFBooleanFalse __asm__("_kCFBooleanFalse");
 CFNullRef LC32CFNull __asm__("_kCFNull");
 CFNumberRef LC32CFNumberNaN __asm__("_kCFNumberNaN");
+CFNumberRef LC32CFNumberPositiveInfinity
+    __asm__("_kCFNumberPositiveInfinity");
+CFNumberRef LC32CFNumberNegativeInfinity
+    __asm__("_kCFNumberNegativeInfinity");
+
+/*
+ * Real CF Boolean, null, NaN, and infinity objects are process-lifetime
+ * singletons: retaining, releasing, or autoreleasing them cannot destroy
+ * them.  Some clients rely on that contract and deliberately transfer these
+ * constants into collections without first retaining them (JSONKit is one
+ * example).  Ordinary LC32 host-object proxies do have guest retain counts,
+ * so use dedicated subclasses which preserve the singleton ownership
+ * semantics while inheriting the normal NSNumber/NSNull forwarding surface.
+ */
+@interface LC32CFImmortalNumber : NSNumber
+@end
+
+@implementation LC32CFImmortalNumber
+- (id)retain { return self; }
+- (oneway void)release {}
+- (id)autorelease { return self; }
+- (NSUInteger)retainCount { return (NSUInteger)-1; }
+@end
+
+@interface LC32CFImmortalNull : NSNull
+@end
+
+@implementation LC32CFImmortalNull
+- (id)retain { return self; }
+- (oneway void)release {}
+- (id)autorelease { return self; }
+- (NSUInteger)retainCount { return (NSUInteger)-1; }
+@end
 
 static id LC32CreateCoreFoundationConstantProxy(const char *className,
                                                  const char *symbolName) {
@@ -164,11 +198,21 @@ static id LC32CreateCoreFoundationConstantProxy(const char *className,
 __attribute__((constructor))
 static void LC32InitializeCoreFoundationObjectConstants(void) {
     LC32CFBooleanTrue = (CFBooleanRef)
-        LC32CreateCoreFoundationConstantProxy("NSNumber", "kCFBooleanTrue");
+        LC32CreateCoreFoundationConstantProxy(
+            "LC32CFImmortalNumber", "kCFBooleanTrue");
     LC32CFBooleanFalse = (CFBooleanRef)
-        LC32CreateCoreFoundationConstantProxy("NSNumber", "kCFBooleanFalse");
+        LC32CreateCoreFoundationConstantProxy(
+            "LC32CFImmortalNumber", "kCFBooleanFalse");
     LC32CFNull = (CFNullRef)
-        LC32CreateCoreFoundationConstantProxy("NSNull", "kCFNull");
+        LC32CreateCoreFoundationConstantProxy(
+            "LC32CFImmortalNull", "kCFNull");
     LC32CFNumberNaN = (CFNumberRef)
-        LC32CreateCoreFoundationConstantProxy("NSNumber", "kCFNumberNaN");
+        LC32CreateCoreFoundationConstantProxy(
+            "LC32CFImmortalNumber", "kCFNumberNaN");
+    LC32CFNumberPositiveInfinity = (CFNumberRef)
+        LC32CreateCoreFoundationConstantProxy(
+            "LC32CFImmortalNumber", "kCFNumberPositiveInfinity");
+    LC32CFNumberNegativeInfinity = (CFNumberRef)
+        LC32CreateCoreFoundationConstantProxy(
+            "LC32CFImmortalNumber", "kCFNumberNegativeInfinity");
 }

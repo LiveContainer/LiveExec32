@@ -191,3 +191,15 @@ _LC32FinishHostWeakRetain:
     movw r12, #1021
     svc #0x80
     bx lr
+
+.global _LC32LookupHostMapping
+_LC32LookupHostMapping:
+    movw r12, #1022
+    svc #0x80
+    bx lr
+
+.global _LC32UpdateHostMapping
+_LC32UpdateHostMapping:
+    movw r12, #1023
+    svc #0x80
+    bx lr

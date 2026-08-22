@@ -32,6 +32,7 @@ typedef enum : uint32_t {
     LC32CFNetworkOpHTTPMessageSetHeaderFieldValue = 15,
     LC32CFNetworkOpCopySystemProxySettings = 16,
     LC32CFNetworkOpReadStreamCreateForHTTPRequest = 17,
+    LC32CFNetworkOpCopyProxiesForURL = 18,
 } LC32CFNetworkOpcode;
 
 #endif

@@ -58,6 +58,15 @@ LC32HostWeakRetainResult LC32TryRetainHostWeakReference(
 uint32_t LC32FinishHostWeakRetain(uint32_t token, uint32_t guest_object,
                                  uint32_t commit);
 
+// The native generation-checked registry is authoritative for guest-to-host
+// identity. Keeping this state out of guest objc associations avoids making
+// every bridged object mutate the guest runtime's global association table.
+// Implemented by private SVCs 1022 and 1023.
+uint64_t LC32LookupHostMapping(uint32_t guest_object);
+uint32_t LC32UpdateHostMapping(uint32_t guest_object,
+                              LC32HostMappingOperation operation,
+                              uint64_t host_object);
+
 // Host lifetime pins call this guest-only root release and use the return
 // value to decide whether a retiring weak-registry tombstone can be removed.
 uint32_t LC32ReleaseGuestLifetimePin(id guest_object);

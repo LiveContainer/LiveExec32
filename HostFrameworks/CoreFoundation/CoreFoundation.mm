@@ -1384,6 +1384,43 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             CFNumberRef number = SlotHostObject<CFNumberRef>(call, 0);
             return number ? static_cast<u32>(CFNumberGetType(number)) : 0;
         }
+        case LC32CoreFoundationOpBundleGetVersionNumber: {
+            if(!RequireSlots(call, 1)) return 0;
+            /* Guest CFBundleRefs are represented by NSBundle peers throughout
+             * this bridge (see BundleGetMainBundle/Create below). Modern
+             * CoreFoundation no longer accepts an NSBundle object directly
+             * here, even though legacy clients treated the pair as bridged.
+             * Reconstitute a real CFBundle for the duration of this scalar
+             * query so the historical version-number parsing stays exact. */
+            NSBundle *bundle = SlotHostObject<NSBundle *>(call, 0);
+            NSURL *bundleURL = bundle.bundleURL;
+            if(!bundleURL) return 0;
+            CFBundleRef coreBundle = CFBundleCreate(
+                kCFAllocatorDefault, (__bridge CFURLRef)bundleURL);
+            if(!coreBundle) return 0;
+            const UInt32 version = CFBundleGetVersionNumber(coreBundle);
+            CFRelease(coreBundle);
+            return version;
+        }
+        case LC32CoreFoundationOpLocaleGetSystem: {
+            if(!RequireSlots(call, 0)) return 0;
+            CFLocaleRef locale = CFLocaleGetSystem();
+            return locale ? [(id)locale guest_self] : 0;
+        }
+        case LC32CoreFoundationOpStringLowercase: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFMutableStringRef string =
+                SlotHostObject<CFMutableStringRef>(call, 0);
+            CFLocaleRef locale = SlotHostObject<CFLocaleRef>(call, 1);
+            if(string) CFStringLowercase(string, locale);
+            return 0;
+        }
+        case LC32CoreFoundationOpURLCopyPathExtension: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFURLRef url = SlotHostObject<CFURLRef>(call, 0);
+            return url ? GuestForCreatedObject(
+                CFURLCopyPathExtension(url)) : 0;
+        }
         case LC32CoreFoundationOpBundleGetMainBundle: {
             if(!RequireSlots(call, 0)) return 0;
             const char *guestExecutable = getenv("LC32_GUEST_EXECUTABLE");

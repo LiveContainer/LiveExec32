@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <OpenGLES/EAGL.h>
 #import <OpenGLES/ES2/gl.h>
+#import <OpenGLES/ES2/glext.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -92,6 +93,8 @@ int main(void) {
         GLuint fragmentShader = 0;
         GLuint program = 0;
         GLuint vertexBuffer = 0;
+        GLuint indexBuffer = 0;
+        GLuint vertexArray = 0;
         GLuint texture = 0;
         glGenFramebuffers(1, &framebuffer);
         glGenRenderbuffers(1, &renderbuffer);
@@ -111,6 +114,13 @@ int main(void) {
         CHECK(viewport[0] == 0 && viewport[1] == 0 &&
               viewport[2] == 4 && viewport[3] == 4,
               "four-value-state-copyback");
+
+#ifdef GL_MAX_SAMPLES_APPLE
+        GLint maximumSamples = 0;
+        glGetIntegerv(GL_MAX_SAMPLES_APPLE, &maximumSamples);
+        CHECK(glGetError() == GL_NO_ERROR && maximumSamples >= 0,
+              "APPLE-max-samples-state-copyback");
+#endif
 
         glDisable(GL_DITHER);
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -251,8 +261,54 @@ int main(void) {
               "shader-VBO-draw-readback");
         gl_ok("shader-VBO-path-error");
 
+        /* A direct/client-pointer draw on VAO 0 must not contaminate the
+         * bridge metadata for a named VAO whose attributes and indices are
+         * entirely buffer-backed. Cocos2d's CCSpriteBatchNode follows this
+         * sequence after drawing ordinary sprites. */
+        const GLushort indices[] = {0, 1, 2};
+        glGenVertexArraysOES(1, &vertexArray);
+        CHECK(vertexArray != 0, "VAO-name-copyback");
+        glBindVertexArrayOES(vertexArray);
+        glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
+        glEnableVertexAttribArray((GLuint)position);
+        glVertexAttribPointer((GLuint)position, 2, GL_FLOAT, GL_FALSE,
+                              2 * sizeof(GLfloat), (const GLvoid *)0);
+        glGenBuffers(1, &indexBuffer);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexBuffer);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices,
+                     GL_STATIC_DRAW);
+        glBindVertexArrayOES(0);
+
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+        glEnableVertexAttribArray((GLuint)position);
+        glVertexAttribPointer((GLuint)position, 2, GL_FLOAT, GL_FALSE,
+                              2 * sizeof(GLfloat), vertices);
+
+        glBindVertexArrayOES(vertexArray);
+        GLint capturedVertexBuffer = 0;
+        glGetVertexAttribiv((GLuint)position,
+                            GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING,
+                            &capturedVertexBuffer);
+        CHECK(capturedVertexBuffer == (GLint)vertexBuffer,
+              "VAO-captured-VBO-binding");
+        glUniform4f(tint, 0.0f, 0.0f, 1.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawElements(GL_TRIANGLES, 3, GL_UNSIGNED_SHORT,
+                       (const GLvoid *)0);
+        glFinish();
+        memset(pixel, 0, sizeof(pixel));
+        glReadPixels(2, 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+        CHECK(pixel[0] <= 7 && pixel[1] <= 7 && pixel[2] >= 248 &&
+              pixel[3] >= 248,
+              "VAO-EBO-draw-after-client-pointer-readback");
+        gl_ok("VAO-EBO-draw-after-client-pointer-error");
+        glBindVertexArrayOES(0);
+
 cleanup:
         if(texture) glDeleteTextures(1, &texture);
+        if(vertexArray) glDeleteVertexArraysOES(1, &vertexArray);
+        if(indexBuffer) glDeleteBuffers(1, &indexBuffer);
         if(vertexBuffer) glDeleteBuffers(1, &vertexBuffer);
         if(program) glDeleteProgram(program);
         if(vertexShader) glDeleteShader(vertexShader);

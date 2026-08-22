@@ -54,6 +54,21 @@ enum {
     LC32HostWeakRetainFirstToken = 3,
 };
 
+/*
+ * Private guest-to-host registry operations.  A provisional mapping belongs
+ * to an ordinary guest object which may still be replaced by a class-cluster
+ * initializer.  Permanent mappings are used by classes and process-lifetime
+ * constants.  ClearIfEqual prevents delayed teardown for a reused ARM address
+ * from erasing a newer mapping.
+ */
+typedef enum LC32HostMappingOperation {
+    LC32HostMappingPublishProvisional = 0,
+    LC32HostMappingPublishPermanent = 1,
+    LC32HostMappingClearIfEqual = 2,
+    LC32HostMappingBeginGuestTeardown = 3,
+    LC32HostMappingFinishGuestTeardown = 4,
+} LC32HostMappingOperation;
+
 typedef struct LC32HostObjectArrayDescriptor {
     uint32_t count;
     uint32_t countArgumentIndex;

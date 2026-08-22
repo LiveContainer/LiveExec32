@@ -197,6 +197,11 @@ typedef enum : uint32_t {
     LC32OpenGLESOpTexEnvi = 176,
     LC32OpenGLESOpColor4ub = 177,
     LC32OpenGLESOpTexEnvf = 178,
+    LC32OpenGLESOpBindVertexArrayOES = 179,
+    LC32OpenGLESOpDeleteVertexArraysOES = 180,
+    LC32OpenGLESOpGenVertexArraysOES = 181,
+    LC32OpenGLESOpRenderbufferStorageMultisampleAPPLE = 182,
+    LC32OpenGLESOpResolveMultisampleFramebufferAPPLE = 183,
 } LC32OpenGLESOpcode;
 
 #endif
