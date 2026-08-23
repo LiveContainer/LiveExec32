@@ -10,6 +10,8 @@ const NSString *UIApplicationStatusBarHeightChangedNotification = @"UIApplicatio
 UIAccessibilityTraits UIAccessibilityTraitNone = 0;
 UIAccessibilityTraits UIAccessibilityTraitButton = UINT64_C(1);
 UIAccessibilityTraits UIAccessibilityTraitSelected = UINT64_C(8);
+UIAccessibilityTraits UIAccessibilityTraitStaticText = UINT64_C(64);
+UIAccessibilityNotifications UIAccessibilityLayoutChangedNotification = 1001;
 
 NSNotificationName const UIApplicationDidBecomeActiveNotification =
     @"UIApplicationDidBecomeActiveNotification";
@@ -31,6 +33,14 @@ NSNotificationName const UIApplicationWillEnterForegroundNotification =
     @"UIApplicationWillEnterForegroundNotification";
 NSNotificationName const UIApplicationWillTerminateNotification =
     @"UIApplicationWillTerminateNotification";
+NSNotificationName const UIApplicationProtectedDataDidBecomeAvailable =
+    @"UIApplicationProtectedDataDidBecomeAvailable";
+NSNotificationName const UIApplicationProtectedDataWillBecomeUnavailable =
+    @"UIApplicationProtectedDataWillBecomeUnavailable";
+UIApplicationLaunchOptionsKey const UIApplicationLaunchOptionsLocalNotificationKey =
+    @"UIApplicationLaunchOptionsLocalNotificationKey";
+UIApplicationLaunchOptionsKey const UIApplicationLaunchOptionsRemoteNotificationKey =
+    @"UIApplicationLaunchOptionsRemoteNotificationKey";
 NSString *const UIApplicationStatusBarOrientationUserInfoKey =
     @"UIApplicationStatusBarOrientationUserInfoKey";
 NSNotificationName const UIApplicationWillChangeStatusBarOrientationNotification =
@@ -48,6 +58,15 @@ NSString *const UIImagePickerControllerEditedImage =
     @"UIImagePickerControllerEditedImage";
 NSString *const UIImagePickerControllerOriginalImage =
     @"UIImagePickerControllerOriginalImage";
+NSString *const UIImagePickerControllerMediaType =
+    @"UIImagePickerControllerMediaType";
+NSString *const UIImagePickerControllerMediaURL =
+    @"UIImagePickerControllerMediaURL";
+
+NSString *const UILocalNotificationDefaultSoundName =
+    @"UILocalNotificationDefaultSoundName";
+NSNotificationName const UIMenuControllerDidHideMenuNotification =
+    @"UIMenuControllerDidHideMenuNotification";
 
 NSString *const UIKeyboardAnimationCurveUserInfoKey =
     @"UIKeyboardAnimationCurveUserInfoKey";
@@ -93,6 +112,8 @@ const UIWindowLevel UIWindowLevelAlert = 2000.0f;
 const UIWindowLevel UIWindowLevelNormal = 0.0f;
 const UIWindowLevel UIWindowLevelStatusBar = 1000.0f;
 const CGFloat UIScrollViewDecelerationRateNormal = 0.998f;
+const CGFloat UIScrollViewDecelerationRateFast = 0.99f;
+NSRunLoopMode const UITrackingRunLoopMode = @"UITrackingRunLoopMode";
 
 static pthread_once_t LC32LegacyAdMobOnce = PTHREAD_ONCE_INIT;
 static pthread_once_t LC32VoiceOverOnce = PTHREAD_ONCE_INIT;

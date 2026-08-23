@@ -72,6 +72,10 @@ int main(void) {
         ? CTRunGetAttributes(firstRun) : NULL;
     const CFRange runRange = firstRun
         ? CTRunGetStringRange(firstRun) : CFRangeMake(0, 0);
+    const CGPoint *runPositions = firstRun
+        ? CTRunGetPositionsPtr(firstRun) : NULL;
+    const CTRunStatus runStatus = firstRun
+        ? CTRunGetStatus(firstRun) : kCTRunStatusNoStatus;
     CGFloat runAscent = 0, runDescent = 0, runLeading = 0;
     const double runWidth = firstRun ? CTRunGetTypographicBounds(
         firstRun, CFRangeMake(0, 0),
@@ -86,6 +90,11 @@ int main(void) {
         finite_nonnegative(offset) && finite_nonnegative(secondaryOffset) &&
         stringIndex != kCFNotFound && runs && firstRun && runAttributes &&
         runRange.location >= 0 && runRange.length > 0 && runWidth > 0 &&
+        runPositions && isfinite((double)runPositions[0].x) &&
+        isfinite((double)runPositions[0].y) &&
+        (runStatus & ~(kCTRunStatusRightToLeft |
+            kCTRunStatusNonMonotonic |
+            kCTRunStatusHasNonIdentityMatrix)) == 0 &&
         finite_nonnegative(runAscent) && finite_nonnegative(runDescent) &&
         finite_nonnegative(runLeading) && truncated;
     printf("coretext-line-metrics: %s\n",
@@ -103,6 +112,7 @@ int main(void) {
     CTFrameRef frame = framesetter && path
         ? CTFramesetterCreateFrame(framesetter,
             CFRangeMake(0, 0), path, NULL) : NULL;
+    CGPathRef framePath = frame ? CTFrameGetPath(frame) : NULL;
     CFArrayRef lines = frame ? CTFrameGetLines(frame) : NULL;
     const CFIndex lineCount = lines ? CFArrayGetCount(lines) : 0;
     CGPoint *origins = lineCount > 0
@@ -131,6 +141,7 @@ int main(void) {
     framePassed = framesetter && finite_nonnegative(suggested.width) &&
         finite_nonnegative(suggested.height) && fitRange.location == 0 &&
         fitRange.length > 0 && path && frame && lines && lineCount > 0 &&
+        framePath &&
         origins && isfinite((double)origins[0].x) &&
         isfinite((double)origins[0].y) && context && pixelsChanged;
     printf("coretext-frame-drawing: %s\n",

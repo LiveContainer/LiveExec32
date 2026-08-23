@@ -16,12 +16,18 @@ static Boolean LC32SetUsesCFTypeCallbacks(
                 sizeof(*callbacks)) == 0);
 }
 
-static Boolean LC32SetValidateCallbacks(const CFSetCallBacks *callbacks) {
-    if(LC32SetUsesCFTypeCallbacks(callbacks)) return true;
+static LC32CoreFoundationCallbacksMode LC32SetCallbacksMode(
+        const CFSetCallBacks *callbacks) {
+    if(!callbacks) return LC32CoreFoundationCallbacksNull;
+    const CFSetCallBacks zeroCallbacks = {};
+    if(memcmp(callbacks, &zeroCallbacks, sizeof(*callbacks)) == 0)
+        return LC32CoreFoundationCallbacksNull;
+    if(LC32SetUsesCFTypeCallbacks(callbacks))
+        return LC32CoreFoundationCallbacksCFType;
     CRSetCrashLogMessage(
-        "LC32: CFSet creation requires kCFTypeSetCallBacks");
+        "LC32: CFSet creation called with custom callbacks");
     HALT;
-    return false;
+    return LC32CoreFoundationCallbacksInvalid;
 }
 
 static Boolean LC32SetValidCount(CFIndex count) {
@@ -50,15 +56,18 @@ CFSetRef CFSetCreate(CFAllocatorRef allocator, const void **values,
                      CFIndex numValues,
                      const CFSetCallBacks *callbacks) {
     (void)allocator;
+    const LC32CoreFoundationCallbacksMode mode =
+        LC32SetCallbacksMode(callbacks);
     if(!LC32SetValidCount(numValues) ||
        (numValues && !values) ||
-       !LC32SetValidateCallbacks(callbacks)) return NULL;
+       mode == LC32CoreFoundationCallbacksInvalid) return NULL;
 
     uint64_t *hostValues = LC32CopySetHostValues(values, numValues);
     if(numValues && !hostValues) return NULL;
     CFSetRef result = (CFSetRef)LC32_CF_CALL(
         LC32CoreFoundationOpSetCreate,
-        LC32_CF_U32((uintptr_t)hostValues), LC32_CF_U32(numValues));
+        LC32_CF_U32((uintptr_t)hostValues), LC32_CF_U32(numValues),
+        LC32_CF_U32(mode));
     free(hostValues);
     return result;
 }
@@ -73,12 +82,16 @@ CFMutableSetRef CFSetCreateMutable(CFAllocatorRef allocator,
                                    CFIndex capacity,
                                    const CFSetCallBacks *callbacks) {
     (void)allocator;
+    const LC32CoreFoundationCallbacksMode mode =
+        LC32SetCallbacksMode(callbacks);
     if(!LC32SetValidCount(capacity) ||
-       !LC32SetValidateCallbacks(callbacks)) {
+       mode == LC32CoreFoundationCallbacksInvalid) {
         return NULL;
     }
-    return (CFMutableSetRef)LC32_CF_CALL(
-        LC32CoreFoundationOpSetCreateMutable, LC32_CF_U32(capacity));
+    CFMutableSetRef result = (CFMutableSetRef)LC32_CF_CALL(
+        LC32CoreFoundationOpSetCreateMutable,
+        LC32_CF_U32(capacity), LC32_CF_U32(mode));
+    return result;
 }
 
 CFMutableSetRef CFSetCreateMutableCopy(CFAllocatorRef allocator,

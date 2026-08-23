@@ -21,6 +21,12 @@ NSString *const AVEncoderAudioQualityKey =
     @"AVEncoderQualityKey";
 NSString *const AVFormatIDKey =
     @"AVFormatIDKey";
+NSString *const AVLinearPCMBitDepthKey =
+    @"AVLinearPCMBitDepthKey";
+NSString *const AVLinearPCMIsBigEndianKey =
+    @"AVLinearPCMIsBigEndianKey";
+NSString *const AVLinearPCMIsFloatKey =
+    @"AVLinearPCMIsFloatKey";
 NSString *const AVNumberOfChannelsKey =
     @"AVNumberOfChannelsKey";
 NSString *const AVSampleRateKey =

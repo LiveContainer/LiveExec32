@@ -16,6 +16,9 @@ static inline UIEdgeInsets_64 LC32HostUIEdgeInsets(const UIEdgeInsets guest) {
     return result;
 }
 
+@interface _UIAppearance : NSObject
+@end
+
 @interface UILayoutContainerView : UIView
 @end
 @interface UITableViewCellLayoutManager : NSObject

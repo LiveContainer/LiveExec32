@@ -7,6 +7,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+const CFStringRef kCTFontFamilyNameAttribute =
+    CFSTR("NSFontFamilyAttribute");
+const CFStringRef kCTFontSizeAttribute = CFSTR("NSFontSizeAttribute");
+
 static pthread_once_t LC32CoreTextDispatcherOnce = PTHREAD_ONCE_INIT;
 static uint64_t LC32CoreTextDispatcherAddress;
 
@@ -86,6 +90,37 @@ CTFontRef CTFontCreateWithName(CFStringRef name, CGFloat size,
         matrix ? LC32_CT_F32(matrix->ty) : 0);
 }
 
+CTFontDescriptorRef CTFontDescriptorCreateWithAttributes(
+        CFDictionaryRef attributes) {
+    return attributes ? (CTFontDescriptorRef)LC32_CT_CALL(
+        LC32CoreTextOpFontDescriptorCreateWithAttributes,
+        LC32_CT_HOST(attributes)) : NULL;
+}
+
+CTFontRef CTFontCreateWithFontDescriptor(CTFontDescriptorRef descriptor,
+                                         CGFloat size,
+                                         const CGAffineTransform *matrix) {
+    if(!descriptor) return NULL;
+    return (CTFontRef)LC32_CT_CALL(
+        LC32CoreTextOpFontCreateWithFontDescriptor,
+        LC32_CT_HOST(descriptor), LC32_CT_F32(size),
+        LC32_CT_U32(matrix != NULL),
+        matrix ? LC32_CT_F32(matrix->a) : 0,
+        matrix ? LC32_CT_F32(matrix->b) : 0,
+        matrix ? LC32_CT_F32(matrix->c) : 0,
+        matrix ? LC32_CT_F32(matrix->d) : 0,
+        matrix ? LC32_CT_F32(matrix->tx) : 0,
+        matrix ? LC32_CT_F32(matrix->ty) : 0);
+}
+
+CTFontRef CTFontCreateUIFontForLanguage(CTFontUIFontType uiType,
+                                        CGFloat size,
+                                        CFStringRef language) {
+    return (CTFontRef)LC32_CT_CALL(
+        LC32CoreTextOpFontCreateUIFontForLanguage,
+        LC32_CT_U32(uiType), LC32_CT_F32(size), LC32_CT_HOST(language));
+}
+
 void CTFrameDraw(CTFrameRef frame, CGContextRef context) {
     if(!frame || !context) return;
     (void)LC32_CT_CALL(LC32CoreTextOpFrameDraw,
@@ -103,6 +138,11 @@ void CTFrameGetLineOrigins(CTFrameRef frame, CFRange range,
 CFArrayRef CTFrameGetLines(CTFrameRef frame) {
     return frame ? (CFArrayRef)LC32_CT_CALL(
         LC32CoreTextOpFrameGetLines, LC32_CT_HOST(frame)) : NULL;
+}
+
+CGPathRef CTFrameGetPath(CTFrameRef frame) {
+    return frame ? (CGPathRef)LC32_CT_CALL(
+        LC32CoreTextOpFrameGetPath, LC32_CT_HOST(frame)) : NULL;
 }
 
 CTFrameRef CTFramesetterCreateFrame(CTFramesetterRef framesetter,
@@ -298,6 +338,26 @@ CTParagraphStyleRef CTParagraphStyleCreate(
 CFDictionaryRef CTRunGetAttributes(CTRunRef run) {
     return run ? (CFDictionaryRef)LC32_CT_CALL(
         LC32CoreTextOpRunGetAttributes, LC32_CT_HOST(run)) : NULL;
+}
+
+const CGPoint *CTRunGetPositionsPtr(CTRunRef run) {
+    if(!run) return NULL;
+    const uint32_t count = LC32_CT_CALL(LC32CoreTextOpRunCopyPositions,
+        LC32_CT_HOST(run), 0, 0);
+    if(!count || count > UINT32_MAX / sizeof(CGPoint)) return NULL;
+
+    CGPoint *positions = LC32GetAssociatedGuestBuffer(
+        (id)run, count * (uint32_t)sizeof(*positions));
+    if(!positions) return NULL;
+    return LC32_CT_CALL(LC32CoreTextOpRunCopyPositions,
+        LC32_CT_HOST(run), LC32_CT_U32((uintptr_t)positions),
+        LC32_CT_U32(count)) ? positions : NULL;
+}
+
+CTRunStatus CTRunGetStatus(CTRunRef run) {
+    return run ? (CTRunStatus)LC32_CT_CALL(
+        LC32CoreTextOpRunGetStatus, LC32_CT_HOST(run))
+        : kCTRunStatusNoStatus;
 }
 
 CFRange CTRunGetStringRange(CTRunRef run) {

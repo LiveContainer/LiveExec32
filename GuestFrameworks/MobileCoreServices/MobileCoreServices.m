@@ -6,5 +6,10 @@
 // into the small-shim runtime.  Keep that graph out until an application
 // actually needs a MobileCoreServices API that can be bridged deliberately.
 
+#import <CoreFoundation/CoreFoundation.h>
+
+const CFStringRef kUTTypeImage = CFSTR("public.image");
+const CFStringRef kUTTypeMovie = CFSTR("public.movie");
+
 void LC32MobileCoreServicesCompatibilityStub(void) {
 }

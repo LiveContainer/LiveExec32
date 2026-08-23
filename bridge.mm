@@ -1493,7 +1493,9 @@ static bool LC32SelectorUsesHostStackVarargs(SEL selector) {
         !strcmp(name, "setWithObjects:") ||
         !strcmp(name, "orderedSetWithObjects:") ||
         !strcmp(name, "dictionaryWithObjectsAndKeys:") ||
-        !strcmp(name, "initWithObjectsAndKeys:");
+        !strcmp(name, "initWithObjectsAndKeys:") ||
+        !strcmp(name, "appearanceWhenContainedIn:") ||
+        !strcmp(name, "appearanceForTraitCollection:whenContainedIn:");
 }
 
 // guest to host call of objc_msgSend*

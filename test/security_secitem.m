@@ -19,6 +19,7 @@ int main(void) {
 
     @autoreleasepool {
         const BOOL constantsValid =
+            CFEqual(kSecAttrAccessGroup, CFSTR("agrp")) &&
             CFEqual(kSecValuePersistentRef,
                     CFSTR("v_PersistentRef")) &&
             CFEqual(kSecValueRef, CFSTR("v_Ref")) &&

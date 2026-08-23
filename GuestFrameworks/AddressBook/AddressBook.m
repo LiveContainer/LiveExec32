@@ -6,29 +6,34 @@
 #import <AddressBook/AddressBook.h>
 #import <CoreFoundation/CoreFoundation.h>
 
-// Clients obtain these property identifiers through exported variables. Their
-// exact values only need to stay unique and stable inside this isolated store.
+// Keep the iOS AddressBook property identifiers so applications can persist
+// and compare them while the backing store remains process-local.
 const ABPropertyID kABPersonFirstNameProperty = 0;
 const ABPropertyID kABPersonLastNameProperty = 1;
-const ABPropertyID kABPersonMiddleNameProperty = 2;
-const ABPropertyID kABPersonPrefixProperty = 3;
+const ABPropertyID kABPersonPhoneProperty = 3;
 const ABPropertyID kABPersonEmailProperty = 4;
-const ABPropertyID kABPersonSuffixProperty = 5;
-const ABPropertyID kABPersonNicknameProperty = 6;
-const ABPropertyID kABPersonOrganizationProperty = 7;
-const ABPropertyID kABPersonDepartmentProperty = 8;
-const ABPropertyID kABPersonJobTitleProperty = 9;
-const ABPropertyID kABPersonBirthdayProperty = 10;
-const ABPropertyID kABPersonNoteProperty = 11;
-const ABPropertyID kABPersonAddressProperty = 12;
-const ABPropertyID kABPersonPhoneProperty = 13;
-const ABPropertyID kABPersonInstantMessageProperty = 14;
-const ABPropertyID kABPersonURLProperty = 15;
+const ABPropertyID kABPersonAddressProperty = 5;
+const ABPropertyID kABPersonMiddleNameProperty = 6;
+const ABPropertyID kABPersonFirstNamePhoneticProperty = 7;
+const ABPropertyID kABPersonMiddleNamePhoneticProperty = 8;
+const ABPropertyID kABPersonLastNamePhoneticProperty = 9;
+const ABPropertyID kABPersonOrganizationProperty = 10;
+const ABPropertyID kABPersonDepartmentProperty = 11;
+const ABPropertyID kABPersonInstantMessageProperty = 13;
+const ABPropertyID kABPersonNoteProperty = 14;
+const ABPropertyID kABPersonBirthdayProperty = 17;
+const ABPropertyID kABPersonJobTitleProperty = 18;
+const ABPropertyID kABPersonNicknameProperty = 19;
+const ABPropertyID kABPersonPrefixProperty = 20;
+const ABPropertyID kABPersonSuffixProperty = 21;
+const ABPropertyID kABPersonURLProperty = 22;
 
 const CFStringRef kABWorkLabel = CFSTR("_$!<Work>!$_");
 const CFStringRef kABHomeLabel = CFSTR("_$!<Home>!$_");
 const CFStringRef kABOtherLabel = CFSTR("_$!<Other>!$_");
 const CFStringRef kABPersonHomePageLabel = CFSTR("_$!<HomePage>!$_");
+const CFStringRef kABPersonPhoneIPhoneLabel = CFSTR("iPhone");
+const CFStringRef kABPersonPhoneMobileLabel = CFSTR("_$!<Mobile>!$_");
 
 const CFStringRef kABPersonAddressStreetKey = CFSTR("Street");
 const CFStringRef kABPersonAddressCityKey = CFSTR("City");

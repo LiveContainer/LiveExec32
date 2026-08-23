@@ -41,6 +41,8 @@ const CFRunLoopMode kCFRunLoopDefaultMode =
 /* These CFStream constants are exported by CoreFoundation on iOS 10. */
 const CFStringRef kCFStreamPropertyShouldCloseNativeSocket =
     CFSTR("kCFStreamPropertyShouldCloseNativeSocket");
+const CFStreamPropertyKey kCFStreamPropertySocketNativeHandle =
+    CFSTR("kCFStreamPropertySocketNativeHandle");
 const CFStringRef kCFStreamSocketSecurityLevelNegotiatedSSL =
     CFSTR("kCFStreamSocketSecurityLevelNegotiatedSSL");
 const CFStringRef kCFStreamSocketSecurityLevelSSLv3 =
@@ -97,6 +99,8 @@ NSString * const NSLocaleCountryCode = @"kCFLocaleCountryCodeKey";
 NSString * const NSLocaleCurrencyCode = @"currency";
 NSString * const NSLocaleIdentifier = @"kCFLocaleIdentifierKey";
 NSString * const NSLocaleLanguageCode = @"kCFLocaleLanguageCodeKey";
+NSNotificationName const NSCurrentLocaleDidChangeNotification =
+    @"kCFLocaleCurrentLocaleDidChangeNotification";
 NSString * const NSRunLoopCommonModes = @"kCFRunLoopCommonModes";
 NSString * const NSURLIsExcludedFromBackupKey =
     @"NSURLIsExcludedFromBackupKey";

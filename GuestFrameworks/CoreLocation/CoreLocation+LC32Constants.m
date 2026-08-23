@@ -7,4 +7,5 @@
 
 // CLLocationAccuracy is `double` on both ABIs.
 const CLLocationAccuracy kCLLocationAccuracyBest = -1.0;
+const CLLocationAccuracy kCLLocationAccuracyNearestTenMeters = 10.0;
 const CLLocationAccuracy kCLLocationAccuracyKilometer = 1000.0;

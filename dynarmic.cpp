@@ -29,6 +29,7 @@
 #include <mach/thread_act.h>
 #include <mach/arm/thread_status.h>
 #include <mach/clock.h>
+#include <mach/host_info.h>
 #include <mach/mig_errors.h>
 #include <mach/task_info.h>
 #include <mach/vm_map.h>
@@ -1923,18 +1924,126 @@ guest_mach_msg_trap(u32 guest_msg,
             break;
         }
         case 200: {
-            MACH_MSG_UNION(host_info, Mess);
-            if(Mess->In.flavor == HOST_PRIORITY_INFO) {
-                result = host_info(Mess->In.Head.msgh_request_port, Mess->In.flavor, (host_info_t)Mess->Out.host_info_out, &Mess->Out.host_info_outCnt);
-                host_header->msgh_size = sizeof(Mess->Out) - sizeof(Mess->Out.host_info_out) + sizeof(Mess->Out.host_info_out[0])*Mess->Out.host_info_outCnt;
-                Mess->Out.RetCode = result;
-            } else {
-                printf("LC32: Unhandled flavor %d\n", Mess->In.flavor);
-                SetPendingGuestCrashMessage(
-                    "Unhandled host_info flavor %d", Mess->In.flavor);
-                CurrentUserCallbacks()->ExceptionRaised(
-                    0xDEADDEAD, Dynarmic::A32::Exception::Yield);
+            /*
+             * host_info returns a variable-length array of 32-bit integers.
+             * Marshal the iOS 10 request and reply explicitly so the guest's
+             * CountInOut value is not confused with the zeroed reply storage
+             * and so future host SDK wire-layout changes cannot leak into the
+             * ARM32 ABI.
+             */
+            struct __attribute__((packed, aligned(4))) HostInfoRequest32 {
+                mach_msg_header_t Head;
+                NDR_record_t NDR;
+                host_flavor_t flavor;
+                mach_msg_type_number_t host_info_outCnt;
+            };
+            struct __attribute__((packed, aligned(4))) HostInfoReply32 {
+                mach_msg_header_t Head;
+                NDR_record_t NDR;
+                kern_return_t RetCode;
+                mach_msg_type_number_t host_info_outCnt;
+                integer_t host_info_out[68];
+            };
+            static_assert(sizeof(HostInfoRequest32) == 40,
+                "unexpected ARM32 host_info request layout");
+            static_assert(offsetof(HostInfoReply32, host_info_out) == 40,
+                "unexpected ARM32 host_info reply payload offset");
+            static_assert(sizeof(HostInfoReply32) == 312,
+                "unexpected ARM32 host_info reply layout");
+
+            const auto writeError = [&](kern_return_t errorCode) {
+                if (rcv_size < sizeof(mig_reply_error_t)) {
+                    host_header->msgh_size = sizeof(mig_reply_error_t);
+                    result = MACH_RCV_TOO_LARGE;
+                    return;
+                }
+                auto *error = reinterpret_cast<mig_reply_error_t *>(
+                    host_header);
+                host_header->msgh_size = sizeof(*error);
+                error->NDR = NDR_record;
+                error->RetCode = errorCode;
+            };
+
+            if (send_size != sizeof(HostInfoRequest32)) {
+                writeError(MIG_BAD_ARGUMENTS);
+                break;
             }
+
+            const auto request =
+                *reinterpret_cast<const HostInfoRequest32 *>(host_header);
+            constexpr mach_msg_type_number_t MaxHostInfoCount = 68;
+            constexpr mach_msg_type_number_t GuestHostBasicInfoOldCount = 5;
+            constexpr mach_msg_type_number_t GuestHostBasicInfoCount = 12;
+            static_assert(sizeof(host_basic_info_data_t) /
+                    sizeof(integer_t) == GuestHostBasicInfoCount,
+                "host HOST_BASIC_INFO layout no longer matches iOS 10");
+            if (request.host_info_outCnt > MaxHostInfoCount) {
+                writeError(MIG_ARRAY_TOO_LARGE);
+                break;
+            }
+            if (request.flavor == HOST_BASIC_INFO &&
+                    request.host_info_outCnt <
+                        GuestHostBasicInfoOldCount) {
+                /*
+                 * XNU accepts the original five-word structure, but leaves
+                 * CountInOut and the caller's buffer untouched below that
+                 * size.
+                 */
+                writeError(KERN_FAILURE);
+                break;
+            }
+
+            std::array<integer_t, MaxHostInfoCount> info = {};
+            mach_msg_type_number_t count = request.host_info_outCnt;
+            const kern_return_t kr = host_info(
+                request.Head.msgh_request_port, request.flavor,
+                info.data(), &count);
+            if (kr != KERN_SUCCESS) {
+                writeError(kr);
+                break;
+            }
+            if (count > MaxHostInfoCount ||
+                    count > request.host_info_outCnt) {
+                writeError(MIG_ARRAY_TOO_LARGE);
+                break;
+            }
+            if (request.flavor == HOST_BASIC_INFO) {
+                const mach_msg_type_number_t expectedCount =
+                    request.host_info_outCnt >= GuestHostBasicInfoCount
+                    ? GuestHostBasicInfoCount
+                    : GuestHostBasicInfoOldCount;
+                if (count != expectedCount) {
+                    writeError(KERN_FAILURE);
+                    break;
+                }
+
+                auto *basic = reinterpret_cast<host_basic_info_t>(
+                    info.data());
+                basic->cpu_type = CPU_TYPE_ARM;
+                basic->cpu_subtype = CPU_SUBTYPE_ARM_V7S;
+                if (count == GuestHostBasicInfoCount) {
+                    basic->cpu_threadtype = CPU_THREADTYPE_NONE;
+                }
+            }
+
+            const mach_msg_size_t replySize =
+                offsetof(HostInfoReply32, host_info_out) +
+                sizeof(info[0]) * count;
+            if (rcv_size < replySize) {
+                host_header->msgh_size = replySize;
+                result = MACH_RCV_TOO_LARGE;
+                break;
+            }
+
+            auto *reply = reinterpret_cast<HostInfoReply32 *>(host_header);
+            reply->NDR = NDR_record;
+            reply->RetCode = KERN_SUCCESS;
+            reply->host_info_outCnt = count;
+            if (count != 0) {
+                memcpy(reply->host_info_out, info.data(),
+                    sizeof(info[0]) * count);
+            }
+            host_header->msgh_size = replySize;
             break;
         }
         case 205: {

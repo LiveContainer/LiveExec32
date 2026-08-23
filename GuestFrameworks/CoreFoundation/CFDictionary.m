@@ -165,6 +165,19 @@ static LC32CoreFoundationCallbacksMode LC32DictionaryValueCallbacksMode(
         if(!callbacks->copyDescription)
             return LC32CoreFoundationCallbacksWeakCFTypeNoDescription;
     }
+    /*
+     * Legacy Objective-C frameworks commonly wrap -retain/-release in value
+     * callbacks solely to assert a private protocol or class.  Native CF
+     * cannot execute those ARM32 function pointers, but this strict shape
+     * has ordinary strong-object ownership and pointer-style optional value
+     * operations.  Preserve those semantics with native retain/release
+     * callbacks on the corresponding host object.
+     */
+    if(callbacks->version == 0 && callbacks->retain && callbacks->release &&
+       !callbacks->copyDescription && !callbacks->equal) {
+        return
+            LC32CoreFoundationCallbacksRetainedObjectNoDescriptionOrEqual;
+    }
     return LC32CoreFoundationCallbacksInvalid;
 }
 

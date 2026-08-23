@@ -34,6 +34,8 @@ const CFStringRef kCFHTTPVersion1_0 = CFSTR("HTTP/1.0");
 const CFStringRef kCFHTTPVersion1_1 = CFSTR("HTTP/1.1");
 
 const SInt32 kCFStreamErrorDomainHTTP = 4;
+const CFStringRef kCFErrorDomainCFNetwork =
+    CFSTR("kCFErrorDomainCFNetwork");
 
 const CFStringRef kCFProxyHostNameKey =
     CFSTR("kCFProxyHostNameKey");

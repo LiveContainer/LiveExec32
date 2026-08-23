@@ -17,6 +17,7 @@ xcrun nm -gjU "$IMAGE" > "$SYMBOLS"
 for symbol in \
     kSecAttrAccessible \
     kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly \
+    kSecAttrAccessGroup \
     kSecAttrAccount \
     kSecAttrApplicationTag \
     kSecAttrGeneric \

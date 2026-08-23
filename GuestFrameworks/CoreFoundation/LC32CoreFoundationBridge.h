@@ -205,6 +205,7 @@ typedef enum : uint32_t {
     LC32CoreFoundationCallbacksWeakCFType = 3,
     LC32CoreFoundationCallbacksWeakCFTypeNoDescription = 4,
     LC32CoreFoundationCallbacksCopyString = 5,
+    LC32CoreFoundationCallbacksRetainedObjectNoDescriptionOrEqual = 6,
 } LC32CoreFoundationCallbacksMode;
 
 typedef enum : uint32_t {

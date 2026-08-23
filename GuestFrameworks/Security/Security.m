@@ -20,6 +20,7 @@
 const CFStringRef kSecAttrAccessible = CFSTR("pdmn");
 const CFStringRef kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly =
     CFSTR("cku");
+const CFStringRef kSecAttrAccessGroup = CFSTR("agrp");
 const CFStringRef kSecAttrAccount = CFSTR("acct");
 const CFStringRef kSecAttrApplicationTag = CFSTR("atag");
 const CFStringRef kSecAttrGeneric = CFSTR("gena");

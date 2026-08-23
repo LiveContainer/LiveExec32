@@ -95,11 +95,28 @@ const CFArrayCallBacks *ArrayCallbacks(uint32_t mode) {
         case LC32CoreFoundationCallbacksWeakCFTypeNoDescription:
             return &weakCFTypeNoDescriptionCallbacks;
         case LC32CoreFoundationCallbacksCopyString:
+        case LC32CoreFoundationCallbacksRetainedObjectNoDescriptionOrEqual:
             break;
         case LC32CoreFoundationCallbacksInvalid:
             break;
     }
     return reinterpret_cast<const CFArrayCallBacks *>(UINTPTR_MAX);
+}
+
+const CFSetCallBacks *SetCallbacks(uint32_t mode) {
+    switch(static_cast<LC32CoreFoundationCallbacksMode>(mode)) {
+        case LC32CoreFoundationCallbacksCFType:
+            return &kCFTypeSetCallBacks;
+        case LC32CoreFoundationCallbacksNull:
+            return nullptr;
+        case LC32CoreFoundationCallbacksWeakCFType:
+        case LC32CoreFoundationCallbacksWeakCFTypeNoDescription:
+        case LC32CoreFoundationCallbacksCopyString:
+        case LC32CoreFoundationCallbacksRetainedObjectNoDescriptionOrEqual:
+        case LC32CoreFoundationCallbacksInvalid:
+            break;
+    }
+    return reinterpret_cast<const CFSetCallBacks *>(UINTPTR_MAX);
 }
 
 CFHashCode WeakCFTypeHash(const void *value) {
@@ -125,6 +142,8 @@ const CFDictionaryKeyCallBacks *DictionaryKeyCallbacks(uint32_t mode) {
             return &weakCFTypeNoDescriptionCallbacks;
         case LC32CoreFoundationCallbacksCopyString:
             return &kCFCopyStringDictionaryKeyCallBacks;
+        case LC32CoreFoundationCallbacksRetainedObjectNoDescriptionOrEqual:
+            break;
         case LC32CoreFoundationCallbacksInvalid:
             break;
     }
@@ -139,6 +158,17 @@ const CFDictionaryValueCallBacks *DictionaryValueCallbacks(uint32_t mode) {
         weakCFTypeNoDescriptionCallbacks = {
             0, nullptr, nullptr, nullptr, CFEqual,
         };
+    static const CFDictionaryValueCallBacks retainedObjectCallbacks = {
+        0,
+        [](CFAllocatorRef, const void *value) -> const void * {
+            return CFRetain(static_cast<CFTypeRef>(value));
+        },
+        [](CFAllocatorRef, const void *value) {
+            CFRelease(static_cast<CFTypeRef>(value));
+        },
+        nullptr,
+        nullptr,
+    };
     switch(static_cast<LC32CoreFoundationCallbacksMode>(mode)) {
         case LC32CoreFoundationCallbacksCFType:
             return &kCFTypeDictionaryValueCallBacks;
@@ -150,6 +180,8 @@ const CFDictionaryValueCallBacks *DictionaryValueCallbacks(uint32_t mode) {
             return &weakCFTypeNoDescriptionCallbacks;
         case LC32CoreFoundationCallbacksCopyString:
             break;
+        case LC32CoreFoundationCallbacksRetainedObjectNoDescriptionOrEqual:
+            return &retainedObjectCallbacks;
         case LC32CoreFoundationCallbacksInvalid:
             break;
     }
@@ -163,6 +195,7 @@ bool DictionaryCallbacksModeIsValid(uint32_t mode) {
         case LC32CoreFoundationCallbacksWeakCFType:
         case LC32CoreFoundationCallbacksWeakCFTypeNoDescription:
         case LC32CoreFoundationCallbacksCopyString:
+        case LC32CoreFoundationCallbacksRetainedObjectNoDescriptionOrEqual:
             return true;
         case LC32CoreFoundationCallbacksInvalid:
             return false;
@@ -1988,15 +2021,20 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             return 1;
         }
         case LC32CoreFoundationOpSetCreate: {
-            if(!RequireSlots(call, 2) ||
+            if((call.slotCount != 2 && call.slotCount != 3) ||
                SlotU32(call, 1) > kMaximumSetEntries) return 0;
+            const uint32_t mode = call.slotCount == 3 ?
+                SlotU32(call, 2) : LC32CoreFoundationCallbacksCFType;
+            const CFSetCallBacks *callbacks = SetCallbacks(mode);
+            if(callbacks == reinterpret_cast<const CFSetCallBacks *>(
+                    UINTPTR_MAX)) return 0;
             std::vector<const void *> values;
             if(!ReadGuestHostObjects(SlotU32(call, 0),
                                      SlotU32(call, 1), values)) return 0;
             return GuestForCreatedObject(CFSetCreate(
                 kCFAllocatorDefault,
                 values.empty() ? nullptr : values.data(), values.size(),
-                &kCFTypeSetCallBacks));
+                callbacks));
         }
         case LC32CoreFoundationOpSetCreateCopy: {
             if(!RequireSlots(call, 1)) return 0;
@@ -2005,11 +2043,16 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
                 kCFAllocatorDefault, set)) : 0;
         }
         case LC32CoreFoundationOpSetCreateMutable: {
-            if(!RequireSlots(call, 1) ||
+            if((call.slotCount != 1 && call.slotCount != 2) ||
                SlotU32(call, 0) > kMaximumSetEntries) return 0;
+            const uint32_t mode = call.slotCount == 2 ?
+                SlotU32(call, 1) : LC32CoreFoundationCallbacksCFType;
+            const CFSetCallBacks *callbacks = SetCallbacks(mode);
+            if(callbacks == reinterpret_cast<const CFSetCallBacks *>(
+                    UINTPTR_MAX)) return 0;
             return GuestForCreatedObject(CFSetCreateMutable(
                 kCFAllocatorDefault, SlotU32(call, 0),
-                &kCFTypeSetCallBacks));
+                callbacks));
         }
         case LC32CoreFoundationOpSetCreateMutableCopy: {
             if(!RequireSlots(call, 2) ||

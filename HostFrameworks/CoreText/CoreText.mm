@@ -218,6 +218,45 @@ u32 LC32_CoreText_Dispatch(u32 opcode, u32 guestCall, u32) {
             return font ? LC32GuestObjectForOwnedHostObject(font) : 0;
         }
 
+        case LC32CoreTextOpFontDescriptorCreateWithAttributes: {
+            if(!RequireCoreTextSlots(call, 1)) return 0;
+            CFDictionaryRef attributes =
+                SlotHostObject<CFDictionaryRef>(call, 0);
+            if(!attributes) return 0;
+            CTFontDescriptorRef descriptor =
+                CTFontDescriptorCreateWithAttributes(attributes);
+            return descriptor
+                ? LC32GuestObjectForOwnedHostObject(descriptor) : 0;
+        }
+
+        case LC32CoreTextOpFontCreateWithFontDescriptor: {
+            if(!RequireCoreTextSlots(call, 9)) return 0;
+            CTFontDescriptorRef descriptor =
+                SlotHostObject<CTFontDescriptorRef>(call, 0);
+            if(!descriptor) return 0;
+            CGAffineTransform transform;
+            const CGAffineTransform *transformPointer = nullptr;
+            if(SlotU32(call, 2)) {
+                transform = CGAffineTransformMake(
+                    SlotCGFloat(call, 3), SlotCGFloat(call, 4),
+                    SlotCGFloat(call, 5), SlotCGFloat(call, 6),
+                    SlotCGFloat(call, 7), SlotCGFloat(call, 8));
+                transformPointer = &transform;
+            }
+            CTFontRef font = CTFontCreateWithFontDescriptor(
+                descriptor, SlotCGFloat(call, 1), transformPointer);
+            return font ? LC32GuestObjectForOwnedHostObject(font) : 0;
+        }
+
+        case LC32CoreTextOpFontCreateUIFontForLanguage: {
+            if(!RequireCoreTextSlots(call, 3)) return 0;
+            CFStringRef language = SlotHostObject<CFStringRef>(call, 2);
+            CTFontRef font = CTFontCreateUIFontForLanguage(
+                static_cast<CTFontUIFontType>(SlotU32(call, 0)),
+                SlotCGFloat(call, 1), language);
+            return font ? LC32GuestObjectForOwnedHostObject(font) : 0;
+        }
+
         case LC32CoreTextOpFrameDraw: {
             if(!RequireCoreTextSlots(call, 2)) return 0;
             CTFrameRef frame = SlotHostObject<CTFrameRef>(call, 0);
@@ -272,6 +311,12 @@ u32 LC32_CoreText_Dispatch(u32 opcode, u32 guestCall, u32) {
             if(!RequireCoreTextSlots(call, 1)) return 0;
             CTFrameRef frame = SlotHostObject<CTFrameRef>(call, 0);
             return frame ? GuestBorrowedObject(CTFrameGetLines(frame)) : 0;
+        }
+
+        case LC32CoreTextOpFrameGetPath: {
+            if(!RequireCoreTextSlots(call, 1)) return 0;
+            CTFrameRef frame = SlotHostObject<CTFrameRef>(call, 0);
+            return frame ? GuestBorrowedObject(CTFrameGetPath(frame)) : 0;
         }
 
         case LC32CoreTextOpFramesetterCreateFrame: {
@@ -430,6 +475,44 @@ u32 LC32_CoreText_Dispatch(u32 opcode, u32 guestCall, u32) {
             if(!RequireCoreTextSlots(call, 1)) return 0;
             CTRunRef run = SlotHostObject<CTRunRef>(call, 0);
             return run ? GuestBorrowedObject(CTRunGetAttributes(run)) : 0;
+        }
+
+        case LC32CoreTextOpRunCopyPositions: {
+            if(!RequireCoreTextSlots(call, 3)) return 0;
+            CTRunRef run = SlotHostObject<CTRunRef>(call, 0);
+            if(!run) return 0;
+            const CFIndex count = CTRunGetGlyphCount(run);
+            if(count <= 0 || static_cast<uint64_t>(count) >
+                    UINT32_MAX / sizeof(LC32CoreTextPair32)) return 0;
+
+            const u32 guestPositions = SlotU32(call, 1);
+            const u32 requestedCount = SlotU32(call, 2);
+            if(!guestPositions && !requestedCount)
+                return static_cast<u32>(count);
+            if(!guestPositions || requestedCount != static_cast<u32>(count))
+                return 0;
+
+            const size_t positionCount = static_cast<size_t>(count);
+            std::vector<CGPoint> nativePositions(positionCount);
+            CTRunGetPositions(run, CFRangeMake(0, count),
+                              nativePositions.data());
+            std::vector<LC32CoreTextPair32> guestValues(positionCount);
+            for(size_t index = 0; index < positionCount; index++) {
+                guestValues[index] = {
+                    ReturnCGFloat(nativePositions[index].x),
+                    ReturnCGFloat(nativePositions[index].y),
+                };
+            }
+            const size_t byteCount = positionCount * sizeof(guestValues[0]);
+            if(!GuestRangeIsValid(guestPositions, byteCount)) return 0;
+            return Dynarmic_mem_1write(guestPositions, byteCount,
+                reinterpret_cast<char *>(guestValues.data())) == 0;
+        }
+
+        case LC32CoreTextOpRunGetStatus: {
+            if(!RequireCoreTextSlots(call, 1)) return 0;
+            CTRunRef run = SlotHostObject<CTRunRef>(call, 0);
+            return run ? static_cast<u32>(CTRunGetStatus(run)) : 0;
         }
 
         case LC32CoreTextOpRunGetStringRange: {

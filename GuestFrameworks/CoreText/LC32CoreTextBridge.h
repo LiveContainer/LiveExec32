@@ -63,6 +63,12 @@ typedef enum : uint32_t {
     LC32CoreTextOpRunGetAttributes = 17,
     LC32CoreTextOpRunGetStringRange = 18,
     LC32CoreTextOpRunGetTypographicBounds = 19,
+    LC32CoreTextOpFontDescriptorCreateWithAttributes = 20,
+    LC32CoreTextOpFontCreateWithFontDescriptor = 21,
+    LC32CoreTextOpFontCreateUIFontForLanguage = 22,
+    LC32CoreTextOpFrameGetPath = 23,
+    LC32CoreTextOpRunCopyPositions = 24,
+    LC32CoreTextOpRunGetStatus = 25,
 } LC32CoreTextOpcode;
 
 #endif

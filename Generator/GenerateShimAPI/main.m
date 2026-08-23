@@ -714,6 +714,9 @@ static BOOL LC32MethodReturnsOwnedResult(NSString *className,
 @property(nonatomic) BOOL usesRuntimeSignatures;
 @property(nonatomic) NSUInteger skippedIncompleteMethods;
 @property(nonatomic) NSUInteger skippedFilteredMethods;
+- (void)validateAndAddMethod:(LC32ObjCMethod *)method;
+- (void)validateAndAddRuntimeMethod:(Method)objcMethod
+                  isInstanceMethod:(BOOL)isInstanceMethod;
 @end
 
 static BOOL LC32MethodHasManualAdapter(NSString *className,
@@ -1236,10 +1239,12 @@ typedef struct {
 } LC32RuntimeGenerationResult;
 
 static LC32RuntimeGenerationResult
-LC32GenerateRuntimeUIKitExtras(NSString *outputRoot) {
+LC32GenerateRuntimeUIKitExtras(NSString *outputRoot,
+                               NSDictionary *frameworks) {
     LC32RuntimeGenerationResult result = {0};
     NSString *uikitPath = @"/System/Library/Frameworks/UIKit.framework/UIKit";
     NSArray<NSString *> *classes = @[
+        @"_UIAppearance",
         @"UIDynamicSystemColor", @"UIDynamicColor", @"UILayoutContainerView",
         @"UICachedDeviceWhiteColor", @"UIDeviceWhiteColor", @"UIDeviceRGBColor",
         @"UITableViewCellLayoutManager", @"_UIMoreListTableView",
@@ -1282,6 +1287,47 @@ LC32GenerateRuntimeUIKitExtras(NSString *outputRoot) {
 
         ClassBuilder *classBuilder =
             [[ClassBuilder alloc] initWithClass:cls imagePath:uikitPath];
+        if([className isEqualToString:@"_UIAppearance"]) {
+            /*
+             * The iOS 10 guest runtime has no Foundation message-forward
+             * handler installed, so merely mirroring _UIAppearance's
+             * -methodSignatureForSelector:/-forwardInvocation: pair cannot
+             * receive an otherwise unknown appearance selector.  Install
+             * the typed public declarations used by legacy navigation-bar
+             * appearance proxies directly on the private guest mirror. Use
+             * the captured iOS 10 signatures rather than current host UIKit
+             * metadata: UIBarMetrics and UIControlState are 32-bit in the
+             * ARMv7 ABI but NSInteger/NSUInteger are 64-bit on the host.
+             */
+            NSDictionary<NSString *, NSString *> *appearanceMethods = @{
+                @"setBackgroundImage:forBarMetrics:": @"UINavigationBar",
+                @"setBackButtonBackgroundImage:forState:barMetrics:":
+                    @"UIBarButtonItem",
+                @"setBackgroundImage:forState:barMetrics:":
+                    @"UIBarButtonItem",
+            };
+            for(NSString *selectorName in
+                    [appearanceMethods.allKeys
+                        sortedArrayUsingSelector:@selector(compare:)]) {
+                NSString *declaringClass = appearanceMethods[selectorName];
+                NSString *typeEncoding =
+                    frameworks[@"UIKit"][declaringClass][@"-"][selectorName];
+                if(![typeEncoding isKindOfClass:NSString.class] ||
+                   typeEncoding.length == 0) {
+                    fprintf(stderr,
+                        "Captured UIKit appearance method not found: %s/%s\n",
+                        declaringClass.UTF8String,
+                        selectorName.UTF8String);
+                    result.failures++;
+                    continue;
+                }
+                LC32ObjCMethod *method = [LC32ObjCMethod
+                    methodWithSelector:NSSelectorFromString(selectorName)
+                          typeEncoding:typeEncoding.UTF8String
+                      isInstanceMethod:YES];
+                [classBuilder validateAndAddMethod:method];
+            }
+        }
         error = nil;
         if(!LC32WriteClass(classBuilder, outputPath, &error)) {
             fprintf(stderr, "Could not write runtime class %s: %s\n",
@@ -1462,7 +1508,8 @@ int main(int argc, char **argv) {
 
         LC32RuntimeGenerationResult runtimeResult = {0};
         if(includeRuntimeUIKit) {
-            runtimeResult = LC32GenerateRuntimeUIKitExtras(outputRoot);
+            runtimeResult =
+                LC32GenerateRuntimeUIKitExtras(outputRoot, frameworks);
         }
         printf("Generated %lu methods in %lu classes from %lu frameworks; "
                "skipped %lu incomplete and %lu filtered methods",
