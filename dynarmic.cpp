@@ -219,6 +219,8 @@ static bool write_guest_memory_with_permissions(
 static bool guest_memory_range_has_permissions(
     u64 address, size_t size, int requiredPermissions);
 static bool GuestAddressRangeIsValid32(u64 address, u64 size);
+static kern_return_t CopyGuestVmMemory(
+    u32 source, u32 destination, u32 size);
 static int ValidateGuestMunmapRange(u64 address, u64 size);
 static std::string CopyGuestCStringForCrash(
     u64 guestAddress, size_t maximumLength);
@@ -2235,6 +2237,58 @@ guest_mach_msg_trap(u32 guest_msg,
                 Mess->Out.RetCode == KERN_SUCCESS
                     ? sizeof(Mess->Out)
                     : sizeof(mig_reply_error_t);
+            break;
+        }
+        case 3808: { // vm_copy
+            /*
+             * vm_map.defs uses vm_address_t/vm_size_t, so the iOS 10
+             * armv7 request is narrower than the host SDK's LP64 MIG
+             * declaration. The addresses name logical guest memory and
+             * therefore cannot be forwarded to the host task's vm_copy.
+             */
+            struct __attribute__((packed, aligned(4))) VmCopyRequest32 {
+                mach_msg_header_t Head;
+                NDR_record_t NDR;
+                u32 source_address;
+                u32 size;
+                u32 dest_address;
+            };
+            static_assert(sizeof(VmCopyRequest32) == 44,
+                "unexpected ARM32 vm_copy request layout");
+            static_assert(sizeof(mig_reply_error_t) == 36,
+                "unexpected vm_copy reply layout");
+
+            if (send_size != sizeof(VmCopyRequest32)) {
+                if (rcv_size < sizeof(mig_reply_error_t)) {
+                    host_header->msgh_size = sizeof(mig_reply_error_t);
+                    result = MACH_RCV_TOO_LARGE;
+                } else {
+                    auto *error = reinterpret_cast<mig_reply_error_t *>(
+                        host_header);
+                    host_header->msgh_size = sizeof(*error);
+                    error->NDR = NDR_record;
+                    error->RetCode = MIG_BAD_ARGUMENTS;
+                }
+                break;
+            }
+            if (rcv_size < sizeof(mig_reply_error_t)) {
+                host_header->msgh_size = sizeof(mig_reply_error_t);
+                result = MACH_RCV_TOO_LARGE;
+                break;
+            }
+
+            const auto request =
+                *reinterpret_cast<const VmCopyRequest32 *>(host_header);
+            auto *reply = reinterpret_cast<mig_reply_error_t *>(host_header);
+            host_header->msgh_size = sizeof(*reply);
+            reply->NDR = NDR_record;
+            reply->RetCode =
+                request.Head.msgh_request_port == mach_task_self()
+                    ? CopyGuestVmMemory(
+                        request.source_address,
+                        request.dest_address,
+                        request.size)
+                    : KERN_INVALID_ARGUMENT;
             break;
         }
         case 3213: {
@@ -5763,6 +5817,111 @@ static bool GuestAddressRangeIsValid32(
         UINT64_C(1) << 32;
     return address < addressSpaceSize &&
         size <= addressSpaceSize - address;
+}
+
+enum class GuestVmRangeStatus {
+    Valid,
+    InvalidAddress,
+    ProtectionFailure,
+};
+
+static GuestVmRangeStatus ValidateGuestVmRangeLocked(
+        u64 address, size_t size,
+        int requiredPermissions) {
+    if (!GuestAddressRangeIsValid32(address, size)) {
+        return GuestVmRangeStatus::InvalidAddress;
+    }
+    khash_t(memory) *memory = sharedHandle.memory;
+    if (memory == nullptr) {
+        return GuestVmRangeStatus::InvalidAddress;
+    }
+    while (size != 0) {
+        const u64 pageAddress =
+            address & ~u64(DYN_PAGE_MASK);
+        const khiter_t iterator =
+            kh_get(memory, memory, pageAddress);
+        if (iterator == kh_end(memory)) {
+            return GuestVmRangeStatus::InvalidAddress;
+        }
+        const t_memory_page page =
+            kh_value(memory, iterator);
+        if (page == nullptr || page->addr == nullptr) {
+            return GuestVmRangeStatus::InvalidAddress;
+        }
+        if ((page->perms & requiredPermissions) !=
+                requiredPermissions) {
+            return GuestVmRangeStatus::ProtectionFailure;
+        }
+        const size_t pageOffset =
+            address & DYN_PAGE_MASK;
+        const size_t chunk = std::min(
+            size, static_cast<size_t>(
+                DYN_PAGE_SIZE - pageOffset));
+        address += chunk;
+        size -= chunk;
+    }
+    return GuestVmRangeStatus::Valid;
+}
+
+static kern_return_t GuestVmRangeStatusToKernReturn(
+        GuestVmRangeStatus status) {
+    switch (status) {
+        case GuestVmRangeStatus::Valid:
+            return KERN_SUCCESS;
+        case GuestVmRangeStatus::InvalidAddress:
+            return KERN_INVALID_ADDRESS;
+        case GuestVmRangeStatus::ProtectionFailure:
+            return KERN_PROTECTION_FAILURE;
+    }
+    return KERN_FAILURE;
+}
+
+static kern_return_t CopyGuestVmMemory(
+        u32 source, u32 destination, u32 size) {
+    /* vm_copy accepts an empty range without inspecting either address. */
+    if (size == 0) {
+        return KERN_SUCCESS;
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(
+        guestVmMutex);
+    const GuestVmRangeStatus sourceStatus =
+        ValidateGuestVmRangeLocked(
+            source, size, PROT_READ);
+    if (sourceStatus != GuestVmRangeStatus::Valid) {
+        return GuestVmRangeStatusToKernReturn(
+            sourceStatus);
+    }
+    const GuestVmRangeStatus destinationStatus =
+        ValidateGuestVmRangeLocked(
+            destination, size, PROT_WRITE);
+    if (destinationStatus != GuestVmRangeStatus::Valid) {
+        return GuestVmRangeStatusToKernReturn(
+            destinationStatus);
+    }
+
+    /*
+     * XNU snapshots the source with vm_map_copyin before overwriting the
+     * destination. A complete private copy preserves that behavior for
+     * forward/backward overlap and for two guest virtual ranges that alias
+     * the same backing memory.
+     */
+    std::vector<uint8_t> snapshot;
+    try {
+        snapshot.resize(size);
+    } catch (const std::exception &) {
+        return KERN_RESOURCE_SHORTAGE;
+    }
+    if (!read_guest_memory_with_permissions(
+            source, snapshot.data(), snapshot.size(),
+            PROT_READ) ||
+        !write_guest_memory_with_permissions(
+            destination, snapshot.data(), snapshot.size(),
+            PROT_WRITE)) {
+        /* The map is locked and was fully validated, so this is defensive. */
+        return KERN_FAILURE;
+    }
+    return KERN_SUCCESS;
 }
 
 static bool GuestProtectionIsValid(int protection) {
