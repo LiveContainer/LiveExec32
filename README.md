@@ -28,7 +28,7 @@ gmake -C GuestMakefile
 ```
   On the first run this downloads the iOS 10.3.3 restore ramdisk component
   (`058-75249-062.dmg`) from Apple's IPSW, decrypts it with `xpwntool`, and
-  copies it into `tmp/ramdisk` with `rsync -aH` (7z would break the HFS
+  copies it into `Resources/RootFS` with `rsync -aH` (7z would break the HFS
   symlinks and dylib hardlink pairs that the guest dyld relies on).  The
   download and decrypted image are cached under `tmp/ipsw/`, so subsequent
   runs only reinstall the rebuilt frameworks.

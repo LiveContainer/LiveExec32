@@ -67,7 +67,7 @@ CoreFoundation_FRAMEWORKS = LC32
 CoreFoundation_LDFLAGS = \
   -compatibility_version 478.23.0 \
   -current_version 478.23.0 -fno-autolink \
-  -Wl,-reexport_library,$(abspath ../tmp/ramdisk/usr/lib/libobjc.A.dylib)
+  -Wl,-reexport_library,$(abspath ../Resources/RootFS/usr/lib/libobjc.A.dylib)
 
 Foundation_FRAMEWORKS = LC32
 Foundation_FILES = $(filter-out \

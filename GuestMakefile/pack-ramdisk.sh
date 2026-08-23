@@ -4,7 +4,7 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd "$SCRIPT_DIR/.." && pwd)
 
-RAMDISK_ROOT=${RAMDISK_ROOT:-"$REPO_ROOT/tmp/ramdisk"}
+RAMDISK_ROOT=${RAMDISK_ROOT:-"$REPO_ROOT/Resources/RootFS"}
 IOS_SYSTEM_ROOT=${IOS_SYSTEM_ROOT:-/Volumes/Greensburg14G60.N41N42N48N49OS}
 BUILD_ROOT=${BUILD_ROOT:-"$SCRIPT_DIR/.theos/obj/debug/armv7s"}
 
