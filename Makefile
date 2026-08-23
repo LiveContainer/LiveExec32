@@ -17,6 +17,7 @@ LiveExec32_FILES = \
 	HostFrameworks/Foundation/NSString.mm \
 	HostFrameworks/CoreFoundation/CoreFoundation.mm \
 	HostFrameworks/CFNetwork/CFNetwork.mm \
+	HostFrameworks/Security/Security.mm \
 	HostFrameworks/CoreGraphics/CoreGraphics.mm \
 	HostFrameworks/CoreText/CoreText.mm \
 	HostFrameworks/AudioToolbox/AudioToolbox.mm \
@@ -26,7 +27,7 @@ LiveExec32_FILES = \
 LiveExec32_CFLAGS = -Iinclude -DDYNARMIC_MASTER
 LiveExec32_CCFLAGS = -std=c++17
 LiveExec32_LDFLAGS = -L./Resources/Frameworks -ldynarmic
-LiveExec32_FRAMEWORKS = AudioToolbox CFNetwork GameKit OpenAL OpenGLES
+LiveExec32_FRAMEWORKS = AudioToolbox CFNetwork GameKit OpenAL OpenGLES Security
 LiveExec32_CODESIGN_FLAGS = -Sentitlements.plist
 #LiveExec32_INSTALL_PATH = /usr/local/bin
 
