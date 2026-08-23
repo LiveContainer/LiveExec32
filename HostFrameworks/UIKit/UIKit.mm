@@ -40,6 +40,17 @@ typedef NS_ENUM(NSUInteger, LC32LegacyIPadGeometryMode) {
 @end
 
 /*
+ * UIWindow.rootViewController did not exist before iOS 4.  Main-nib games
+ * from that era commonly archive their drawable view directly under the
+ * window and leave the root controller nil.  Modern UIKit rejects such a
+ * window at the end of application launch, so give the host a controller
+ * whose inert view sits behind the untouched guest hierarchy.  The guest
+ * rootViewController accessor deliberately hides this implementation detail.
+ */
+@interface LC32LegacyWindowRootController : UIViewController
+@end
+
+/*
 symbol = r0 + r1 << 32
 r0 = r2
 r1 = r3
@@ -109,6 +120,17 @@ void LC32NativeLayoutViewIfNeeded(UIView *view) {
         class_getMethodImplementation(UIView.class,
                                       @selector(layoutIfNeeded)));
     if(view) layout(view, @selector(layoutIfNeeded));
+}
+
+void LC32NativeSendSubviewToBack(UIView *view, UIView *subview) {
+    using SendSubviewToBack = void (*)(id, SEL, UIView *);
+    static SendSubviewToBack sendSubviewToBack =
+        reinterpret_cast<SendSubviewToBack>(
+            class_getMethodImplementation(
+                UIView.class, @selector(sendSubviewToBack:)));
+    if(view && subview) {
+        sendSubviewToBack(view, @selector(sendSubviewToBack:), subview);
+    }
 }
 
 UIInterfaceOrientationMask LC32CachedGuestOrientationMask(
@@ -416,10 +438,11 @@ UIInterfaceOrientation LC32LegacyTargetOrientation(void) {
 UIViewController *LC32GuestWindowRootViewController(UIWindow *window) {
     UIViewController *root = LC32NativeWindowRootViewController(window);
     if([root isKindOfClass:LC32LegacyIPadContainerController.class]) {
-        return ((LC32LegacyIPadContainerController *)root)
+        root = ((LC32LegacyIPadContainerController *)root)
             .guestContentController;
     }
-    return root;
+    return [root isKindOfClass:LC32LegacyWindowRootController.class]
+        ? nil : root;
 }
 
 void LC32InstallGuestWindowRootViewController(
@@ -757,6 +780,35 @@ id LC32ObjectProperty(id object, const char *name) {
     }
 }
 
+bool LC32InstallLegacyDirectSubviewRoot(UIWindow *window) {
+    if(!window || LC32NativeWindowRootViewController(window)) return false;
+
+    const NSUInteger existingSubviewCount = window.subviews.count;
+    if(!existingSubviewCount) return false;
+
+    UIViewController *controller =
+        [[LC32LegacyWindowRootController alloc] initWithNibName:nil
+                                                         bundle:nil];
+    (void)controller.view;
+    LC32NativeSetWindowRootViewController(window, controller);
+    const bool installed =
+        LC32NativeWindowRootViewController(window) == controller;
+    if(installed) {
+        /* Assigning a native root normally places its view above existing
+         * direct children.  Move only that new implementation detail behind
+         * the archived hierarchy so every preexisting child keeps its exact
+         * relative order, including any private UIKit overlay. */
+        LC32NativeSendSubviewToBack(window, controller.view);
+        fprintf(stderr,
+            "LC32: installed legacy direct-view window root (%lu subviews)\n",
+            (unsigned long)existingSubviewCount);
+    }
+#if !__has_feature(objc_arc)
+    [controller release];
+#endif
+    return installed;
+}
+
 void LC32AdoptLegacyRootViewController(UIWindow *window) {
     if(!window || !window.guest_selfOrNull) return;
     UIViewController *existing =
@@ -796,6 +848,12 @@ void LC32AdoptLegacyRootViewController(UIWindow *window) {
         }
     }
 
+    if(!controller && LC32InstallLegacyDirectSubviewRoot(window)) {
+        LC32ApplyLegacyWindowPolicy(window);
+        LC32ScaleLegacyIPadWindow(window);
+        return;
+    }
+
     if(controller) {
         LC32InstallGuestWindowRootViewController(window, controller,
             LC32LegacyIPadGeometryModePreservePortraitCanvas);
@@ -824,6 +882,43 @@ void LC32AdoptLegacyRootViewControllers(void) {
 }
 
 } // namespace
+
+@implementation LC32LegacyWindowRootController
+
+- (void)loadView {
+    UIView *view = [[UIView alloc] initWithFrame:CGRectZero];
+    view.backgroundColor = UIColor.clearColor;
+    view.opaque = NO;
+    view.userInteractionEnabled = NO;
+    view.autoresizingMask = UIViewAutoresizingFlexibleWidth |
+                            UIViewAutoresizingFlexibleHeight;
+    self.view = view;
+#if !__has_feature(objc_arc)
+    [view release];
+#endif
+}
+
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    return LC32GuestInterfacePolicy().declaredOrientations;
+}
+
+- (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
+    const UIInterfaceOrientationMask mask =
+        [self supportedInterfaceOrientations];
+    const UIInterfaceOrientation target = LC32LegacyTargetOrientation();
+    return LC32MaskForInterfaceOrientation(target) & mask
+        ? target : LC32FirstOrientationInMask(mask);
+}
+
+- (BOOL)prefersStatusBarHidden {
+    return LC32GuestInterfacePolicy().statusBarHidden;
+}
+
+- (BOOL)shouldAutomaticallyForwardRotationMethods {
+    return NO;
+}
+
+@end
 
 @implementation LC32LegacyIPadContainerController
 
