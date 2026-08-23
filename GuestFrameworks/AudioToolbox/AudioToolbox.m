@@ -10,6 +10,14 @@
 
 #import "LC32AudioToolboxBridge.h"
 
+#ifndef LC32_TRACE_AUDIO_OUTPUT
+#define LC32_TRACE_AUDIO_OUTPUT 0
+#endif
+
+#if LC32_TRACE_AUDIO_OUTPUT
+#include <stdio.h>
+#endif
+
 /* Deprecated AudioSession route dictionary values retained for old apps. */
 const CFStringRef kAudioSessionInputRoute_BuiltInMic =
     CFSTR("MicrophoneBuiltIn");
@@ -279,9 +287,12 @@ static void LC32AudioQueueInvokePropertyListener(
  * The old FMOD output bundled by several 32-bit games configures a RemoteIO
  * AudioUnit directly. A host AudioUnit cannot be exposed as a raw pointer to
  * the guest, and its realtime callback cannot consume guest AudioBufferList
- * pointers. Keep a small guest-owned unit which pumps a silent output buffer
- * through the guest callback. Besides advancing the audio stream, the callback
- * is also how old FMOD wakes its mixer thread after consuming its ring buffer.
+ * pointers. Keep a small guest-owned unit which invokes the guest callback.
+ * A private host AudioQueue sink consumes the rendered PCM without ever
+ * calling emulated code from its realtime thread; if the host route is not
+ * available, the same pump falls back to its original silent timing mode.
+ * Besides producing audio, the callback is how old FMOD wakes its mixer thread
+ * after consuming its ring buffer.
  */
 typedef struct {
     uint32_t magic;
@@ -291,6 +302,9 @@ typedef struct {
     pthread_t renderThread;
     uint32_t stopRequested;
     uint32_t started;
+    uint32_t hostOutputToken;
+    uint32_t hostOutputHealthy;
+    uint32_t renderFrames;
     BOOL initialized;
     BOOL renderThreadJoinable;
     BOOL joiningRenderThread;
@@ -459,10 +473,40 @@ static void *LC32SilentAudioPumpMain(void *context) {
         AudioTimeStamp timeStamp = {0};
         timeStamp.mSampleTime = sampleTime;
         timeStamp.mFlags = kAudioTimeStampSampleTimeValid;
-        (void)pump->callback.inputProc(pump->callback.inputProcRefCon,
+        const OSStatus renderStatus = pump->callback.inputProc(
+            pump->callback.inputProcRefCon,
             &actionFlags, &timeStamp, 0, pump->numberFrames,
             pump->bufferList);
         sampleTime += pump->numberFrames;
+
+        BOOL hostPaced = NO;
+        const uint32_t hostOutputToken = __atomic_load_n(
+            &pump->unit->hostOutputToken, __ATOMIC_ACQUIRE);
+        if(hostOutputToken && __atomic_load_n(
+                &pump->unit->hostOutputHealthy, __ATOMIC_ACQUIRE)) {
+            const BOOL silence = renderStatus != noErr ||
+                (actionFlags & kAudioUnitRenderAction_OutputIsSilence) != 0;
+            const OSStatus submitStatus = (OSStatus)LC32_AUDIO_CALL(
+                LC32AudioToolboxOpRemoteIOOutputSubmit,
+                LC32_AUDIO_U32(hostOutputToken),
+                LC32_AUDIO_U32((uintptr_t)pump->bufferList),
+                LC32_AUDIO_U32(pump->numberFrames),
+                LC32_AUDIO_U32(silence));
+            if(submitStatus == noErr) {
+                /* Waiting for a returned native AudioQueue buffer supplies
+                 * the pacing for the next render quantum. */
+                hostPaced = YES;
+            } else {
+                __atomic_store_n(&pump->unit->hostOutputHealthy, 0,
+                    __ATOMIC_RELEASE);
+#if LC32_TRACE_AUDIO_OUTPUT
+                fprintf(stderr,
+                    "LC32: RemoteIO output submit failed: status=%d\n",
+                    (int)submitStatus);
+#endif
+            }
+        }
+        if(hostPaced) continue;
 
         struct timespec remaining = pump->interval;
         while(!__atomic_load_n(&pump->unit->stopRequested,
@@ -491,6 +535,7 @@ static OSStatus LC32SilentAudioPrepareThreadLocked(
         return kAudio_MemFullError;
     }
     unit->renderThreadJoinable = YES;
+    unit->renderFrames = pump->numberFrames;
     return noErr;
 }
 
@@ -500,21 +545,47 @@ static OSStatus LC32SilentAudioPrepareThreadLocked(
  * the thread; successful Stop/Uninitialize/Dispose calls still guarantee that
  * no callback can be executing after they return. */
 static OSStatus LC32SilentAudioStopLocked(LC32SilentAudioUnit *unit) {
+    if(unit->joiningRenderThread ||
+       (unit->renderThreadJoinable &&
+        pthread_equal(pthread_self(), unit->renderThread))) {
+        return kAudioUnitErr_CannotDoInCurrentContext;
+    }
     __atomic_store_n(&unit->started, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&unit->stopRequested, 1, __ATOMIC_RELEASE);
-    if(!unit->renderThreadJoinable) return noErr;
-    if(pthread_equal(pthread_self(), unit->renderThread))
-        return kAudioUnitErr_CannotDoInCurrentContext;
-    if(unit->joiningRenderThread)
-        return kAudioUnitErr_CannotDoInCurrentContext;
-    unit->joiningRenderThread = YES;
-    const pthread_t renderThread = unit->renderThread;
-    pthread_mutex_unlock(&unit->mutex);
-    const int result = pthread_join(renderThread, NULL);
-    pthread_mutex_lock(&unit->mutex);
-    unit->joiningRenderThread = NO;
-    if(result != 0) return kAudioUnitErr_CannotDoInCurrentContext;
-    unit->renderThreadJoinable = NO;
+    __atomic_store_n(&unit->hostOutputHealthy, 0, __ATOMIC_RELEASE);
+
+    /* Retire the host token first. This marks the sink disposing and wakes a
+     * render thread which may be blocked waiting for a returned native
+     * AudioQueue buffer. The host keeps the in-flight submission alive until
+     * it unwinds, so it is safe to join only after this cancellation. */
+    const uint32_t hostOutputToken = __atomic_load_n(
+        &unit->hostOutputToken, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&unit->hostOutputToken, 0, __ATOMIC_RELEASE);
+    if(hostOutputToken) {
+        const OSStatus outputStatus = (OSStatus)LC32_AUDIO_CALL(
+            LC32AudioToolboxOpRemoteIOOutputStop,
+            LC32_AUDIO_U32(hostOutputToken));
+#if LC32_TRACE_AUDIO_OUTPUT
+        if(outputStatus != noErr) {
+            fprintf(stderr,
+                "LC32: RemoteIO output stop failed: status=%d\n",
+                (int)outputStatus);
+        }
+#else
+        (void)outputStatus;
+#endif
+    }
+
+    if(unit->renderThreadJoinable) {
+        unit->joiningRenderThread = YES;
+        const pthread_t renderThread = unit->renderThread;
+        pthread_mutex_unlock(&unit->mutex);
+        const int result = pthread_join(renderThread, NULL);
+        pthread_mutex_lock(&unit->mutex);
+        unit->joiningRenderThread = NO;
+        if(result != 0) return kAudioUnitErr_CannotDoInCurrentContext;
+        unit->renderThreadJoinable = NO;
+    }
     return noErr;
 }
 
@@ -690,6 +761,41 @@ OSStatus AudioOutputUnitStart(AudioUnit ci) {
             pthread_mutex_unlock(&silent->mutex);
             return status;
         }
+    }
+
+    uint32_t hostOutputToken = 0;
+    const OSStatus outputStatus = (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpRemoteIOOutputStart,
+        LC32_AUDIO_U32((uintptr_t)&silent->format),
+        LC32_AUDIO_U32(silent->renderFrames),
+        LC32_AUDIO_U32((uintptr_t)&hostOutputToken));
+    if(outputStatus == noErr && hostOutputToken) {
+        __atomic_store_n(&silent->hostOutputToken, hostOutputToken,
+            __ATOMIC_RELEASE);
+        __atomic_store_n(&silent->hostOutputHealthy, 1,
+            __ATOMIC_RELEASE);
+#if LC32_TRACE_AUDIO_OUTPUT
+        fprintf(stderr,
+            "LC32: RemoteIO host output started: token=0x%x frames=%u\n",
+            hostOutputToken, silent->renderFrames);
+#endif
+    } else {
+        /* Native Simulator audio can be unavailable (for example status
+         * -66628 with no route). Preserve the compatibility pump so FMOD's
+         * mixer and game-side timing continue even when output is silent. */
+        if(hostOutputToken) {
+            (void)LC32_AUDIO_CALL(LC32AudioToolboxOpRemoteIOOutputStop,
+                LC32_AUDIO_U32(hostOutputToken));
+        }
+        __atomic_store_n(&silent->hostOutputToken, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&silent->hostOutputHealthy, 0,
+            __ATOMIC_RELEASE);
+#if LC32_TRACE_AUDIO_OUTPUT
+        fprintf(stderr,
+            "LC32: RemoteIO host output unavailable; using silent pacing "
+            "(status=%d token=0x%x)\n", (int)outputStatus,
+            hostOutputToken);
+#endif
     }
     __atomic_store_n(&silent->started, 1, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&silent->mutex);

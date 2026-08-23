@@ -6,6 +6,7 @@
 
 #include <objc/message.h>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -18,6 +19,30 @@ namespace {
 constexpr size_t kMaximumPropertyBytes = 16u * 1024u * 1024u;
 constexpr size_t kMaximumAudioBytes = 256u * 1024u * 1024u;
 constexpr u32 kMaximumAudioBuffers = 64;
+constexpr u32 kRemoteIOOutputBufferCount = 3;
+constexpr u32 kRemoteIOOutputPrimeBufferCount = 2;
+constexpr u32 kRemoteIOOutputMaximumFrames = 4096;
+constexpr u32 kRemoteIOOutputMaximumChannels = 32;
+constexpr size_t kRemoteIOOutputMaximumBufferBytes =
+    16u * 1024u * 1024u;
+
+class AudioToolboxGuestHostCallQuiescence {
+public:
+    AudioToolboxGuestHostCallQuiescence()
+        : active_(Dynarmic_guest_host_call_quiescence_begin()) {}
+
+    ~AudioToolboxGuestHostCallQuiescence() {
+        if(active_) Dynarmic_guest_host_call_quiescence_end();
+    }
+
+    AudioToolboxGuestHostCallQuiescence(
+        const AudioToolboxGuestHostCallQuiescence &) = delete;
+    AudioToolboxGuestHostCallQuiescence &operator=(
+        const AudioToolboxGuestHostCallQuiescence &) = delete;
+
+private:
+    bool active_;
+};
 
 struct ExtAudioFileEntry {
     ExtAudioFileRef file = nullptr;
@@ -121,6 +146,36 @@ struct AudioQueueEntry {
     u32 nextTimelineToken = 1;
 };
 
+enum class RemoteIOOutputBufferState : uint8_t {
+    Free,
+    Filling,
+    Enqueued,
+};
+
+struct RemoteIOOutputBufferEntry {
+    AudioQueueBufferRef buffer = nullptr;
+    RemoteIOOutputBufferState state = RemoteIOOutputBufferState::Free;
+};
+
+struct RemoteIOOutputEntry {
+    AudioQueueRef queue = nullptr;
+    u32 token = 0;
+    AudioStreamBasicDescription guestFormat = {};
+    AudioStreamBasicDescription nativeFormat = {};
+    u32 framesPerQuantum = 0;
+    u32 guestBytesPerFrame = 0;
+    u32 nativeBytesPerFrame = 0;
+    u32 nativeBufferBytes = 0;
+    u32 submitTimeoutMilliseconds = 100;
+    bool nonInterleaved = false;
+    RemoteIOOutputBufferEntry buffers[kRemoteIOOutputBufferCount];
+    std::mutex mutex;
+    std::condition_variable condition;
+    u32 activeUsers = 0;
+    u32 activeCallbacks = 0;
+    bool disposing = false;
+};
+
 static_assert(sizeof(GuestAudioBuffer) == 12);
 static_assert(offsetof(GuestAudioBuffer, channels) == 0);
 static_assert(offsetof(GuestAudioBuffer, byteSize) == 4);
@@ -171,6 +226,13 @@ std::unordered_map<uintptr_t,
 uintptr_t nextAudioQueuePropertyListenerCookie = 1;
 thread_local std::unordered_map<u32, u32>
     audioQueueGuestCallbacksOnCurrentThread;
+
+std::mutex remoteIOOutputsMutex;
+std::unordered_map<u32, std::shared_ptr<RemoteIOOutputEntry>>
+    remoteIOOutputs;
+std::vector<std::shared_ptr<RemoteIOOutputEntry>>
+    quarantinedRemoteIOOutputs;
+std::atomic<u32> nextRemoteIOOutputToken{1};
 
 bool ReadAudioToolboxCall(u32 guestAddress, LC32AudioToolboxCall &call) {
     struct {
@@ -478,6 +540,47 @@ void QuarantineAudioQueue(const std::shared_ptr<AudioQueueEntry> &entry) {
      * those exceptional entries for process life; successful, quiescent
      * disposals are released normally. */
     quarantinedAudioQueues.push_back(entry);
+}
+
+std::shared_ptr<RemoteIOOutputEntry> FindRemoteIOOutput(u32 token) {
+    std::lock_guard<std::mutex> lock(remoteIOOutputsMutex);
+    const auto iterator = remoteIOOutputs.find(token);
+    return iterator == remoteIOOutputs.end() ? nullptr : iterator->second;
+}
+
+std::shared_ptr<RemoteIOOutputEntry> TakeRemoteIOOutput(u32 token) {
+    std::lock_guard<std::mutex> lock(remoteIOOutputsMutex);
+    const auto iterator = remoteIOOutputs.find(token);
+    if(iterator == remoteIOOutputs.end()) return nullptr;
+    auto entry = iterator->second;
+    remoteIOOutputs.erase(iterator);
+    return entry;
+}
+
+u32 AllocateRemoteIOOutputToken() {
+    for(size_t attempt = 0; attempt < UINT32_MAX; ++attempt) {
+        const u32 token = nextRemoteIOOutputToken.fetch_add(
+            1, std::memory_order_relaxed);
+        if(!token) continue;
+        std::lock_guard<std::mutex> lock(remoteIOOutputsMutex);
+        if(remoteIOOutputs.find(token) == remoteIOOutputs.end())
+            return token;
+    }
+    return 0;
+}
+
+bool PublishRemoteIOOutput(
+        const std::shared_ptr<RemoteIOOutputEntry> &entry) {
+    if(!entry || !entry->token || !entry->queue) return false;
+    std::lock_guard<std::mutex> lock(remoteIOOutputsMutex);
+    return remoteIOOutputs.emplace(entry->token, entry).second;
+}
+
+void QuarantineRemoteIOOutput(
+        const std::shared_ptr<RemoteIOOutputEntry> &entry) {
+    if(!entry) return;
+    std::lock_guard<std::mutex> lock(remoteIOOutputsMutex);
+    quarantinedRemoteIOOutputs.push_back(entry);
 }
 
 bool PublishAudioQueuePropertyListener(
@@ -968,6 +1071,20 @@ OSStatus DispatchAudioSessionSetProperty(
     if(dataSize && !ReadGuestBytes(guestData, dataSize, bytes.data()))
         return kAudio_ParamError;
 
+    /* Modern hosts may reject this deprecated iOS property with 'what'.
+     * The RemoteIO compatibility unit consumes it locally to choose its
+     * render quantum, so preserve the iOS 10 success contract for valid
+     * durations rather than making host AudioSession support a prerequisite. */
+    if(property ==
+            kAudioSessionProperty_PreferredHardwareIOBufferDuration) {
+        if(dataSize != sizeof(Float32))
+            return kAudioSessionBadPropertySizeError;
+        Float32 duration = 0;
+        memcpy(&duration, bytes.data(), sizeof(duration));
+        return duration > 0.0f && duration <= 1.0f
+            ? noErr : kAudio_ParamError;
+    }
+
     const OSStatus initializationStatus =
         EnsureNativeAudioSessionInitialized();
     if(initializationStatus != noErr) return initializationStatus;
@@ -1103,6 +1220,433 @@ OSStatus DispatchAudioSessionGetProperty(
         }
     }
     return status;
+}
+
+void RemoteIOOutputCallback(void *rawEntry, AudioQueueRef queue,
+                            AudioQueueBufferRef nativeBuffer) {
+    const uintptr_t rawToken = reinterpret_cast<uintptr_t>(rawEntry);
+    if(rawToken == 0 || rawToken > UINT32_MAX || !nativeBuffer) return;
+    auto entry = FindRemoteIOOutput(static_cast<u32>(rawToken));
+    if(!entry) return;
+    {
+        std::lock_guard<std::mutex> lock(entry->mutex);
+        ++entry->activeCallbacks;
+        if(!entry->disposing && queue == entry->queue) {
+            for(auto &candidate : entry->buffers) {
+                if(candidate.buffer != nativeBuffer) continue;
+                if(candidate.state ==
+                        RemoteIOOutputBufferState::Enqueued) {
+                    candidate.state = RemoteIOOutputBufferState::Free;
+                }
+                break;
+            }
+        }
+        --entry->activeCallbacks;
+    }
+    entry->condition.notify_all();
+}
+
+class RemoteIOOutputUse {
+public:
+    explicit RemoteIOOutputUse(
+            const std::shared_ptr<RemoteIOOutputEntry> &entry)
+        : entry_(entry) {
+        if(!entry_) return;
+        std::lock_guard<std::mutex> lock(entry_->mutex);
+        if(entry_->disposing || !entry_->queue) return;
+        ++entry_->activeUsers;
+        active_ = true;
+    }
+
+    ~RemoteIOOutputUse() {
+        if(!active_ || !entry_) return;
+        {
+            std::lock_guard<std::mutex> lock(entry_->mutex);
+            if(entry_->activeUsers) --entry_->activeUsers;
+        }
+        entry_->condition.notify_all();
+    }
+
+    explicit operator bool() const { return active_; }
+
+private:
+    std::shared_ptr<RemoteIOOutputEntry> entry_;
+    bool active_ = false;
+};
+
+OSStatus ConfigureRemoteIOOutputEntry(
+        RemoteIOOutputEntry &entry,
+        const AudioStreamBasicDescription &inputFormat,
+        u32 framesPerQuantum) {
+    if(inputFormat.mFormatID != kAudioFormatLinearPCM ||
+       !(inputFormat.mSampleRate >= 1.0 &&
+         inputFormat.mSampleRate <= 384000.0) ||
+       inputFormat.mChannelsPerFrame == 0 ||
+       inputFormat.mChannelsPerFrame > kRemoteIOOutputMaximumChannels ||
+       inputFormat.mBytesPerFrame == 0 ||
+       framesPerQuantum == 0 ||
+       framesPerQuantum > kRemoteIOOutputMaximumFrames) {
+        return kAudioUnitErr_FormatNotSupported;
+    }
+
+    AudioStreamBasicDescription guestFormat = inputFormat;
+    guestFormat.mReserved = 0;
+    if(guestFormat.mFramesPerPacket == 0)
+        guestFormat.mFramesPerPacket = 1;
+    if(guestFormat.mFramesPerPacket != 1)
+        return kAudioUnitErr_FormatNotSupported;
+    const uint64_t expectedGuestPacketBytes =
+        static_cast<uint64_t>(guestFormat.mBytesPerFrame) *
+        guestFormat.mFramesPerPacket;
+    if(expectedGuestPacketBytes > UINT32_MAX ||
+       (guestFormat.mBytesPerPacket != 0 &&
+        guestFormat.mBytesPerPacket != expectedGuestPacketBytes)) {
+        return kAudioUnitErr_FormatNotSupported;
+    }
+    guestFormat.mBytesPerPacket =
+        static_cast<u32>(expectedGuestPacketBytes);
+
+    const bool nonInterleaved =
+        (guestFormat.mFormatFlags &
+            kAudioFormatFlagIsNonInterleaved) != 0;
+    const uint64_t nativeBytesPerFrame =
+        static_cast<uint64_t>(guestFormat.mBytesPerFrame) *
+        (nonInterleaved ? guestFormat.mChannelsPerFrame : 1u);
+    const uint64_t nativeBufferBytes =
+        nativeBytesPerFrame * framesPerQuantum;
+    if(nativeBytesPerFrame == 0 || nativeBytesPerFrame > UINT32_MAX ||
+       nativeBufferBytes == 0 ||
+       nativeBufferBytes > kRemoteIOOutputMaximumBufferBytes) {
+        return kAudioUnitErr_FormatNotSupported;
+    }
+
+    AudioStreamBasicDescription nativeFormat = guestFormat;
+    nativeFormat.mFormatFlags &= ~kAudioFormatFlagIsNonInterleaved;
+    nativeFormat.mBytesPerFrame = static_cast<u32>(nativeBytesPerFrame);
+    nativeFormat.mBytesPerPacket = nativeFormat.mBytesPerFrame;
+
+    entry.guestFormat = guestFormat;
+    entry.nativeFormat = nativeFormat;
+    entry.framesPerQuantum = framesPerQuantum;
+    entry.guestBytesPerFrame = guestFormat.mBytesPerFrame;
+    entry.nativeBytesPerFrame = nativeFormat.mBytesPerFrame;
+    entry.nativeBufferBytes = static_cast<u32>(nativeBufferBytes);
+    entry.nonInterleaved = nonInterleaved;
+    const double timeoutMilliseconds =
+        3000.0 * framesPerQuantum / guestFormat.mSampleRate;
+    entry.submitTimeoutMilliseconds = static_cast<u32>(
+        timeoutMilliseconds < 100.0 ? 100.0 :
+        timeoutMilliseconds > 500.0 ? 500.0 :
+        timeoutMilliseconds + 0.5);
+    return noErr;
+}
+
+OSStatus DestroyRemoteIOOutput(
+        const std::shared_ptr<RemoteIOOutputEntry> &entry) {
+    if(!entry) return kAudioUnitErr_Uninitialized;
+    AudioToolboxGuestHostCallQuiescence quiescence;
+    AudioQueueRef queue = nullptr;
+    {
+        std::unique_lock<std::mutex> lock(entry->mutex);
+        entry->disposing = true;
+        entry->condition.notify_all();
+        entry->condition.wait(lock, [&] {
+            return entry->activeUsers == 0;
+        });
+        queue = entry->queue;
+    }
+    if(!queue) return kAudioUnitErr_Uninitialized;
+
+    const OSStatus stopStatus = AudioQueueStop(queue, true);
+    {
+        std::unique_lock<std::mutex> lock(entry->mutex);
+        entry->condition.wait(lock, [&] {
+            return entry->activeCallbacks == 0;
+        });
+    }
+    const OSStatus disposeStatus = AudioQueueDispose(queue, true);
+    {
+        std::unique_lock<std::mutex> lock(entry->mutex);
+        entry->condition.wait(lock, [&] {
+            return entry->activeCallbacks == 0;
+        });
+        if(disposeStatus == noErr) {
+            entry->queue = nullptr;
+        }
+    }
+    if(disposeStatus != noErr) {
+        QuarantineRemoteIOOutput(entry);
+        return disposeStatus;
+    }
+    return stopStatus == kAudioQueueErr_InvalidRunState
+        ? noErr : stopStatus;
+}
+
+OSStatus DispatchRemoteIOOutputStart(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 3) || !SlotU32(call, 0) ||
+       !SlotU32(call, 2) || !WriteGuestU32(SlotU32(call, 2), 0)) {
+        return kAudio_ParamError;
+    }
+
+    AudioStreamBasicDescription format = {};
+    if(!ReadGuestBytes(SlotU32(call, 0), sizeof(format), &format))
+        return kAudio_ParamError;
+    std::shared_ptr<RemoteIOOutputEntry> entry;
+    try {
+        entry = std::make_shared<RemoteIOOutputEntry>();
+    } catch(const std::bad_alloc &) {
+        return kAudio_MemFullError;
+    }
+    OSStatus status = ConfigureRemoteIOOutputEntry(
+        *entry, format, SlotU32(call, 1));
+    if(status != noErr) return status;
+
+    entry->token = AllocateRemoteIOOutputToken();
+    if(!entry->token) return kAudio_MemFullError;
+
+    AudioQueueRef queue = nullptr;
+    {
+        AudioToolboxGuestHostCallQuiescence quiescence;
+        status = AudioQueueNewOutput(&entry->nativeFormat,
+            RemoteIOOutputCallback,
+            reinterpret_cast<void *>(
+                static_cast<uintptr_t>(entry->token)),
+            nullptr, nullptr, 0, &queue);
+    }
+    if(status != noErr) return status;
+    entry->queue = queue;
+    for(auto &buffer : entry->buffers) {
+        {
+            AudioToolboxGuestHostCallQuiescence quiescence;
+            status = AudioQueueAllocateBuffer(
+                queue, entry->nativeBufferBytes, &buffer.buffer);
+        }
+        if(status != noErr) {
+            OSStatus disposeStatus;
+            {
+                AudioToolboxGuestHostCallQuiescence quiescence;
+                disposeStatus = AudioQueueDispose(queue, true);
+            }
+            if(disposeStatus != noErr) QuarantineRemoteIOOutput(entry);
+            return status;
+        }
+    }
+
+    for(u32 index = 0; index < kRemoteIOOutputPrimeBufferCount; ++index) {
+        AudioQueueBufferRef buffer = entry->buffers[index].buffer;
+        if(!buffer || buffer->mAudioDataBytesCapacity <
+                entry->nativeBufferBytes || !buffer->mAudioData) {
+            status = kAudio_ParamError;
+            break;
+        }
+        memset(buffer->mAudioData, 0, entry->nativeBufferBytes);
+        buffer->mAudioDataByteSize = entry->nativeBufferBytes;
+        entry->buffers[index].state =
+            RemoteIOOutputBufferState::Enqueued;
+        {
+            AudioToolboxGuestHostCallQuiescence quiescence;
+            status = AudioQueueEnqueueBuffer(queue, buffer, 0, nullptr);
+        }
+        if(status != noErr) {
+            entry->buffers[index].state =
+                RemoteIOOutputBufferState::Free;
+            break;
+        }
+    }
+    if(status != noErr) {
+        OSStatus disposeStatus;
+        {
+            AudioToolboxGuestHostCallQuiescence quiescence;
+            disposeStatus = AudioQueueDispose(queue, true);
+        }
+        if(disposeStatus != noErr) QuarantineRemoteIOOutput(entry);
+        return status;
+    }
+
+    if(!PublishRemoteIOOutput(entry)) {
+        OSStatus disposeStatus;
+        {
+            AudioToolboxGuestHostCallQuiescence quiescence;
+            disposeStatus = AudioQueueDispose(queue, true);
+        }
+        if(disposeStatus != noErr) QuarantineRemoteIOOutput(entry);
+        return kAudio_MemFullError;
+    }
+    {
+        AudioToolboxGuestHostCallQuiescence quiescence;
+        status = AudioQueueStart(queue, nullptr);
+    }
+    if(status != noErr ||
+       !WriteGuestU32(SlotU32(call, 2), entry->token)) {
+        (void)TakeRemoteIOOutput(entry->token);
+        const OSStatus destroyStatus = DestroyRemoteIOOutput(entry);
+        if(status != noErr) return status;
+        (void)destroyStatus;
+        return kAudio_ParamError;
+    }
+    return noErr;
+}
+
+OSStatus DispatchRemoteIOOutputSubmit(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 4)) return kAudio_ParamError;
+    auto entry = FindRemoteIOOutput(SlotU32(call, 0));
+    RemoteIOOutputUse outputUse(entry);
+    if(!outputUse) return kAudioUnitErr_Uninitialized;
+    if(SlotU32(call, 2) != entry->framesPerQuantum)
+        return kAudio_ParamError;
+    const bool silence = SlotU32(call, 3) != 0;
+    const u32 expectedBufferCount = entry->nonInterleaved
+        ? entry->guestFormat.mChannelsPerFrame : 1u;
+
+    GuestAudioBuffer guestBuffers[kRemoteIOOutputMaximumChannels] = {};
+    u32 guestBufferCount = expectedBufferCount;
+    if(!silence) {
+        const u32 guestList = SlotU32(call, 1);
+        u32 returnedBufferCount = 0;
+        if(!ReadGuestU32(guestList, returnedBufferCount) ||
+           returnedBufferCount != guestBufferCount) {
+            return kAudio_ParamError;
+        }
+        const uint64_t buffersAddress =
+            static_cast<uint64_t>(guestList) + sizeof(u32);
+        const size_t buffersBytes =
+            guestBufferCount * sizeof(GuestAudioBuffer);
+        if(buffersAddress > UINT32_MAX ||
+           buffersAddress + buffersBytes >
+               static_cast<uint64_t>(UINT32_MAX) + 1 ||
+           !ReadGuestBytes(static_cast<u32>(buffersAddress),
+               buffersBytes, guestBuffers)) {
+            return kAudio_ParamError;
+        }
+    }
+
+    RemoteIOOutputBufferEntry *selected = nullptr;
+    {
+        AudioToolboxGuestHostCallQuiescence quiescence;
+        std::unique_lock<std::mutex> lock(entry->mutex);
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(entry->submitTimeoutMilliseconds);
+        const bool available = entry->condition.wait_until(
+            lock, deadline, [&] {
+                if(entry->disposing) return true;
+                for(const auto &buffer : entry->buffers) {
+                    if(buffer.state ==
+                            RemoteIOOutputBufferState::Free) {
+                        return true;
+                    }
+                }
+                return false;
+            });
+        if(!available) return kAudioUnitErr_RenderTimeout;
+        if(entry->disposing || !entry->queue)
+            return kAudioUnitErr_Uninitialized;
+        for(auto &buffer : entry->buffers) {
+            if(buffer.state != RemoteIOOutputBufferState::Free) continue;
+            buffer.state = RemoteIOOutputBufferState::Filling;
+            selected = &buffer;
+            break;
+        }
+    }
+    const auto releaseSelected = [&] {
+        if(!selected) return;
+        std::lock_guard<std::mutex> lock(entry->mutex);
+        if(selected->state == RemoteIOOutputBufferState::Filling ||
+           selected->state == RemoteIOOutputBufferState::Enqueued) {
+            selected->state = RemoteIOOutputBufferState::Free;
+        }
+        entry->condition.notify_all();
+    };
+    if(!selected || !selected->buffer || !selected->buffer->mAudioData ||
+       selected->buffer->mAudioDataBytesCapacity <
+            entry->nativeBufferBytes) {
+        releaseSelected();
+        return kAudio_ParamError;
+    }
+
+    uint8_t *nativeBytes = static_cast<uint8_t *>(
+        selected->buffer->mAudioData);
+    bool copied = true;
+    if(silence) {
+        memset(nativeBytes, 0, entry->nativeBufferBytes);
+    } else if(!entry->nonInterleaved) {
+        const GuestAudioBuffer &guest = guestBuffers[0];
+        copied = guest.channels == entry->guestFormat.mChannelsPerFrame &&
+            guest.byteSize >= entry->nativeBufferBytes && guest.data &&
+            ReadGuestBytes(guest.data, entry->nativeBufferBytes,
+                nativeBytes);
+    } else {
+        const size_t channelBytes =
+            static_cast<size_t>(entry->guestBytesPerFrame) *
+            entry->framesPerQuantum;
+        const size_t totalGuestBytes = channelBytes * guestBufferCount;
+        std::vector<uint8_t> planarBytes;
+        try {
+            planarBytes.resize(totalGuestBytes);
+        } catch(const std::bad_alloc &) {
+            releaseSelected();
+            return kAudio_MemFullError;
+        }
+        for(size_t channel = 0;
+                copied && channel < guestBufferCount; ++channel) {
+            const GuestAudioBuffer &guest = guestBuffers[channel];
+            copied = guest.channels == 1 &&
+                guest.byteSize >= channelBytes && guest.data &&
+                ReadGuestBytes(guest.data, channelBytes,
+                    planarBytes.data() + channel * channelBytes);
+        }
+        if(copied) {
+            for(u32 frame = 0; frame < entry->framesPerQuantum; ++frame) {
+                for(size_t channel = 0;
+                        channel < guestBufferCount; ++channel) {
+                    memcpy(nativeBytes +
+                            (static_cast<size_t>(frame) *
+                                guestBufferCount + channel) *
+                                entry->guestBytesPerFrame,
+                        planarBytes.data() + channel * channelBytes +
+                            static_cast<size_t>(frame) *
+                                entry->guestBytesPerFrame,
+                        entry->guestBytesPerFrame);
+                }
+            }
+        }
+    }
+
+    if(!copied) {
+        releaseSelected();
+        return kAudio_ParamError;
+    }
+
+    selected->buffer->mAudioDataByteSize = entry->nativeBufferBytes;
+    {
+        std::lock_guard<std::mutex> lock(entry->mutex);
+        if(entry->disposing || !entry->queue) {
+            selected->state = RemoteIOOutputBufferState::Free;
+            entry->condition.notify_all();
+            return kAudioUnitErr_Uninitialized;
+        }
+        selected->state = RemoteIOOutputBufferState::Enqueued;
+    }
+    OSStatus status;
+    {
+        AudioToolboxGuestHostCallQuiescence quiescence;
+        status = AudioQueueEnqueueBuffer(
+            entry->queue, selected->buffer, 0, nullptr);
+    }
+    if(status != noErr) {
+        releaseSelected();
+    }
+    return status;
+}
+
+OSStatus DispatchRemoteIOOutputStop(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 1) || !SlotU32(call, 0))
+        return kAudio_ParamError;
+    auto entry = TakeRemoteIOOutput(SlotU32(call, 0));
+    return entry ? DestroyRemoteIOOutput(entry)
+                 : kAudioUnitErr_Uninitialized;
 }
 
 std::shared_ptr<ExtAudioFileEntry> FindExtAudioFile(u32 token) {
@@ -2588,6 +3132,12 @@ extern "C" u32 LC32_AudioToolbox_Dispatch(u32 opcode, u32 guestCall, u32) {
             return static_cast<u32>(DispatchAudioQueuePause(call));
         case LC32AudioToolboxOpAudioQueueDispose:
             return static_cast<u32>(DispatchAudioQueueDispose(call));
+        case LC32AudioToolboxOpRemoteIOOutputStart:
+            return static_cast<u32>(DispatchRemoteIOOutputStart(call));
+        case LC32AudioToolboxOpRemoteIOOutputSubmit:
+            return static_cast<u32>(DispatchRemoteIOOutputSubmit(call));
+        case LC32AudioToolboxOpRemoteIOOutputStop:
+            return static_cast<u32>(DispatchRemoteIOOutputStop(call));
     }
     return static_cast<u32>(kAudio_ParamError);
 }

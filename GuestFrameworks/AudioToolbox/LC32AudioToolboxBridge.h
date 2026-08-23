@@ -66,6 +66,12 @@ typedef enum : uint32_t {
     LC32AudioToolboxOpAudioQueueCreateTimeline = 38,
     LC32AudioToolboxOpAudioQueueDisposeTimeline = 39,
     LC32AudioToolboxOpAudioQueueGetCurrentTime = 40,
+    /* Private RemoteIO compatibility sink. The guest invokes the emulated
+     * render callback; a host-only AudioQueue consumes the resulting PCM so
+     * no emulated code ever runs on CoreAudio's callback thread. */
+    LC32AudioToolboxOpRemoteIOOutputStart = 41,
+    LC32AudioToolboxOpRemoteIOOutputSubmit = 42,
+    LC32AudioToolboxOpRemoteIOOutputStop = 43,
 } LC32AudioToolboxOpcode;
 
 #endif
