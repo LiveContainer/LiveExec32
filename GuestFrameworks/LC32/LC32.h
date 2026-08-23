@@ -9,6 +9,16 @@
 #define CRSetCrashLogMessage(msg) __assert_rtn(NULL, __FILE__, __LINE__, msg)
 #define HALT __builtin_trap()
 
+/* Darwin Clang does not support __attribute__((alias)) for Mach-O symbols.
+ * Emit a public assembler alias instead so both exported spellings have the
+ * same address and no forwarding thunk is introduced. */
+#define LC32_ASM_STRINGIFY_INNER(value) #value
+#define LC32_ASM_STRINGIFY(value) LC32_ASM_STRINGIFY_INNER(value)
+#define LC32_ASM_GLOBAL_ALIAS(alias, target) \
+    __asm__(".globl _" LC32_ASM_STRINGIFY(alias) "\n" \
+            "_" LC32_ASM_STRINGIFY(alias) " = _" \
+            LC32_ASM_STRINGIFY(target))
+
 @interface NSObject(LC32)
 - (instancetype)initWithHostSelf:(uint64_t)host_self;
 - (void)bindHostSelf:(uint64_t)ptr;

@@ -864,11 +864,6 @@ void glAlphaFunc(GLenum function, GLclampf reference) {
         LC32_GL_U32(function), LC32_GL_F32(reference));
 }
 
-void glBindRenderbufferOES(GLenum target, GLuint renderbuffer) {
-    LC32_GL_CALL(LC32OpenGLESOpBindRenderbufferOES,
-        LC32_GL_U32(target), LC32_GL_U32(renderbuffer));
-}
-
 void glBindVertexArrayOES(GLuint array) {
     LC32_GL_CALL(LC32OpenGLESOpBindVertexArrayOES, LC32_GL_U32(array));
 }
@@ -919,19 +914,6 @@ void glFogfv(GLenum pname, const GLfloat *params) {
 void glFogx(GLenum pname, GLfixed param) {
     LC32_GL_CALL(LC32OpenGLESOpFogx,
         LC32_GL_U32(pname), LC32_GL_I32(param));
-}
-
-void glFramebufferRenderbufferOES(GLenum target, GLenum attachment,
-                                  GLenum renderbufferTarget,
-                                  GLuint renderbuffer) {
-    LC32_GL_CALL(LC32OpenGLESOpFramebufferRenderbufferOES,
-        LC32_GL_U32(target), LC32_GL_U32(attachment),
-        LC32_GL_U32(renderbufferTarget), LC32_GL_U32(renderbuffer));
-}
-
-void glGenRenderbuffersOES(GLsizei count, GLuint *renderbuffers) {
-    LC32_GL_CALL(LC32OpenGLESOpGenRenderbuffersOES,
-        LC32_GL_I32(count), LC32_GL_PTR(renderbuffers));
 }
 
 void glLightfv(GLenum light, GLenum pname, const GLfloat *params) {
@@ -986,13 +968,6 @@ void glPushMatrix(void) {
     LC32_GL_CALL0(LC32OpenGLESOpPushMatrix);
 }
 
-void glRenderbufferStorageOES(GLenum target, GLenum internalFormat,
-                              GLsizei width, GLsizei height) {
-    LC32_GL_CALL(LC32OpenGLESOpRenderbufferStorageOES,
-        LC32_GL_U32(target), LC32_GL_U32(internalFormat),
-        LC32_GL_I32(width), LC32_GL_I32(height));
-}
-
 void glRenderbufferStorageMultisampleAPPLE(GLenum target, GLsizei samples,
                                             GLenum internalFormat,
                                             GLsizei width, GLsizei height) {
@@ -1006,40 +981,30 @@ void glResolveMultisampleFramebufferAPPLE(void) {
     LC32_GL_CALL0(LC32OpenGLESOpResolveMultisampleFramebufferAPPLE);
 }
 
-/* Legacy OES aliases.  These were the only names exposed by the iOS 2.x-era
- * OpenGL ES 1 headers, so old apps link against them; the host exports the
- * extension-free entry points only. */
-void glBindFramebufferOES(GLenum target, GLuint framebuffer) {
-    glBindFramebuffer(target, framebuffer);
-}
-
-GLenum glCheckFramebufferStatusOES(GLenum target) {
-    return glCheckFramebufferStatus(target);
-}
-
-void glDeleteFramebuffersOES(GLsizei count, const GLuint *framebuffers) {
-    glDeleteFramebuffers(count, framebuffers);
-}
-
-void glDeleteRenderbuffersOES(GLsizei count, const GLuint *renderbuffers) {
-    glDeleteRenderbuffers(count, renderbuffers);
-}
-
-void glFramebufferTexture2DOES(GLenum target, GLenum attachment,
-                               GLenum textureTarget, GLuint texture,
-                               GLint level) {
-    glFramebufferTexture2D(target, attachment, textureTarget, texture,
-        level);
-}
-
-void glGenFramebuffersOES(GLsizei count, GLuint *framebuffers) {
-    glGenFramebuffers(count, framebuffers);
-}
-
-void glGetRenderbufferParameterivOES(GLenum target, GLenum pname,
-                                     GLint *params) {
-    glGetRenderbufferParameteriv(target, pname, params);
-}
+/* OES entry points promoted verbatim to ES2 core are true symbol aliases, so
+ * both spellings have the same address and no forwarding thunk is introduced. */
+LC32_ASM_GLOBAL_ALIAS(glBindFramebufferOES, glBindFramebuffer);
+LC32_ASM_GLOBAL_ALIAS(glBindRenderbufferOES, glBindRenderbuffer);
+LC32_ASM_GLOBAL_ALIAS(glBlendEquationOES, glBlendEquation);
+LC32_ASM_GLOBAL_ALIAS(glBlendEquationSeparateOES, glBlendEquationSeparate);
+LC32_ASM_GLOBAL_ALIAS(glBlendFuncSeparateOES, glBlendFuncSeparate);
+LC32_ASM_GLOBAL_ALIAS(glCheckFramebufferStatusOES,
+    glCheckFramebufferStatus);
+LC32_ASM_GLOBAL_ALIAS(glDeleteFramebuffersOES, glDeleteFramebuffers);
+LC32_ASM_GLOBAL_ALIAS(glDeleteRenderbuffersOES, glDeleteRenderbuffers);
+LC32_ASM_GLOBAL_ALIAS(glFramebufferRenderbufferOES,
+    glFramebufferRenderbuffer);
+LC32_ASM_GLOBAL_ALIAS(glFramebufferTexture2DOES, glFramebufferTexture2D);
+LC32_ASM_GLOBAL_ALIAS(glGenFramebuffersOES, glGenFramebuffers);
+LC32_ASM_GLOBAL_ALIAS(glGenRenderbuffersOES, glGenRenderbuffers);
+LC32_ASM_GLOBAL_ALIAS(glGenerateMipmapOES, glGenerateMipmap);
+LC32_ASM_GLOBAL_ALIAS(glGetFramebufferAttachmentParameterivOES,
+    glGetFramebufferAttachmentParameteriv);
+LC32_ASM_GLOBAL_ALIAS(glGetRenderbufferParameterivOES,
+    glGetRenderbufferParameteriv);
+LC32_ASM_GLOBAL_ALIAS(glIsFramebufferOES, glIsFramebuffer);
+LC32_ASM_GLOBAL_ALIAS(glIsRenderbufferOES, glIsRenderbuffer);
+LC32_ASM_GLOBAL_ALIAS(glRenderbufferStorageOES, glRenderbufferStorage);
 
 void glRotatef(GLfloat angle, GLfloat x, GLfloat y, GLfloat z) {
     LC32_GL_CALL(LC32OpenGLESOpRotatef,

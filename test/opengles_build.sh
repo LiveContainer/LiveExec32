@@ -16,4 +16,5 @@ clang -arch armv7s -isysroot "$SDKROOT" -miphoneos-version-min=10.3 \
 
 file "$OUTPUT"
 otool -L "$OUTPUT"
-"$SCRIPT_DIR/opengles_symbols.sh"
+"$SCRIPT_DIR/opengles_symbols.sh" \
+    "$FRAMEWORK_DIR/OpenGLES.framework/OpenGLES"

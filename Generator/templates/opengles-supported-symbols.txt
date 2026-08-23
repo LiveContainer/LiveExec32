@@ -12,9 +12,12 @@ glBindTexture
 glBindVertexArrayOES
 glBlendColor
 glBlendEquation
+glBlendEquationOES
 glBlendEquationSeparate
+glBlendEquationSeparateOES
 glBlendFunc
 glBlendFuncSeparate
+glBlendFuncSeparateOES
 glBufferData
 glBufferSubData
 glCheckFramebufferStatus
@@ -76,6 +79,7 @@ glGenRenderbuffersOES
 glGenTextures
 glGenVertexArraysOES
 glGenerateMipmap
+glGenerateMipmapOES
 glGetActiveAttrib
 glGetActiveUniform
 glGetAttachedShaders
@@ -85,6 +89,7 @@ glGetBufferParameteriv
 glGetError
 glGetFloatv
 glGetFramebufferAttachmentParameteriv
+glGetFramebufferAttachmentParameterivOES
 glGetIntegerv
 glGetProgramInfoLog
 glGetProgramiv
@@ -107,8 +112,10 @@ glHint
 glIsBuffer
 glIsEnabled
 glIsFramebuffer
+glIsFramebufferOES
 glIsProgram
 glIsRenderbuffer
+glIsRenderbufferOES
 glIsShader
 glIsTexture
 glLightfv
