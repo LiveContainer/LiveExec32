@@ -70,6 +70,8 @@ typedef enum : uint32_t {
     LC32CoreFoundationOpLocaleGetSystem = 47,
     LC32CoreFoundationOpStringLowercase = 48,
     LC32CoreFoundationOpURLCopyPathExtension = 49,
+    LC32CoreFoundationOpBundleCopyBundleURL = 50,
+    LC32CoreFoundationOpURLCopyFileSystemPath = 51,
 
     /* String operations use an isolated range so parallel bridge work can
      * add lower-valued opcode families without changing this guest ABI. */

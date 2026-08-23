@@ -112,6 +112,13 @@ CFStringRef CFURLCopyPathExtension(CFURLRef url) {
         LC32_CF_HOST(url)) : NULL;
 }
 
+CFStringRef CFURLCopyFileSystemPath(CFURLRef url,
+                                    CFURLPathStyle pathStyle) {
+    return url ? (CFStringRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCopyFileSystemPath,
+        LC32_CF_HOST(url), LC32_CF_U32(pathStyle)) : NULL;
+}
+
 void CFRelease(CFTypeRef ref) {
     [(id)ref release];
 }

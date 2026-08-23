@@ -1454,6 +1454,34 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             return url ? GuestForCreatedObject(
                 CFURLCopyPathExtension(url)) : 0;
         }
+        case LC32CoreFoundationOpURLCopyFileSystemPath: {
+            if(!RequireSlots(call, 2)) return 0;
+            NSURL *url = SlotHostObject<NSURL *>(call, 0);
+            const int32_t rawStyle = static_cast<int32_t>(SlotU32(call, 1));
+            if(!url || rawStyle < kCFURLPOSIXPathStyle ||
+               rawStyle > kCFURLWindowsPathStyle) return 0;
+            CFStringRef path = CFURLCopyFileSystemPath(
+                (__bridge CFURLRef)url,
+                static_cast<CFURLPathStyle>(rawStyle));
+            if(!path || rawStyle != kCFURLPOSIXPathStyle ||
+               !sharedHandle.fs) {
+                return GuestForCreatedObject(path);
+            }
+
+            char hostPath[PATH_MAX] = {};
+            if(!CFStringGetFileSystemRepresentation(
+                    path, hostPath, sizeof(hostPath)) || hostPath[0] != '/') {
+                return GuestForCreatedObject(path);
+            }
+            char guestPath[PATH_MAX] = {};
+            if(!sharedHandle.fs->pathHostToGuest(hostPath, guestPath)) {
+                return GuestForCreatedObject(path);
+            }
+            CFRelease(path);
+            return GuestForCreatedObject(
+                CFStringCreateWithFileSystemRepresentation(
+                    kCFAllocatorDefault, guestPath));
+        }
         case LC32CoreFoundationOpBundleGetMainBundle: {
             if(!RequireSlots(call, 0)) return 0;
             const char *guestExecutable = getenv("LC32_GUEST_EXECUTABLE");
@@ -1463,6 +1491,13 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             NSBundle *bundle = [NSBundle bundleWithPath:
                 executablePath.stringByDeletingLastPathComponent];
             return bundle ? bundle.guest_self : 0;
+        }
+        case LC32CoreFoundationOpBundleCopyBundleURL: {
+            if(!RequireSlots(call, 1)) return 0;
+            NSBundle *bundle = SlotHostObject<NSBundle *>(call, 0);
+            NSURL *url = bundle.bundleURL;
+            return url ? GuestForCreatedObject(
+                reinterpret_cast<CFTypeRef>([url copy])) : 0;
         }
         case LC32CoreFoundationOpBundleGetIdentifier: {
             if(!RequireSlots(call, 1)) return 0;

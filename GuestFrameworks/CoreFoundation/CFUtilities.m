@@ -27,6 +27,12 @@ CFStringRef CFBundleGetIdentifier(CFBundleRef bundle) {
         LC32_CF_HOST(bundle)) : NULL;
 }
 
+CFURLRef CFBundleCopyBundleURL(CFBundleRef bundle) {
+    return bundle ? (CFURLRef)LC32_CF_CALL(
+        LC32CoreFoundationOpBundleCopyBundleURL,
+        LC32_CF_HOST(bundle)) : NULL;
+}
+
 UInt32 CFBundleGetVersionNumber(CFBundleRef bundle) {
     return bundle ? LC32_CF_CALL(
         LC32CoreFoundationOpBundleGetVersionNumber,
