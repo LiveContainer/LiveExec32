@@ -357,6 +357,39 @@ size_t TextureParameterElementCount(GLenum pname) {
     }
 }
 
+size_t TextureEnvironmentElementCount(GLenum pname) {
+    switch(pname) {
+        case GL_TEXTURE_ENV_COLOR:
+            return 4;
+        case GL_TEXTURE_ENV_MODE:
+        case GL_COMBINE_RGB:
+        case GL_COMBINE_ALPHA:
+        case GL_RGB_SCALE:
+        case GL_ALPHA_SCALE:
+        case GL_SRC0_RGB:
+        case GL_SRC1_RGB:
+        case GL_SRC2_RGB:
+        case GL_SRC0_ALPHA:
+        case GL_SRC1_ALPHA:
+        case GL_SRC2_ALPHA:
+        case GL_OPERAND0_RGB:
+        case GL_OPERAND1_RGB:
+        case GL_OPERAND2_RGB:
+        case GL_OPERAND0_ALPHA:
+        case GL_OPERAND1_ALPHA:
+        case GL_OPERAND2_ALPHA:
+#ifdef GL_COORD_REPLACE_OES
+        case GL_COORD_REPLACE_OES:
+#endif
+#ifdef GL_TEXTURE_LOD_BIAS_EXT
+        case GL_TEXTURE_LOD_BIAS_EXT:
+#endif
+            return 1;
+        default:
+            return 0;
+    }
+}
+
 bool PixelSize(GLsizei width, GLsizei height, GLenum format, GLenum type,
                GLint alignment, size_t &byteCount, GLenum &error,
                size_t *rowBytesOutput = nullptr,
@@ -1881,6 +1914,19 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
         case LC32OpenGLESOpTexEnvf: {
             REQUIRE(3);
             glTexEnvf(U(0), U(1), F(2));
+            return 0;
+        }
+        case LC32OpenGLESOpTexEnvfv: {
+            REQUIRE(3);
+            const size_t count = TextureEnvironmentElementCount(U(1));
+            if(!count) {
+                const GLfloat dummy[4] = {};
+                glTexEnvfv(U(0), U(1), dummy);
+                return 0;
+            }
+            std::vector<GLfloat> values;
+            if(!ReadGuestArray(U(2), count, values)) return 0;
+            glTexEnvfv(U(0), U(1), values.data());
             return 0;
         }
         case LC32OpenGLESOpMultMatrixf: {

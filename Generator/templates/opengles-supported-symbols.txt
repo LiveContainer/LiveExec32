@@ -154,6 +154,7 @@ glStencilOp
 glStencilOpSeparate
 glTexCoordPointer
 glTexEnvf
+glTexEnvfv
 glTexEnvi
 glTexImage2D
 glTexParameterf

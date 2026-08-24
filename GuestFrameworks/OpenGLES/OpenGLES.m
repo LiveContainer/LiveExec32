@@ -694,6 +694,11 @@ void glTexEnvf(GLenum target, GLenum pname, GLfloat param) {
         LC32_GL_U32(target), LC32_GL_U32(pname), LC32_GL_F32(param));
 }
 
+void glTexEnvfv(GLenum target, GLenum pname, const GLfloat *params) {
+    LC32_GL_CALL(LC32OpenGLESOpTexEnvfv,
+        LC32_GL_U32(target), LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
 void glTexEnvi(GLenum target, GLenum pname, GLint param) {
     LC32_GL_CALL(LC32OpenGLESOpTexEnvi,
         LC32_GL_U32(target), LC32_GL_U32(pname), LC32_GL_I32(param));

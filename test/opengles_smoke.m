@@ -6,6 +6,22 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifndef GL_TEXTURE_ENV
+#define GL_TEXTURE_ENV 0x2300
+#endif
+#ifndef GL_TEXTURE_ENV_MODE
+#define GL_TEXTURE_ENV_MODE 0x2200
+#endif
+#ifndef GL_TEXTURE_ENV_COLOR
+#define GL_TEXTURE_ENV_COLOR 0x2201
+#endif
+#ifndef GL_MODULATE
+#define GL_MODULATE 0x2100
+#endif
+
+extern void glTexEnvfv(GLenum target, GLenum pname,
+                       const GLfloat *params);
+
 static int failures;
 
 #define CHECK(condition, label) do {                                      \
@@ -56,12 +72,41 @@ static GLuint compile_shader(GLenum type, const char *source,
     return shader;
 }
 
+static void test_texture_environment_vector(void) {
+    EAGLContext *context =
+        [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES1];
+    if(!context) {
+        printf("SKIP create-ES1-context: Catalyst has no OpenGL ES "
+               "runtime; an ANGLE/Metal backend is required\n");
+        return;
+    }
+    if(![EAGLContext setCurrentContext:context]) {
+        CHECK(0, "set-current-ES1-context");
+        [context release];
+        return;
+    }
+    CHECK(1, "set-current-ES1-context");
+
+    const GLfloat color[4] = {0.125f, 0.25f, 0.5f, 0.75f};
+    glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, color);
+    gl_ok("texture-env-four-float-vector");
+
+    const GLfloat mode = (GLfloat)GL_MODULATE;
+    glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, &mode);
+    gl_ok("texture-env-scalar-vector");
+
+    [EAGLContext setCurrentContext:nil];
+    [context release];
+}
+
 int main(void) {
     @autoreleasepool {
         unsigned int major = 0;
         unsigned int minor = 0;
         EAGLGetVersion(&major, &minor);
         CHECK(major >= 1, "EAGL-version-copyback");
+
+        test_texture_environment_vector();
 
         EAGLContext *context =
             [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES2];
