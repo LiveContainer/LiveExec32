@@ -10,7 +10,12 @@ APPLICATION_NAME = LiveExec32
 #TOOL_NAME = LiveExec32
 
 LiveExec32_FILES = \
-	main.cpp debugger_server.cpp arm_dynarmic_cp15.cpp dynarmic.cpp filesystem.cpp variables.cpp \
+	main.cpp debugger_server.cpp arm_dynarmic_cp15.cpp \
+	dynarmic.cpp dynarmic_syscalls.cpp dynarmic_memory.cpp \
+	dynarmic_callbacks.cpp dynarmic_thread_state.cpp \
+	dynarmic_native_jit.cpp dynarmic_psynch.cpp \
+	dynarmic_workqueue.cpp dynarmic_core.cpp \
+	filesystem.cpp variables.cpp \
 	ap_getparents.c target.c \
 	bridge.mm block_bridge.mm bridge.s log.m \
 	HostFrameworks/Foundation/Foundation.mm \
