@@ -2,6 +2,9 @@
 #import <OpenGLES/ES1/gl.h>
 #import <OpenGLES/ES1/glext.h>
 #import <OpenGLES/ES2/gl.h>
+#import <OpenGLES/ES2/glext.h>
+#import <OpenGLES/ES3/gl.h>
+#import <OpenGLES/ES3/glext.h>
 #import <Foundation/Foundation+LC32.h>
 #import <LC32/LC32.h>
 
@@ -77,6 +80,7 @@ static uint64_t LC32OpenGLESSigned(GLint value) {
     LC32OpenGLESDispatch((opcode), (const uint64_t[]){__VA_ARGS__}, \
         (uint32_t)(sizeof((const uint64_t[]){__VA_ARGS__}) / sizeof(uint64_t)))
 #define LC32_GL_U32(value) ((uint64_t)(uint32_t)(value))
+#define LC32_GL_U64(value) ((uint64_t)(value))
 #define LC32_GL_I32(value) LC32OpenGLESSigned((GLint)(value))
 #define LC32_GL_F32(value) LC32OpenGLESFloat((GLfloat)(value))
 #define LC32_GL_PTR(value) LC32OpenGLESGuestPointer((const void *)(value))
@@ -1044,3 +1048,1344 @@ void glVertexPointer(GLint size, GLenum type, GLsizei stride,
         LC32_GL_I32(size), LC32_GL_U32(type), LC32_GL_I32(stride),
         LC32_GL_PTR(pointer));
 }
+
+void glAlphaFuncx(GLenum function, GLclampx reference) {
+    LC32_GL_CALL(LC32OpenGLESOpAlphaFuncx,
+        LC32_GL_U32(function), LC32_GL_I32(reference));
+}
+
+void glClearColorx(GLclampx red, GLclampx green, GLclampx blue,
+                   GLclampx alpha) {
+    LC32_GL_CALL(LC32OpenGLESOpClearColorx,
+        LC32_GL_I32(red), LC32_GL_I32(green),
+        LC32_GL_I32(blue), LC32_GL_I32(alpha));
+}
+
+void glClearDepthx(GLclampx depth) {
+    LC32_GL_CALL(LC32OpenGLESOpClearDepthx, LC32_GL_I32(depth));
+}
+
+void glClipPlanef(GLenum plane, const GLfloat *equation) {
+    LC32_GL_CALL(LC32OpenGLESOpClipPlanef,
+        LC32_GL_U32(plane), LC32_GL_PTR(equation));
+}
+
+void glClipPlanex(GLenum plane, const GLfixed *equation) {
+    LC32_GL_CALL(LC32OpenGLESOpClipPlanex,
+        LC32_GL_U32(plane), LC32_GL_PTR(equation));
+}
+
+void glColor4x(GLfixed red, GLfixed green, GLfixed blue, GLfixed alpha) {
+    LC32_GL_CALL(LC32OpenGLESOpColor4x,
+        LC32_GL_I32(red), LC32_GL_I32(green),
+        LC32_GL_I32(blue), LC32_GL_I32(alpha));
+}
+
+void glDepthRangex(GLclampx nearValue, GLclampx farValue) {
+    LC32_GL_CALL(LC32OpenGLESOpDepthRangex,
+        LC32_GL_I32(nearValue), LC32_GL_I32(farValue));
+}
+
+void glFogxv(GLenum pname, const GLfixed *params) {
+    LC32_GL_CALL(LC32OpenGLESOpFogxv,
+        LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glFrustumf(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top,
+                GLfloat nearValue, GLfloat farValue) {
+    LC32_GL_CALL(LC32OpenGLESOpFrustumf,
+        LC32_GL_F32(left), LC32_GL_F32(right),
+        LC32_GL_F32(bottom), LC32_GL_F32(top),
+        LC32_GL_F32(nearValue), LC32_GL_F32(farValue));
+}
+
+void glFrustumx(GLfixed left, GLfixed right, GLfixed bottom, GLfixed top,
+                GLfixed nearValue, GLfixed farValue) {
+    LC32_GL_CALL(LC32OpenGLESOpFrustumx,
+        LC32_GL_I32(left), LC32_GL_I32(right),
+        LC32_GL_I32(bottom), LC32_GL_I32(top),
+        LC32_GL_I32(nearValue), LC32_GL_I32(farValue));
+}
+
+void glGetClipPlanef(GLenum plane, GLfloat *equation) {
+    LC32_GL_CALL(LC32OpenGLESOpGetClipPlanef,
+        LC32_GL_U32(plane), LC32_GL_PTR(equation));
+}
+
+void glGetClipPlanex(GLenum plane, GLfixed *equation) {
+    LC32_GL_CALL(LC32OpenGLESOpGetClipPlanex,
+        LC32_GL_U32(plane), LC32_GL_PTR(equation));
+}
+
+void glGetFixedv(GLenum pname, GLfixed *params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetFixedv,
+        LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glGetLightfv(GLenum light, GLenum pname, GLfloat *params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetLightfv,
+        LC32_GL_U32(light), LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glGetLightxv(GLenum light, GLenum pname, GLfixed *params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetLightxv,
+        LC32_GL_U32(light), LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glGetMaterialfv(GLenum face, GLenum pname, GLfloat *params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetMaterialfv,
+        LC32_GL_U32(face), LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glGetMaterialxv(GLenum face, GLenum pname, GLfixed *params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetMaterialxv,
+        LC32_GL_U32(face), LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glGetPointerv(GLenum pname, void **params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetPointerv,
+        LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glGetTexEnvfv(GLenum environment, GLenum pname, GLfloat *params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetTexEnvfv,
+        LC32_GL_U32(environment), LC32_GL_U32(pname),
+        LC32_GL_PTR(params));
+}
+
+void glGetTexEnviv(GLenum environment, GLenum pname, GLint *params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetTexEnviv,
+        LC32_GL_U32(environment), LC32_GL_U32(pname),
+        LC32_GL_PTR(params));
+}
+
+void glGetTexEnvxv(GLenum environment, GLenum pname, GLfixed *params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetTexEnvxv,
+        LC32_GL_U32(environment), LC32_GL_U32(pname),
+        LC32_GL_PTR(params));
+}
+
+void glGetTexParameterxv(GLenum target, GLenum pname, GLfixed *params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetTexParameterxv,
+        LC32_GL_U32(target), LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glLightModelf(GLenum pname, GLfloat param) {
+    LC32_GL_CALL(LC32OpenGLESOpLightModelf,
+        LC32_GL_U32(pname), LC32_GL_F32(param));
+}
+
+void glLightModelfv(GLenum pname, const GLfloat *params) {
+    LC32_GL_CALL(LC32OpenGLESOpLightModelfv,
+        LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glLightModelx(GLenum pname, GLfixed param) {
+    LC32_GL_CALL(LC32OpenGLESOpLightModelx,
+        LC32_GL_U32(pname), LC32_GL_I32(param));
+}
+
+void glLightModelxv(GLenum pname, const GLfixed *params) {
+    LC32_GL_CALL(LC32OpenGLESOpLightModelxv,
+        LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glLightf(GLenum light, GLenum pname, GLfloat param) {
+    LC32_GL_CALL(LC32OpenGLESOpLightf,
+        LC32_GL_U32(light), LC32_GL_U32(pname), LC32_GL_F32(param));
+}
+
+void glLightx(GLenum light, GLenum pname, GLfixed param) {
+    LC32_GL_CALL(LC32OpenGLESOpLightx,
+        LC32_GL_U32(light), LC32_GL_U32(pname), LC32_GL_I32(param));
+}
+
+void glLightxv(GLenum light, GLenum pname, const GLfixed *params) {
+    LC32_GL_CALL(LC32OpenGLESOpLightxv,
+        LC32_GL_U32(light), LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glLineWidthx(GLfixed width) {
+    LC32_GL_CALL(LC32OpenGLESOpLineWidthx, LC32_GL_I32(width));
+}
+
+void glLoadMatrixx(const GLfixed *matrix) {
+    LC32_GL_CALL(LC32OpenGLESOpLoadMatrixx, LC32_GL_PTR(matrix));
+}
+
+void glLogicOp(GLenum opcode) {
+    LC32_GL_CALL(LC32OpenGLESOpLogicOp, LC32_GL_U32(opcode));
+}
+
+void glMaterialf(GLenum face, GLenum pname, GLfloat param) {
+    LC32_GL_CALL(LC32OpenGLESOpMaterialf,
+        LC32_GL_U32(face), LC32_GL_U32(pname), LC32_GL_F32(param));
+}
+
+void glMaterialx(GLenum face, GLenum pname, GLfixed param) {
+    LC32_GL_CALL(LC32OpenGLESOpMaterialx,
+        LC32_GL_U32(face), LC32_GL_U32(pname), LC32_GL_I32(param));
+}
+
+void glMaterialxv(GLenum face, GLenum pname, const GLfixed *params) {
+    LC32_GL_CALL(LC32OpenGLESOpMaterialxv,
+        LC32_GL_U32(face), LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glMultMatrixx(const GLfixed *matrix) {
+    LC32_GL_CALL(LC32OpenGLESOpMultMatrixx, LC32_GL_PTR(matrix));
+}
+
+void glMultiTexCoord4f(GLenum target, GLfloat s, GLfloat t, GLfloat r,
+                       GLfloat q) {
+    LC32_GL_CALL(LC32OpenGLESOpMultiTexCoord4f,
+        LC32_GL_U32(target), LC32_GL_F32(s), LC32_GL_F32(t),
+        LC32_GL_F32(r), LC32_GL_F32(q));
+}
+
+void glMultiTexCoord4x(GLenum target, GLfixed s, GLfixed t, GLfixed r,
+                       GLfixed q) {
+    LC32_GL_CALL(LC32OpenGLESOpMultiTexCoord4x,
+        LC32_GL_U32(target), LC32_GL_I32(s), LC32_GL_I32(t),
+        LC32_GL_I32(r), LC32_GL_I32(q));
+}
+
+void glNormal3x(GLfixed x, GLfixed y, GLfixed z) {
+    LC32_GL_CALL(LC32OpenGLESOpNormal3x,
+        LC32_GL_I32(x), LC32_GL_I32(y), LC32_GL_I32(z));
+}
+
+void glOrthox(GLfixed left, GLfixed right, GLfixed bottom, GLfixed top,
+              GLfixed nearValue, GLfixed farValue) {
+    LC32_GL_CALL(LC32OpenGLESOpOrthox,
+        LC32_GL_I32(left), LC32_GL_I32(right),
+        LC32_GL_I32(bottom), LC32_GL_I32(top),
+        LC32_GL_I32(nearValue), LC32_GL_I32(farValue));
+}
+
+void glPointParameterf(GLenum pname, GLfloat param) {
+    LC32_GL_CALL(LC32OpenGLESOpPointParameterf,
+        LC32_GL_U32(pname), LC32_GL_F32(param));
+}
+
+void glPointParameterfv(GLenum pname, const GLfloat *params) {
+    LC32_GL_CALL(LC32OpenGLESOpPointParameterfv,
+        LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glPointParameterx(GLenum pname, GLfixed param) {
+    LC32_GL_CALL(LC32OpenGLESOpPointParameterx,
+        LC32_GL_U32(pname), LC32_GL_I32(param));
+}
+
+void glPointParameterxv(GLenum pname, const GLfixed *params) {
+    LC32_GL_CALL(LC32OpenGLESOpPointParameterxv,
+        LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glPointSize(GLfloat size) {
+    LC32_GL_CALL(LC32OpenGLESOpPointSize, LC32_GL_F32(size));
+}
+
+void glPointSizex(GLfixed size) {
+    LC32_GL_CALL(LC32OpenGLESOpPointSizex, LC32_GL_I32(size));
+}
+
+void glPolygonOffsetx(GLfixed factor, GLfixed units) {
+    LC32_GL_CALL(LC32OpenGLESOpPolygonOffsetx,
+        LC32_GL_I32(factor), LC32_GL_I32(units));
+}
+
+void glRotatex(GLfixed angle, GLfixed x, GLfixed y, GLfixed z) {
+    LC32_GL_CALL(LC32OpenGLESOpRotatex,
+        LC32_GL_I32(angle), LC32_GL_I32(x),
+        LC32_GL_I32(y), LC32_GL_I32(z));
+}
+
+void glSampleCoveragex(GLclampx value, GLboolean invert) {
+    LC32_GL_CALL(LC32OpenGLESOpSampleCoveragex,
+        LC32_GL_I32(value), LC32_GL_U32(invert));
+}
+
+void glScalex(GLfixed x, GLfixed y, GLfixed z) {
+    LC32_GL_CALL(LC32OpenGLESOpScalex,
+        LC32_GL_I32(x), LC32_GL_I32(y), LC32_GL_I32(z));
+}
+
+void glTexEnviv(GLenum target, GLenum pname, const GLint *params) {
+    LC32_GL_CALL(LC32OpenGLESOpTexEnviv,
+        LC32_GL_U32(target), LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glTexEnvx(GLenum target, GLenum pname, GLfixed param) {
+    LC32_GL_CALL(LC32OpenGLESOpTexEnvx,
+        LC32_GL_U32(target), LC32_GL_U32(pname), LC32_GL_I32(param));
+}
+
+void glTexEnvxv(GLenum target, GLenum pname, const GLfixed *params) {
+    LC32_GL_CALL(LC32OpenGLESOpTexEnvxv,
+        LC32_GL_U32(target), LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glTexParameterx(GLenum target, GLenum pname, GLfixed param) {
+    LC32_GL_CALL(LC32OpenGLESOpTexParameterx,
+        LC32_GL_U32(target), LC32_GL_U32(pname), LC32_GL_I32(param));
+}
+
+void glTexParameterxv(GLenum target, GLenum pname,
+                      const GLfixed *params) {
+    LC32_GL_CALL(LC32OpenGLESOpTexParameterxv,
+        LC32_GL_U32(target), LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glTranslatex(GLfixed x, GLfixed y, GLfixed z) {
+    LC32_GL_CALL(LC32OpenGLESOpTranslatex,
+        LC32_GL_I32(x), LC32_GL_I32(y), LC32_GL_I32(z));
+}
+
+void glCurrentPaletteMatrixOES(GLuint matrixpaletteindex) {
+    LC32_GL_CALL(LC32OpenGLESOpCurrentPaletteMatrixOES,
+        LC32_GL_U32(matrixpaletteindex));
+}
+
+void glDrawTexfOES(GLfloat x, GLfloat y, GLfloat z,
+                   GLfloat width, GLfloat height) {
+    LC32_GL_CALL(LC32OpenGLESOpDrawTexfOES,
+        LC32_GL_F32(x), LC32_GL_F32(y), LC32_GL_F32(z),
+        LC32_GL_F32(width), LC32_GL_F32(height));
+}
+
+void glDrawTexfvOES(const GLfloat *coords) {
+    LC32_GL_CALL(LC32OpenGLESOpDrawTexfvOES, LC32_GL_PTR(coords));
+}
+
+void glDrawTexiOES(GLint x, GLint y, GLint z, GLint width, GLint height) {
+    LC32_GL_CALL(LC32OpenGLESOpDrawTexiOES,
+        LC32_GL_I32(x), LC32_GL_I32(y), LC32_GL_I32(z),
+        LC32_GL_I32(width), LC32_GL_I32(height));
+}
+
+void glDrawTexivOES(const GLint *coords) {
+    LC32_GL_CALL(LC32OpenGLESOpDrawTexivOES, LC32_GL_PTR(coords));
+}
+
+void glDrawTexsOES(GLshort x, GLshort y, GLshort z,
+                   GLshort width, GLshort height) {
+    LC32_GL_CALL(LC32OpenGLESOpDrawTexsOES,
+        LC32_GL_I32(x), LC32_GL_I32(y), LC32_GL_I32(z),
+        LC32_GL_I32(width), LC32_GL_I32(height));
+}
+
+void glDrawTexsvOES(const GLshort *coords) {
+    LC32_GL_CALL(LC32OpenGLESOpDrawTexsvOES, LC32_GL_PTR(coords));
+}
+
+void glDrawTexxOES(GLfixed x, GLfixed y, GLfixed z,
+                   GLfixed width, GLfixed height) {
+    LC32_GL_CALL(LC32OpenGLESOpDrawTexxOES,
+        LC32_GL_I32(x), LC32_GL_I32(y), LC32_GL_I32(z),
+        LC32_GL_I32(width), LC32_GL_I32(height));
+}
+
+void glDrawTexxvOES(const GLfixed *coords) {
+    LC32_GL_CALL(LC32OpenGLESOpDrawTexxvOES, LC32_GL_PTR(coords));
+}
+
+void glLoadPaletteFromModelViewMatrixOES(void) {
+    LC32_GL_CALL0(LC32OpenGLESOpLoadPaletteFromModelViewMatrixOES);
+}
+
+void glMatrixIndexPointerOES(GLint size, GLenum type, GLsizei stride,
+                             const GLvoid *pointer) {
+    LC32_GL_CALL(LC32OpenGLESOpMatrixIndexPointerOES,
+        LC32_GL_I32(size), LC32_GL_U32(type), LC32_GL_I32(stride),
+        LC32_GL_PTR(pointer));
+}
+
+void glPointSizePointerOES(GLenum type, GLsizei stride,
+                           const GLvoid *pointer) {
+    LC32_GL_CALL(LC32OpenGLESOpPointSizePointerOES,
+        LC32_GL_U32(type), LC32_GL_I32(stride), LC32_GL_PTR(pointer));
+}
+
+void glWeightPointerOES(GLint size, GLenum type, GLsizei stride,
+                        const GLvoid *pointer) {
+    LC32_GL_CALL(LC32OpenGLESOpWeightPointerOES,
+        LC32_GL_I32(size), LC32_GL_U32(type), LC32_GL_I32(stride),
+        LC32_GL_PTR(pointer));
+}
+
+void glActiveShaderProgramEXT(GLuint pipeline, GLuint program) {
+    LC32_GL_CALL(LC32OpenGLESOpActiveShaderProgramEXT,
+        LC32_GL_U32(pipeline), LC32_GL_U32(program));
+}
+
+void glBeginQueryEXT(GLenum target, GLuint id) {
+    LC32_GL_CALL(LC32OpenGLESOpBeginQueryEXT,
+        LC32_GL_U32(target), LC32_GL_U32(id));
+}
+
+void glBindProgramPipelineEXT(GLuint pipeline) {
+    LC32_GL_CALL(LC32OpenGLESOpBindProgramPipelineEXT,
+        LC32_GL_U32(pipeline));
+}
+
+GLenum glClientWaitSyncAPPLE(GLsync sync, GLbitfield flags,
+                             GLuint64 timeout) {
+    return (GLenum)LC32_GL_CALL(LC32OpenGLESOpClientWaitSyncAPPLE,
+        LC32_GL_PTR(sync), LC32_GL_U32(flags), LC32_GL_U64(timeout));
+}
+
+void glCopyTextureLevelsAPPLE(GLuint destinationTexture,
+                              GLuint sourceTexture,
+                              GLint sourceBaseLevel,
+                              GLsizei sourceLevelCount) {
+    LC32_GL_CALL(LC32OpenGLESOpCopyTextureLevelsAPPLE,
+        LC32_GL_U32(destinationTexture), LC32_GL_U32(sourceTexture),
+        LC32_GL_I32(sourceBaseLevel), LC32_GL_I32(sourceLevelCount));
+}
+
+GLuint glCreateShaderProgramvEXT(GLenum type, GLsizei count,
+                                 const GLchar *const *strings) {
+    return (GLuint)LC32_GL_CALL(LC32OpenGLESOpCreateShaderProgramvEXT,
+        LC32_GL_U32(type), LC32_GL_I32(count), LC32_GL_PTR(strings));
+}
+
+void glDeleteProgramPipelinesEXT(GLsizei count, const GLuint *pipelines) {
+    LC32_GL_CALL(LC32OpenGLESOpDeleteProgramPipelinesEXT,
+        LC32_GL_I32(count), LC32_GL_PTR(pipelines));
+}
+
+void glDeleteQueriesEXT(GLsizei count, const GLuint *ids) {
+    LC32_GL_CALL(LC32OpenGLESOpDeleteQueriesEXT,
+        LC32_GL_I32(count), LC32_GL_PTR(ids));
+}
+
+void glDeleteSyncAPPLE(GLsync sync) {
+    LC32_GL_CALL(LC32OpenGLESOpDeleteSyncAPPLE, LC32_GL_PTR(sync));
+}
+
+void glDrawArraysInstancedEXT(GLenum mode, GLint first, GLsizei count,
+                              GLsizei instanceCount) {
+    LC32_GL_CALL(LC32OpenGLESOpDrawArraysInstancedEXT,
+        LC32_GL_U32(mode), LC32_GL_I32(first), LC32_GL_I32(count),
+        LC32_GL_I32(instanceCount));
+}
+
+void glDrawElementsInstancedEXT(GLenum mode, GLsizei count, GLenum type,
+                                const GLvoid *indices,
+                                GLsizei instanceCount) {
+    LC32_GL_CALL(LC32OpenGLESOpDrawElementsInstancedEXT,
+        LC32_GL_U32(mode), LC32_GL_I32(count), LC32_GL_U32(type),
+        LC32_GL_PTR(indices), LC32_GL_I32(instanceCount));
+}
+
+void glEndQueryEXT(GLenum target) {
+    LC32_GL_CALL(LC32OpenGLESOpEndQueryEXT, LC32_GL_U32(target));
+}
+
+GLsync glFenceSyncAPPLE(GLenum condition, GLbitfield flags) {
+    return (GLsync)(uintptr_t)LC32_GL_CALL(LC32OpenGLESOpFenceSyncAPPLE,
+        LC32_GL_U32(condition), LC32_GL_U32(flags));
+}
+
+void glFlushMappedBufferRangeEXT(GLenum target, GLintptr offset,
+                                 GLsizeiptr length) {
+    LC32_GL_CALL(LC32OpenGLESOpFlushMappedBufferRangeEXT,
+        LC32_GL_U32(target), LC32_GL_I32(offset), LC32_GL_I32(length));
+}
+
+void glGenProgramPipelinesEXT(GLsizei count, GLuint *pipelines) {
+    LC32_GL_CALL(LC32OpenGLESOpGenProgramPipelinesEXT,
+        LC32_GL_I32(count), LC32_GL_PTR(pipelines));
+}
+
+void glGenQueriesEXT(GLsizei count, GLuint *ids) {
+    LC32_GL_CALL(LC32OpenGLESOpGenQueriesEXT,
+        LC32_GL_I32(count), LC32_GL_PTR(ids));
+}
+
+void glGetBufferPointervOES(GLenum target, GLenum pname, GLvoid **params) {
+    uint32_t guestPointer = 0;
+    LC32_GL_CALL(LC32OpenGLESOpGetBufferPointervOES,
+        LC32_GL_U32(target), LC32_GL_U32(pname),
+        LC32_GL_PTR(&guestPointer));
+    if(params) *params = (GLvoid *)(uintptr_t)guestPointer;
+}
+
+void glGetInteger64vAPPLE(GLenum pname, GLint64 *params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetInteger64vAPPLE,
+        LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glGetObjectLabelEXT(GLenum type, GLuint object, GLsizei bufSize,
+                         GLsizei *length, GLchar *label) {
+    LC32_GL_CALL(LC32OpenGLESOpGetObjectLabelEXT,
+        LC32_GL_U32(type), LC32_GL_U32(object), LC32_GL_I32(bufSize),
+        LC32_GL_PTR(length), LC32_GL_PTR(label));
+}
+
+void glGetProgramPipelineInfoLogEXT(GLuint pipeline, GLsizei bufSize,
+                                    GLsizei *length, GLchar *infoLog) {
+    LC32_GL_CALL(LC32OpenGLESOpGetProgramPipelineInfoLogEXT,
+        LC32_GL_U32(pipeline), LC32_GL_I32(bufSize),
+        LC32_GL_PTR(length), LC32_GL_PTR(infoLog));
+}
+
+void glGetProgramPipelineivEXT(GLuint pipeline, GLenum pname,
+                               GLint *params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetProgramPipelineivEXT,
+        LC32_GL_U32(pipeline), LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glGetQueryObjectuivEXT(GLuint id, GLenum pname, GLuint *params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetQueryObjectuivEXT,
+        LC32_GL_U32(id), LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glGetQueryivEXT(GLenum target, GLenum pname, GLint *params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetQueryivEXT,
+        LC32_GL_U32(target), LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glGetSyncivAPPLE(GLsync sync, GLenum pname, GLsizei bufSize,
+                      GLsizei *length, GLint *values) {
+    LC32_GL_CALL(LC32OpenGLESOpGetSyncivAPPLE,
+        LC32_GL_PTR(sync), LC32_GL_U32(pname), LC32_GL_I32(bufSize),
+        LC32_GL_PTR(length), LC32_GL_PTR(values));
+}
+
+void glInsertEventMarkerEXT(GLsizei length, const GLchar *marker) {
+    LC32_GL_CALL(LC32OpenGLESOpInsertEventMarkerEXT,
+        LC32_GL_I32(length), LC32_GL_PTR(marker));
+}
+
+GLboolean glIsProgramPipelineEXT(GLuint pipeline) {
+    return (GLboolean)LC32_GL_CALL(LC32OpenGLESOpIsProgramPipelineEXT,
+        LC32_GL_U32(pipeline));
+}
+
+GLboolean glIsQueryEXT(GLuint id) {
+    return (GLboolean)LC32_GL_CALL(LC32OpenGLESOpIsQueryEXT,
+        LC32_GL_U32(id));
+}
+
+GLboolean glIsSyncAPPLE(GLsync sync) {
+    return (GLboolean)LC32_GL_CALL(LC32OpenGLESOpIsSyncAPPLE,
+        LC32_GL_PTR(sync));
+}
+
+GLboolean glIsVertexArrayOES(GLuint array) {
+    return (GLboolean)LC32_GL_CALL(LC32OpenGLESOpIsVertexArrayOES,
+        LC32_GL_U32(array));
+}
+
+void glLabelObjectEXT(GLenum type, GLuint object, GLsizei length,
+                      const GLchar *label) {
+    LC32_GL_CALL(LC32OpenGLESOpLabelObjectEXT,
+        LC32_GL_U32(type), LC32_GL_U32(object), LC32_GL_I32(length),
+        LC32_GL_PTR(label));
+}
+
+GLvoid *glMapBufferOES(GLenum target, GLenum access) {
+    GLint length = 0;
+    glGetBufferParameteriv(target, GL_BUFFER_SIZE, &length);
+    void *shadow = length > 0 ? malloc((size_t)length) : NULL;
+    uint32_t mapped = LC32_GL_CALL(LC32OpenGLESOpMapBufferOES,
+        LC32_GL_U32(target), LC32_GL_U32(access), LC32_GL_PTR(shadow),
+        LC32_GL_I32(length));
+    if(!mapped) {
+        free(shadow);
+        return NULL;
+    }
+    return shadow;
+}
+
+GLvoid *glMapBufferRangeEXT(GLenum target, GLintptr offset,
+                            GLsizeiptr length, GLbitfield access) {
+    void *shadow = length > 0 ? malloc((size_t)length) : NULL;
+    uint32_t mapped = LC32_GL_CALL(LC32OpenGLESOpMapBufferRangeEXT,
+        LC32_GL_U32(target), LC32_GL_I32(offset), LC32_GL_I32(length),
+        LC32_GL_U32(access), LC32_GL_PTR(shadow));
+    if(!mapped) {
+        free(shadow);
+        return NULL;
+    }
+    return shadow;
+}
+
+void glPopGroupMarkerEXT(void) {
+    LC32_GL_CALL0(LC32OpenGLESOpPopGroupMarkerEXT);
+}
+
+void glProgramParameteriEXT(GLuint program, GLenum pname, GLint value) {
+    LC32_GL_CALL(LC32OpenGLESOpProgramParameteriEXT,
+        LC32_GL_U32(program), LC32_GL_U32(pname), LC32_GL_I32(value));
+}
+
+void glProgramUniform1fEXT(GLuint program, GLint location, GLfloat x) {
+    LC32_GL_CALL(LC32OpenGLESOpProgramUniform1fEXT,
+        LC32_GL_U32(program), LC32_GL_I32(location), LC32_GL_F32(x));
+}
+
+void glProgramUniform2fEXT(GLuint program, GLint location,
+                           GLfloat x, GLfloat y) {
+    LC32_GL_CALL(LC32OpenGLESOpProgramUniform2fEXT,
+        LC32_GL_U32(program), LC32_GL_I32(location),
+        LC32_GL_F32(x), LC32_GL_F32(y));
+}
+
+void glProgramUniform3fEXT(GLuint program, GLint location,
+                           GLfloat x, GLfloat y, GLfloat z) {
+    LC32_GL_CALL(LC32OpenGLESOpProgramUniform3fEXT,
+        LC32_GL_U32(program), LC32_GL_I32(location),
+        LC32_GL_F32(x), LC32_GL_F32(y), LC32_GL_F32(z));
+}
+
+void glProgramUniform4fEXT(GLuint program, GLint location,
+                           GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
+    LC32_GL_CALL(LC32OpenGLESOpProgramUniform4fEXT,
+        LC32_GL_U32(program), LC32_GL_I32(location),
+        LC32_GL_F32(x), LC32_GL_F32(y), LC32_GL_F32(z), LC32_GL_F32(w));
+}
+
+void glProgramUniform1iEXT(GLuint program, GLint location, GLint x) {
+    LC32_GL_CALL(LC32OpenGLESOpProgramUniform1iEXT,
+        LC32_GL_U32(program), LC32_GL_I32(location), LC32_GL_I32(x));
+}
+
+void glProgramUniform2iEXT(GLuint program, GLint location, GLint x, GLint y) {
+    LC32_GL_CALL(LC32OpenGLESOpProgramUniform2iEXT,
+        LC32_GL_U32(program), LC32_GL_I32(location),
+        LC32_GL_I32(x), LC32_GL_I32(y));
+}
+
+void glProgramUniform3iEXT(GLuint program, GLint location,
+                           GLint x, GLint y, GLint z) {
+    LC32_GL_CALL(LC32OpenGLESOpProgramUniform3iEXT,
+        LC32_GL_U32(program), LC32_GL_I32(location),
+        LC32_GL_I32(x), LC32_GL_I32(y), LC32_GL_I32(z));
+}
+
+void glProgramUniform4iEXT(GLuint program, GLint location,
+                           GLint x, GLint y, GLint z, GLint w) {
+    LC32_GL_CALL(LC32OpenGLESOpProgramUniform4iEXT,
+        LC32_GL_U32(program), LC32_GL_I32(location),
+        LC32_GL_I32(x), LC32_GL_I32(y), LC32_GL_I32(z), LC32_GL_I32(w));
+}
+
+#define LC32_GL_PROGRAM_UNIFORM_ARRAY(width, suffix, type, opcode)          \
+void glProgramUniform##width##suffix##EXT(GLuint program, GLint location,   \
+        GLsizei count, const type *value) {                                 \
+    LC32_GL_CALL((opcode), LC32_GL_U32(program), LC32_GL_I32(location),     \
+        LC32_GL_I32(count), LC32_GL_PTR(value));                            \
+}
+
+LC32_GL_PROGRAM_UNIFORM_ARRAY(1, fv, GLfloat,
+    LC32OpenGLESOpProgramUniform1fvEXT)
+LC32_GL_PROGRAM_UNIFORM_ARRAY(2, fv, GLfloat,
+    LC32OpenGLESOpProgramUniform2fvEXT)
+LC32_GL_PROGRAM_UNIFORM_ARRAY(3, fv, GLfloat,
+    LC32OpenGLESOpProgramUniform3fvEXT)
+LC32_GL_PROGRAM_UNIFORM_ARRAY(4, fv, GLfloat,
+    LC32OpenGLESOpProgramUniform4fvEXT)
+LC32_GL_PROGRAM_UNIFORM_ARRAY(1, iv, GLint,
+    LC32OpenGLESOpProgramUniform1ivEXT)
+LC32_GL_PROGRAM_UNIFORM_ARRAY(2, iv, GLint,
+    LC32OpenGLESOpProgramUniform2ivEXT)
+LC32_GL_PROGRAM_UNIFORM_ARRAY(3, iv, GLint,
+    LC32OpenGLESOpProgramUniform3ivEXT)
+LC32_GL_PROGRAM_UNIFORM_ARRAY(4, iv, GLint,
+    LC32OpenGLESOpProgramUniform4ivEXT)
+
+#undef LC32_GL_PROGRAM_UNIFORM_ARRAY
+
+#define LC32_GL_PROGRAM_UNIFORM_MATRIX(width, opcode)                     \
+void glProgramUniformMatrix##width##fvEXT(GLuint program, GLint location,  \
+        GLsizei count, GLboolean transpose, const GLfloat *value) {        \
+    LC32_GL_CALL((opcode), LC32_GL_U32(program), LC32_GL_I32(location),    \
+        LC32_GL_I32(count), LC32_GL_U32(transpose), LC32_GL_PTR(value));   \
+}
+
+LC32_GL_PROGRAM_UNIFORM_MATRIX(2, LC32OpenGLESOpProgramUniformMatrix2fvEXT)
+LC32_GL_PROGRAM_UNIFORM_MATRIX(3, LC32OpenGLESOpProgramUniformMatrix3fvEXT)
+LC32_GL_PROGRAM_UNIFORM_MATRIX(4, LC32OpenGLESOpProgramUniformMatrix4fvEXT)
+
+#undef LC32_GL_PROGRAM_UNIFORM_MATRIX
+
+void glPushGroupMarkerEXT(GLsizei length, const GLchar *marker) {
+    LC32_GL_CALL(LC32OpenGLESOpPushGroupMarkerEXT,
+        LC32_GL_I32(length), LC32_GL_PTR(marker));
+}
+
+void glTexStorage2DEXT(GLenum target, GLsizei levels,
+                       GLenum internalformat, GLsizei width,
+                       GLsizei height) {
+    LC32_GL_CALL(LC32OpenGLESOpTexStorage2DEXT,
+        LC32_GL_U32(target), LC32_GL_I32(levels),
+        LC32_GL_U32(internalformat), LC32_GL_I32(width),
+        LC32_GL_I32(height));
+}
+
+GLboolean glUnmapBufferOES(GLenum target) {
+    uint32_t guestPointer = 0;
+    GLboolean result = (GLboolean)LC32_GL_CALL(
+        LC32OpenGLESOpUnmapBufferOES, LC32_GL_U32(target),
+        LC32_GL_PTR(&guestPointer));
+    if(guestPointer) free((void *)(uintptr_t)guestPointer);
+    return result;
+}
+
+void glUseProgramStagesEXT(GLuint pipeline, GLbitfield stages,
+                           GLuint program) {
+    LC32_GL_CALL(LC32OpenGLESOpUseProgramStagesEXT,
+        LC32_GL_U32(pipeline), LC32_GL_U32(stages),
+        LC32_GL_U32(program));
+}
+
+void glValidateProgramPipelineEXT(GLuint pipeline) {
+    LC32_GL_CALL(LC32OpenGLESOpValidateProgramPipelineEXT,
+        LC32_GL_U32(pipeline));
+}
+
+void glVertexAttribDivisorEXT(GLuint index, GLuint divisor) {
+    LC32_GL_CALL(LC32OpenGLESOpVertexAttribDivisorEXT,
+        LC32_GL_U32(index), LC32_GL_U32(divisor));
+}
+
+void glWaitSyncAPPLE(GLsync sync, GLbitfield flags, GLuint64 timeout) {
+    LC32_GL_CALL(LC32OpenGLESOpWaitSyncAPPLE,
+        LC32_GL_PTR(sync), LC32_GL_U32(flags), LC32_GL_U64(timeout));
+}
+
+void glBeginTransformFeedback(GLenum primitiveMode) {
+    LC32_GL_CALL(LC32OpenGLESOpBeginTransformFeedback,
+        LC32_GL_U32(primitiveMode));
+}
+
+void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
+    LC32_GL_CALL(LC32OpenGLESOpBindBufferBase,
+        LC32_GL_U32(target), LC32_GL_U32(index), LC32_GL_U32(buffer));
+}
+
+void glBindBufferRange(GLenum target, GLuint index, GLuint buffer,
+                       GLintptr offset, GLsizeiptr size) {
+    LC32_GL_CALL(LC32OpenGLESOpBindBufferRange,
+        LC32_GL_U32(target), LC32_GL_U32(index), LC32_GL_U32(buffer),
+        LC32_GL_I32(offset), LC32_GL_I32(size));
+}
+
+void glBindSampler(GLuint unit, GLuint sampler) {
+    LC32_GL_CALL(LC32OpenGLESOpBindSampler,
+        LC32_GL_U32(unit), LC32_GL_U32(sampler));
+}
+
+void glBindTransformFeedback(GLenum target, GLuint id) {
+    LC32_GL_CALL(LC32OpenGLESOpBindTransformFeedback,
+        LC32_GL_U32(target), LC32_GL_U32(id));
+}
+
+void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
+                       GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1,
+                       GLbitfield mask, GLenum filter) {
+    LC32_GL_CALL(LC32OpenGLESOpBlitFramebuffer,
+        LC32_GL_I32(srcX0), LC32_GL_I32(srcY0), LC32_GL_I32(srcX1),
+        LC32_GL_I32(srcY1), LC32_GL_I32(dstX0), LC32_GL_I32(dstY0),
+        LC32_GL_I32(dstX1), LC32_GL_I32(dstY1), LC32_GL_U32(mask),
+        LC32_GL_U32(filter));
+}
+
+void glClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat depth,
+                     GLint stencil) {
+    LC32_GL_CALL(LC32OpenGLESOpClearBufferfi,
+        LC32_GL_U32(buffer), LC32_GL_I32(drawbuffer),
+        LC32_GL_F32(depth), LC32_GL_I32(stencil));
+}
+
+void glClearBufferfv(GLenum buffer, GLint drawbuffer, const GLfloat *value) {
+    LC32_GL_CALL(LC32OpenGLESOpClearBufferfv,
+        LC32_GL_U32(buffer), LC32_GL_I32(drawbuffer), LC32_GL_PTR(value));
+}
+
+void glClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint *value) {
+    LC32_GL_CALL(LC32OpenGLESOpClearBufferiv,
+        LC32_GL_U32(buffer), LC32_GL_I32(drawbuffer), LC32_GL_PTR(value));
+}
+
+void glClearBufferuiv(GLenum buffer, GLint drawbuffer, const GLuint *value) {
+    LC32_GL_CALL(LC32OpenGLESOpClearBufferuiv,
+        LC32_GL_U32(buffer), LC32_GL_I32(drawbuffer), LC32_GL_PTR(value));
+}
+
+void glCompressedTexImage3D(GLenum target, GLint level,
+                            GLenum internalformat, GLsizei width,
+                            GLsizei height, GLsizei depth, GLint border,
+                            GLsizei imageSize, const GLvoid *data) {
+    LC32_GL_CALL(LC32OpenGLESOpCompressedTexImage3D,
+        LC32_GL_U32(target), LC32_GL_I32(level),
+        LC32_GL_U32(internalformat), LC32_GL_I32(width),
+        LC32_GL_I32(height), LC32_GL_I32(depth), LC32_GL_I32(border),
+        LC32_GL_I32(imageSize), LC32_GL_PTR(data));
+}
+
+void glCompressedTexSubImage3D(GLenum target, GLint level, GLint xoffset,
+                               GLint yoffset, GLint zoffset, GLsizei width,
+                               GLsizei height, GLsizei depth, GLenum format,
+                               GLsizei imageSize, const GLvoid *data) {
+    LC32_GL_CALL(LC32OpenGLESOpCompressedTexSubImage3D,
+        LC32_GL_U32(target), LC32_GL_I32(level), LC32_GL_I32(xoffset),
+        LC32_GL_I32(yoffset), LC32_GL_I32(zoffset), LC32_GL_I32(width),
+        LC32_GL_I32(height), LC32_GL_I32(depth), LC32_GL_U32(format),
+        LC32_GL_I32(imageSize), LC32_GL_PTR(data));
+}
+
+void glCopyBufferSubData(GLenum readTarget, GLenum writeTarget,
+                         GLintptr readOffset, GLintptr writeOffset,
+                         GLsizeiptr size) {
+    LC32_GL_CALL(LC32OpenGLESOpCopyBufferSubData,
+        LC32_GL_U32(readTarget), LC32_GL_U32(writeTarget),
+        LC32_GL_I32(readOffset), LC32_GL_I32(writeOffset),
+        LC32_GL_I32(size));
+}
+
+void glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffset,
+                         GLint yoffset, GLint zoffset, GLint x, GLint y,
+                         GLsizei width, GLsizei height) {
+    LC32_GL_CALL(LC32OpenGLESOpCopyTexSubImage3D,
+        LC32_GL_U32(target), LC32_GL_I32(level), LC32_GL_I32(xoffset),
+        LC32_GL_I32(yoffset), LC32_GL_I32(zoffset), LC32_GL_I32(x),
+        LC32_GL_I32(y), LC32_GL_I32(width), LC32_GL_I32(height));
+}
+
+void glDeleteSamplers(GLsizei count, const GLuint *samplers) {
+    LC32_GL_CALL(LC32OpenGLESOpDeleteSamplers,
+        LC32_GL_I32(count), LC32_GL_PTR(samplers));
+}
+
+void glDeleteTransformFeedbacks(GLsizei count, const GLuint *ids) {
+    LC32_GL_CALL(LC32OpenGLESOpDeleteTransformFeedbacks,
+        LC32_GL_I32(count), LC32_GL_PTR(ids));
+}
+
+void glDrawBuffers(GLsizei count, const GLenum *buffers) {
+    LC32_GL_CALL(LC32OpenGLESOpDrawBuffers,
+        LC32_GL_I32(count), LC32_GL_PTR(buffers));
+}
+
+void glDrawRangeElements(GLenum mode, GLuint start, GLuint end,
+                         GLsizei count, GLenum type,
+                         const GLvoid *indices) {
+    LC32_GL_CALL(LC32OpenGLESOpDrawRangeElements,
+        LC32_GL_U32(mode), LC32_GL_U32(start), LC32_GL_U32(end),
+        LC32_GL_I32(count), LC32_GL_U32(type), LC32_GL_PTR(indices));
+}
+
+void glEndTransformFeedback(void) {
+    LC32_GL_CALL0(LC32OpenGLESOpEndTransformFeedback);
+}
+
+void glFramebufferTextureLayer(GLenum target, GLenum attachment,
+                               GLuint texture, GLint level, GLint layer) {
+    LC32_GL_CALL(LC32OpenGLESOpFramebufferTextureLayer,
+        LC32_GL_U32(target), LC32_GL_U32(attachment),
+        LC32_GL_U32(texture), LC32_GL_I32(level), LC32_GL_I32(layer));
+}
+
+void glGenSamplers(GLsizei count, GLuint *samplers) {
+    LC32_GL_CALL(LC32OpenGLESOpGenSamplers,
+        LC32_GL_I32(count), LC32_GL_PTR(samplers));
+}
+
+void glGenTransformFeedbacks(GLsizei count, GLuint *ids) {
+    LC32_GL_CALL(LC32OpenGLESOpGenTransformFeedbacks,
+        LC32_GL_I32(count), LC32_GL_PTR(ids));
+}
+
+void glGetActiveUniformBlockName(GLuint program, GLuint blockIndex,
+                                 GLsizei bufSize, GLsizei *length,
+                                 GLchar *name) {
+    LC32_GL_CALL(LC32OpenGLESOpGetActiveUniformBlockName,
+        LC32_GL_U32(program), LC32_GL_U32(blockIndex),
+        LC32_GL_I32(bufSize), LC32_GL_PTR(length), LC32_GL_PTR(name));
+}
+
+void glGetActiveUniformBlockiv(GLuint program, GLuint blockIndex,
+                               GLenum pname, GLint *params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetActiveUniformBlockiv,
+        LC32_GL_U32(program), LC32_GL_U32(blockIndex),
+        LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glGetActiveUniformsiv(GLuint program, GLsizei uniformCount,
+                           const GLuint *uniformIndices, GLenum pname,
+                           GLint *params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetActiveUniformsiv,
+        LC32_GL_U32(program), LC32_GL_I32(uniformCount),
+        LC32_GL_PTR(uniformIndices), LC32_GL_U32(pname),
+        LC32_GL_PTR(params));
+}
+
+void glGetBufferParameteri64v(GLenum target, GLenum pname, GLint64 *params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetBufferParameteri64v,
+        LC32_GL_U32(target), LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+GLint glGetFragDataLocation(GLuint program, const GLchar *name) {
+    return (GLint)LC32_GL_CALL(LC32OpenGLESOpGetFragDataLocation,
+        LC32_GL_U32(program), LC32_GL_PTR(name));
+}
+
+void glGetInteger64i_v(GLenum target, GLuint index, GLint64 *data) {
+    LC32_GL_CALL(LC32OpenGLESOpGetInteger64i_v,
+        LC32_GL_U32(target), LC32_GL_U32(index), LC32_GL_PTR(data));
+}
+
+void glGetIntegeri_v(GLenum target, GLuint index, GLint *data) {
+    LC32_GL_CALL(LC32OpenGLESOpGetIntegeri_v,
+        LC32_GL_U32(target), LC32_GL_U32(index), LC32_GL_PTR(data));
+}
+
+void glGetInternalformativ(GLenum target, GLenum internalformat,
+                           GLenum pname, GLsizei bufSize, GLint *params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetInternalformativ,
+        LC32_GL_U32(target), LC32_GL_U32(internalformat),
+        LC32_GL_U32(pname), LC32_GL_I32(bufSize), LC32_GL_PTR(params));
+}
+
+void glGetProgramBinary(GLuint program, GLsizei bufSize, GLsizei *length,
+                        GLenum *binaryFormat, GLvoid *binary) {
+    LC32_GL_CALL(LC32OpenGLESOpGetProgramBinary,
+        LC32_GL_U32(program), LC32_GL_I32(bufSize), LC32_GL_PTR(length),
+        LC32_GL_PTR(binaryFormat), LC32_GL_PTR(binary));
+}
+
+void glGetSamplerParameterfv(GLuint sampler, GLenum pname, GLfloat *params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetSamplerParameterfv,
+        LC32_GL_U32(sampler), LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glGetSamplerParameteriv(GLuint sampler, GLenum pname, GLint *params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetSamplerParameteriv,
+        LC32_GL_U32(sampler), LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+typedef struct LC32OpenGLESIndexedStringCache {
+    GLenum name;
+    GLuint index;
+    GLubyte *bytes;
+    uint32_t capacity;
+    struct LC32OpenGLESIndexedStringCache *next;
+} LC32OpenGLESIndexedStringCache;
+
+static __thread LC32OpenGLESIndexedStringCache *LC32OpenGLESIndexedStrings;
+
+const GLubyte *glGetStringi(GLenum name, GLuint index) {
+    LC32OpenGLESIndexedStringCache *cache = LC32OpenGLESIndexedStrings;
+    while(cache && (cache->name != name || cache->index != index))
+        cache = cache->next;
+    if(!cache) {
+        cache = calloc(1, sizeof(*cache));
+        if(!cache) return NULL;
+        cache->name = name;
+        cache->index = index;
+        cache->next = LC32OpenGLESIndexedStrings;
+        LC32OpenGLESIndexedStrings = cache;
+    }
+
+    const uint32_t length = LC32_GL_CALL(
+        LC32OpenGLESOpGetStringiLength, LC32_GL_U32(name),
+        LC32_GL_U32(index));
+    if(!length) return NULL;
+    if(cache->capacity < length) {
+        GLubyte *replacement = realloc(cache->bytes, length);
+        if(!replacement) return NULL;
+        cache->bytes = replacement;
+        cache->capacity = length;
+    }
+    const uint32_t copied = LC32_GL_CALL(LC32OpenGLESOpGetStringiCopy,
+        LC32_GL_U32(name), LC32_GL_U32(index), LC32_GL_PTR(cache->bytes),
+        LC32_GL_U32(cache->capacity));
+    return copied == length ? cache->bytes : NULL;
+}
+
+void glGetTransformFeedbackVarying(GLuint program, GLuint index,
+                                   GLsizei bufSize, GLsizei *length,
+                                   GLsizei *size, GLenum *type,
+                                   GLchar *name) {
+    LC32_GL_CALL(LC32OpenGLESOpGetTransformFeedbackVarying,
+        LC32_GL_U32(program), LC32_GL_U32(index), LC32_GL_I32(bufSize),
+        LC32_GL_PTR(length), LC32_GL_PTR(size), LC32_GL_PTR(type),
+        LC32_GL_PTR(name));
+}
+
+GLuint glGetUniformBlockIndex(GLuint program, const GLchar *name) {
+    return (GLuint)LC32_GL_CALL(LC32OpenGLESOpGetUniformBlockIndex,
+        LC32_GL_U32(program), LC32_GL_PTR(name));
+}
+
+void glGetUniformIndices(GLuint program, GLsizei uniformCount,
+                         const GLchar *const *uniformNames,
+                         GLuint *uniformIndices) {
+    LC32_GL_CALL(LC32OpenGLESOpGetUniformIndices,
+        LC32_GL_U32(program), LC32_GL_I32(uniformCount),
+        LC32_GL_PTR(uniformNames), LC32_GL_PTR(uniformIndices));
+}
+
+void glGetUniformuiv(GLuint program, GLint location, GLuint *params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetUniformuiv,
+        LC32_GL_U32(program), LC32_GL_I32(location), LC32_GL_PTR(params));
+}
+
+void glGetVertexAttribIiv(GLuint index, GLenum pname, GLint *params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetVertexAttribIiv,
+        LC32_GL_U32(index), LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glGetVertexAttribIuiv(GLuint index, GLenum pname, GLuint *params) {
+    LC32_GL_CALL(LC32OpenGLESOpGetVertexAttribIuiv,
+        LC32_GL_U32(index), LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glInvalidateFramebuffer(GLenum target, GLsizei numAttachments,
+                             const GLenum *attachments) {
+    LC32_GL_CALL(LC32OpenGLESOpInvalidateFramebuffer,
+        LC32_GL_U32(target), LC32_GL_I32(numAttachments),
+        LC32_GL_PTR(attachments));
+}
+
+void glInvalidateSubFramebuffer(GLenum target, GLsizei numAttachments,
+                                const GLenum *attachments, GLint x, GLint y,
+                                GLsizei width, GLsizei height) {
+    LC32_GL_CALL(LC32OpenGLESOpInvalidateSubFramebuffer,
+        LC32_GL_U32(target), LC32_GL_I32(numAttachments),
+        LC32_GL_PTR(attachments), LC32_GL_I32(x), LC32_GL_I32(y),
+        LC32_GL_I32(width), LC32_GL_I32(height));
+}
+
+GLboolean glIsSampler(GLuint sampler) {
+    return (GLboolean)LC32_GL_CALL(LC32OpenGLESOpIsSampler,
+        LC32_GL_U32(sampler));
+}
+
+GLboolean glIsTransformFeedback(GLuint id) {
+    return (GLboolean)LC32_GL_CALL(LC32OpenGLESOpIsTransformFeedback,
+        LC32_GL_U32(id));
+}
+
+void glPauseTransformFeedback(void) {
+    LC32_GL_CALL0(LC32OpenGLESOpPauseTransformFeedback);
+}
+
+void glProgramBinary(GLuint program, GLenum binaryFormat,
+                     const GLvoid *binary, GLsizei length) {
+    LC32_GL_CALL(LC32OpenGLESOpProgramBinary,
+        LC32_GL_U32(program), LC32_GL_U32(binaryFormat),
+        LC32_GL_PTR(binary), LC32_GL_I32(length));
+}
+
+void glProgramUniform1uiEXT(GLuint program, GLint location, GLuint x) {
+    LC32_GL_CALL(LC32OpenGLESOpProgramUniform1uiEXT,
+        LC32_GL_U32(program), LC32_GL_I32(location), LC32_GL_U32(x));
+}
+
+void glProgramUniform2uiEXT(GLuint program, GLint location, GLuint x,
+                            GLuint y) {
+    LC32_GL_CALL(LC32OpenGLESOpProgramUniform2uiEXT,
+        LC32_GL_U32(program), LC32_GL_I32(location), LC32_GL_U32(x),
+        LC32_GL_U32(y));
+}
+
+void glProgramUniform3uiEXT(GLuint program, GLint location, GLuint x,
+                            GLuint y, GLuint z) {
+    LC32_GL_CALL(LC32OpenGLESOpProgramUniform3uiEXT,
+        LC32_GL_U32(program), LC32_GL_I32(location), LC32_GL_U32(x),
+        LC32_GL_U32(y), LC32_GL_U32(z));
+}
+
+void glProgramUniform4uiEXT(GLuint program, GLint location, GLuint x,
+                            GLuint y, GLuint z, GLuint w) {
+    LC32_GL_CALL(LC32OpenGLESOpProgramUniform4uiEXT,
+        LC32_GL_U32(program), LC32_GL_I32(location), LC32_GL_U32(x),
+        LC32_GL_U32(y), LC32_GL_U32(z), LC32_GL_U32(w));
+}
+
+void glProgramUniform1uivEXT(GLuint program, GLint location, GLsizei count,
+                             const GLuint *value) {
+    LC32_GL_CALL(LC32OpenGLESOpProgramUniform1uivEXT,
+        LC32_GL_U32(program), LC32_GL_I32(location), LC32_GL_I32(count),
+        LC32_GL_PTR(value));
+}
+
+void glProgramUniform2uivEXT(GLuint program, GLint location, GLsizei count,
+                             const GLuint *value) {
+    LC32_GL_CALL(LC32OpenGLESOpProgramUniform2uivEXT,
+        LC32_GL_U32(program), LC32_GL_I32(location), LC32_GL_I32(count),
+        LC32_GL_PTR(value));
+}
+
+void glProgramUniform3uivEXT(GLuint program, GLint location, GLsizei count,
+                             const GLuint *value) {
+    LC32_GL_CALL(LC32OpenGLESOpProgramUniform3uivEXT,
+        LC32_GL_U32(program), LC32_GL_I32(location), LC32_GL_I32(count),
+        LC32_GL_PTR(value));
+}
+
+void glProgramUniform4uivEXT(GLuint program, GLint location, GLsizei count,
+                             const GLuint *value) {
+    LC32_GL_CALL(LC32OpenGLESOpProgramUniform4uivEXT,
+        LC32_GL_U32(program), LC32_GL_I32(location), LC32_GL_I32(count),
+        LC32_GL_PTR(value));
+}
+
+#define LC32_PROGRAM_MATRIX_EXT_BODY(opcode) \
+    LC32_GL_CALL((opcode), LC32_GL_U32(program), LC32_GL_I32(location), \
+        LC32_GL_I32(count), LC32_GL_U32(transpose), LC32_GL_PTR(value))
+
+void glProgramUniformMatrix2x3fvEXT(GLuint program, GLint location,
+                                    GLsizei count, GLboolean transpose,
+                                    const GLfloat *value) {
+    LC32_PROGRAM_MATRIX_EXT_BODY(
+        LC32OpenGLESOpProgramUniformMatrix2x3fvEXT);
+}
+void glProgramUniformMatrix2x4fvEXT(GLuint program, GLint location,
+                                    GLsizei count, GLboolean transpose,
+                                    const GLfloat *value) {
+    LC32_PROGRAM_MATRIX_EXT_BODY(
+        LC32OpenGLESOpProgramUniformMatrix2x4fvEXT);
+}
+void glProgramUniformMatrix3x2fvEXT(GLuint program, GLint location,
+                                    GLsizei count, GLboolean transpose,
+                                    const GLfloat *value) {
+    LC32_PROGRAM_MATRIX_EXT_BODY(
+        LC32OpenGLESOpProgramUniformMatrix3x2fvEXT);
+}
+void glProgramUniformMatrix3x4fvEXT(GLuint program, GLint location,
+                                    GLsizei count, GLboolean transpose,
+                                    const GLfloat *value) {
+    LC32_PROGRAM_MATRIX_EXT_BODY(
+        LC32OpenGLESOpProgramUniformMatrix3x4fvEXT);
+}
+void glProgramUniformMatrix4x2fvEXT(GLuint program, GLint location,
+                                    GLsizei count, GLboolean transpose,
+                                    const GLfloat *value) {
+    LC32_PROGRAM_MATRIX_EXT_BODY(
+        LC32OpenGLESOpProgramUniformMatrix4x2fvEXT);
+}
+void glProgramUniformMatrix4x3fvEXT(GLuint program, GLint location,
+                                    GLsizei count, GLboolean transpose,
+                                    const GLfloat *value) {
+    LC32_PROGRAM_MATRIX_EXT_BODY(
+        LC32OpenGLESOpProgramUniformMatrix4x3fvEXT);
+}
+
+void glReadBuffer(GLenum mode) {
+    LC32_GL_CALL(LC32OpenGLESOpReadBuffer, LC32_GL_U32(mode));
+}
+
+void glResumeTransformFeedback(void) {
+    LC32_GL_CALL0(LC32OpenGLESOpResumeTransformFeedback);
+}
+
+void glSamplerParameterf(GLuint sampler, GLenum pname, GLfloat param) {
+    LC32_GL_CALL(LC32OpenGLESOpSamplerParameterf,
+        LC32_GL_U32(sampler), LC32_GL_U32(pname), LC32_GL_F32(param));
+}
+
+void glSamplerParameterfv(GLuint sampler, GLenum pname,
+                          const GLfloat *params) {
+    LC32_GL_CALL(LC32OpenGLESOpSamplerParameterfv,
+        LC32_GL_U32(sampler), LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glSamplerParameteri(GLuint sampler, GLenum pname, GLint param) {
+    LC32_GL_CALL(LC32OpenGLESOpSamplerParameteri,
+        LC32_GL_U32(sampler), LC32_GL_U32(pname), LC32_GL_I32(param));
+}
+
+void glSamplerParameteriv(GLuint sampler, GLenum pname, const GLint *params) {
+    LC32_GL_CALL(LC32OpenGLESOpSamplerParameteriv,
+        LC32_GL_U32(sampler), LC32_GL_U32(pname), LC32_GL_PTR(params));
+}
+
+void glTexImage3D(GLenum target, GLint level, GLint internalformat,
+                  GLsizei width, GLsizei height, GLsizei depth, GLint border,
+                  GLenum format, GLenum type, const GLvoid *pixels) {
+    LC32_GL_CALL(LC32OpenGLESOpTexImage3D,
+        LC32_GL_U32(target), LC32_GL_I32(level), LC32_GL_I32(internalformat),
+        LC32_GL_I32(width), LC32_GL_I32(height), LC32_GL_I32(depth),
+        LC32_GL_I32(border), LC32_GL_U32(format), LC32_GL_U32(type),
+        LC32_GL_PTR(pixels));
+}
+
+void glTexStorage3D(GLenum target, GLsizei levels, GLenum internalformat,
+                    GLsizei width, GLsizei height, GLsizei depth) {
+    LC32_GL_CALL(LC32OpenGLESOpTexStorage3D,
+        LC32_GL_U32(target), LC32_GL_I32(levels),
+        LC32_GL_U32(internalformat), LC32_GL_I32(width),
+        LC32_GL_I32(height), LC32_GL_I32(depth));
+}
+
+void glTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                     GLint zoffset, GLsizei width, GLsizei height,
+                     GLsizei depth, GLenum format, GLenum type,
+                     const GLvoid *pixels) {
+    LC32_GL_CALL(LC32OpenGLESOpTexSubImage3D,
+        LC32_GL_U32(target), LC32_GL_I32(level), LC32_GL_I32(xoffset),
+        LC32_GL_I32(yoffset), LC32_GL_I32(zoffset), LC32_GL_I32(width),
+        LC32_GL_I32(height), LC32_GL_I32(depth), LC32_GL_U32(format),
+        LC32_GL_U32(type), LC32_GL_PTR(pixels));
+}
+
+void glTransformFeedbackVaryings(GLuint program, GLsizei count,
+                                 const GLchar *const *varyings,
+                                 GLenum bufferMode) {
+    LC32_GL_CALL(LC32OpenGLESOpTransformFeedbackVaryings,
+        LC32_GL_U32(program), LC32_GL_I32(count), LC32_GL_PTR(varyings),
+        LC32_GL_U32(bufferMode));
+}
+
+void glUniform1ui(GLint location, GLuint v0) {
+    LC32_GL_CALL(LC32OpenGLESOpUniform1ui,
+        LC32_GL_I32(location), LC32_GL_U32(v0));
+}
+
+void glUniform2ui(GLint location, GLuint v0, GLuint v1) {
+    LC32_GL_CALL(LC32OpenGLESOpUniform2ui,
+        LC32_GL_I32(location), LC32_GL_U32(v0), LC32_GL_U32(v1));
+}
+
+void glUniform3ui(GLint location, GLuint v0, GLuint v1, GLuint v2) {
+    LC32_GL_CALL(LC32OpenGLESOpUniform3ui,
+        LC32_GL_I32(location), LC32_GL_U32(v0), LC32_GL_U32(v1),
+        LC32_GL_U32(v2));
+}
+
+void glUniform4ui(GLint location, GLuint v0, GLuint v1, GLuint v2,
+                  GLuint v3) {
+    LC32_GL_CALL(LC32OpenGLESOpUniform4ui,
+        LC32_GL_I32(location), LC32_GL_U32(v0), LC32_GL_U32(v1),
+        LC32_GL_U32(v2), LC32_GL_U32(v3));
+}
+
+void glUniform1uiv(GLint location, GLsizei count, const GLuint *value) {
+    LC32_GL_CALL(LC32OpenGLESOpUniform1uiv, LC32_GL_I32(location),
+        LC32_GL_I32(count), LC32_GL_PTR(value));
+}
+void glUniform2uiv(GLint location, GLsizei count, const GLuint *value) {
+    LC32_GL_CALL(LC32OpenGLESOpUniform2uiv, LC32_GL_I32(location),
+        LC32_GL_I32(count), LC32_GL_PTR(value));
+}
+void glUniform3uiv(GLint location, GLsizei count, const GLuint *value) {
+    LC32_GL_CALL(LC32OpenGLESOpUniform3uiv, LC32_GL_I32(location),
+        LC32_GL_I32(count), LC32_GL_PTR(value));
+}
+void glUniform4uiv(GLint location, GLsizei count, const GLuint *value) {
+    LC32_GL_CALL(LC32OpenGLESOpUniform4uiv, LC32_GL_I32(location),
+        LC32_GL_I32(count), LC32_GL_PTR(value));
+}
+
+void glUniformBlockBinding(GLuint program, GLuint uniformBlockIndex,
+                           GLuint uniformBlockBinding) {
+    LC32_GL_CALL(LC32OpenGLESOpUniformBlockBinding,
+        LC32_GL_U32(program), LC32_GL_U32(uniformBlockIndex),
+        LC32_GL_U32(uniformBlockBinding));
+}
+
+#define LC32_UNIFORM_MATRIX_BODY(opcode) \
+    LC32_GL_CALL((opcode), LC32_GL_I32(location), LC32_GL_I32(count), \
+        LC32_GL_U32(transpose), LC32_GL_PTR(value))
+
+void glUniformMatrix2x3fv(GLint location, GLsizei count, GLboolean transpose,
+                          const GLfloat *value) {
+    LC32_UNIFORM_MATRIX_BODY(LC32OpenGLESOpUniformMatrix2x3fv);
+}
+void glUniformMatrix2x4fv(GLint location, GLsizei count, GLboolean transpose,
+                          const GLfloat *value) {
+    LC32_UNIFORM_MATRIX_BODY(LC32OpenGLESOpUniformMatrix2x4fv);
+}
+void glUniformMatrix3x2fv(GLint location, GLsizei count, GLboolean transpose,
+                          const GLfloat *value) {
+    LC32_UNIFORM_MATRIX_BODY(LC32OpenGLESOpUniformMatrix3x2fv);
+}
+void glUniformMatrix3x4fv(GLint location, GLsizei count, GLboolean transpose,
+                          const GLfloat *value) {
+    LC32_UNIFORM_MATRIX_BODY(LC32OpenGLESOpUniformMatrix3x4fv);
+}
+void glUniformMatrix4x2fv(GLint location, GLsizei count, GLboolean transpose,
+                          const GLfloat *value) {
+    LC32_UNIFORM_MATRIX_BODY(LC32OpenGLESOpUniformMatrix4x2fv);
+}
+void glUniformMatrix4x3fv(GLint location, GLsizei count, GLboolean transpose,
+                          const GLfloat *value) {
+    LC32_UNIFORM_MATRIX_BODY(LC32OpenGLESOpUniformMatrix4x3fv);
+}
+
+void glVertexAttribI4i(GLuint index, GLint x, GLint y, GLint z, GLint w) {
+    LC32_GL_CALL(LC32OpenGLESOpVertexAttribI4i,
+        LC32_GL_U32(index), LC32_GL_I32(x), LC32_GL_I32(y),
+        LC32_GL_I32(z), LC32_GL_I32(w));
+}
+
+void glVertexAttribI4iv(GLuint index, const GLint *v) {
+    LC32_GL_CALL(LC32OpenGLESOpVertexAttribI4iv,
+        LC32_GL_U32(index), LC32_GL_PTR(v));
+}
+
+void glVertexAttribI4ui(GLuint index, GLuint x, GLuint y, GLuint z,
+                        GLuint w) {
+    LC32_GL_CALL(LC32OpenGLESOpVertexAttribI4ui,
+        LC32_GL_U32(index), LC32_GL_U32(x), LC32_GL_U32(y),
+        LC32_GL_U32(z), LC32_GL_U32(w));
+}
+
+void glVertexAttribI4uiv(GLuint index, const GLuint *v) {
+    LC32_GL_CALL(LC32OpenGLESOpVertexAttribI4uiv,
+        LC32_GL_U32(index), LC32_GL_PTR(v));
+}
+
+void glVertexAttribIPointer(GLuint index, GLint size, GLenum type,
+                            GLsizei stride, const GLvoid *pointer) {
+    LC32_GL_CALL(LC32OpenGLESOpVertexAttribIPointer,
+        LC32_GL_U32(index), LC32_GL_I32(size), LC32_GL_U32(type),
+        LC32_GL_I32(stride), LC32_GL_PTR(pointer));
+}
+
+#undef LC32_PROGRAM_MATRIX_EXT_BODY
+#undef LC32_UNIFORM_MATRIX_BODY
+
+/*
+ * OpenGL ES 3 promoted these extension entry points without changing their
+ * ABI.  Export true symbol aliases so clients comparing function pointers see
+ * the same address and so the guest never gains a second dispatcher path for
+ * one operation.
+ */
+LC32_ASM_GLOBAL_ALIAS(glBeginQuery, glBeginQueryEXT);
+LC32_ASM_GLOBAL_ALIAS(glBindVertexArray, glBindVertexArrayOES);
+LC32_ASM_GLOBAL_ALIAS(glClientWaitSync, glClientWaitSyncAPPLE);
+LC32_ASM_GLOBAL_ALIAS(glDeleteQueries, glDeleteQueriesEXT);
+LC32_ASM_GLOBAL_ALIAS(glDeleteSync, glDeleteSyncAPPLE);
+LC32_ASM_GLOBAL_ALIAS(glDeleteVertexArrays, glDeleteVertexArraysOES);
+LC32_ASM_GLOBAL_ALIAS(glDrawArraysInstanced, glDrawArraysInstancedEXT);
+LC32_ASM_GLOBAL_ALIAS(glDrawElementsInstanced, glDrawElementsInstancedEXT);
+LC32_ASM_GLOBAL_ALIAS(glEndQuery, glEndQueryEXT);
+LC32_ASM_GLOBAL_ALIAS(glFenceSync, glFenceSyncAPPLE);
+LC32_ASM_GLOBAL_ALIAS(glFlushMappedBufferRange,
+                      glFlushMappedBufferRangeEXT);
+LC32_ASM_GLOBAL_ALIAS(glGenQueries, glGenQueriesEXT);
+LC32_ASM_GLOBAL_ALIAS(glGenVertexArrays, glGenVertexArraysOES);
+LC32_ASM_GLOBAL_ALIAS(glGetBufferPointerv, glGetBufferPointervOES);
+LC32_ASM_GLOBAL_ALIAS(glGetInteger64v, glGetInteger64vAPPLE);
+LC32_ASM_GLOBAL_ALIAS(glGetQueryObjectuiv, glGetQueryObjectuivEXT);
+LC32_ASM_GLOBAL_ALIAS(glGetQueryiv, glGetQueryivEXT);
+LC32_ASM_GLOBAL_ALIAS(glGetSynciv, glGetSyncivAPPLE);
+LC32_ASM_GLOBAL_ALIAS(glIsQuery, glIsQueryEXT);
+LC32_ASM_GLOBAL_ALIAS(glIsSync, glIsSyncAPPLE);
+LC32_ASM_GLOBAL_ALIAS(glIsVertexArray, glIsVertexArrayOES);
+LC32_ASM_GLOBAL_ALIAS(glMapBufferRange, glMapBufferRangeEXT);
+LC32_ASM_GLOBAL_ALIAS(glProgramParameteri, glProgramParameteriEXT);
+LC32_ASM_GLOBAL_ALIAS(glRenderbufferStorageMultisample,
+                      glRenderbufferStorageMultisampleAPPLE);
+LC32_ASM_GLOBAL_ALIAS(glTexStorage2D, glTexStorage2DEXT);
+LC32_ASM_GLOBAL_ALIAS(glUnmapBuffer, glUnmapBufferOES);
+LC32_ASM_GLOBAL_ALIAS(glVertexAttribDivisor, glVertexAttribDivisorEXT);
+LC32_ASM_GLOBAL_ALIAS(glWaitSync, glWaitSyncAPPLE);
