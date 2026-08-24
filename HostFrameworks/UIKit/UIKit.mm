@@ -76,6 +76,15 @@ std::atomic<NSInteger> LC32LegacyRequestedOrientation{
     UIInterfaceOrientationUnknown};
 thread_local bool LC32SuppressGuestOrientationQuery = false;
 
+/*
+ * Do not replace these calls with ordinary Objective-C messages. A view can
+ * be an instance of a synthesized guest subclass whose override is backed by
+ * LC32InvokeGuestSelector. UIKit invokes the compatibility layout code from
+ * native scene callbacks, where dynamically dispatching into ARM32 guest code
+ * is unsafe (and may run on a host thread that is not registered for guest
+ * execution). Calling UIView's typed IMP directly deliberately applies only
+ * the native base implementation while preserving the arm64 aggregate ABI.
+ */
 CGRect LC32NativeViewBounds(UIView *view) {
     using Getter = CGRect (*)(id, SEL);
     static Getter getter = reinterpret_cast<Getter>(
