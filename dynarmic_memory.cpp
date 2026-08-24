@@ -5,22 +5,38 @@ int guestMappingLen = 0;
 guest_file_mapping guestMappings[1000];
 size_t guestMappingGeneration = 0;
 
+static void AppendDyldGuestImages(
+    std::vector<GuestImageSnapshot> &images);
+
 std::vector<GuestImageSnapshot> SnapshotGuestImages() {
-    std::lock_guard<std::mutex> lock(guestMappingMutex);
     std::vector<GuestImageSnapshot> images;
-    const int count = std::max(0, std::min(guestMappingLen, 1000));
-    images.reserve(static_cast<size_t>(count));
-    for (int index = 0; index < count; ++index) {
-        const guest_file_mapping &mapping = guestMappings[index];
-        images.push_back({
-            mapping.start,
-            mapping.end,
-            mapping.name != nullptr
-                ? std::string(mapping.name,
-                    strnlen(mapping.name, PATH_MAX))
-                : "(unknown image)",
-        });
+    {
+        std::lock_guard<std::mutex> lock(guestMappingMutex);
+        const int count = std::max(0, std::min(guestMappingLen, 1000));
+        images.reserve(static_cast<size_t>(count));
+        for (int index = 0; index < count; ++index) {
+            const guest_file_mapping &mapping = guestMappings[index];
+            images.push_back({
+                mapping.start,
+                mapping.end,
+                mapping.name != nullptr
+                    ? std::string(mapping.name,
+                        strnlen(mapping.name, PATH_MAX))
+                    : "(unknown image)",
+            });
+        }
     }
+
+    /*
+     * The synthetic dyld Mach-port notification is optional and may not have
+     * run before a guest crashes.  guestMappings then contains only the main
+     * executable and dyld, leaving every system-library frame nameless.  The
+     * all-image-info array is dyld's authoritative, already-published image
+     * list. Treat it as a best-effort snapshot: every pointer, range, and
+     * Mach-O header is validated below in case a non-crash diagnostic races
+     * an image update.
+     */
+    AppendDyldGuestImages(images);
     return images;
 }
 
@@ -81,6 +97,171 @@ static u32 GuestImageSlide(
         cursor += command.cmdsize;
     }
     return mapping.start;
+}
+
+struct DyldAllImageInfosPrefix32 {
+    uint32_t version;
+    uint32_t infoArrayCount;
+    uint32_t infoArray;
+};
+
+struct DyldImageInfo32 {
+    uint32_t imageLoadAddress;
+    uint32_t imageFilePath;
+    uint32_t imageFileModDate;
+};
+
+static bool GuestImageTextRange(
+        const GuestImageSnapshot &mapping,
+        const GuestMachOImage &image,
+        u32 *textStart, u32 *textEnd) {
+    const u32 slide = GuestImageSlide(mapping, image);
+    size_t cursor = 0;
+    for (uint32_t index = 0; index < image.header.ncmds; ++index) {
+        if (cursor + sizeof(load_command) > image.loadCommands.size()) {
+            return false;
+        }
+        load_command command{};
+        memcpy(&command, image.loadCommands.data() + cursor,
+            sizeof(command));
+        if (command.cmdsize < sizeof(load_command) ||
+                command.cmdsize > image.loadCommands.size() - cursor) {
+            return false;
+        }
+        if (command.cmd == LC_SEGMENT &&
+                command.cmdsize >= sizeof(segment_command)) {
+            segment_command segment{};
+            memcpy(&segment, image.loadCommands.data() + cursor,
+                sizeof(segment));
+            if (strncmp(segment.segname, SEG_TEXT,
+                    sizeof(segment.segname)) == 0) {
+                const u64 start = static_cast<u64>(slide) + segment.vmaddr;
+                const u64 end = start + segment.vmsize;
+                if (start > UINT32_MAX || end > UINT32_MAX || end <= start) {
+                    return false;
+                }
+                *textStart = static_cast<u32>(start);
+                *textEnd = static_cast<u32>(end);
+                return true;
+            }
+        }
+        cursor += command.cmdsize;
+    }
+    return false;
+}
+
+static void AppendDyldGuestImages(
+        std::vector<GuestImageSnapshot> &images) {
+    const u32 allImageInfosAddress =
+        sharedHandle.dyld_info_guest_address;
+    if (allImageInfosAddress == 0) {
+        return;
+    }
+
+    DyldAllImageInfosPrefix32 allImageInfos{};
+    if (!read_guest_memory_with_permissions(
+            allImageInfosAddress, &allImageInfos,
+            sizeof(allImageInfos), PROT_READ) ||
+            allImageInfos.infoArrayCount == 0 ||
+            allImageInfos.infoArrayCount > 4096 ||
+            allImageInfos.infoArray == 0) {
+        return;
+    }
+
+    const u64 infosSize =
+        static_cast<u64>(allImageInfos.infoArrayCount) *
+        sizeof(DyldImageInfo32);
+    if (!GuestAddressRangeIsValid32(
+            allImageInfos.infoArray, infosSize)) {
+        return;
+    }
+    std::vector<DyldImageInfo32> dyldImages(
+        allImageInfos.infoArrayCount);
+    if (!read_guest_memory_with_permissions(
+            allImageInfos.infoArray, dyldImages.data(),
+            static_cast<size_t>(infosSize), PROT_READ)) {
+        return;
+    }
+
+    for (const DyldImageInfo32 &dyldImage : dyldImages) {
+        if (dyldImage.imageLoadAddress == 0) {
+            continue;
+        }
+        const auto existing = std::find_if(
+            images.begin(), images.end(),
+            [&dyldImage](const GuestImageSnapshot &image) {
+                return image.start == dyldImage.imageLoadAddress;
+            });
+        if (existing != images.end()) {
+            continue;
+        }
+
+        GuestImageSnapshot mapping{
+            dyldImage.imageLoadAddress,
+            dyldImage.imageLoadAddress,
+            CopyGuestCStringForCrash(
+                dyldImage.imageFilePath, PATH_MAX),
+        };
+        if (mapping.name.empty()) {
+            mapping.name = "(unknown image)";
+        }
+        GuestMachOImage image;
+        u32 textStart = 0;
+        u32 textEnd = 0;
+        if (!ReadGuestMachOImage(mapping, image) ||
+                !GuestImageTextRange(
+                    mapping, image, &textStart, &textEnd)) {
+            continue;
+        }
+        mapping.start = textStart;
+        mapping.end = textEnd;
+        images.push_back(std::move(mapping));
+    }
+}
+
+static bool GuestFileOffsetAddress(
+        const GuestMachOImage &image, u32 slide,
+        uint32_t fileOffset, u64 size, u32 *address) {
+    size_t cursor = 0;
+    for (uint32_t index = 0; index < image.header.ncmds; ++index) {
+        if (cursor + sizeof(load_command) > image.loadCommands.size()) {
+            return false;
+        }
+        load_command command{};
+        memcpy(&command, image.loadCommands.data() + cursor,
+            sizeof(command));
+        if (command.cmdsize < sizeof(load_command) ||
+                command.cmdsize > image.loadCommands.size() - cursor) {
+            return false;
+        }
+        if (command.cmd == LC_SEGMENT &&
+                command.cmdsize >= sizeof(segment_command)) {
+            segment_command segment{};
+            memcpy(&segment, image.loadCommands.data() + cursor,
+                sizeof(segment));
+            const u64 segmentFileStart = segment.fileoff;
+            const u64 segmentFileEnd =
+                segmentFileStart + segment.filesize;
+            const u64 requestedStart = fileOffset;
+            const u64 requestedEnd = requestedStart + size;
+            if (segmentFileEnd >= segmentFileStart &&
+                    requestedEnd >= requestedStart &&
+                    requestedStart >= segmentFileStart &&
+                    requestedEnd <= segmentFileEnd) {
+                const u64 resolved = static_cast<u64>(slide) +
+                    segment.vmaddr +
+                    (requestedStart - segmentFileStart);
+                if (resolved <= UINT32_MAX &&
+                        size <= UINT32_MAX - resolved + 1) {
+                    *address = static_cast<u32>(resolved);
+                    return true;
+                }
+                return false;
+            }
+        }
+        cursor += command.cmdsize;
+    }
+    return false;
 }
 
 std::vector<GuestCrashAnnotation>
@@ -230,12 +411,25 @@ static void load_symbols_for_image(
         return;
     }
 
-    const u64 symbolTableAddress =
-        static_cast<u64>(mapping.start) + symbolTable.symoff;
-    const u64 stringTableAddress =
-        static_cast<u64>(mapping.start) + symbolTable.stroff;
-    if (!GuestAddressRangeIsValid32(symbolTableAddress,
-            static_cast<u64>(symbolTable.nsyms) * sizeof(struct nlist)) ||
+    const u64 symbolTableSize =
+        static_cast<u64>(symbolTable.nsyms) * sizeof(struct nlist);
+    u32 symbolTableAddress = 0;
+    u32 stringTableAddress = 0;
+    /*
+     * LC_SYMTAB offsets are file offsets, not offsets from the Mach header.
+     * Those happen to be equivalent for ordinary split-segment images, but
+     * not for images whose __LINKEDIT was rearranged in a dyld shared cache.
+     * Translate each offset through the segment that owns its file range and
+     * then apply the image slide.
+     */
+    if (!GuestFileOffsetAddress(
+            image, slide, symbolTable.symoff,
+            symbolTableSize, &symbolTableAddress) ||
+            !GuestFileOffsetAddress(
+                image, slide, symbolTable.stroff,
+                symbolTable.strsize, &stringTableAddress) ||
+            !GuestAddressRangeIsValid32(
+                symbolTableAddress, symbolTableSize) ||
             !GuestAddressRangeIsValid32(
                 stringTableAddress, symbolTable.strsize)) {
         return;
@@ -248,7 +442,9 @@ static void load_symbols_for_image(
                 entryAddress, &entry, sizeof(entry), PROT_READ)) {
             break;
         }
-        if (entry.n_un.n_strx == 0 ||
+        if ((entry.n_type & N_STAB) != 0 ||
+                (entry.n_type & N_TYPE) != N_SECT ||
+                entry.n_un.n_strx == 0 ||
                 entry.n_un.n_strx >= symbolTable.strsize ||
                 entry.n_value == 0) {
             continue;
