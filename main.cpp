@@ -27,9 +27,12 @@
 #include <string.h>
 #include <ctype.h>
 #include <string>
+#include <utility>
+#include <vector>
 #include "dynarmic.h"
 #include "arm_dynarmic_cp15.h"
 #include "debugger_server.h"
+#include "guest_bootstrap.h"
 
 extern "C" void LC32ConfigureLegacyAppTransportSecurity(
     uint32_t guestSDKVersion);
@@ -233,18 +236,6 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
     return addr;
 }
 
-u32 prependString(u32& address, const char* fmt, ...) {
-    char buffer[1000];
-    va_list args;
-    va_start(args, fmt);
-    u32 len = vsnprintf(buffer, sizeof(buffer), fmt, args);
-    va_end(args);
-    
-    address -= len + 1;
-    Dynarmic_mem_1write(address, len, buffer);
-    return address;
-}
-
 static std::string DefaultGuestRootPath(const char *argv0) {
     std::string executablePath = argv0 ? argv0 : "";
     const size_t lastSlash = executablePath.rfind('/');
@@ -317,6 +308,21 @@ int main(int argc, char* argv[], char* envp[]) {
         //printf("Usage: %s <path> argv...\n", argv[0]);
         // TODO: display help or setup wizard
         return 1;
+    }
+
+    /*
+     * Snapshot explicit guest variables before any setenv call can replace
+     * the process environment array.  The extra ENV component keeps this
+     * operator-facing namespace separate from LC32_GUEST_HOME,
+     * LC32_GUEST_EXECUTABLE, and other launcher/build controls.
+     */
+    auto guestEnvironmentSelection =
+        LC32GuestBootstrap::CollectEnvironment(envp);
+    for(const std::string &name :
+            guestEnvironmentSelection.rejectedSourceNames) {
+        fprintf(stderr,
+            "LC32: ignoring malformed guest environment variable %s\n",
+            name.c_str());
     }
     
     // NativeGuestThreadsRequested() caches this setting during initialization.
@@ -395,77 +401,93 @@ int main(int argc, char* argv[], char* envp[]) {
     sharedHandle.ucb->MemoryWrite64(commpage + 0x84, 1); // dev firmware
     
     // allocate stack guards and stack buffer for dyld
-    u32 dyldStackGuardStart = Dynarmic_mmap(0x80000000, 0x1000, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    u32 dyldStack = Dynarmic_mmap(0x80000000, 0xff000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    Dynarmic_mmap(0x80000000, 0x1000, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    
-    u32 dyldStackPtr = dyldStack - 0x1000 + 0x100000;
-    
-    // write strings to the stack
-    u32 guest_apple[] = {
-        0, // separator
-        // apple
-        // comment out these if you want ASLR
-        prependString(dyldStackPtr, "malloc_entropy=0xf0ef08e3de46c995,0xd5adb183cbc1fed0"),
-        prependString(dyldStackPtr, "stack_guard=0xff39f7772c708a80"),
-        
-        prependString(dyldStackPtr, "pfz=0xffffffff"),
-        prependString(dyldStackPtr, "main_stack=0x%x,0xff000,0x%x,0x100000", dyldStackGuardStart + 0x100000, dyldStackGuardStart),
-        prependString(dyldStackPtr, "%s", execPath),
+    constexpr u32 InvalidGuestMapping = static_cast<u32>(-1);
+    constexpr u32 DyldStackSize = 0xff000;
+    constexpr u32 DyldStackGuardSize = 0x1000;
+    constexpr u32 DyldStackMappingSize =
+        DyldStackGuardSize + DyldStackSize + DyldStackGuardSize;
+    const u32 dyldStackGuardStart = Dynarmic_mmap(
+        0x80000000, DyldStackMappingSize, PROT_NONE,
+        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if(dyldStackGuardStart == InvalidGuestMapping) {
+        fprintf(stderr, "LC32: could not allocate the guest initial stack\n");
+        return 1;
+    }
+    const u32 dyldStack = dyldStackGuardStart + DyldStackGuardSize;
+    if(Dynarmic_mprotect(
+            dyldStack, DyldStackSize, PROT_READ | PROT_WRITE) != 0) {
+        fprintf(stderr, "LC32: could not protect the guest initial stack\n");
+        return 1;
+    }
+
+    std::vector<std::string> guestArguments;
+    guestArguments.reserve(static_cast<size_t>(argc - 1));
+    for(int index = 1; index < argc; index++) {
+        guestArguments.emplace_back(argv[index] ? argv[index] : "");
+    }
+
+    std::vector<std::string> overriddenGuestEnvironmentNames;
+    std::vector<std::string> guestEnvironment =
+        LC32GuestBootstrap::FinalizeEnvironment(
+            std::move(guestEnvironmentSelection), guestHome,
+            getenv("LC32_OBJC_TRACE") ?: "0",
+            getenv("NATIVE_GUEST_THREADS") ?: "0",
+            &overriddenGuestEnvironmentNames);
+    for(const std::string &name : overriddenGuestEnvironmentNames) {
+        fprintf(stderr,
+            "LC32: launcher value overrides forwarded guest variable %s\n",
+            name.c_str());
+    }
+
+    char mainStackApple[128];
+    const int mainStackLength = snprintf(
+        mainStackApple, sizeof(mainStackApple),
+        "main_stack=0x%x,0xff000,0x%x,0x100000",
+        dyldStackGuardStart + 0x100000, dyldStackGuardStart);
+    if(mainStackLength < 0 ||
+            static_cast<size_t>(mainStackLength) >=
+                sizeof(mainStackApple)) {
+        fprintf(stderr, "LC32: could not format the guest stack metadata\n");
+        return 1;
+    }
+    const std::vector<std::string> guestApple = {
+        execPath,
+        mainStackApple,
+        "pfz=0xffffffff",
+        "stack_guard=0xff39f7772c708a80",
+        // Comment out the entropy entries to let dyld choose ASLR values.
+        "malloc_entropy=0xf0ef08e3de46c995,0xd5adb183cbc1fed0",
     };
-    u32 guest_envp[] = {
-        0, // separator
-        // envp
-        prependString(dyldStackPtr, "LC32_OBJC_TRACE=%s",
-            getenv("LC32_OBJC_TRACE") ?: "0"),
-        prependString(dyldStackPtr, "HOME=%s", guestHome.c_str()),
-        prependString(dyldStackPtr, "NATIVE_GUEST_THREADS=%s",
-            getenv("NATIVE_GUEST_THREADS") ?: "0"),
-        //prependString(dyldStackPtr, "OBJC_PRINT_LOAD_METHODS=1"),
-        //prependString(dyldStackPtr, "OBJC_PRINT_RESOLVED_METHODS=1"),
-        //prependString(dyldStackPtr, "OBJC_PRINT_CLASS_SETUP=1"),
-        prependString(dyldStackPtr, "DYLD_SHARED_REGION=private"),
-        prependString(dyldStackPtr, "DYLD_PRINT_OPTS=1"),
-        prependString(dyldStackPtr, "DYLD_PRINT_ENV=1"),
-        prependString(dyldStackPtr, "DYLD_PRINT_SEGMENTS=1"),
-        prependString(dyldStackPtr, "DYLD_PRINT_INITIALIZERS=1"),
-        //prependString(dyldStackPtr, "MallocTracing=YES"),
-        //prependString(dyldStackPtr, "MallocStackLogging=YES"),
-        //prependString(dyldStackPtr, "MallocScribble=YES"),
-        //prependString(dyldStackPtr, "MallocLogFile=/tmp/a.malloc.log")
-    };
-    u32 guest_argv[1000] = {0};
-    guest_argv[0] = argc - 1;
-    // CAUTION: write backwards!!
-    for (int i = argc-1; i >= 1; i--) {
-        guest_argv[i] = prependString(dyldStackPtr, "%s", argv[i]);
+
+    LC32GuestBootstrap::InitialStackImage initialStack;
+    std::string initialStackError;
+    if(!LC32GuestBootstrap::BuildInitialStackImage(
+            dyldStack, DyldStackSize, execAddr,
+            guestArguments, guestEnvironment, guestApple,
+            &initialStack, &initialStackError)) {
+        fprintf(stderr, "LC32: could not build the guest initial stack: %s\n",
+            initialStackError.c_str());
+        return 1;
     }
-    
-    // align
-    dyldStackPtr &= ~(sizeof(u32)-1);
-    dyldStackPtr -= 0x1000;
-    
-    // calculate for alignment...
-    int toBeWritten = sizeof(guest_apple) + sizeof(guest_envp) + sizeof(guest_argv) + sizeof(u32) * 2;
-    dyldStackPtr -= (dyldStackPtr - toBeWritten) & 0xF;
-    
-    // write apple
-    for (int i = 0; i < sizeof(guest_apple)/sizeof(u32); i++) {
-        sharedHandle.ucb->MemoryWrite32(dyldStackPtr -= sizeof(u32), guest_apple[i]);
+    for(LC32GuestBootstrap::InitialStackString &string :
+            initialStack.strings) {
+        if(Dynarmic_mem_1write(
+                string.address, string.value.size() + 1,
+                string.value.data()) != 0) {
+            fprintf(stderr,
+                "LC32: could not write a guest launch string at 0x%x\n",
+                string.address);
+            return 1;
+        }
     }
-    
-    // write envp
-    for (int i = 0; i < sizeof(guest_envp)/sizeof(u32); i++) {
-        sharedHandle.ucb->MemoryWrite32(dyldStackPtr -= sizeof(u32), guest_envp[i]);
+    if(Dynarmic_mem_1write(
+            initialStack.stackPointer,
+            initialStack.words.size() * sizeof(u32),
+            reinterpret_cast<char *>(initialStack.words.data())) != 0) {
+        fprintf(stderr, "LC32: could not write the guest initial stack table\n");
+        return 1;
     }
-    
-    // write argv and argc
-    for (int i = argc; i >= 0; i--) {
-        sharedHandle.ucb->MemoryWrite32(dyldStackPtr -= sizeof(u32), guest_argv[i]);
-    }
-    
-    // write main executable base
-    sharedHandle.ucb->MemoryWrite32(dyldStackPtr -= sizeof(u32), execAddr);
+    const u32 dyldStackPtr = initialStack.stackPointer;
     
     printf("LC32: stack ptr now 0x%x\n", dyldStackPtr);
     

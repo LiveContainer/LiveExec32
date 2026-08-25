@@ -53,6 +53,21 @@ gmake -C GuestMakefile
 .theos/out/LiveExec32 /var/mobile/ramdisk32/usr/bin/fdisk
 ```
 
+Host environment variables are isolated from the guest by default. To pass a
+specific value, prefix its name with `LC32_GUEST_ENV_`; the launcher strips
+that prefix when constructing the guest environment. For example:
+
+```bash
+LC32_GUEST_ENV_NSUnbufferedIO=YES \
+  .theos/out/LiveExec32 /var/mobile/ramdisk32/usr/bin/fdisk
+```
+
+`HOME`, `LC32_OBJC_TRACE`, `NATIVE_GUEST_THREADS`, and
+`DYLD_SHARED_REGION` remain launcher-owned and cannot be overridden through
+this mechanism. `DYLD_PRINT_*` diagnostics are disabled by default, but can
+be enabled explicitly, for example with
+`LC32_GUEST_ENV_DYLD_PRINT_SEGMENTS=1`.
+
 ## Design
 - LiveExec32 has most of the codebase and references from [unidbg](https://github.com/zhkl0228/unidbg), so it also uses Dynarmic as the dynamic translator of ARMv7 code to ARM64.
 - The entry point starts from dyld, so it has all of dyld APIs isolated from that of host.

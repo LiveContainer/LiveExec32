@@ -1,3 +1,26 @@
+LC32_HOST_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),\
+  $(if $(strip $(filter-out check-guest-bootstrap,$(MAKECMDGOALS))),,1),)
+
+HOST_CXX ?= xcrun --sdk macosx clang++
+HOST_CXXFLAGS ?= -std=c++17 -Wall -Wextra -Werror -pedantic
+HOST_TEST_OUTPUT_DIR ?= $(CURDIR)/.theos/host-tests
+GUEST_BOOTSTRAP_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/guest-bootstrap-host
+
+.PHONY: check-guest-bootstrap
+check-guest-bootstrap: $(GUEST_BOOTSTRAP_HOST_TEST)
+	"$(GUEST_BOOTSTRAP_HOST_TEST)"
+
+$(GUEST_BOOTSTRAP_HOST_TEST): guest_bootstrap_host.cpp \
+  ../guest_bootstrap.cpp ../guest_bootstrap.h
+	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
+	$(HOST_CXX) $(HOST_CXXFLAGS) -I"$(abspath ..)" \
+		guest_bootstrap_host.cpp ../guest_bootstrap.cpp -o "$@"
+
+# Keep this host-native regression test usable on a clean checkout without
+# requiring Theos or bootstrapping the iOS 10.3 guest SDK. Mixed/default goals
+# continue through the normal guest-test declarations below.
+ifeq ($(strip $(LC32_HOST_ONLY_BUILD)),)
+
 ARCHS := armv7s
 TARGET := iphone:clang:16.5:10.3
 .DEFAULT_GOAL := all
@@ -257,4 +280,6 @@ check-messenger:
 # clean target remains responsible for test/.theos.
 clean-outputs:
 	rm -f $(foreach tool,$(TOOL_NAME),"$(TEST_OUTPUT_DIR)/$(tool)")
+endif
+
 endif

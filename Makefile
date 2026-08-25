@@ -10,7 +10,7 @@ APPLICATION_NAME = LiveExec32
 #TOOL_NAME = LiveExec32
 
 LiveExec32_FILES = \
-	main.cpp debugger_server.cpp arm_dynarmic_cp15.cpp \
+	main.cpp guest_bootstrap.cpp debugger_server.cpp arm_dynarmic_cp15.cpp \
 	dynarmic.cpp dynarmic_syscalls.cpp dynarmic_memory.cpp \
 	dynarmic_callbacks.cpp dynarmic_thread_state.cpp \
 	dynarmic_native_jit.cpp dynarmic_psynch.cpp \
