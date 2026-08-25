@@ -3,7 +3,7 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd "$SCRIPT_DIR/.." && pwd)
-SDKROOT=${SDKROOT:-"$REPO_ROOT/../SDKs/iPhoneOS10.3.sdk"}
+SDKROOT=${SDKROOT:-"$REPO_ROOT/tmp/iPhoneOS10.3.sdk"}
 MANIFEST="$REPO_ROOT/Generator/templates/opengles-supported-symbols.txt"
 SOURCE="$REPO_ROOT/GuestFrameworks/OpenGLES/OpenGLES.m"
 EAGL_SOURCE="$REPO_ROOT/GuestFrameworks/OpenGLES/EAGL.m"

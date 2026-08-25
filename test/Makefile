@@ -1,7 +1,9 @@
 ARCHS := armv7s
 TARGET := iphone:clang:16.5:10.3
-ISYSROOT := $(abspath ../../SDKs/iPhoneOS10.3.sdk)
+.DEFAULT_GOAL := all
 GO_EASY_ON_ME := 1
+
+include ../GuestMakefile/guest-sdk.mk
 
 # Examples:
 #   make -C test                 # build every guest test
@@ -176,6 +178,12 @@ THREADING_TESTS := lc32-native-pthread-smoke lc32-ownership-publication-race lc3
 UIKIT_TESTS := $(filter lc32-uikit-%,$(TOOL_NAME)) lc32-guest-fp-return lc32-guest-host-aggregate-arguments lc32-scalar-pointer-bridge lc32-text-input-traits
 
 include $(THEOS_MAKE_PATH)/tool.mk
+
+# Cover both the normal internal-all fanout and direct per-test targets.
+ifneq ($(strip $(LC32_GUEST_SDK_DEPENDENCY)),)
+before-all:: $(LC32_GUEST_SDK_DEPENDENCY)
+$(TOOL_NAME) $(TOOL_NAME:=.all.tool.variables): | $(LC32_GUEST_SDK_DEPENDENCY)
+endif
 
 # Preserve the paths used by the existing LiveExec32 runtime commands while
 # retaining Theos' incremental objects under test/.theos.

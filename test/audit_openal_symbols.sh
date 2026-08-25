@@ -4,7 +4,7 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd "$SCRIPT_DIR/.." && pwd)
 BINARY=${1:-"$REPO_ROOT/GuestMakefile/.theos/obj/debug/armv7s/OpenAL.framework/OpenAL"}
-SDKROOT=${2:-"$REPO_ROOT/../SDKs/iPhoneOS10.3.sdk"}
+SDKROOT=${2:-"$REPO_ROOT/tmp/iPhoneOS10.3.sdk"}
 TBD="$SDKROOT/System/Library/Frameworks/OpenAL.framework/OpenAL.tbd"
 
 if [ ! -f "$BINARY" ]; then

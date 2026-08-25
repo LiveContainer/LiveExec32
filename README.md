@@ -22,6 +22,15 @@ There are also missing syscalls that I have yet to provide to pass through. Plea
 gmake -C GuestMakefile generate-shims
 gmake -C GuestMakefile
 ```
+  The guest build downloads the third-party iOS 10.3 SDK archive to
+  `tmp/iPhoneOS10.3.sdk.tar.gz`, verifies its pinned SHA-256 checksum, and
+  extracts it atomically to `tmp/iPhoneOS10.3.sdk` for subsequent builds. Set
+  `ISYSROOT=/path/to/iPhoneOS10.3.sdk` to use an SDK obtained elsewhere, or
+  override `LC32_GUEST_SDK_URL` and `LC32_GUEST_SDK_SHA256` together when
+  using another mirror. The archive is hosted by a third party and remains
+  subject to Apple's SDK terms. Run `gmake -C GuestMakefile sdk` to prefetch
+  it without building. Theos still needs its separate iPhoneOS 16.5 SDK to
+  link the project.
 - Set up the guest root filesystem and install the built shim frameworks:
 ```bash
 ./GuestMakefile/pack-ramdisk.sh

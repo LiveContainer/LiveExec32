@@ -1,7 +1,9 @@
 ARCHS := armv7s
 TARGET := iphone:clang:16.5:10.3
-ISYSROOT := $(abspath ../../SDKs/iPhoneOS10.3.sdk)
+.DEFAULT_GOAL := all
 GO_EASY_ON_ME = 1
+
+include guest-sdk.mk
 
 MANUAL_FRAMEWORKS_ROOT := ../GuestFrameworks
 GENERATED_FRAMEWORKS_ROOT := $(MANUAL_FRAMEWORKS_ROOT)/.generated
@@ -9,7 +11,7 @@ GENERATED_FRAMEWORKS_STAMP := $(GENERATED_FRAMEWORKS_ROOT)/.complete
 
 ifeq ($(strip $(MAKECMDGOALS)),)
 LC32_REQUIRE_GENERATED_FRAMEWORKS := 1
-else ifneq ($(strip $(filter-out clean generate-shims,$(MAKECMDGOALS))),)
+else ifneq ($(strip $(filter-out clean generate-shims sdk,$(MAKECMDGOALS))),)
 LC32_REQUIRE_GENERATED_FRAMEWORKS := 1
 endif
 
@@ -67,7 +69,7 @@ CoreFoundation_FRAMEWORKS = LC32
 CoreFoundation_LDFLAGS = \
   -compatibility_version 478.23.0 \
   -current_version 478.23.0 -fno-autolink \
-  -Wl,-reexport_library,$(abspath ../Resources/RootFS/usr/lib/libobjc.A.dylib)
+  -Wl,-reexport_library,$(ISYSROOT)/usr/lib/libobjc.A.tbd
 
 Foundation_FRAMEWORKS = LC32
 Foundation_FILES = $(filter-out \
@@ -134,6 +136,14 @@ generate-shims:
 	./generate-shims.sh
 
 include $(THEOS_MAKE_PATH)/framework.mk
+
+# Theos can fan framework builds out from internal-all, and its convenience
+# targets bypass before-all. Gate both paths so no compiler observes a partial
+# or missing SDK, including when parallel building is explicitly enabled.
+ifneq ($(strip $(LC32_GUEST_SDK_DEPENDENCY)),)
+before-all:: $(LC32_GUEST_SDK_DEPENDENCY)
+$(FRAMEWORK_NAME) $(FRAMEWORK_NAME:=.all.framework.variables): | $(LC32_GUEST_SDK_DEPENDENCY)
+endif
 
 # Exclude linking against CoreFoundation and Foundation for themselves
 ifeq ($(THEOS_CURRENT_INSTANCE), $(filter $(THEOS_CURRENT_INSTANCE), CoreFoundation Foundation))
