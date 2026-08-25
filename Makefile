@@ -10,7 +10,7 @@ APPLICATION_NAME = LiveExec32
 #TOOL_NAME = LiveExec32
 
 LiveExec32_FILES = \
-	main.cpp guest_bootstrap.cpp debugger_server.cpp arm_dynarmic_cp15.cpp \
+	main.cpp LC32HelpUI.m guest_bootstrap.cpp debugger_server.cpp arm_dynarmic_cp15.cpp \
 	dynarmic.cpp dynarmic_syscalls.cpp dynarmic_memory.cpp \
 	dynarmic_callbacks.cpp dynarmic_thread_state.cpp \
 	dynarmic_native_jit.cpp dynarmic_psynch.cpp \
@@ -32,9 +32,10 @@ LiveExec32_FILES = \
 LiveExec32_CFLAGS = -Iinclude -DDYNARMIC_MASTER
 LiveExec32_CCFLAGS = -std=c++17
 LiveExec32_LDFLAGS = -L./Resources/Frameworks -ldynarmic
-LiveExec32_FRAMEWORKS = AudioToolbox CFNetwork GameKit OpenAL OpenGLES Security
+LiveExec32_FRAMEWORKS = AudioToolbox CFNetwork GameKit OpenAL OpenGLES Security UIKit
 LiveExec32_CODESIGN_FLAGS = -Sentitlements.plist
 #LiveExec32_INSTALL_PATH = /usr/local/bin
+LC32HelpUI.m_CFLAGS = -fobjc-arc
 
 # include gdbstub. Note that mini-gdbstub doesn't support armv7 but it doesn't care anyways
 LiveExec32_CFLAGS += -I./External/mini-gdbstub/include

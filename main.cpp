@@ -36,6 +36,7 @@
 
 extern "C" void LC32ConfigureLegacyAppTransportSecurity(
     uint32_t guestSDKVersion);
+extern "C" int LC32RunHelpUI(int argc, char *argv[]);
 
 static uint32_t guestExecutableSDKVersion;
 
@@ -305,8 +306,20 @@ void setupPathEnvs(char* argv0) {
 extern "C"
 int main(int argc, char* argv[], char* envp[]) {
     if (argc == 1) {
-        //printf("Usage: %s <path> argv...\n", argv[0]);
-        // TODO: display help or setup wizard
+        printf("Usage: %s <path> argv...\n", argv[0]);
+        /*
+         * If user tries to launch LiveExec32 as an app from LiveContainer,
+         * displays an UI. For now we only display a guide on how to use it.
+         * SpringBoard launches an application directly from launchd.
+         * CoreSimulator supplies these runtime variables, and its application
+         * process does not need to have launchd as its direct parent.
+         */
+        const bool simulatorLaunch =
+            getenv("SIMULATOR_UDID") != nullptr ||
+            getenv("SIMULATOR_DEVICE_NAME") != nullptr;
+        if(simulatorLaunch || getppid() == 1) {
+            return LC32RunHelpUI(argc, argv);
+        }
         return 1;
     }
 
