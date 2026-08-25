@@ -1248,11 +1248,14 @@ extern "C" void LC32UIKitPrepareGuestClass(Class cls) {
 
 }
 
-extern "C" void LC32UIKitHandleLegacyStatusBarOrientation(
-        u32 orientationValue) {
+/* SVC 1002 forwards the first guest argument in r2, followed by r3 and the
+ * guest stack pointer. Keep this exported entry point in that three-word
+ * shape even though the UIKit adapter only needs the orientation. */
+extern "C" u32 LC32UIKitHandleLegacyStatusBarOrientation(
+        u32 orientationValue, u32, u32) {
     const UIInterfaceOrientation orientation =
         (UIInterfaceOrientation)orientationValue;
-    if(!LC32MaskForInterfaceOrientation(orientation)) return;
+    if(!LC32MaskForInterfaceOrientation(orientation)) return 0;
     LC32LegacyRequestedOrientation.store(
         orientation, std::memory_order_relaxed);
     /* Early game engines can keep the native main thread inside their guest
@@ -1272,11 +1275,12 @@ extern "C" void LC32UIKitHandleLegacyStatusBarOrientation(
         }
     }
 
-    /* Avoid entering guest shouldAutorotate... while its outgoing
-     * setStatusBarOrientation: bridge call is still on the JIT stack. */
+    /* Avoid entering guest shouldAutorotate... while its outgoing direct
+     * UIKit host call is still on the JIT stack. */
     dispatch_async(dispatch_get_main_queue(), ^{
         LC32AdoptLegacyRootViewControllers();
     });
+    return 0;
 }
 
 @interface UIWindow (LC32LegacyRootViewController)

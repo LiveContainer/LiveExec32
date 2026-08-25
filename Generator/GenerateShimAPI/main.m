@@ -818,6 +818,17 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
        [selector isEqualToString:@"beginAnimations:context:"]) {
         return YES;
     }
+    /* Modern UIApplication accepts these deprecated selectors but no longer
+     * applies their orientation request. The manual guest adapter sends the
+     * intent to the host scene compatibility layer directly, keeping UIKit
+     * policy out of the generic Objective-C dispatcher. */
+    if([className isEqualToString:@"UIApplication"] &&
+       method.isInstanceMethod &&
+       ([selector isEqualToString:@"setStatusBarOrientation:"] ||
+        [selector isEqualToString:
+            @"setStatusBarOrientation:animated:"])) {
+        return YES;
+    }
     /* UIDevice uniqueIdentifier was removed from the host SDK (iOS 7), so
      * forwarding to the host UIDevice raises NSInvalidArgumentException.
      * The guest adapter fabricates a stable legacy identifier instead. */

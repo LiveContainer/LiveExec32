@@ -1559,15 +1559,6 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
     std::unique_ptr<u64[]> objectArrayHostStorage[9];
     id receiver = (id)host_self;
     SEL selector = (SEL)host_cmd;
-    const char *selectorName = selector ? sel_getName(selector) : nullptr;
-    if(selectorName &&
-       (!strcmp(selectorName, "setStatusBarOrientation:") ||
-        !strcmp(selectorName, "setStatusBarOrientation:animated:"))) {
-        /* This selector is ignored by modern UIApplication. Preserve the
-         * guest-originated orientation intent for the UIWindowScene adapter;
-         * the adapter defers work until this guest-to-host call unwinds. */
-        LC32UIKitHandleLegacyStatusBarOrientation((u32)args[0]);
-    }
     /*
      * Do this before object_getClass(receiver): the diagnostic is specifically
      * meant to survive a stale setCompletionBlock: receiver.  Lookup touches
