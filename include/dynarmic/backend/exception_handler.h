@@ -18,7 +18,7 @@ class BlockOfCode;
 }  // namespace Dynarmic::Backend::X64
 #elif defined(MCL_ARCHITECTURE_ARM64)
 namespace oaknut {
-class CodeBlock;
+class ConfigurableCodeBlock;
 }  // namespace oaknut
 #elif defined(MCL_ARCHITECTURE_RISCV)
 namespace Dynarmic::Backend::RV64 {
@@ -54,7 +54,7 @@ public:
 #if defined(MCL_ARCHITECTURE_X86_64)
     void Register(X64::BlockOfCode& code);
 #elif defined(MCL_ARCHITECTURE_ARM64)
-    void Register(oaknut::CodeBlock& mem, std::size_t mem_size);
+    void Register(oaknut::ConfigurableCodeBlock& mem, std::size_t mem_size);
 #elif defined(MCL_ARCHITECTURE_RISCV)
     void Register(RV64::CodeBlock& mem, std::size_t mem_size);
 #else

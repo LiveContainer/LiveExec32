@@ -9,7 +9,7 @@
 #include <optional>
 
 #include <mcl/stdint.hpp>
-#include <oaknut/code_block.hpp>
+#include <oaknut/configurable_code_block.hpp>
 #include <oaknut/oaknut.hpp>
 #include <tsl/robin_map.h>
 #include <tsl/robin_set.h>
@@ -70,7 +70,7 @@ protected:
     FakeCall FastmemCallback(u64 host_pc);
 
     const size_t code_cache_size;
-    oaknut::CodeBlock mem;
+    oaknut::ConfigurableCodeBlock mem;
     oaknut::CodeGenerator code;
 
     // A IR::LocationDescriptor will have one current CodePtr.
