@@ -64,11 +64,14 @@ setup_ramdisk() {
     rsync -aH \
         --exclude='.Trashes' \
         --exclude='.HFS+ Private Directory Data' \
+        --exclude='System/Library/AppleUSBDevice' \
         --exclude='System/Library/CoreServices/DumpPanic' \
         --exclude='System/Library/CoreServices/ReportCrash' \
         --exclude='System/Library/Extensions/*' \
         --exclude='System/Library/Filesystems/*' \
         --exclude='System/Library/Frameworks/*' \
+        --exclude='System/Library/LaunchDaemons/*' \
+        --exclude='System/Library/Lockdown' \
         --exclude='System/Library/PrivateFrameworks/*' \
         --exclude='usr/lib/updaters' \
         --exclude='usr/lib/IOABPLib.dylib' \
@@ -109,9 +112,27 @@ setup_ramdisk() {
     fi
 }
 
+make_ramdisk_writable() {
+    # The restore image intentionally contains 0444/0555 entries.  rsync -aH
+    # preserves those modes, and the openrsync shipped by macOS does not apply
+    # relative --chmod expressions reliably.  Add only owner-write permission
+    # after copying: this keeps executable and special bits intact, does not
+    # follow symlinks, and also repairs RootFS trees created by older runs.
+    find "$RAMDISK_ROOT" -xdev \( -type f -o -type d \) \
+        ! -perm -u+w -exec chmod u+w {} +
+
+    read_only_path=$(find "$RAMDISK_ROOT" -xdev \( -type f -o -type d \) \
+        ! -perm -u+w -print -quit)
+    if [ -n "$read_only_path" ]; then
+        echo "Ramdisk path remains read-only: $read_only_path" >&2
+        exit 1
+    fi
+}
+
 if [ ! -d "$RAMDISK_ROOT/System/Library" ]; then
     setup_ramdisk
 fi
+make_ramdisk_writable
 if [ ! -d "$IOS_SYSTEM_ROOT/System/Library" ]; then
     echo "iOS system root is unavailable: $IOS_SYSTEM_ROOT" >&2
     echo "Mount or set IOS_SYSTEM_ROOT so framework Info.plists can be installed" >&2
