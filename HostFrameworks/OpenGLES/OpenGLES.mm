@@ -22,7 +22,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "../../bridge.h"
+#include "bridge.h"
 #include "../../GuestFrameworks/OpenGLES/LC32OpenGLESBridge.h"
 
 #pragma clang diagnostic push

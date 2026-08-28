@@ -61,6 +61,10 @@
 	<true/>
 	<key>MinimumOSVersion</key>
 	<string>12.0</string>
+	<key>SBAppTags</key>
+	<array>
+		<string>hidden</string>
+	</array>
 	<key>SBAppUsesLocalNotifications</key>
 	<integer>1</integer>
 	<key>UIApplicationSupportsIndirectInputEvents</key>

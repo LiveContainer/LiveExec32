@@ -16,7 +16,14 @@ This project is heavily based on [unidbg](https://github.com/zhkl0228/unidbg).
 There are also missing syscalls that I have yet to provide to pass through. Please see [ARM32SyscallHandler.java](https://github.com/zhkl0228/unidbg/blob/master/unidbg-ios/src/main/java/com/github/unidbg/ios/ARM32SyscallHandler.java) and [DarwinSyscallHandler.java](https://github.com/zhkl0228/unidbg/blob/master/unidbg-ios/src/main/java/com/github/unidbg/ios/DarwinSyscallHandler.java) to implement them properly.
 
 ## Usage
-- Compile this project using theos
+- Compile this project using Theos:
+```bash
+gmake
+```
+  For local execution tests on macOS, use
+  `gmake LC32_BUILD_CATALYST=1`. This opt-in mode rewrites and re-signs only
+  the assembled app and its embedded frameworks for Catalyst; a subsequent
+  plain `gmake` restores normal iOS artifacts without requiring `clean`.
 - Generate the guest Objective-C shims, then build the guest frameworks:
 ```bash
 gmake -C GuestMakefile generate-shims
@@ -50,7 +57,7 @@ gmake -C GuestMakefile
 
 - Launch a binary and profit.
 ```bash
-.theos/out/LiveExec32 /var/mobile/ramdisk32/usr/bin/fdisk
+.theos/obj/LiveExec32.app/LiveExec32 /var/mobile/ramdisk32/usr/bin/fdisk
 ```
 
 Host environment variables are isolated from the guest by default. To pass a
@@ -59,7 +66,7 @@ that prefix when constructing the guest environment. For example:
 
 ```bash
 LC32_GUEST_ENV_NSUnbufferedIO=YES \
-  .theos/out/LiveExec32 /var/mobile/ramdisk32/usr/bin/fdisk
+  .theos/obj/LiveExec32.app/LiveExec32 /var/mobile/ramdisk32/usr/bin/fdisk
 ```
 
 `HOME`, `LC32_OBJC_TRACE`, `NATIVE_GUEST_THREADS`, and

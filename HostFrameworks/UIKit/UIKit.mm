@@ -186,7 +186,7 @@ const LC32GuestUIKitPolicy& LC32GuestInterfacePolicy(void) {
         false,
     };
     /* UIKit can query native controller policy while the shim dylib is
-     * loading. Do not permanently cache the fallback until main.cpp has
+     * loading. Do not permanently cache the fallback until LC32RunGuest has
      * published the selected guest executable. */
     const char *guestExecutable = getenv("LC32_GUEST_EXECUTABLE");
     if(!guestExecutable || !guestExecutable[0]) return policy;
@@ -367,7 +367,7 @@ LC32LegacyIPadContainerController *LC32LegacyContainerForWindow(
 bool LC32GuestIsIPadOnly(void) {
     const char *guestExecutable = getenv("LC32_GUEST_EXECUTABLE");
     /* UIKit can create internal windows while the shim dylib is loading.
-     * Do not consume the cache until main.cpp has published the guest. */
+     * Do not consume the cache until LC32RunGuest has published the guest. */
     if(!guestExecutable || !guestExecutable[0]) return false;
 
     static bool result = false;

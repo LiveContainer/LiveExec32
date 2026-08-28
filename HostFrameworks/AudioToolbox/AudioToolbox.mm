@@ -1,7 +1,7 @@
 @import AudioToolbox;
 @import Foundation;
 
-#include "../../bridge.h"
+#include "bridge.h"
 #include "../../GuestFrameworks/AudioToolbox/LC32AudioToolboxBridge.h"
 
 #include <objc/message.h>

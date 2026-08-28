@@ -11,10 +11,13 @@ check-guest-bootstrap: $(GUEST_BOOTSTRAP_HOST_TEST)
 	"$(GUEST_BOOTSTRAP_HOST_TEST)"
 
 $(GUEST_BOOTSTRAP_HOST_TEST): guest_bootstrap_host.cpp \
-  ../guest_bootstrap.cpp ../guest_bootstrap.h
+  ../HostFrameworks/LC32/guest_bootstrap.cpp \
+  ../HostFrameworks/LC32/guest_bootstrap.h
 	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
-	$(HOST_CXX) $(HOST_CXXFLAGS) -I"$(abspath ..)" \
-		guest_bootstrap_host.cpp ../guest_bootstrap.cpp -o "$@"
+	$(HOST_CXX) $(HOST_CXXFLAGS) \
+		-I"$(abspath ../HostFrameworks/LC32)" \
+		guest_bootstrap_host.cpp \
+		../HostFrameworks/LC32/guest_bootstrap.cpp -o "$@"
 
 # Keep this host-native regression test usable on a clean checkout without
 # requiring Theos or bootstrapping the iOS 10.3 guest SDK. Mixed/default goals

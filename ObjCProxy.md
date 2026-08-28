@@ -69,7 +69,8 @@ unsupported ABI are filtered and need a hand-written adapter.
 ### App-defined classes in the host runtime
 
 Application classes are loaded normally by guest libobjc. When native
-`objc_getClass` cannot find a class, the hook in [bridge.mm](bridge.mm) checks
+`objc_getClass` cannot find a class, the hook in
+[bridge.mm](HostFrameworks/LC32/bridge.mm) checks
 the guest runtime and, when appropriate:
 
 1. resolves or synthesizes the superclass;
@@ -310,7 +311,8 @@ The main Objective-C-related operations are:
 | 1022–1023 | Look up or update the authoritative host mapping. |
 
 The veneers live in [LC32.s](GuestFrameworks/LC32/LC32.s); the SVC cases are
-serviced in `dynarmic_callbacks.cpp`.
+serviced in
+[dynarmic_callbacks.cpp](HostFrameworks/LC32/dynarmic_callbacks.cpp).
 
 ## Threading, reentrancy, and quiescence
 
@@ -436,7 +438,8 @@ The high-volume tracing switches are opt-in because they affect timing:
 
 ## Implementation map
 
-- [bridge.mm](bridge.mm): identity registry, object conversion, native class
+- [bridge.mm](HostFrameworks/LC32/bridge.mm): identity registry, object
+  conversion, native class
   synthesis, selector marshalling, lifetime pins, and weak ownership.
 - [LC32.h](GuestFrameworks/LC32/LC32.h),
   [LC32.m](GuestFrameworks/LC32/LC32.m), and
@@ -446,13 +449,15 @@ The high-volume tracing switches are opt-in because they affect timing:
   pointer tags, mapping operations, and descriptor layouts.
 - [GenerateShimAPI](Generator/GenerateShimAPI/main.m): generated framework
   method bodies and ownership-family selection.
-- [block_bridge.mm](block_bridge.mm) and
+- [block_bridge.mm](HostFrameworks/LC32/block_bridge.mm) and
   [LC32BlockBridgeABI.h](include/LC32BlockBridgeABI.h): block signature
   translation and foreign-thread callback execution.
 - [UIKit.mm](HostFrameworks/UIKit/UIKit.mm): UIKit-specific guest class
   preparation and native-only compatibility dispatch.
-- `dynarmic_callbacks.cpp`, `dynarmic_core.cpp`, and
-  `dynarmic_thread_state.cpp`: SVC servicing, nested execution, and debugger
+- [dynarmic_callbacks.cpp](HostFrameworks/LC32/dynarmic_callbacks.cpp),
+  [dynarmic_core.cpp](HostFrameworks/LC32/dynarmic_core.cpp), and
+  [dynarmic_thread_state.cpp](HostFrameworks/LC32/dynarmic_thread_state.cpp):
+  SVC servicing, nested execution, and debugger
   quiescence.
 
 ## TODO

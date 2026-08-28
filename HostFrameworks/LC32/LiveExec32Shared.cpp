@@ -29,6 +29,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "LiveExec32Shared.h"
 #include "dynarmic.h"
 #include "arm_dynarmic_cp15.h"
 #include "debugger_server.h"
@@ -36,7 +37,6 @@
 
 extern "C" void LC32ConfigureLegacyAppTransportSecurity(
     uint32_t guestSDKVersion);
-extern "C" int LC32RunHelpUI(int argc, char *argv[]);
 
 static uint32_t guestExecutableSDKVersion;
 
@@ -238,7 +238,14 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
 }
 
 static std::string DefaultGuestRootPath(const char *argv0) {
-    std::string executablePath = argv0 ? argv0 : "";
+    char resolvedExecutablePath[PATH_MAX];
+    const char *executable = argv0 ? argv0 : "";
+    if(argv0 != nullptr &&
+            realpath(argv0, resolvedExecutablePath) != nullptr) {
+        executable = resolvedExecutablePath;
+    }
+
+    std::string executablePath = executable;
     const size_t lastSlash = executablePath.rfind('/');
     if(lastSlash == std::string::npos) return "RootFS";
     return executablePath.substr(0, lastSlash + 1) + "RootFS";
@@ -303,23 +310,12 @@ void setupPathEnvs(char* argv0) {
     setenv("DYLD_PATH", path, 0);
 }
 
-extern "C"
-int main(int argc, char* argv[], char* envp[]) {
-    if (argc == 1) {
-        printf("Usage: %s <path> argv...\n", argv[0]);
-        /*
-         * If user tries to launch LiveExec32 as an app from LiveContainer,
-         * displays an UI. For now we only display a guide on how to use it.
-         * SpringBoard launches an application directly from launchd.
-         * CoreSimulator supplies these runtime variables, and its application
-         * process does not need to have launchd as its direct parent.
-         */
-        const bool simulatorLaunch =
-            getenv("SIMULATOR_UDID") != nullptr ||
-            getenv("SIMULATOR_DEVICE_NAME") != nullptr;
-        if(simulatorLaunch || getppid() == 1) {
-            return LC32RunHelpUI(argc, argv);
-        }
+int LC32RunGuest(int argc, char* argv[], char* envp[]) {
+    if(argc < 2 || argv == nullptr || argv[0] == nullptr ||
+            argv[1] == nullptr) {
+        printf("Usage: %s <path> argv...\n",
+            argv != nullptr && argv[0] != nullptr ?
+                argv[0] : "LiveExec32");
         return 1;
     }
 
@@ -577,4 +573,5 @@ int main(int argc, char* argv[], char* envp[]) {
             threadHandle.jit->Cpsr());
         fflush(stderr);
     }
+    return 0;
 }

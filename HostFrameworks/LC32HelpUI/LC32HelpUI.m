@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#import "LC32HelpUI.h"
 
 static void LC32ShowLauncherWindow(UIWindow *window) {
     NSString *message;

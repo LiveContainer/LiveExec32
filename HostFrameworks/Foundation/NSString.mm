@@ -1,6 +1,6 @@
 @import Foundation;
 
-#import "../../bridge.h"
+#import "bridge.h"
 #import "../../GuestFrameworks/Foundation/LC32FoundationBridge.h"
 
 #include <atomic>
