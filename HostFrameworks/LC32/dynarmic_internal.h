@@ -110,7 +110,6 @@ extern "C" void abort_with_reason(
     uint32_t reason_namespace, uint64_t reason_code,
     const char *reason_string, uint64_t reason_flags)
     __attribute__((noreturn, cold));
-extern "C" const char *__crashreporter_info__;
 
 inline constexpr uint32_t LC32_OS_REASON_LIBSYSTEM = 18;
 inline constexpr uint32_t LC32_OS_REASON_MAX_VALID_NAMESPACE = 47;

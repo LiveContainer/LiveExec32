@@ -19,6 +19,7 @@ DYNARMIC_STATIC_LIBS := \
 
 LiveExec32Shared_FILES = \
 	LiveExec32Shared.cpp guest_bootstrap.cpp debugger_server.cpp \
+	crash_exception.mm \
 	arm_dynarmic_cp15.cpp dynarmic.cpp dynarmic_syscalls.cpp \
 	dynarmic_memory.cpp dynarmic_callbacks.cpp dynarmic_thread_state.cpp \
 	dynarmic_native_jit.cpp dynarmic_psynch.cpp dynarmic_workqueue.cpp \
@@ -33,11 +34,12 @@ LiveExec32Shared_CFLAGS = \
 	-I. -I$(DYNARMIC_ROOT)/src -I../../include -DDYNARMIC_MASTER \
 	-I../../External/mini-gdbstub/include
 LiveExec32Shared_CCFLAGS = -std=c++17
+crash_exception.mm_CFLAGS = -fobjc-arc
 LiveExec32Shared_OBJ_FILES = $(DYNARMIC_STATIC_LIBS)
 LiveExec32Shared_LDFLAGS = -L../../External/mini-gdbstub/build
 LiveExec32Shared_LIBRARIES = gdbstub
 LiveExec32Shared_FRAMEWORKS = \
-	AudioToolbox CFNetwork CoreFoundation GameKit IOKit \
+	AudioToolbox CFNetwork CoreFoundation Foundation GameKit IOKit \
 	OpenAL OpenGLES Security UIKit
 LiveExec32Shared_PUBLIC_HEADERS = LiveExec32Shared.h
 LiveExec32Shared_RESOURCE_DIRS = Resources

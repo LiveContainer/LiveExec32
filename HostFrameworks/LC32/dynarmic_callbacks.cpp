@@ -1,5 +1,15 @@
 #include "dynarmic_internal.h"
 #include "dynarmic_syscalls.h"
+#include "crash_exception.h"
+
+namespace {
+struct GuestCrashExceptionPayload {
+    std::string report;
+    std::string fallbackReason;
+    uint32_t fallbackNamespace;
+    uint64_t fallbackCode;
+};
+}
 
 static void AppendCrashReportText(
         std::string &report, const std::string &text) {
@@ -83,25 +93,6 @@ static std::string SanitizeCompactCrashText(
     return result;
 }
 
-static void PublishGuestCrashReport(const std::string &report) {
-    char *persistentReport = static_cast<char *>(
-        malloc(report.size() + 1));
-    if (persistentReport != nullptr) {
-        memcpy(persistentReport, report.c_str(), report.size() + 1);
-        __atomic_store_n(
-            &__crashreporter_info__, persistentReport,
-            __ATOMIC_RELEASE);
-    }
-
-    if (!report.empty()) {
-        fwrite(report.data(), 1, report.size(), stderr);
-        if (report.back() != '\n') {
-            fputc('\n', stderr);
-        }
-    }
-    fflush(stderr);
-}
-
 static bool GuestAbortReasonIsUsable(
         const GuestAbortMetadata &metadata) {
     return metadata.valid && metadata.reasonNamespace > 0 &&
@@ -123,11 +114,10 @@ static uint64_t GuestAbortReasonCode(
         : LC32_GUEST_CRASH_REASON_CODE;
 }
 
-[[noreturn]] static void AbortHostWithGuestCrashReport(
+[[noreturn]] static void ThrowGuestCrashExceptionPayload(
         const GuestAbortMetadata &metadata,
-        const std::string &fullReport,
+        std::string fullReport,
         std::string compactReason) {
-    PublishGuestCrashReport(fullReport);
     if (compactReason.empty()) {
         compactReason = "LiveExec32 guest process crashed";
     }
@@ -140,13 +130,13 @@ static uint64_t GuestAbortReasonCode(
     const uint64_t reasonCode =
         GuestAbortReasonCode(metadata);
 
-    /*
-     * Do not propagate NO_CRASH_REPORT or private guest-era flags. Passing
-     * zero asks the host kernel for its normal abort report while retaining
-     * the guest namespace and code above.
-     */
-    abort_with_reason(
-        reasonNamespace, reasonCode, compactReason.c_str(), 0);
+    /* DumpCrashReport catches this private transport value before its broad
+     * failure handlers, then raises the Objective-C exception from that
+     * handler. An NSException raised here would otherwise be swallowed by
+     * the catch (...) which protects report construction. */
+    throw GuestCrashExceptionPayload{
+        std::move(fullReport), std::move(compactReason),
+        reasonNamespace, reasonCode};
 }
 
 class DynarmicCallbacks32 final : public Dynarmic::A32::UserCallbacks {
@@ -551,6 +541,12 @@ public:
 
         try {
             DumpBacktrace(true, signal, pendingSignal);
+        } catch (const GuestCrashExceptionPayload &crash) {
+            dumpingBacktrace = false;
+            LC32ThrowGuestCrashException(
+                crash.report.data(), crash.report.size(),
+                crash.fallbackNamespace, crash.fallbackCode,
+                crash.fallbackReason.c_str());
         } catch (const std::exception &exception) {
             dumpingBacktrace = false;
             HaltAllGuestJits(LC32HaltReasonTrap);
@@ -702,17 +698,6 @@ public:
             AppendCrashReportFormat(report,
                 "Emulator error: %s\n", crashMessage.c_str());
         }
-        for (const GuestCrashAnnotation &annotation : annotations) {
-            if (annotation.message == abortMetadata.reason) {
-                continue;
-            }
-            AppendCrashReportFormat(report,
-                "Crash message from %s: %s (cause: 0x%llx)\n",
-                annotation.imageName.c_str(),
-                annotation.message.c_str(),
-                static_cast<unsigned long long>(annotation.abortCause));
-        }
-
         AppendCrashReportFormat(report,
             "Registers:\n"
             " r0 0x%08x  r1 0x%08x  r2 0x%08x  r3 0x%08x\n"
@@ -759,6 +744,16 @@ public:
                 "%3zu: 0x%08x-0x%08x %s\n",
                 index, images[index].start, images[index].end,
                 images[index].name.c_str());
+        }
+        for (const GuestCrashAnnotation &annotation : annotations) {
+            if (annotation.message == abortMetadata.reason) {
+                continue;
+            }
+            AppendCrashReportFormat(report,
+                "Crash message from %s: %s (cause: 0x%llx)\n",
+                annotation.imageName.c_str(),
+                annotation.message.c_str(),
+                static_cast<unsigned long long>(annotation.abortCause));
         }
 
         if (!crash) {
@@ -872,8 +867,8 @@ public:
         compactReason += compactImages;
 
         dumpingBacktrace = false;
-        AbortHostWithGuestCrashReport(
-            abortMetadata, report, std::move(compactReason));
+        ThrowGuestCrashExceptionPayload(
+            abortMetadata, std::move(report), std::move(compactReason));
     }
 
     void CallSVC(u32 swi) override {

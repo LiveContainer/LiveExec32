@@ -2,6 +2,7 @@
 @import UIKit;
 #import <objc/runtime.h>
 #include "bridge.h"
+#include "crash_exception.h"
 #include "../CoreGraphics/LC32CoreGraphicsHost.h"
 
 #include <atomic>
@@ -784,7 +785,8 @@ id LC32ObjectProperty(id object, const char *name) {
     if(!object || ![object respondsToSelector:selector]) return nil;
     @try {
         return ((id (*)(id, SEL))objc_msgSend)(object, selector);
-    } @catch(NSException *) {
+    } @catch(NSException *exception) {
+        if(LC32IsGuestCrashException(exception)) @throw;
         return nil;
     }
 }

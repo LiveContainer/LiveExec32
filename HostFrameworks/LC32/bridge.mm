@@ -1,4 +1,5 @@
 #import "bridge.h"
+#include "crash_exception.h"
 #include "LC32ObjCBridgeABI.h"
 
 #import <dispatch/dispatch.h>
@@ -202,6 +203,9 @@ static void LC32TraceNativeNetworkObject(const char *direction,
                     error.description.UTF8String ?: "?");
             }
         } @catch(NSException *exception) {
+            if (LC32IsGuestCrashException(exception)) {
+                @throw;
+            }
             fprintf(stderr,
                 "LC32 network trace failed for %s arg=%u: %s\n",
                 sel_getName(selector), argumentIndex,
