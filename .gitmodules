@@ -1,3 +1,6 @@
 [submodule "External/dynarmic"]
 	path = External/dynarmic
 	url = https://github.com/LiveContainer/dynarmic.git
+[submodule "External/mini-gdbstub"]
+	path = External/mini-gdbstub
+	url = https://github.com/LiveContainer/mini-gdbstub.git

@@ -67,7 +67,9 @@ lc32-dynarmic-static:
 		echo "External/dynarmic is missing; initialize the submodule" >&2; \
 		exit 1; \
 	}
-	cmake -S "$(DYNARMIC_ROOT)" -B "$(DYNARMIC_BUILD_DIR)" \
+	cmake --no-warn-unused-cli \
+		-S "$(DYNARMIC_ROOT)" -B "$(DYNARMIC_BUILD_DIR)" \
+		-DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
 		-DDYNARMIC_USE_BUNDLED_EXTERNALS=ON \
 		-DDYNARMIC_FRONTENDS=A32 \
 		-DBUILD_TESTING=OFF \

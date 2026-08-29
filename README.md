@@ -18,7 +18,7 @@ There are also missing syscalls that I have yet to provide to pass through. Plea
 ## Usage
 - Initialize Dynarmic, then compile this project using Theos:
 ```bash
-git submodule update --init External/dynarmic
+git submodule update --init --recursive
 gmake
 ```
   The host build configures Dynarmic automatically with CMake and links its
@@ -47,17 +47,19 @@ gmake -C GuestMakefile
 ./GuestMakefile/pack-ramdisk.sh
 ```
   On the first run this downloads the iOS 10.3.3 restore ramdisk component
-  (`058-75249-062.dmg`) from Apple's IPSW, decrypts it with `xpwntool`, and
-  copies it into `Resources/RootFS` with `rsync -aH` (7z would break the HFS
-  symlinks and dylib hardlink pairs that the guest dyld relies on).  The
-  download and decrypted image are cached under `tmp/ipsw/`, so subsequent
-  runs only reinstall the rebuilt frameworks.
+  (`058-75249-062.dmg`) from Apple's IPSW, verifies its pinned checksum,
+  extracts its Img3 payload, and copies it into `Resources/RootFS` with
+  `rsync -aH` (7z would break the HFS symlinks and dylib hardlink pairs that
+  the guest dyld relies on). The download and extracted image are cached
+  under `tmp/ipsw/`, so subsequent runs only reinstall the rebuilt
+  frameworks.
 
   Override the sources with `RAMDISK_IPSW_URL`, `RAMDISK_IPSW_COMPONENT`,
-  `RAMDISK_SETUP_DIR`, `RAMDISK_ROOT`, and `IOS_SYSTEM_ROOT` (the latter is
-  the decrypted iOS 10.3.3 system root used for framework metadata and must
-  be mounted while packing).  Requires `pzb`, `xpwntool`, `hdiutil`, and
-  `rsync`.
+  `RAMDISK_IPSW_COMPONENT_SHA256`, `RAMDISK_IMAGE_SHA256`,
+  `RAMDISK_SETUP_DIR`, and `RAMDISK_ROOT`. Framework bundle metadata is
+  tracked under `GuestMakefile/FrameworkInfoPlists`; override that snapshot
+  with `FRAMEWORK_INFO_ROOT`, or set `IOS_SYSTEM_ROOT` to test against another
+  mounted system image. Requires `pzb`, Python 3, `hdiutil`, and `rsync`.
 
 - Launch a binary and profit.
 ```bash

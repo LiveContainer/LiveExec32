@@ -5,46 +5,83 @@ SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd "$SCRIPT_DIR/.." && pwd)
 
 RAMDISK_ROOT=${RAMDISK_ROOT:-"$REPO_ROOT/Resources/RootFS"}
-IOS_SYSTEM_ROOT=${IOS_SYSTEM_ROOT:-/Volumes/Greensburg14G60.N41N42N48N49OS}
+IOS_SYSTEM_ROOT=${IOS_SYSTEM_ROOT:-}
+FRAMEWORK_INFO_ROOT=${FRAMEWORK_INFO_ROOT:-"$SCRIPT_DIR/FrameworkInfoPlists"}
 BUILD_ROOT=${BUILD_ROOT:-"$SCRIPT_DIR/.theos/obj/debug/armv7s"}
 
 # The guest root is the iOS 10.3.3 restore ramdisk.  If it has not been set
-# up yet, download and decrypt it from the IPSW, then copy it into place
+# up yet, download and extract it from the IPSW, then copy it into place
 # with rsync -aH.  (7z would break the HFS symlinks and dylib hardlink
 # pairs that the guest dyld relies on.)  This only runs once, before the
 # first pack.
-RAMDISK_IPSW_URL=${RAMDISK_IPSW_URL:-
-    "http://appldnld.apple.com/ios10.3.3/091-23384-20170719-CA966D80-6977-11E7-9F96-3E9100BA0AE3/iPhone_4.0_32bit_10.3.3_14G60_Restore.ipsw"}
+RAMDISK_IPSW_URL=${RAMDISK_IPSW_URL:-"http://appldnld.apple.com/ios10.3.3/091-23384-20170719-CA966D80-6977-11E7-9F96-3E9100BA0AE3/iPhone_4.0_32bit_10.3.3_14G60_Restore.ipsw"}
 RAMDISK_IPSW_COMPONENT=${RAMDISK_IPSW_COMPONENT:-"058-75249-062.dmg"}
+RAMDISK_IPSW_COMPONENT_SHA256=${RAMDISK_IPSW_COMPONENT_SHA256:-"d50dff8eae1a17cc91369929fdea4dc0cdf815c6b8e11f5809cc16629f3f1a44"}
+RAMDISK_IMAGE_SHA256=${RAMDISK_IMAGE_SHA256:-"3564d16366b053503107288be6cb335b2283cf14838ab64a88017c17a2a6a1bc"}
 RAMDISK_SETUP_DIR=${RAMDISK_SETUP_DIR:-"$REPO_ROOT/tmp/ipsw"}
+
+RAMDISK_ROOT=$(python3 -c \
+    'import os, sys; print(os.path.realpath(sys.argv[1]))' "$RAMDISK_ROOT")
+case "$RAMDISK_ROOT" in
+    /|/Applications|/Library|/System|/Users|/bin|/private|/private/tmp|/sbin|/tmp|/usr|/var)
+        echo "Refusing unsafe RAMDISK_ROOT: $RAMDISK_ROOT" >&2
+        exit 1
+        ;;
+esac
+case "$REPO_ROOT/" in
+    "$RAMDISK_ROOT"/*)
+        echo "RAMDISK_ROOT must not contain the repository: $RAMDISK_ROOT" >&2
+        exit 1
+        ;;
+esac
+
+file_sha256() {
+    shasum -a 256 "$1" | awk '{ print $1 }'
+}
+
+verify_sha256() {
+    [ -f "$1" ] && [ "$(file_sha256 "$1")" = "$2" ]
+}
 
 setup_ramdisk() {
     echo "Setting up guest ramdisk at $RAMDISK_ROOT" >&2
-    mkdir -p "$RAMDISK_SETUP_DIR"
+    mkdir -p "$RAMDISK_SETUP_DIR" "$(dirname "$RAMDISK_ROOT")"
     encrypted_image="$RAMDISK_SETUP_DIR/$RAMDISK_IPSW_COMPONENT"
     decrypted_image="$RAMDISK_SETUP_DIR/ramdisk.dmg"
 
-    if [ ! -f "$encrypted_image" ]; then
-        echo "Downloading $RAMDISK_IPSW_COMPONENT from the iOS 10.3.3 IPSW" >&2
-        download_attempt=1
-        while :; do
-            if (cd "$RAMDISK_SETUP_DIR" && pzb -g "$RAMDISK_IPSW_COMPONENT" "$RAMDISK_IPSW_URL") \
-                    && [ -f "$encrypted_image" ]; then
-                break
-            fi
-            download_attempt=$((download_attempt + 1))
-            if [ "$download_attempt" -gt 3 ]; then
-                echo "Failed to download $RAMDISK_IPSW_COMPONENT" >&2
-                exit 1
-            fi
-            echo "Download failed; retrying ($download_attempt/3)" >&2
-            sleep 2
-        done
-    fi
+    if ! verify_sha256 "$decrypted_image" "$RAMDISK_IMAGE_SHA256"; then
+        rm -f "$decrypted_image"
+        if ! verify_sha256 "$encrypted_image" "$RAMDISK_IPSW_COMPONENT_SHA256"; then
+            rm -f "$encrypted_image"
+            echo "Downloading $RAMDISK_IPSW_COMPONENT from the iOS 10.3.3 IPSW" >&2
+            download_attempt=1
+            while :; do
+                download_dir=$(mktemp -d "$RAMDISK_SETUP_DIR/.download.XXXXXX")
+                if (cd "$download_dir" && pzb -g "$RAMDISK_IPSW_COMPONENT" "$RAMDISK_IPSW_URL") \
+                        && verify_sha256 "$download_dir/$RAMDISK_IPSW_COMPONENT" \
+                            "$RAMDISK_IPSW_COMPONENT_SHA256"; then
+                    mv "$download_dir/$RAMDISK_IPSW_COMPONENT" "$encrypted_image"
+                    rm -rf "$download_dir"
+                    break
+                fi
+                rm -rf "$download_dir"
+                download_attempt=$((download_attempt + 1))
+                if [ "$download_attempt" -gt 3 ]; then
+                    echo "Failed to download $RAMDISK_IPSW_COMPONENT" >&2
+                    exit 1
+                fi
+                echo "Download failed; retrying ($download_attempt/3)" >&2
+                sleep 2
+            done
+        fi
 
-    if [ ! -f "$decrypted_image" ]; then
-        echo "Decrypting ramdisk image" >&2
-        xpwntool "$encrypted_image" "$decrypted_image" -k
+        echo "Extracting ramdisk image from Img3" >&2
+        python3 "$SCRIPT_DIR/extract-img3.py" \
+            "$encrypted_image" "$decrypted_image"
+        if ! verify_sha256 "$decrypted_image" "$RAMDISK_IMAGE_SHA256"; then
+            echo "Extracted ramdisk image checksum mismatch" >&2
+            exit 1
+        fi
     fi
 
     mount_point=$(mktemp -d "$RAMDISK_ROOT.attach.XXXXXX")
@@ -133,9 +170,8 @@ if [ ! -d "$RAMDISK_ROOT/System/Library" ]; then
     setup_ramdisk
 fi
 make_ramdisk_writable
-if [ ! -d "$IOS_SYSTEM_ROOT/System/Library" ]; then
+if [ -n "$IOS_SYSTEM_ROOT" ] && [ ! -d "$IOS_SYSTEM_ROOT/System/Library" ]; then
     echo "iOS system root is unavailable: $IOS_SYSTEM_ROOT" >&2
-    echo "Mount or set IOS_SYSTEM_ROOT so framework Info.plists can be installed" >&2
     exit 1
 fi
 
@@ -162,24 +198,28 @@ for framework_name in $framework_names; do
     case "$framework_name" in
         AVFAudio)
             relative_bundle=System/Library/Frameworks/AVFAudio.framework
-            source_plist="$IOS_SYSTEM_ROOT/$relative_bundle/Info.plist"
-            if [ ! -f "$source_plist" ]; then
-                source_plist="$IOS_SYSTEM_ROOT/System/Library/Frameworks/AVFoundation.framework/Frameworks/AVFAudio.framework/Info.plist"
-            fi
             ;;
         FileProvider)
             relative_bundle=System/Library/PrivateFrameworks/FileProvider.framework
-            source_plist="$IOS_SYSTEM_ROOT/$relative_bundle/Info.plist"
             ;;
         LC32)
             relative_bundle=System/Library/Frameworks/LC32.framework
-            source_plist="$REPO_ROOT/GuestFrameworks/LC32/Info.plist"
             ;;
         *)
             relative_bundle="System/Library/Frameworks/$framework_name.framework"
-            source_plist="$IOS_SYSTEM_ROOT/$relative_bundle/Info.plist"
             ;;
     esac
+
+    if [ "$framework_name" = LC32 ]; then
+        source_plist="$REPO_ROOT/GuestFrameworks/LC32/Info.plist"
+    elif [ -n "$IOS_SYSTEM_ROOT" ]; then
+        source_plist="$IOS_SYSTEM_ROOT/$relative_bundle/Info.plist"
+        if [ "$framework_name" = AVFAudio ] && [ ! -f "$source_plist" ]; then
+            source_plist="$IOS_SYSTEM_ROOT/System/Library/Frameworks/AVFoundation.framework/Frameworks/AVFAudio.framework/Info.plist"
+        fi
+    else
+        source_plist="$FRAMEWORK_INFO_ROOT/$framework_name.plist"
+    fi
 
     expected_id="/$relative_bundle/$framework_name"
     destination_bundle="$RAMDISK_ROOT/$relative_bundle"

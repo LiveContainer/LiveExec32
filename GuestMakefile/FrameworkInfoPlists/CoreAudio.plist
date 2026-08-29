@@ -1,0 +1,230 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>BuildMachineOSBuild</key>
+	<string>15A284</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>English</string>
+	<key>CFBundleExecutable</key>
+	<string>CoreAudio</string>
+	<key>CFBundleGetInfoString</key>
+	<string>CoreAudio 4.3.0</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.apple.audio.CoreAudio</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>CoreAudio</string>
+	<key>CFBundlePackageType</key>
+	<string>FMWK</string>
+	<key>CFBundleShortVersionString</key>
+	<string>4.3.0</string>
+	<key>CFBundleSupportedPlatforms</key>
+	<array>
+		<string>iPhoneOS</string>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>4.3.0</string>
+	<key>DTCompiler</key>
+	<string>com.apple.compilers.llvm.clang.1_0</string>
+	<key>DTPlatformBuild</key>
+	<string></string>
+	<key>DTPlatformName</key>
+	<string>iphoneos</string>
+	<key>DTPlatformVersion</key>
+	<string>10.3</string>
+	<key>DTSDKBuild</key>
+	<string>14G33</string>
+	<key>DTSDKName</key>
+	<string>iphoneos10.3.internal</string>
+	<key>DTXcode</key>
+	<string>0830</string>
+	<key>DTXcodeBuild</key>
+	<string>8V109d</string>
+	<key>MinimumOSVersion</key>
+	<string>10.3</string>
+	<key>NullAudioDriverConfiguration</key>
+	<dict>
+		<key>can be content default</key>
+		<true/>
+		<key>can be system default</key>
+		<true/>
+		<key>clock domain</key>
+		<integer>0</integer>
+		<key>hidden</key>
+		<false/>
+		<key>latency</key>
+		<integer>2</integer>
+		<key>name</key>
+		<string>Null_Device</string>
+		<key>preferred channel stereo L</key>
+		<integer>1</integer>
+		<key>preferred channel stereo R</key>
+		<integer>2</integer>
+		<key>ring buffer frame size</key>
+		<real>1366</real>
+		<key>safety offset</key>
+		<integer>0</integer>
+		<key>sample rate</key>
+		<integer>44100</integer>
+		<key>streams</key>
+		<array>
+			<dict>
+				<key>basic description</key>
+				<dict>
+					<key>bits per channel</key>
+					<integer>16</integer>
+					<key>bytes per frame</key>
+					<integer>4</integer>
+					<key>bytes per packet</key>
+					<integer>4</integer>
+					<key>channels per frame</key>
+					<integer>2</integer>
+					<key>format flags</key>
+					<integer>12</integer>
+					<key>format id</key>
+					<real>1819304813</real>
+					<key>frames per packet</key>
+					<integer>1</integer>
+					<key>sample rate</key>
+					<integer>44100</integer>
+				</dict>
+				<key>is input</key>
+				<true/>
+				<key>supported formats</key>
+				<array>
+					<dict>
+						<key>bits per channel</key>
+						<integer>16</integer>
+						<key>bytes per frame</key>
+						<integer>4</integer>
+						<key>bytes per packet</key>
+						<integer>4</integer>
+						<key>channels per frame</key>
+						<integer>2</integer>
+						<key>format flags</key>
+						<integer>12</integer>
+						<key>format id</key>
+						<integer>1819304813</integer>
+						<key>frames per packet</key>
+						<integer>1</integer>
+						<key>sample rate</key>
+						<integer>44100</integer>
+					</dict>
+				</array>
+				<key>terminal type</key>
+				<real>1751412840</real>
+			</dict>
+			<dict>
+				<key>basic description</key>
+				<dict>
+					<key>bits per channel</key>
+					<integer>16</integer>
+					<key>bytes per frame</key>
+					<integer>4</integer>
+					<key>bytes per packet</key>
+					<integer>4</integer>
+					<key>channels per frame</key>
+					<integer>2</integer>
+					<key>format flags</key>
+					<integer>12</integer>
+					<key>format id</key>
+					<integer>1819304813</integer>
+					<key>frames per packet</key>
+					<integer>1</integer>
+					<key>sample rate</key>
+					<real>44100</real>
+				</dict>
+				<key>is input</key>
+				<false/>
+				<key>supported formats</key>
+				<array>
+					<dict>
+						<key>bits per channel</key>
+						<integer>16</integer>
+						<key>bytes per frame</key>
+						<integer>2</integer>
+						<key>bytes per packet</key>
+						<integer>2</integer>
+						<key>channels per frame</key>
+						<integer>1</integer>
+						<key>format flags</key>
+						<integer>12</integer>
+						<key>format id</key>
+						<integer>1819304813</integer>
+						<key>frames per packet</key>
+						<integer>1</integer>
+						<key>sample rate</key>
+						<integer>44100</integer>
+					</dict>
+					<dict>
+						<key>bits per channel</key>
+						<integer>16</integer>
+						<key>bytes per frame</key>
+						<integer>4</integer>
+						<key>bytes per packet</key>
+						<integer>4</integer>
+						<key>channels per frame</key>
+						<integer>2</integer>
+						<key>format flags</key>
+						<integer>12</integer>
+						<key>format id</key>
+						<integer>1819304813</integer>
+						<key>frames per packet</key>
+						<integer>1</integer>
+						<key>sample rate</key>
+						<integer>44100</integer>
+					</dict>
+					<dict>
+						<key>bits per channel</key>
+						<integer>16</integer>
+						<key>bytes per frame</key>
+						<integer>2</integer>
+						<key>bytes per packet</key>
+						<integer>2</integer>
+						<key>channels per frame</key>
+						<integer>1</integer>
+						<key>format flags</key>
+						<integer>12</integer>
+						<key>format id</key>
+						<integer>1819304813</integer>
+						<key>frames per packet</key>
+						<integer>1</integer>
+						<key>sample rate</key>
+						<integer>48000</integer>
+					</dict>
+					<dict>
+						<key>bits per channel</key>
+						<integer>16</integer>
+						<key>bytes per frame</key>
+						<integer>4</integer>
+						<key>bytes per packet</key>
+						<integer>4</integer>
+						<key>channels per frame</key>
+						<integer>2</integer>
+						<key>format flags</key>
+						<integer>12</integer>
+						<key>format id</key>
+						<real>1819304813</real>
+						<key>frames per packet</key>
+						<integer>1</integer>
+						<key>sample rate</key>
+						<integer>48000</integer>
+					</dict>
+				</array>
+				<key>terminal type</key>
+				<real>1751412840</real>
+			</dict>
+		</array>
+		<key>transport type</key>
+		<real>1853189228</real>
+		<key>uuid</key>
+		<string>Null_Device</string>
+	</dict>
+	<key>UIDeviceFamily</key>
+	<array>
+		<integer>1</integer>
+	</array>
+</dict>
+</plist>

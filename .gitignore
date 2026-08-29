@@ -4,6 +4,7 @@ packages/
 *.o
 a.out
 *.dSYM
+__pycache__/
 tmp/
 Generator/GenerateShimAPI/GenerateShimObjC
 Generator/GenerateShimAPI/GenerateShimOpenGLES

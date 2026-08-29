@@ -1,0 +1,142 @@
+name: Build LiveExec32
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Let an in-flight release finish replacing the nightly assets atomically.
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    outputs:
+      artifact-id: ${{ steps.artifact.outputs.artifact-id }}
+      release-subject: ${{ steps.metadata.outputs.subject }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v7
+      with:
+        submodules: recursive
+        persist-credentials: false
+
+    - name: Restore extracted guest ramdisk
+      id: ramdisk-cache
+      uses: actions/cache/restore@v6
+      with:
+        path: tmp/ipsw/ramdisk.dmg
+        key: lc32-ramdisk-v1-3564d16366b053503107288be6cb335b2283cf14838ab64a88017c17a2a6a1bc
+
+    - name: Install build dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        brew install make boost ldid
+
+        theos="$RUNNER_TEMP/theos"
+        theos_commit=5280bd038207e14f8bd76f5417aa2fe641c03228
+        git init "$theos"
+        git -C "$theos" remote add origin https://github.com/theos/theos.git
+        git -C "$theos" fetch --depth 1 origin "$theos_commit"
+        git -C "$theos" checkout --detach FETCH_HEAD
+        git -C "$theos" submodule update --init --recursive --depth 1
+
+        sdk_archive="$RUNNER_TEMP/iPhoneOS16.5.sdk.tar.xz"
+        curl --fail --location --retry 3 --output "$sdk_archive" \
+          https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz
+        echo "5e0fd3f01266cce4ce012d4a99b38eb56578fca40d09edc81cd83dee958202fb  $sdk_archive" \
+          | shasum -a 256 -c -
+        mkdir -p "$theos/sdks"
+        tar -xJf "$sdk_archive" -C "$theos/sdks"
+        test -f "$theos/sdks/iPhoneOS16.5.sdk/SDKSettings.plist"
+        echo "THEOS=$theos" >> "$GITHUB_ENV"
+
+        pzb_archive="$RUNNER_TEMP/pzb.zip"
+        pzb_root="$RUNNER_TEMP/pzb"
+        tools_dir="$RUNNER_TEMP/lc32-tools"
+        curl --fail --location --retry 3 --output "$pzb_archive" \
+          https://github.com/tihmstar/partialZipBrowser/releases/download/44/buildroot_macos-latest.zip
+        echo "f72452e5c9c1248b8c4b4967a357b03addbe98d61ba8bad286ef0146dfdccdd2  $pzb_archive" \
+          | shasum -a 256 -c -
+        mkdir -p "$pzb_root" "$tools_dir"
+        unzip -q "$pzb_archive" -d "$pzb_root"
+        install -m 0755 \
+          "$pzb_root/buildroot_macos-latest/usr/local/bin/pzb" \
+          "$tools_dir/pzb"
+        echo "$tools_dir" >> "$GITHUB_PATH"
+
+    - name: Generate guest shims
+      run: gmake -C GuestMakefile generate-shims
+
+    - name: Build guest frameworks
+      run: gmake -C GuestMakefile
+
+    - name: Assemble guest root filesystem
+      run: bash GuestMakefile/pack-ramdisk.sh
+
+    - name: Save extracted guest ramdisk
+      if: steps.ramdisk-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: tmp/ipsw/ramdisk.dmg
+        key: ${{ steps.ramdisk-cache.outputs.cache-primary-key }}
+
+    - name: Build IPA
+      run: gmake package
+
+    - name: Read build metadata
+      id: metadata
+      shell: bash
+      run: |
+        printf 'subject=%s\n' "$(git log -1 --pretty=%s)" >> "$GITHUB_OUTPUT"
+
+    - name: Upload Artifact
+      id: artifact
+      uses: actions/upload-artifact@v7
+      with:
+        path: packages/*.ipa
+        archive: false
+        if-no-files-found: error
+
+  release:
+    name: Nightly Release
+    if: >-
+      github.event_name != 'pull_request' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
+    needs: build
+    runs-on: ubuntu-latest
+    concurrency:
+      group: nightly-release
+      cancel-in-progress: false
+    permissions:
+      contents: write
+
+    steps:
+    - name: Download IPA
+      uses: actions/download-artifact@v8
+      with:
+        artifact-ids: ${{ needs.build.outputs.artifact-id }}
+        path: packages
+
+    - name: Nightly Release
+      uses: andelf/nightly-release@5834076edc55cc05975561c9722043f072ac5c26
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      with:
+        body: |
+          **Commit:** [${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
+          **Message:** ${{ needs.build.outputs.release-subject }}
+
+          This is a nightly release [created automatically with GitHub Actions workflow](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}).
+        files: |
+          packages/*.ipa
