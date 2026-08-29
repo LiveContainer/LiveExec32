@@ -16,10 +16,14 @@ This project is heavily based on [unidbg](https://github.com/zhkl0228/unidbg).
 There are also missing syscalls that I have yet to provide to pass through. Please see [ARM32SyscallHandler.java](https://github.com/zhkl0228/unidbg/blob/master/unidbg-ios/src/main/java/com/github/unidbg/ios/ARM32SyscallHandler.java) and [DarwinSyscallHandler.java](https://github.com/zhkl0228/unidbg/blob/master/unidbg-ios/src/main/java/com/github/unidbg/ios/DarwinSyscallHandler.java) to implement them properly.
 
 ## Usage
-- Compile this project using Theos:
+- Initialize Dynarmic, then compile this project using Theos:
 ```bash
+git submodule update --init External/dynarmic
 gmake
 ```
+  The host build configures Dynarmic automatically with CMake and links its
+  static libraries into `LiveExec32Shared`. This requires CMake and Boost
+  1.57 or newer on the build machine.
   For local execution tests on macOS, use
   `gmake LC32_BUILD_CATALYST=1`. This opt-in mode rewrites and re-signs only
   the assembled app and its embedded frameworks for Catalyst; a subsequent
@@ -95,7 +99,8 @@ templates.
 
 ## FAQ
 ### Can this be used to run 32-bit apps & integrate to LiveContainer?
-eta son. No support for iOS 26+ yet until I can enable dual-mapping JIT for Dynarmic.
+Yes. The bundled Dynarmic revision includes the dual-mapping/TXM JIT path
+required by iOS 26+, while non-iOS hosts remain single-mapped by default.
 
 ### Will this be available as a jailbreak tweak?
 Yes, but no plan for this yet. This could be made as transparent as possible,

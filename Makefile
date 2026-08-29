@@ -55,16 +55,14 @@ after-LiveExec32-all::
 		"$$frameworks/LC32HelpUI.framework/"; \
 	cp -a "$(THEOS_OBJ_DIR)/$(firstword $(ARCHS))/LiveExec32.app/LiveExec32" \
 		"$(THEOS_OBJ_DIR)/LiveExec32.app/LiveExec32"; \
-	cp -a "Resources/Frameworks/libdynarmic.dylib" \
-		"$$frameworks/libdynarmic.dylib"
+	rm -f "$$frameworks/libdynarmic.dylib"
 ifeq ($(LC32_BUILD_CATALYST),1)
 	@set -e; \
 	frameworks="$(THEOS_OBJ_DIR)/LiveExec32.app/Frameworks"; \
 	for binary in \
 		"$(THEOS_OBJ_DIR)/LiveExec32.app/LiveExec32" \
 		"$$frameworks/LiveExec32Shared.framework/LiveExec32Shared" \
-		"$$frameworks/LC32HelpUI.framework/LC32HelpUI" \
-		"$$frameworks/libdynarmic.dylib"; do \
+		"$$frameworks/LC32HelpUI.framework/LC32HelpUI"; do \
 		output="$$binary.lc32-vtool"; \
 		rm -f "$$output"; \
 		vtool -arch arm64 -set-build-version 6 11.0 11.0 \
@@ -76,7 +74,6 @@ endif
 	frameworks="$(THEOS_OBJ_DIR)/LiveExec32.app/Frameworks"; \
 	ldid -S "$$frameworks/LiveExec32Shared.framework"; \
 	ldid -S "$$frameworks/LC32HelpUI.framework"; \
-	ldid -S "$$frameworks/libdynarmic.dylib"; \
 	if [ "$(LC32_BUILD_CATALYST)" = 1 ]; then \
 		ldid -S "$(THEOS_OBJ_DIR)/LiveExec32.app"; \
 	else \
@@ -95,3 +92,9 @@ internal-clean::
 		_THEOS_CURRENT_OPERATION= THEOS_CURRENT_ARCH=
 
 include $(THEOS_MAKE_PATH)/application.mk
+
+# Theos updates an existing IPA with `zip -u`, which retains entries removed
+# from the staging tree. Recreate the archive so dependency transitions cannot
+# leave obsolete binaries (such as the former libdynarmic.dylib) packaged.
+before-package::
+	@rm -f "$(_THEOS_IPA_PACKAGE_FILENAME)"
