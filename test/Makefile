@@ -109,6 +109,7 @@ $(eval $(call lc32_guest_test,lc32-corefoundation-run-loop-source,corefoundation
 $(eval $(call lc32_guest_test,lc32-corefoundation-run-loop-timer,corefoundation_run_loop_timer.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-socket,corefoundation_socket.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-url-propertylist,corefoundation_url_propertylist.m,Foundation CoreFoundation))
+$(eval $(call lc32_guest_test,lc32-corefoundation-uuid,corefoundation_uuid.c,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-write-stream,corefoundation_write_stream.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-cxx-lifecycle,cxx_lifecycle.mm,Foundation UIKit LC32))
 $(eval $(call lc32_guest_test,lc32-data-bytes,data_bytes.m,Foundation))

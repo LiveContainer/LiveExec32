@@ -1,7 +1,55 @@
 #import <CoreFoundation/CoreFoundation+LC32.h>
 
+#include <stddef.h>
+#include <string.h>
+
 const CFStringRef kCFBundleVersionKey = CFSTR("CFBundleVersion");
 const CFRunLoopMode kCFRunLoopCommonModes = CFSTR("kCFRunLoopCommonModes");
+
+typedef union {
+    CFUUIDBytes bytes;
+    UInt8 rawBytes[16];
+} LC32CFUUIDBytes;
+
+_Static_assert(sizeof(CFUUIDBytes) == 16,
+               "CFUUIDBytes must contain exactly 16 bytes");
+_Static_assert(sizeof(LC32CFUUIDBytes) == 16,
+               "LC32CFUUIDBytes must not add padding");
+_Static_assert(offsetof(CFUUIDBytes, byte0) == 0,
+               "CFUUIDBytes byte0 must be first");
+_Static_assert(offsetof(CFUUIDBytes, byte15) == 15,
+               "CFUUIDBytes byte15 must be last");
+
+static int LC32CFUUIDHexValue(unsigned char character) {
+    if(character >= '0' && character <= '9') return character - '0';
+    if(character >= 'A' && character <= 'F') return character - 'A' + 10;
+    if(character >= 'a' && character <= 'f') return character - 'a' + 10;
+    return -1;
+}
+
+static Boolean LC32CFUUIDParseString(const char *text,
+                                     UInt8 rawBytes[16]) {
+    if(!text || !rawBytes) return false;
+    UInt8 parsed[16];
+    size_t byteIndex = 0;
+    int highNibble = -1;
+    for(const unsigned char *cursor = (const unsigned char *)text;
+            *cursor; ++cursor) {
+        if(*cursor == '-') continue;
+        const int nibble = LC32CFUUIDHexValue(*cursor);
+        if(nibble < 0) return false;
+        if(highNibble < 0) {
+            highNibble = nibble;
+            continue;
+        }
+        if(byteIndex == sizeof(parsed)) return false;
+        parsed[byteIndex++] = (UInt8)((highNibble << 4) | nibble);
+        highNibble = -1;
+    }
+    if(byteIndex != sizeof(parsed) || highNibble >= 0) return false;
+    memcpy(rawBytes, parsed, sizeof(parsed));
+    return true;
+}
 
 /* Foundation's iOS 6 import is two-level bound to CoreFoundation. */
 NSString * const NSGregorianCalendar = @"gregorian";
@@ -98,20 +146,15 @@ CFUUIDRef CFUUIDCreate(CFAllocatorRef allocator) {
 CFUUIDRef CFUUIDCreateFromUUIDBytes(CFAllocatorRef allocator,
                                     CFUUIDBytes bytes) {
     static const char digits[] = "0123456789ABCDEF";
-    const UInt8 rawBytes[16] = {
-        bytes.byte0, bytes.byte1, bytes.byte2, bytes.byte3,
-        bytes.byte4, bytes.byte5, bytes.byte6, bytes.byte7,
-        bytes.byte8, bytes.byte9, bytes.byte10, bytes.byte11,
-        bytes.byte12, bytes.byte13, bytes.byte14, bytes.byte15,
-    };
+    const LC32CFUUIDBytes storage = {.bytes = bytes};
     char text[37];
     size_t output = 0;
-    for(size_t index = 0; index < sizeof(rawBytes); ++index) {
+    for(size_t index = 0; index < sizeof(storage.rawBytes); ++index) {
         if(index == 4 || index == 6 || index == 8 || index == 10) {
             text[output++] = '-';
         }
-        text[output++] = digits[rawBytes[index] >> 4];
-        text[output++] = digits[rawBytes[index] & 0x0f];
+        text[output++] = digits[storage.rawBytes[index] >> 4];
+        text[output++] = digits[storage.rawBytes[index] & 0x0f];
     }
     text[output] = '\0';
 
@@ -123,6 +166,14 @@ CFUUIDRef CFUUIDCreateFromUUIDBytes(CFAllocatorRef allocator,
         initWithUUIDString:(NSString *)string];
     CFRelease(string);
     return uuid;
+}
+
+CFUUIDBytes CFUUIDGetUUIDBytes(CFUUIDRef uuid) {
+    LC32CFUUIDBytes result = {0};
+    if(!uuid) return result.bytes;
+    NSString *string = [(NSUUID *)uuid UUIDString];
+    LC32CFUUIDParseString(string.UTF8String, result.rawBytes);
+    return result.bytes;
 }
 
 CFStringRef CFUUIDCreateString(CFAllocatorRef allocator, CFUUIDRef uuid) {
