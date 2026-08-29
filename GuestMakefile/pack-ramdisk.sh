@@ -7,7 +7,7 @@ REPO_ROOT=$(CDPATH= cd "$SCRIPT_DIR/.." && pwd)
 RAMDISK_ROOT=${RAMDISK_ROOT:-"$REPO_ROOT/Resources/RootFS"}
 IOS_SYSTEM_ROOT=${IOS_SYSTEM_ROOT:-}
 FRAMEWORK_INFO_ROOT=${FRAMEWORK_INFO_ROOT:-"$SCRIPT_DIR/FrameworkInfoPlists"}
-BUILD_ROOT=${BUILD_ROOT:-"$SCRIPT_DIR/.theos/obj/debug/armv7s"}
+BUILD_ROOT=${BUILD_ROOT:-"$SCRIPT_DIR/.theos/obj/armv7s"}
 
 # The guest root is the iOS 10.3.3 restore ramdisk.  If it has not been set
 # up yet, download and extract it from the IPSW, then copy it into place

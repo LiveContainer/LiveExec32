@@ -3,7 +3,7 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd "$SCRIPT_DIR/.." && pwd)
-IMAGE=${1:-"$REPO_ROOT/GuestMakefile/.theos/obj/debug/armv7s/Security.framework/Security"}
+IMAGE=${1:-"$REPO_ROOT/GuestMakefile/.theos/obj/armv7s/Security.framework/Security"}
 
 if [ ! -f "$IMAGE" ]; then
     echo "Security linked image does not exist: $IMAGE" >&2

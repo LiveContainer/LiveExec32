@@ -33,6 +33,12 @@ gmake
 gmake -C GuestMakefile generate-shims
 gmake -C GuestMakefile
 ```
+  With GNU Make 4 or newer, independent frameworks and their source files are
+  built through the shared jobserver; pass `-jN` to cap concurrency. Guest
+  frameworks also share the SDK's MRC/ARC Clang module contexts, keeping a
+  cold module cache compact. Set `LC32_SHARE_GUEST_MODULE_CACHE=0` only when
+  diagnosing an isolated Clang module-cache issue.
+
   The guest build downloads the third-party iOS 10.3 SDK archive to
   `tmp/iPhoneOS10.3.sdk.tar.gz`, verifies its pinned SHA-256 checksum, and
   extracts it atomically to `tmp/iPhoneOS10.3.sdk` for subsequent builds. Set

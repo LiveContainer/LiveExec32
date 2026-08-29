@@ -3,7 +3,7 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd "$SCRIPT_DIR/.." && pwd)
-FRAMEWORK=${1:-"$REPO_ROOT/GuestMakefile/.theos/obj/debug/armv7s/CoreText.framework/CoreText"}
+FRAMEWORK=${1:-"$REPO_ROOT/GuestMakefile/.theos/obj/armv7s/CoreText.framework/CoreText"}
 
 if [ ! -f "$FRAMEWORK" ]; then
     echo "CoreText guest framework not found: $FRAMEWORK" >&2

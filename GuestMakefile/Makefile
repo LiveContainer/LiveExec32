@@ -1,7 +1,17 @@
 ARCHS := armv7s
 TARGET := iphone:clang:16.5:10.3
+FINALPACKAGE = 1
+STRIP = 0
 .DEFAULT_GOAL := all
 GO_EASY_ON_ME = 1
+
+# Theos normally serializes product targets and only parallelizes source files
+# within one framework.  Let the top-level guest build fan independent
+# frameworks out through GNU Make's shared jobserver; instance submakes retain
+# Theos's normal phase ordering.
+ifeq ($(THEOS_CURRENT_INSTANCE),)
+_THEOS_MAKE_PARALLEL := yes
+endif
 
 include guest-sdk.mk
 
@@ -30,6 +40,13 @@ ADDITIONAL_CFLAGS = \
   -F$(ISYSROOT)/System/Library/Frameworks/AVFoundation.framework/Frameworks
 ADDITIONAL_LDFLAGS = -fno-autolink -F$(THEOS_OBJ_DIR)
 include $(THEOS)/makefiles/common.mk
+
+# THEOS_INSTANCE_NAME is not referenced by the SDK modules. Excluding it from
+# their context hash lets every guest framework share the same MRC/ARC PCMs.
+LC32_SHARE_GUEST_MODULE_CACHE ?= 1
+ifeq ($(LC32_SHARE_GUEST_MODULE_CACHE),1)
+MODULESFLAGS += -fmodules-ignore-macro=THEOS_INSTANCE_NAME
+endif
 
 BOOTSTRAP_FRAMEWORKS := LC32 AudioToolbox CoreFoundation CoreGraphics CoreText CFNetwork Foundation
 manual_framework_dirs = $(patsubst %/,%,$(wildcard $(MANUAL_FRAMEWORKS_ROOT)/*/))
@@ -141,9 +158,27 @@ include $(THEOS_MAKE_PATH)/framework.mk
 # Theos can fan framework builds out from internal-all, and its convenience
 # targets bypass before-all. Gate both paths so no compiler observes a partial
 # or missing SDK, including when parallel building is explicitly enabled.
+GUEST_FRAMEWORK_BUILD_TARGETS := $(FRAMEWORK_NAME:=.all.framework.variables)
+$(FRAMEWORK_NAME) $(GUEST_FRAMEWORK_BUILD_TARGETS): | $(_THEOS_BUILD_SESSION_FILE)
 ifneq ($(strip $(LC32_GUEST_SDK_DEPENDENCY)),)
 before-all:: $(LC32_GUEST_SDK_DEPENDENCY)
-$(FRAMEWORK_NAME) $(FRAMEWORK_NAME:=.all.framework.variables): | $(LC32_GUEST_SDK_DEPENDENCY)
+$(FRAMEWORK_NAME) $(GUEST_FRAMEWORK_BUILD_TARGETS): | $(LC32_GUEST_SDK_DEPENDENCY)
+endif
+
+# Preserve Theos's before/internal/after ordering at the top level while the
+# framework prerequisites of internal-all run concurrently.  Every guest
+# framework links LC32, and the two re-export relationships below consume
+# binaries produced by this same build, so encode those ordering constraints.
+ifeq ($(THEOS_CURRENT_INSTANCE),)
+.NOTPARALLEL: all clean clean-packages stage package install uninstall do commands
+$(filter-out LC32,$(FRAMEWORK_NAME)): | LC32
+$(filter-out LC32.all.framework.variables,$(GUEST_FRAMEWORK_BUILD_TARGETS)): | \
+  LC32.all.framework.variables
+Foundation: | CoreFoundation CFNetwork
+Foundation.all.framework.variables: | \
+  CoreFoundation.all.framework.variables CFNetwork.all.framework.variables
+AVFoundation: | AVFAudio
+AVFoundation.all.framework.variables: | AVFAudio.all.framework.variables
 endif
 
 # Exclude linking against CoreFoundation and Foundation for themselves

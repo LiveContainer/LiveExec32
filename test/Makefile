@@ -37,7 +37,7 @@ include ../GuestMakefile/guest-sdk.mk
 #   make -C test check-symbols   # build and audit framework symbol coverage
 # Final executables are copied to /private/tmp by default for LiveExec32.
 
-GUEST_FRAMEWORK_DIR ?= $(abspath ../GuestMakefile/.theos/obj/debug/armv7s)
+GUEST_FRAMEWORK_DIR ?= $(abspath ../GuestMakefile/.theos/obj/armv7s)
 TEST_OUTPUT_DIR ?= /private/tmp
 ROOTFS ?= $(abspath ../Resources/RootFS)
 
