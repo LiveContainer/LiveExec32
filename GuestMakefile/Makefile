@@ -26,6 +26,7 @@ export CLANG_MODULE_CACHE_PATH := $(CURDIR)/.theos/module-cache
 ADDITIONAL_CFLAGS = \
   -I$(abspath ../include) \
   -I$(MANUAL_FRAMEWORKS_ROOT) \
+  -Wno-deprecated-module-dot-map \
   -F$(ISYSROOT)/System/Library/Frameworks/AVFoundation.framework/Frameworks
 ADDITIONAL_LDFLAGS = -fno-autolink -F$(THEOS_OBJ_DIR)
 include $(THEOS)/makefiles/common.mk

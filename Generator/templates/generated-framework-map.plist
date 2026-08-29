@@ -116,6 +116,35 @@
 	<key>Foundation/NSURLSessionUploadTask</key>
 	<string>CFNetwork</string>
 
+	<!-- These captured classes are unavailable to the ARMv7 iPhone target
+	     (macOS, Simulator, tvOS, or Watch extension only). -->
+	<key>AVFoundation/AVCaptureAudioFileOutput</key>
+	<string>-</string>
+	<key>AVFoundation/AVCaptureAudioPreviewOutput</key>
+	<string>-</string>
+	<key>AVFoundation/AVCaptureDeviceInputSource</key>
+	<string>-</string>
+	<key>AVFoundation/AVCaptureScreenInput</key>
+	<string>-</string>
+	<key>Foundation/NSSocketPort</key>
+	<string>-</string>
+	<key>GameKit/GKGameSessionSharingViewController</key>
+	<string>-</string>
+	<key>WatchKit/WKApplicationRefreshBackgroundTask</key>
+	<string>-</string>
+	<key>WatchKit/WKExtension</key>
+	<string>-</string>
+	<key>WatchKit/WKRefreshBackgroundTask</key>
+	<string>-</string>
+	<key>WatchKit/WKSnapshotRefreshBackgroundTask</key>
+	<string>-</string>
+	<key>WatchKit/WKURLSessionRefreshBackgroundTask</key>
+	<string>-</string>
+	<key>WatchKit/WKWatchConnectivityRefreshBackgroundTask</key>
+	<string>-</string>
+	<key>WebKit/WKOpenPanelParameters</key>
+	<string>-</string>
+
 	<key>JavaScriptCore/MyClass</key>
 	<string>-</string>
 	<key>UIKit/NSFileProviderExtension</key>

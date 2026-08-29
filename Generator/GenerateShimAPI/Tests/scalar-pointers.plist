@@ -28,6 +28,14 @@
                 <string>{CGSize=ff}28@0:4@8f12^f16f20i24</string>
             </dict>
         </dict>
+        <key>UIDevice</key>
+        <dict>
+            <key>-</key>
+            <dict>
+                <key>userInterfaceIdiom</key>
+                <string>i8@0:4</string>
+            </dict>
+        </dict>
     </dict>
 </dict>
 </plist>

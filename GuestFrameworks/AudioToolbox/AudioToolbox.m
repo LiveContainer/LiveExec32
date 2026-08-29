@@ -1032,7 +1032,7 @@ OSStatus AudioQueueFreeBuffer(AudioQueueRef inAQ, AudioQueueBufferRef inBuffer) 
     if(!inAQ || !inBuffer) return kAudio_ParamError;
     pthread_mutex_lock(&LC32AudioQueueAllocationsMutex);
     LC32GuestAudioQueueAllocation **cursor = &LC32AudioQueueAllocations;
-    while(*cursor && (&(*cursor)->buffer != inBuffer ||
+    while(*cursor && ((AudioQueueBufferRef)&(*cursor)->buffer != inBuffer ||
             (*cursor)->queue != inAQ)) {
         cursor = &(*cursor)->next;
     }

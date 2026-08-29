@@ -610,7 +610,9 @@ static BOOL LC32MethodReturnsOwnedResult(NSString *className,
         (self.method.returnType[0] == '@' &&
          !LC32MethodIsInInitFamily(self.method) &&
          !LC32MethodReturnsOwnedResult(self.className, self.method));
-    if(self.method.returnType[0] == '{') {
+    if(self.method.returnType[0] == 'v') {
+        [call appendString:@"(void)LC32InvokeHostSelector(self.host_self, host_cmd"];
+    } else if(self.method.returnType[0] == '{') {
         if(LC32KnownStructForEncoding(self.method.returnType) ==
                 LC32KnownStructNSRange) {
             [call appendString:
@@ -703,7 +705,19 @@ static BOOL LC32MethodReturnsOwnedResult(NSString *className,
 }
 
 - (NSString *)description {
-    return [self.lines componentsJoinedByString:@"\n"];
+    NSString *source = [self.lines componentsJoinedByString:@"\n"];
+    if(!LC32MethodIsInInitFamily(self.method)) return source;
+
+    /* Proxy initializers deliberately terminate at the native peer rather
+     * than chaining through guest self/super, so Clang's body-level
+     * designated-initializer diagnostic does not describe this ABI. Keep the
+     * class-level coverage diagnostic visible outside this local scope. */
+    return [NSString stringWithFormat:
+        @"#pragma clang diagnostic push\n"
+         "#pragma clang diagnostic ignored \"-Wobjc-designated-initializers\"\n"
+         "%@\n"
+         "#pragma clang diagnostic pop",
+        source];
 }
 @end
 
@@ -780,6 +794,12 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
                [selector isEqualToString:@"initWithFormat:locale:"] ||
                [selector isEqualToString:
                    @"initWithFormat:locale:arguments:"] ||
+               [selector isEqualToString:@"rangeOfString:"] ||
+               [selector isEqualToString:@"rangeOfString:options:"] ||
+               [selector isEqualToString:
+                   @"rangeOfString:options:range:"] ||
+               [selector isEqualToString:
+                   @"rangeOfString:options:range:locale:"] ||
                [selector isEqualToString:@"stringByAppendingFormat:"];
     }
     if([className isEqualToString:@"NSData"] && method.isInstanceMethod) {
@@ -787,6 +807,7 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
                [selector isEqualToString:@"getBytes:"] ||
                [selector isEqualToString:@"getBytes:length:"] ||
                [selector isEqualToString:@"getBytes:range:"] ||
+               [selector isEqualToString:@"subdataWithRange:"] ||
                /* r^v/^v byte buffers: native Foundation cannot dereference
                 * an ARM32 address, so the guest adapter copies through the
                 * guest-memory bridge before initializing. */
@@ -795,6 +816,18 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
                    @"initWithBytesNoCopy:length:"] ||
                [selector isEqualToString:
                    @"initWithBytesNoCopy:length:freeWhenDone:"];
+    }
+    if([className isEqualToString:@"NSMutableData"]) {
+        if(!method.isInstanceMethod) {
+            return [selector isEqualToString:@"dataWithCapacity:"];
+        }
+        return [selector isEqualToString:@"initWithCapacity:"] ||
+               [selector isEqualToString:@"mutableBytes"] ||
+               [selector isEqualToString:@"appendData:"] ||
+               [selector isEqualToString:@"increaseLengthBy:"] ||
+               [selector isEqualToString:@"resetBytesInRange:"] ||
+               [selector isEqualToString:@"setData:"] ||
+               [selector isEqualToString:@"setLength:"];
     }
     if([className isEqualToString:@"NSValue"]) {
         if(!method.isInstanceMethod) {
@@ -816,6 +849,49 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
     if([className isEqualToString:@"UIView"] &&
        !method.isInstanceMethod &&
        [selector isEqualToString:@"beginAnimations:context:"]) {
+        return YES;
+    }
+    if([className isEqualToString:@"NSPredicate"] &&
+       !method.isInstanceMethod &&
+       [selector isEqualToString:@"predicateWithFormat:"]) {
+        return YES;
+    }
+    if([className isEqualToString:@"NSBundle"] &&
+       !method.isInstanceMethod &&
+       [selector isEqualToString:@"mainBundle"]) {
+        return YES;
+    }
+    if([className isEqualToString:@"GKLocalPlayer"] &&
+       method.isInstanceMethod &&
+       ([selector isEqualToString:@"setAuthenticateHandler:"] ||
+        [selector isEqualToString:@"isAuthenticated"] ||
+        [selector isEqualToString:
+            @"loadDefaultLeaderboardCategoryIDWithCompletionHandler:"] ||
+        [selector isEqualToString:
+            @"loadDefaultLeaderboardIdentifierWithCompletionHandler:"])) {
+        return YES;
+    }
+    if(method.isInstanceMethod &&
+       (([className isEqualToString:@"UIImage"] &&
+         [selector isEqualToString:@"CGImage"]) ||
+        ([className isEqualToString:@"UIScreen"] &&
+         ([selector isEqualToString:@"bounds"] ||
+          [selector isEqualToString:@"applicationFrame"] ||
+          [selector isEqualToString:@"scale"])) ||
+        ([className isEqualToString:@"UIColor"] &&
+         [selector isEqualToString:@"CGColor"]) ||
+        ([className isEqualToString:@"UIWebView"] &&
+         [selector isEqualToString:@"loadRequest:"]) ||
+        ([className isEqualToString:@"UIWindow"] &&
+         ([selector isEqualToString:@"rootViewController"] ||
+          [selector isEqualToString:@"setRootViewController:"])) ||
+        ([className isEqualToString:@"UIDevice"] &&
+         [selector isEqualToString:@"userInterfaceIdiom"]))) {
+        return YES;
+    }
+    if([className isEqualToString:@"UIImage"] &&
+       !method.isInstanceMethod &&
+       [selector isEqualToString:@"imageNamed:"]) {
         return YES;
     }
     /* Modern UIApplication accepts these deprecated selectors but no longer
@@ -1003,6 +1079,21 @@ static BOOL LC32MethodHasIndirectObjectBuffer(NSString *className,
     [string appendFormat:@"#import <LC32/LC32.h>\n"];
     [string appendFormat:@"#import <CoreGraphics/CoreGraphics+LC32.h>\n"];
     [string appendFormat:@"#import <UIKit/UIKit+LC32.h>\n"];
+    [string appendString:
+        @"// Proxy methods intentionally forward across an ABI boundary; "
+         "source-level noescape and guest self/super checks do not apply.\n"
+         "#pragma clang diagnostic push\n"
+         "#pragma clang diagnostic ignored \"-Wmissing-noescape\"\n"
+         "#pragma clang diagnostic ignored \"-Wobjc-missing-super-calls\"\n"];
+    if(!self.usesRuntimeSignatures) {
+        /* Captured ARM32 encodings are authoritative, but do not retain every
+         * typedef, object specialization, or block spelling from the SDK.
+         * Runtime-derived UIKit extras stay unsuppressed because their
+         * width-dependent mismatches require an ABI audit. */
+        [string appendString:
+            @"#pragma clang diagnostic ignored \"-Wmismatched-parameter-types\"\n"
+             "#pragma clang diagnostic ignored \"-Wmismatched-return-types\"\n"];
+    }
     [string appendFormat:@"@implementation %@\n", self.className];
     if([self.className isEqualToString:@"NSData"]) {
         // NSData.h declares bytes as a property. Once its generated method is
@@ -1016,6 +1107,31 @@ static BOOL LC32MethodHasIndirectObjectBuffer(NSString *className,
         // with the manual category implementation.
         [string appendString:@"@dynamic objCType;\n"];
     }
+    /* Filtering a manual property adapter's accessor is not enough: Clang
+     * otherwise synthesizes a guest ivar and replacement accessor in the
+     * primary class. Declare those SDK properties dynamic so the category is
+     * the sole implementation. */
+    if([self.className isEqualToString:@"NSMutableData"]) {
+        [string appendString:@"@dynamic mutableBytes;\n"];
+    }
+    if([self.className isEqualToString:@"GKLocalPlayer"]) {
+        [string appendString:@"@dynamic authenticateHandler, authenticated;\n"];
+    }
+    if([self.className isEqualToString:@"UIImage"]) {
+        [string appendString:@"@dynamic CGImage;\n"];
+    }
+    if([self.className isEqualToString:@"UIScreen"]) {
+        [string appendString:@"@dynamic bounds, applicationFrame, scale;\n"];
+    }
+    if([self.className isEqualToString:@"UIColor"]) {
+        [string appendString:@"@dynamic CGColor;\n"];
+    }
+    if([self.className isEqualToString:@"UIWindow"]) {
+        [string appendString:@"@dynamic rootViewController;\n"];
+    }
+    if([self.className isEqualToString:@"UIDevice"]) {
+        [string appendString:@"@dynamic userInterfaceIdiom;\n"];
+    }
     NSArray<NSString *> *methodKeys =
         [self.methods.allKeys sortedArrayUsingSelector:@selector(compare:)];
     NSMutableArray<NSString *> *methodSources =
@@ -1025,7 +1141,8 @@ static BOOL LC32MethodHasIndirectObjectBuffer(NSString *className,
     }
     [string appendString:[methodSources componentsJoinedByString:@"\n\n"]];
     [string appendString:@"\n"];
-    [string appendString:@"@end"];
+    [string appendString:@"@end\n"];
+    [string appendString:@"#pragma clang diagnostic pop"];
     return string;
 }
 @end

@@ -11,6 +11,7 @@ trap 'rm -rf "$TEMP_ROOT"' EXIT HUP INT TERM
 
 FIXTURE_SOURCE="$TEMP_ROOT/UIKit/LC32ScalarPointerFixture.m"
 NSSTRING_SOURCE="$TEMP_ROOT/UIKit/NSString.m"
+UIDEVICE_SOURCE="$TEMP_ROOT/UIKit/UIDevice.m"
 
 require_line() {
     needle=$1
@@ -48,6 +49,14 @@ require_line \
 require_line \
     '// Input-only scalar pointer guest_arg0 needs no copyback' \
     "$FIXTURE_SOURCE"
+require_line \
+    '(void)LC32InvokeHostSelector(self.host_self, host_cmd' \
+    "$FIXTURE_SOURCE"
+
+if grep -Fq 'uint64_t host_ret =' "$FIXTURE_SOURCE"; then
+    echo "Void scalar-pointer shims still emit an unused host_ret" >&2
+    exit 1
+fi
 
 require_line \
     'double host_arg2 = guest_arg2 ? (double)*guest_arg2 : 0.0;' \
@@ -58,6 +67,12 @@ require_line \
 require_line \
     'if(guest_arg2) *guest_arg2 = (float)host_arg2;' \
     "$NSSTRING_SOURCE"
+
+require_line '@dynamic userInterfaceIdiom;' "$UIDEVICE_SOURCE"
+if grep -Fq -- '- (int)userInterfaceIdiom' "$UIDEVICE_SOURCE"; then
+    echo "Manual UIDevice property adapter still has a generated method" >&2
+    exit 1
+fi
 
 if grep -Fq 'FIXME: has unhandled types' "$FIXTURE_SOURCE" ||
    grep -Fq 'FIXME: has unhandled types' "$NSSTRING_SOURCE"; then

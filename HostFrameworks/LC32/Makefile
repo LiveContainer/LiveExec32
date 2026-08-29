@@ -17,6 +17,32 @@ DYNARMIC_STATIC_LIBS := \
 	$(DYNARMIC_BUILD_DIR)/externals/mcl/src/libmcl.a \
 	$(DYNARMIC_BUILD_DIR)/externals/fmt/libfmt.a
 
+# CMake 4 split developer diagnostics into author and policy categories and
+# made its older aggregate spellings noisy. Keep both the local CMake 3 flow
+# and the macOS CI CMake 4 flow quiet without hiding Dynarmic's own messages.
+LC32_CMAKE_VERSION := $(shell cmake --version 2>/dev/null | \
+	awk 'NR == 1 { print $$3 }')
+LC32_CMAKE_MAJOR := $(word 1,$(subst ., ,$(LC32_CMAKE_VERSION)))
+LC32_CMAKE_MINOR := $(word 2,$(subst ., ,$(LC32_CMAKE_VERSION)))
+LC32_CMAKE_IS_V4_OR_NEWER := $(shell \
+	test "$(LC32_CMAKE_MAJOR)" -ge 4 2>/dev/null && echo 1)
+LC32_CMAKE_HAS_DIAGNOSTIC_CATEGORIES := $(shell \
+	if test "$(LC32_CMAKE_MAJOR)" -gt 4 2>/dev/null; then echo 1; \
+	elif test "$(LC32_CMAKE_MAJOR)" -eq 4 2>/dev/null && \
+	     test "$(LC32_CMAKE_MINOR)" -ge 4 2>/dev/null; then echo 1; fi)
+ifeq ($(LC32_CMAKE_HAS_DIAGNOSTIC_CATEGORIES),1)
+DYNARMIC_CMAKE_WARNING_FLAGS := \
+	-Wno-author -Wno-policy -Wno-deprecated -Wno-unused-cli
+else
+DYNARMIC_CMAKE_WARNING_FLAGS := \
+	--no-warn-unused-cli -Wno-dev -Wno-deprecated
+endif
+ifeq ($(LC32_CMAKE_IS_V4_OR_NEWER),1)
+DYNARMIC_CMAKE_POLICY_FLAGS := -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+else
+DYNARMIC_CMAKE_POLICY_FLAGS :=
+endif
+
 LiveExec32Shared_FILES = \
 	LiveExec32Shared.cpp guest_bootstrap.cpp debugger_server.cpp \
 	crash_exception.mm \
@@ -61,15 +87,17 @@ include $(THEOS_MAKE_PATH)/framework.mk
 # finish updating its archives before the framework link is evaluated.
 .NOTPARALLEL: internal-framework-all
 
+# The nested CMake build uses a fixed worker count. Its build command drops the
+# parent Theos jobserver instead of advertising it and then overriding it.
 .PHONY: lc32-dynarmic-static
 lc32-dynarmic-static:
 	@test -f "$(DYNARMIC_ROOT)/CMakeLists.txt" || { \
 		echo "External/dynarmic is missing; initialize the submodule" >&2; \
 		exit 1; \
 	}
-	cmake --no-warn-unused-cli \
+	cmake $(DYNARMIC_CMAKE_WARNING_FLAGS) \
 		-S "$(DYNARMIC_ROOT)" -B "$(DYNARMIC_BUILD_DIR)" \
-		-DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+		$(DYNARMIC_CMAKE_POLICY_FLAGS) \
 		-DDYNARMIC_USE_BUNDLED_EXTERNALS=ON \
 		-DDYNARMIC_FRONTENDS=A32 \
 		-DBUILD_TESTING=OFF \
@@ -82,7 +110,7 @@ lc32-dynarmic-static:
 		-DCMAKE_OSX_ARCHITECTURES=arm64 \
 		-DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
 		-DCMAKE_C_FLAGS="-arch arm64"
-	cmake --build "$(DYNARMIC_BUILD_DIR)" \
+	env -u MAKEFLAGS cmake --build "$(DYNARMIC_BUILD_DIR)" \
 		--target dynarmic --parallel 4
 	@for archive in $(DYNARMIC_STATIC_LIBS); do \
 		test -f "$$archive" || { \
