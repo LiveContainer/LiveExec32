@@ -1,5 +1,8 @@
 #include "dynarmic_internal.h"
 #include "dynarmic_syscalls.h"
+#include "darwin_file_syscalls.h"
+
+#include <poll.h>
 
 // guest syscalls
 int guest_csops(pid_t pid, unsigned int ops, u32 guest_useraddr, size_t usersize) {
@@ -259,7 +262,14 @@ int guest___sysctl(u32 guest_name, u_int namelen, u32 guest_oldp,
 int guest___sysctlbyname(u32 guest_name, u_int namelen, u32 guest_oldp,
         u32 guest_oldlenp, u32 guest_newp, size_t newlen) {
     // TODO: fake stuff like CPU architecture and KERN_USRSTACK32
-    DynarmicHostString host_name(guest_name);
+    std::array<char, PATH_MAX> host_name = {};
+    if(namelen >= host_name.size()) {
+        return return_with_carry_direct(ENAMETOOLONG, true);
+    }
+    if(namelen != 0 && !read_guest_memory_with_permissions(
+            guest_name, host_name.data(), namelen, PROT_READ)) {
+        return return_with_carry_direct(EFAULT, true);
+    }
 
     GuestSysctlStorage storage;
     const int prepareError = PrepareGuestSysctlStorage(
@@ -267,7 +277,7 @@ int guest___sysctlbyname(u32 guest_name, u_int namelen, u32 guest_oldp,
     if(prepareError) return return_with_carry_direct(prepareError, true);
 
     const int result = syscallRetCarry(SYS_sysctlbyname,
-        host_name.hostPtr, namelen,
+        host_name.data(), namelen,
         guest_oldp ? storage.hostOldBytes.data() : nullptr,
         guest_oldlenp ? &storage.hostOldLength : nullptr,
         guest_newp ? storage.hostNewBytes.data() : nullptr, newlen,
@@ -282,7 +292,10 @@ int guest___sysctlbyname(u32 guest_name, u_int namelen, u32 guest_oldp,
 
 int guest_getattrlist(u32 guest_path, u32 guest_attrList, u32 guest_attrBuf, size_t attrBufSize, unsigned long options) {
     char host_path[PATH_MAX];
-    sharedHandle.fs->pathGuestToHost(guest_path, host_path);
+    const int path_error = LC32GuestPathToHost(guest_path, host_path);
+    if(path_error != 0) {
+        return return_with_carry_direct(path_error, true);
+    }
     struct attrlist host_attrList;
     Dynarmic_mem_1read(guest_attrList, sizeof(struct attrlist), (char *)&host_attrList);
     char *host_attrBuf = (char *)malloc(attrBufSize);
@@ -293,9 +306,14 @@ int guest_getattrlist(u32 guest_path, u32 guest_attrList, u32 guest_attrBuf, siz
 }
 
 int guest_shm_open(u32 guest_name, int oflag, int mode) {
-    DynarmicHostString host_name(guest_name);
-    printf("LC32: shm_open %s\n", host_name.hostPtr);
-    return syscallRetCarry(SYS_shm_open, host_name.hostPtr, oflag, mode);
+    char host_name[PATH_MAX];
+    const int copy_error = LC32CopyGuestCString(
+        guest_name, host_name);
+    if(copy_error != 0) {
+        return return_with_carry_direct(copy_error, true);
+    }
+    printf("LC32: shm_open %s\n", host_name);
+    return syscallRetCarry(SYS_shm_open, host_name, oflag, mode);
 }
 
 int     guest_pthread_getugid_np(u32 uid, u32 gid) {
@@ -1699,19 +1717,40 @@ guest_mach_msg_trap(u32 guest_msg,
     return result;
 }
 
-int guest_getdirentries64(int fd, u32 guest_buf, int nbytes, u32 guest_basep) {
-    char *host_buf = (char *)malloc(nbytes);
-    __darwin_off_t host_basep =
-        static_cast<__darwin_off_t>(
-            Dynarmic_current_user_callbacks()->MemoryRead32(
-                guest_basep)); // is reading needed?
-    // FIXME: is this correct?
-    int result = syscallRetCarry(SYS_getdirentries64, fd, host_buf, nbytes, &host_basep, 0,0,0);
-    Dynarmic_mem_1write(guest_buf, nbytes, host_buf);
-    Dynarmic_current_user_callbacks()->MemoryWrite64(
-        guest_basep, host_basep);
-    free(host_buf);
-    return result;
+int guest_getdirentries64(int fd, u32 guest_buf, u32 nbytes,
+        u32 guest_basep) {
+    /* XNU caps one getdirentries64 transfer at 128 MiB. */
+    constexpr size_t maximumBufferSize = 128U * 1024U * 1024U;
+    const size_t bufferSize = std::min(
+        static_cast<size_t>(nbytes), maximumBufferSize);
+    std::vector<char> hostBuffer;
+    try {
+        hostBuffer.resize(bufferSize);
+    } catch(const std::bad_alloc &) {
+        return return_with_carry_direct(ENOMEM, true);
+    }
+
+    /* basep is output-only and is a 64-bit off_t in the armv7 ABI. */
+    off_t hostPosition = 0;
+    const int result = syscallRetCarry(
+        SYS_getdirentries64, fd,
+        hostBuffer.empty() ? nullptr : hostBuffer.data(),
+        bufferSize, &hostPosition, 0, 0, 0);
+    if(threadHandle.cpsr->hasCarry()) {
+        return result;
+    }
+    if(result < 0 || static_cast<size_t>(result) > bufferSize) {
+        return return_with_carry_direct(EIO, true);
+    }
+    if((result != 0 && !write_guest_memory_with_permissions(
+            guest_buf, hostBuffer.data(), static_cast<size_t>(result),
+            PROT_WRITE)) ||
+            !write_guest_memory_with_permissions(
+                guest_basep, &hostPosition, sizeof(hostPosition),
+                PROT_WRITE)) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+    return return_with_carry_direct(result, false);
 }
 
 void guest_stat_copy(struct stat *host_buf, struct stat_32 *host_buf_32) {
@@ -1745,7 +1784,10 @@ void guest_stat_copy(struct stat *host_buf, struct stat_32 *host_buf_32) {
 
 int guest_stat64(u32 guest_path, u32 guest_buf) {
     char host_path[PATH_MAX];
-    sharedHandle.fs->pathGuestToHost(guest_path, host_path);
+    const int path_error = LC32GuestPathToHost(guest_path, host_path);
+    if(path_error != 0) {
+        return return_with_carry_direct(path_error, true);
+    }
     struct stat host_buf;
     struct stat_32 host_buf_32;
     int result = stat(host_path, &host_buf);
@@ -1771,7 +1813,10 @@ int guest_lstat(u32 guest_path, u32 guest_buf) {
     struct stat host_buf;
     struct stat_32 host_buf_32;
     char host_path[PATH_MAX];
-    sharedHandle.fs->pathGuestToHost(guest_path, host_path);
+    const int path_error = LC32GuestPathToHost(guest_path, host_path);
+    if(path_error != 0) {
+        return return_with_carry_direct(path_error, true);
+    }
     int result = lstat(host_path, &host_buf);
     if(result == 0) {
         guest_stat_copy(&host_buf, &host_buf_32);
@@ -1782,7 +1827,10 @@ int guest_lstat(u32 guest_path, u32 guest_buf) {
 
 int guest_statfs64(u32 guest_path, u32 guest_buf) {
     char host_path[PATH_MAX];
-    sharedHandle.fs->pathGuestToHost(guest_path, host_path);
+    const int path_error = LC32GuestPathToHost(guest_path, host_path);
+    if(path_error != 0) {
+        return return_with_carry_direct(path_error, true);
+    }
     struct statfs host_buf;
     int result = syscallRetCarry(SYS_statfs, host_path, &host_buf, 0,0,0,0,0);
     if(result == 0) {
@@ -2193,8 +2241,12 @@ int guest_bind(int socket, u32 guest_address, socklen_t address_len) {
             address_len - pathOffset);
 
         char host_path[PATH_MAX];
-        sharedHandle.fs->pathGuestToHost(
-            guest_path.data(), host_path);
+        errno = 0;
+        if(!sharedHandle.fs->pathGuestToHost(
+                guest_path.data(), host_path)) {
+            return return_with_carry_direct(
+                errno != 0 ? errno : EINVAL, true);
+        }
         const size_t host_path_len = strlen(host_path);
         if (host_path_len > SOCK_MAXADDRLEN - pathOffset) {
             return return_with_carry_direct(ENAMETOOLONG, true);
@@ -2354,29 +2406,24 @@ int guest_getsockopt(int socket, int level, int option,
     return return_with_carry_direct(0, false);
 }
 
-int guest_getsockname(int socket, u32 guest_address,
-        u32 guest_address_len) {
+static int ReadGuestSocketAddressLength(
+        u32 guest_address_len, u32 *requested_len) {
     if (guest_address_len == 0) {
         return return_with_carry_direct(EFAULT, true);
     }
-
-    u32 requested_len = 0;
-    if (Dynarmic_mem_1read(
-            guest_address_len, sizeof(requested_len),
-            reinterpret_cast<char *>(&requested_len)) != 0) {
+    if (!read_guest_memory_with_permissions(
+            guest_address_len, requested_len,
+            sizeof(*requested_len), PROT_READ)) {
         return return_with_carry_direct(EFAULT, true);
     }
+    return 0;
+}
 
-    std::array<char, SOCK_MAXADDRLEN> host_address = {};
-    socklen_t host_address_len = host_address.size();
-    const int result = syscallRetCarry(
-        SYS_getsockname, socket,
-        reinterpret_cast<sockaddr *>(host_address.data()),
-        &host_address_len, 0, 0, 0, 0);
-    if (threadHandle.cpsr->hasCarry()) {
-        return result;
-    }
-
+static int CopyOutGuestSocketAddress(
+        u32 guest_address, u32 guest_address_len,
+        u32 requested_len,
+        const std::array<char, SOCK_MAXADDRLEN> &host_address,
+        socklen_t host_address_len) {
     std::array<char, SOCK_MAXADDRLEN> guest_address_storage =
         host_address;
     u32 returned_len = host_address_len;
@@ -2386,7 +2433,8 @@ int guest_getsockname(int socket, u32 guest_address,
 
     constexpr size_t path_offset =
         offsetof(sockaddr_un, sun_path);
-    if (stored_len >= sizeof(__sockaddr_header) &&
+    if (host_address_len <= host_address.size() &&
+            stored_len >= sizeof(__sockaddr_header) &&
             reinterpret_cast<const sockaddr *>(
                 host_address.data())->sa_family == AF_UNIX &&
             stored_len > path_offset &&
@@ -2398,8 +2446,12 @@ int guest_getsockname(int socket, u32 guest_address,
             stored_len - path_offset);
 
         char guest_path[PATH_MAX] = {};
-        sharedHandle.fs->pathHostToGuest(
-            host_path.data(), guest_path);
+        errno = 0;
+        if (!sharedHandle.fs->pathHostToGuest(
+                host_path.data(), guest_path)) {
+            return return_with_carry_direct(
+                errno != 0 ? errno : EINVAL, true);
+        }
         const size_t guest_path_len = strlen(guest_path);
         if (guest_path_len >
                 SOCK_MAXADDRLEN - path_offset) {
@@ -2423,17 +2475,120 @@ int guest_getsockname(int socket, u32 guest_address,
         static_cast<size_t>(requested_len), stored_len);
     if (copy_len != 0 &&
             (guest_address == 0 ||
-             Dynarmic_mem_1write(
-                guest_address, copy_len,
-                guest_address_storage.data()) != 0)) {
+             !write_guest_memory_with_permissions(
+                 guest_address, guest_address_storage.data(),
+                 copy_len, PROT_WRITE))) {
         return return_with_carry_direct(EFAULT, true);
     }
-    if (Dynarmic_mem_1write(
-            guest_address_len, sizeof(returned_len),
-            reinterpret_cast<char *>(&returned_len)) != 0) {
+    if (!write_guest_memory_with_permissions(
+            guest_address_len, &returned_len,
+            sizeof(returned_len), PROT_WRITE)) {
         return return_with_carry_direct(EFAULT, true);
     }
     return return_with_carry_direct(0, false);
+}
+
+static int GuestSocketName(int syscall_number, int socket,
+        u32 guest_address, u32 guest_address_len) {
+    u32 requested_len = 0;
+    const int preparation_error = ReadGuestSocketAddressLength(
+        guest_address_len, &requested_len);
+    if (preparation_error != 0) {
+        return preparation_error;
+    }
+
+    std::array<char, SOCK_MAXADDRLEN> host_address = {};
+    socklen_t host_address_len = host_address.size();
+    const int result = syscallRetCarry(
+        syscall_number, socket,
+        reinterpret_cast<sockaddr *>(host_address.data()),
+        &host_address_len, 0, 0, 0, 0);
+    if (threadHandle.cpsr->hasCarry()) {
+        return result;
+    }
+    return CopyOutGuestSocketAddress(
+        guest_address, guest_address_len, requested_len,
+        host_address, host_address_len);
+}
+
+int guest_getsockname(int socket, u32 guest_address,
+        u32 guest_address_len) {
+    return GuestSocketName(
+        SYS_getsockname, socket,
+        guest_address, guest_address_len);
+}
+
+int guest_getpeername(int socket, u32 guest_address,
+        u32 guest_address_len) {
+    return GuestSocketName(
+        SYS_getpeername, socket,
+        guest_address, guest_address_len);
+}
+
+int guest_accept(int syscall_number, int socket,
+        u32 guest_address, u32 guest_address_len) {
+    const bool wants_address = guest_address != 0;
+    u32 requested_len = 0;
+    if (wants_address) {
+        const int preparation_error = ReadGuestSocketAddressLength(
+            guest_address_len, &requested_len);
+        if (preparation_error != 0) {
+            return preparation_error;
+        }
+    }
+
+    std::array<char, SOCK_MAXADDRLEN> host_address = {};
+    socklen_t host_address_len = host_address.size();
+    if (GuestThreadCanYieldBeforeBlocking()) {
+        const int socket_flags = ::fcntl(socket, F_GETFL);
+        if (socket_flags >= 0 && (socket_flags & O_NONBLOCK) == 0) {
+            pollfd readiness = {
+                .fd = socket,
+                .events = POLLIN,
+                .revents = 0,
+            };
+            if (::poll(&readiness, 1, 0) == 0 &&
+                    GuestThreadYieldBeforeBlocking()) {
+                return return_with_carry_direct(EINTR, true);
+            }
+        }
+    }
+    const bool workqueue_may_block =
+        NativeGuestWorkqueueIsCurrent();
+    if (workqueue_may_block) {
+        NativeGuestWorkqueueHostBlockEnter();
+    }
+    const int accepted = debugger_aware_host_wait(
+        [&] {
+            return syscallRetCarry(
+                NativeGuestThreadsEnabled()
+                    ? SYS_accept : syscall_number,
+                socket,
+                wants_address
+                    ? reinterpret_cast<sockaddr *>(
+                        host_address.data())
+                    : nullptr,
+                wants_address ? &host_address_len : nullptr,
+                0, 0, 0, 0);
+        },
+        return_with_carry_direct(EINTR, true));
+    if (workqueue_may_block) {
+        NativeGuestWorkqueueHostBlockExit();
+    }
+    if (threadHandle.cpsr->hasCarry()) {
+        return accepted;
+    }
+
+    if (wants_address) {
+        const int copyout_result = CopyOutGuestSocketAddress(
+            guest_address, guest_address_len, requested_len,
+            host_address, host_address_len);
+        if (copyout_result != 0) {
+            (void)::close(accepted);
+            return copyout_result;
+        }
+    }
+    return return_with_carry_direct(accepted, false);
 }
 
 ssize_t guest_recvfrom(int syscall_number, int socket,
@@ -2645,8 +2800,12 @@ int guest_connect(int NR, int socket, u32 guest_address,
             address_len - path_offset);
 
         char host_path[PATH_MAX] = {};
-        sharedHandle.fs->pathGuestToHost(
-            guest_path.data(), host_path);
+        errno = 0;
+        if(!sharedHandle.fs->pathGuestToHost(
+                guest_path.data(), host_path)) {
+            return return_with_carry_direct(
+                errno != 0 ? errno : EINVAL, true);
+        }
         const size_t host_path_len = strlen(host_path);
         if (host_path_len > SOCK_MAXADDRLEN - path_offset) {
             return return_with_carry_direct(ENAMETOOLONG, true);
@@ -2725,8 +2884,13 @@ int guest_gettimeofday(u32 guest_tp, u32 guest_tzp) {
 
 int guest_rename(u32 guest_old, u32 guest_new) {
     char host_old[PATH_MAX], host_new[PATH_MAX];
-    sharedHandle.fs->pathGuestToHost(guest_old, host_old);
-    sharedHandle.fs->pathGuestToHost(guest_new, host_new);
+    int path_error = LC32GuestPathToHost(guest_old, host_old);
+    if(path_error == 0) {
+        path_error = LC32GuestPathToHost(guest_new, host_new);
+    }
+    if(path_error != 0) {
+        return return_with_carry_direct(path_error, true);
+    }
     return syscallRetCarry(SYS_rename, host_old, host_new, 0,0,0,0,0);
 }
 
@@ -2786,8 +2950,13 @@ ssize_t guest_sendto(int NR, int socket, u32 guest_buffer,
                 dest_len - path_offset);
 
             char host_path[PATH_MAX] = {};
-            sharedHandle.fs->pathGuestToHost(
-                guest_path.data(), host_path);
+            errno = 0;
+            if(!sharedHandle.fs->pathGuestToHost(
+                    guest_path.data(), host_path)) {
+                return static_cast<ssize_t>(
+                    return_with_carry_direct(
+                        errno != 0 ? errno : EINVAL, true));
+            }
             const size_t host_path_len = strlen(host_path);
             if (host_path_len > SOCK_MAXADDRLEN - path_offset) {
                 return static_cast<ssize_t>(
@@ -2953,8 +3122,13 @@ ssize_t guest_sendmsg(int NR, int socket,
                 host_name_length - path_offset);
 
             char host_path[PATH_MAX] = {};
-            sharedHandle.fs->pathGuestToHost(
-                guest_path.data(), host_path);
+            errno = 0;
+            if(!sharedHandle.fs->pathGuestToHost(
+                    guest_path.data(), host_path)) {
+                return static_cast<ssize_t>(
+                    return_with_carry_direct(
+                        errno != 0 ? errno : EINVAL, true));
+            }
             const size_t host_path_length = strlen(host_path);
             if (host_path_length >
                     SOCK_MAXADDRLEN - path_offset) {
@@ -3279,12 +3453,22 @@ void CloseAllGuestAesFileDescriptors() {
 }
 
 int guest_open(int NR, u32 guest_path, int oflag, int mode) {
-    DynarmicHostString guestPath(guest_path);
+    char copied_path[PATH_MAX];
     char host_path[PATH_MAX];
-    sharedHandle.fs->pathGuestToHost(
-        guestPath.hostPtr, host_path);
+    int path_error = LC32CopyGuestCString(guest_path, copied_path);
+    if(path_error == 0 && copied_path[0] == '\0') {
+        path_error = ENOENT;
+    }
+    errno = 0;
+    if(path_error == 0 && !sharedHandle.fs->pathGuestToHost(
+            copied_path, host_path)) {
+        path_error = errno != 0 ? errno : EINVAL;
+    }
+    if(path_error != 0) {
+        return return_with_carry_direct(path_error, true);
+    }
     const bool openGuestAesDevice =
-        strcmp(guestPath.hostPtr, "/dev/aes_0") == 0;
+        strcmp(copied_path, "/dev/aes_0") == 0;
     const char *openedHostPath = openGuestAesDevice
         ? "/dev/null" : host_path;
     int result = debugger_aware_host_wait(
@@ -3301,45 +3485,123 @@ int guest_open(int NR, u32 guest_path, int oflag, int mode) {
     return result;
 }
 
+static int guest_chdir_with_syscall(int syscall_number, u32 guest_path) {
+    char copied_path[PATH_MAX];
+    char host_path[PATH_MAX];
+    const int copy_error = LC32CopyGuestCString(
+        guest_path, copied_path);
+    if(copy_error != 0) {
+        return return_with_carry_direct(copy_error, true);
+    }
+    if(copied_path[0] == '\0') {
+        return return_with_carry_direct(ENOENT, true);
+    }
+    if(!sharedHandle.fs->pathGuestToHost(copied_path, host_path)) {
+        const int error = errno != 0 ? errno : EINVAL;
+        return return_with_carry_direct(error, true);
+    }
+    return syscallRetCarry(
+        syscall_number, host_path, 0, 0, 0, 0, 0, 0);
+}
+
+int guest_chdir(u32 guest_path) {
+    return guest_chdir_with_syscall(SYS_chdir, guest_path);
+}
+
+int guest_fchdir(int fildes) {
+    return syscallRetCarry(
+        SYS_fchdir, fildes, 0, 0, 0, 0, 0, 0);
+}
+
+int guest_pthread_chdir(u32 guest_path) {
+    /*
+     * XNU's private pthread cwd is the closest match for an ARM guest backed
+     * by a native host pthread. Cooperative guest pthreads share one host
+     * thread, so they necessarily share this override until their scheduler
+     * grows per-logical-thread cwd state.
+     */
+    return guest_chdir_with_syscall(
+        SYS___pthread_chdir, guest_path);
+}
+
+int guest_pthread_fchdir(int fildes) {
+    /* Passing -1 is meaningful: XNU clears the current thread's cwd override
+     * and makes subsequent relative lookups use the process cwd again. */
+    return syscallRetCarry(
+        SYS___pthread_fchdir, fildes, 0, 0, 0, 0, 0, 0);
+}
+
 int guest_unlink(u32 guest_path) {
     char host_path[PATH_MAX];
-    sharedHandle.fs->pathGuestToHost(guest_path, host_path);
+    const int path_error = LC32GuestPathToHost(guest_path, host_path);
+    if(path_error != 0) {
+        return return_with_carry_direct(path_error, true);
+    }
     return syscallRetCarry(SYS_unlink, host_path, 0,0,0,0,0,0);
 }
 
 int guest_chmod(u32 guest_path, mode_t mode) {
     char host_path[PATH_MAX];
-    sharedHandle.fs->pathGuestToHost(guest_path, host_path);
+    const int path_error = LC32GuestPathToHost(guest_path, host_path);
+    if(path_error != 0) {
+        return return_with_carry_direct(path_error, true);
+    }
     return syscallRetCarry(SYS_chmod, host_path, mode, 0,0,0,0,0);
 }
 
 int guest_chown(u32 guest_path, uid_t owner, gid_t group) {
     char host_path[PATH_MAX];
-    sharedHandle.fs->pathGuestToHost(guest_path, host_path);
+    const int path_error = LC32GuestPathToHost(guest_path, host_path);
+    if(path_error != 0) {
+        return return_with_carry_direct(path_error, true);
+    }
     return syscallRetCarry(SYS_chown, host_path, owner, group, 0,0,0,0);
 }
 
 int guest_access(u32 guest_path, int mode) {
     char host_path[PATH_MAX];
-    sharedHandle.fs->pathGuestToHost(guest_path, host_path);
+    const int path_error = LC32GuestPathToHost(guest_path, host_path);
+    if(path_error != 0) {
+        return return_with_carry_direct(path_error, true);
+    }
     return syscallRetCarry(SYS_access, host_path, mode, 0,0,0,0,0);
 }
 
 int guest_mkdir(u32 guest_path, mode_t mode) {
     char host_path[PATH_MAX];
-    sharedHandle.fs->pathGuestToHost(guest_path, host_path);
+    const int path_error = LC32GuestPathToHost(guest_path, host_path);
+    if(path_error != 0) {
+        return return_with_carry_direct(path_error, true);
+    }
     return syscallRetCarry(SYS_mkdir, host_path, mode, 0,0,0,0,0);
 }
 
 int guest_setxattr(u32 guest_path, u32 guest_name, u32 guest_value,
         size_t size, u_int32_t position, int options) {
+    constexpr size_t maximum_staged_xattr_size = 64 * 1024 * 1024;
+    char copied_path[PATH_MAX];
     char host_path[PATH_MAX];
-    sharedHandle.fs->pathGuestToHost(guest_path, host_path);
-    DynarmicHostString name(guest_name);
-    if(!name.hostPtr || (!guest_value && size != 0)) {
-        return return_with_carry_direct(EFAULT, true);
+    char name[PATH_MAX];
+    int error = LC32CopyGuestCString(guest_path, copied_path);
+    if(error == 0 && copied_path[0] == '\0') {
+        error = ENOENT;
     }
-
+    if(error == 0 && !sharedHandle.fs->pathGuestToHost(
+            copied_path, host_path)) {
+        error = errno != 0 ? errno : EINVAL;
+    }
+    if(error == 0) {
+        error = LC32CopyGuestCString(guest_name, name);
+    }
+    if(error != 0) {
+        return return_with_carry_direct(error, true);
+    }
+    if(!guest_value && size != 0) {
+        return return_with_carry_direct(EINVAL, true);
+    }
+    if(size > maximum_staged_xattr_size) {
+        return return_with_carry_direct(ENOMEM, true);
+    }
     std::vector<uint8_t> value;
     if(size != 0) {
         if(!guest_memory_range_has_permissions(
@@ -3358,7 +3620,7 @@ int guest_setxattr(u32 guest_path, u32 guest_name, u32 guest_value,
     }
 
     return syscallRetCarry(
-        SYS_setxattr, host_path, name.hostPtr,
+        SYS_setxattr, host_path, name,
         value.empty() ? nullptr : value.data(), size,
         position, options, 0);
 }
@@ -3669,14 +3931,53 @@ int guest_pthread_sigmask(int how, u32 guest_set, u32 guest_oldset) {
 }
 
 ssize_t guest_readlink(u32 guest_pathname, u32 guest_buf, size_t bufsiz) {
+    char copied_path[PATH_MAX];
     char host_pathname[PATH_MAX];
-    sharedHandle.fs->pathGuestToHost(guest_pathname, host_pathname);
-    char *host_buf = (char *)malloc(bufsiz);
-    int result = syscallRetCarry(SYS_readlink, host_pathname, host_buf, bufsiz, 0,0,0,0);
-    sharedHandle.fs->pathHostToGuest(host_buf, guest_buf);
-    Dynarmic_mem_1write(guest_buf, bufsiz, host_buf);
-    free(host_buf);
-    return result;
+    int error = LC32CopyGuestCString(guest_pathname, copied_path);
+    if(error == 0 && copied_path[0] == '\0') {
+        error = ENOENT;
+    }
+    if(error == 0 && !sharedHandle.fs->pathGuestToHost(
+            copied_path, host_pathname)) {
+        error = errno != 0 ? errno : EINVAL;
+    }
+    if(error != 0) {
+        return return_with_carry_direct(error, true);
+    }
+
+    /* readlink does not terminate its output. Stage a complete target so
+     * reverse mount translation never examines uninitialized bytes. */
+    std::array<char, PATH_MAX + 1> hostTarget = {};
+    const int hostResult = syscallRetCarry(
+        SYS_readlink, host_pathname, hostTarget.data(), PATH_MAX,
+        0, 0, 0, 0);
+    if(threadHandle.cpsr->hasCarry()) {
+        return hostResult;
+    }
+    if(hostResult < 0 || hostResult > PATH_MAX) {
+        return return_with_carry_direct(EIO, true);
+    }
+    hostTarget[static_cast<size_t>(hostResult)] = '\0';
+
+    std::array<char, PATH_MAX> guestTarget = {};
+    const char *visibleTarget = hostTarget.data();
+    if(hostTarget[0] == '/') {
+        errno = 0;
+        if(!sharedHandle.fs->pathHostToGuest(
+                hostTarget.data(), guestTarget.data())) {
+            return return_with_carry_direct(
+                errno != 0 ? errno : EINVAL, true);
+        }
+        visibleTarget = guestTarget.data();
+    }
+
+    const size_t copyLength = std::min(bufsiz, strlen(visibleTarget));
+    if(copyLength != 0 && !write_guest_memory_with_permissions(
+            guest_buf, visibleTarget, copyLength, PROT_WRITE)) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+    return return_with_carry_direct(
+        static_cast<int>(copyLength), false);
 }
 
 int guest_munmap(u32 guest_addr, size_t len) {
@@ -3744,9 +4045,22 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
             return 0;
         // r2 is a pointer
         case F_GETPATH: {
-            char host_r2[PATH_MAX];
+            char host_r2[PATH_MAX] = {};
             int result = syscallRetCarry(SYS_fcntl, fildes, cmd, host_r2, 0,0,0,0);
-            sharedHandle.fs->pathHostToGuest(host_r2, guest_r2);
+            if(threadHandle.cpsr->hasCarry()) {
+                return result;
+            }
+            char translated_r2[PATH_MAX];
+            if(!sharedHandle.fs->pathHostToGuest(host_r2, translated_r2)) {
+                const int error = errno != 0 ? errno : EINVAL;
+                return return_with_carry_direct(error, true);
+            }
+            const size_t translated_size = strlen(translated_r2) + 1;
+            if(!write_guest_memory_with_permissions(
+                    guest_r2, translated_r2, translated_size,
+                    PROT_WRITE)) {
+                return return_with_carry_direct(EFAULT, true);
+            }
             return result;
         }
         case F_PREALLOCATE: {

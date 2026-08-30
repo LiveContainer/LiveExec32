@@ -72,6 +72,9 @@ endef
 $(eval $(call lc32_test,lc32-aes-ioctl-abi,aes_ioctl_abi.c,))
 $(eval $(call lc32_test,lc32-bind-abi,bind_abi.c,))
 $(eval $(call lc32_test,lc32-connect-nocancel,connect_nocancel.c connect_nocancel.S,))
+$(eval $(call lc32_test,lc32-cwd-syscalls,cwd_syscalls.c,))
+$(eval $(call lc32_test,lc32-darwin-eperm,darwin_eperm.c,))
+$(eval $(call lc32_test,lc32-darwin-safe-syscalls,darwin_safe_syscalls.c,))
 $(eval $(call lc32_test,lc32-debugger-stop,debugger_stop_worker.c,))
 $(eval $(call lc32_test,lc32-debugger-stop-main,debugger_stop.c,))
 $(eval $(call lc32_test,lc32-getsockname-abi,getsockname_abi.c,))
@@ -82,6 +85,7 @@ $(eval $(call lc32_test,lc32-lseek-abi,lseek_abi.c,))
 $(eval $(call lc32_test,lc32-native-pthread-smoke,native_pthread_smoke.c,))
 $(eval $(call lc32_test,lc32-recvfrom-abi,recvfrom_abi.c,))
 $(eval $(call lc32_test,lc32-setsockopt-abi,setsockopt_abi.c,))
+$(eval $(call lc32_test,lc32-socket-accept-abi,socket_accept_abi.c,))
 $(eval $(call lc32_test,lc32-sysctl-size-query,sysctl_size_query.c,))
 $(eval $(call lc32_test,lc32-vm-allocate-collision,vm_allocate_collision.c,))
 $(eval $(call lc32_test,lc32-vm-copy,vm_copy.c,))
@@ -189,15 +193,20 @@ lc32-audio-queue-input_CFLAGS := -Wno-deprecated-declarations
 lc32-audio-queue-output_CFLAGS := -Wno-deprecated-declarations -Wno-nonnull
 lc32-audio-session_CFLAGS := -Wno-deprecated-declarations
 lc32-audio-unit-output_CFLAGS := -Wno-deprecated-declarations
+lc32-darwin-eperm_CFLAGS := -Wno-deprecated-declarations
+lc32-darwin-safe-syscalls_CFLAGS := -Wno-deprecated-declarations
 lc32-security-secitem_CFLAGS := -Wno-deprecated-declarations -Wno-nonnull
+lc32-socket-accept-abi_CFLAGS := -Wno-deprecated-declarations
 lc32-uikit-appearance_CFLAGS := -Wno-deprecated-declarations
 
 ABI_TESTS := \
-  lc32-aes-ioctl-abi lc32-bind-abi lc32-connect-nocancel \
-  lc32-debugger-stop lc32-debugger-stop-main lc32-getsockname-abi \
+  lc32-aes-ioctl-abi lc32-bind-abi lc32-connect-nocancel lc32-cwd-syscalls \
+  lc32-darwin-eperm lc32-darwin-safe-syscalls lc32-debugger-stop \
+  lc32-debugger-stop-main lc32-getsockname-abi \
   lc32-getsockopt-abi lc32-host-info lc32-kqueue-kevent lc32-lseek-abi \
   lc32-native-pthread-smoke lc32-recvfrom-abi lc32-setsockopt-abi \
-  lc32-sysctl-size-query lc32-vm-allocate-collision lc32-vm-copy
+  lc32-socket-accept-abi lc32-sysctl-size-query \
+  lc32-vm-allocate-collision lc32-vm-copy
 AUDIO_TESTS := $(filter lc32-audio-%,$(TOOL_NAME))
 COREFOUNDATION_TESTS := $(filter lc32-corefoundation-%,$(TOOL_NAME))
 GRAPHICS_TESTS := $(filter lc32-coregraphics-% lc32-coretext-% lc32-openal-% lc32-opengles-%,$(TOOL_NAME))

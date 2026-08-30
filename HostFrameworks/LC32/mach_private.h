@@ -128,8 +128,11 @@ struct proc_bsdshortinfo {
 
 struct iovec_32 {
     uint32_t guest_iov_base;  /* Base address. */
-    size_t iov_len;    /* Length. */
+    uint32_t iov_len;         /* Length. */
 };
+
+static_assert(sizeof(iovec_32) == 8,
+    "armv7 iovec must contain two 32-bit fields");
 
 struct crashreporter_annotations_t {
 	uint64_t version;		// unsigned long

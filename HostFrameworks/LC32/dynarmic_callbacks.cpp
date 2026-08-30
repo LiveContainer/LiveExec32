@@ -1,5 +1,6 @@
 #include "dynarmic_internal.h"
 #include "dynarmic_syscalls.h"
+#include "darwin_file_syscalls.h"
 #include "crash_exception.h"
 
 namespace {
@@ -957,13 +958,11 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             case -21: // _kernelrpc_mach_port_insert_right_trap
             case -19: // _kernelrpc_mach_port_mod_refs_trap
             case SYS_getpid: // 20
-            case SYS_setuid: // 23
             case SYS_getuid: // 24
             case SYS_geteuid: // 25
             case SYS_getppid: // 39
             case SYS_getegid: // 43
             case SYS_getgid: // 47
-            case SYS_socket: // 97
             case SYS_issetugid: // 327
                 cpu->Regs()[0] = syscallRetCarry(NR, cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3]);
                 cpsr->setCarry(false); // FIXME: mach_reply_port sets carry to true, idk why
@@ -982,7 +981,7 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 cpsr->setCarry(false);
             } break;
             // direct call with custom args
-            case 333: // __pthread_canceled
+            case SYS___pthread_canceled:
                 /*
                  * Guest pthread cancellation requests are not modeled yet.
                  * XNU accepts actions 1 and 2 (enable/disable) unconditionally;
@@ -998,8 +997,8 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                         return_with_carry_direct(EINVAL, true);
                 }
                 break;
-            case 334: // semwait_signal
-            case 423: // semwait_signal_nocancel
+            case SYS___semwait_signal:
+            case SYS___semwait_signal_nocancel:
                 if (cpu->Regs()[1] == 0 && cpu->Regs()[2] == 0 &&
                         GuestThreadYieldBeforeBlocking()) {
                     /*
@@ -1024,15 +1023,94 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                         return_with_carry_direct(EINTR, true));
                 }
                 break;
-            case SYS_fsync: // 95
+            case SYS_fsync:
+            case SYS_fsync_nocancel:
+            case SYS_fdatasync:
                 cpu->Regs()[0] = debugger_aware_host_wait(
                     [&] {
+                        const int hostSyscall = NR == SYS_fdatasync
+                            ? SYS_fdatasync
+                            : (NativeGuestThreadsEnabled()
+                                ? SYS_fsync : NR);
                         return syscallRetCarry(
-                            NR, cpu->Regs()[0],
+                            hostSyscall,
+                            cpu->Regs()[0],
                             0, 0, 0, 0, 0, 0);
                     },
                     return_with_carry_direct(EINTR, true));
                 break;
+            /* These BSD calls contain only scalar or native descriptor
+             * arguments. Keep the carry produced by the host syscall so
+             * fallible operations report errno through the guest ABI. */
+            case SYS_umask:
+            case SYS_getdtablesize:
+            case SYS_getpgrp:
+            case SYS_getpgid:
+            case SYS_getsid:
+            case SYS_getpriority:
+            case SYS_fchown:
+            case SYS_fchmod:
+            case SYS_fchflags:
+            case SYS_socket:
+            case SYS_listen:
+            case SYS_shutdown:
+            case SYS_fpathconf:
+                cpu->Regs()[0] = syscallRetCarry(
+                    NR, cpu->Regs()[0], cpu->Regs()[1],
+                    cpu->Regs()[2], 0, 0, 0, 0);
+                break;
+            case SYS_flock: {
+                const int operation = static_cast<int>(cpu->Regs()[1]);
+                const bool mayBlock =
+                    (operation & (LOCK_SH | LOCK_EX)) != 0 &&
+                    (operation & LOCK_NB) == 0;
+                if (mayBlock &&
+                        GuestThreadYieldBeforeBlocking()) {
+                    cpu->Regs()[0] =
+                        return_with_carry_direct(EINTR, true);
+                    break;
+                }
+                const bool workqueueMayBlock =
+                    mayBlock &&
+                    NativeGuestWorkqueueIsCurrent();
+                if (workqueueMayBlock) {
+                    NativeGuestWorkqueueHostBlockEnter();
+                }
+                cpu->Regs()[0] = debugger_aware_host_wait(
+                    [&] {
+                        return syscallRetCarry(
+                            SYS_flock, cpu->Regs()[0], operation,
+                            0, 0, 0, 0, 0);
+                    },
+                    return_with_carry_direct(EINTR, true));
+                if (workqueueMayBlock) {
+                    NativeGuestWorkqueueHostBlockExit();
+                }
+                break;
+            }
+            case SYS_pipe: {
+                /* Darwin returns the two descriptors in r0/r1; libsystem's
+                 * ARM veneer copies them to the caller-provided int[2]. */
+                int descriptors[2] = {-1, -1};
+                if (::pipe(descriptors) == -1) {
+                    const int error = errno;
+                    for (int descriptor : descriptors) {
+                        if (descriptor >= 0) {
+                            (void)::close(descriptor);
+                        }
+                    }
+                    cpu->Regs()[0] =
+                        return_with_carry_direct(error, true);
+                    cpu->Regs()[1] = 0;
+                } else {
+                    cpu->Regs()[0] =
+                        static_cast<u32>(descriptors[0]);
+                    cpu->Regs()[1] =
+                        static_cast<u32>(descriptors[1]);
+                    cpsr->setCarry(false);
+                }
+                break;
+            }
             // the rest are indirect calls
             case -17:
                 cpu->Regs()[0] = mach_port_destroy(
@@ -1199,10 +1277,66 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 cpu->Regs()[0] = guest__kernelrpc_mach_vm_allocate_trap(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2] | ((u64)cpu->Regs()[3] << 32), cpu->Regs()[4]);
                 break;
             case SYS_syscall: {
-                printf("Warning: CallSVC(SYS_syscall, NR=%d) called. Be sure to check arguments\n", cpu->Regs()[0]);
-                cpu->Regs()[12] = cpu->Regs()[0];
-                CallSVC(0x80);
-                break;
+                /* The ARMv7 indirect-syscall veneer leaves the requested
+                 * number in r0 and its first six argument words in r1-r6.
+                 * XNU treats the saved r12 == 0 as a one-register argument
+                 * offset; a seventh word comes from the veneer stack at
+                 * sp+28.  Repack that state to the direct layout consumed by
+                 * the handlers below. */
+                const u32 target = static_cast<uint16_t>(cpu->Regs()[0]);
+                if (target == SYS_syscall ||
+                        target > SYS_abort_with_payload) {
+                    cpu->Regs()[0] =
+                        return_with_carry_direct(ENOSYS, true);
+                    break;
+                }
+
+                size_t spilledWords = 0;
+                switch (target) {
+                    case SYS___semwait_signal:
+                    case SYS___semwait_signal_nocancel:
+                    case SYS_mmap:
+                    case SYS_proc_info:
+                    case SYS_bsdthread_register:
+                        spilledWords = 1;
+                        break;
+                    case SYS_kevent_qos:
+                    case SYS_abort_with_payload:
+                        spilledWords = 2;
+                        break;
+                    default:
+                        break;
+                }
+
+                const u32 originalStack = cpu->Regs()[Reg::SP];
+                std::array<u32, 2> spilled{};
+                if (spilledWords != 0 &&
+                        !read_guest_memory_with_permissions(
+                            static_cast<u64>(originalStack) + 28,
+                            spilled.data(),
+                            spilledWords * sizeof(spilled[0]),
+                            PROT_READ)) {
+                    cpu->Regs()[0] =
+                        return_with_carry_direct(EFAULT, true);
+                    break;
+                }
+
+                for (size_t index = 0; index < 6; ++index) {
+                    cpu->Regs()[index] = cpu->Regs()[index + 1];
+                }
+                if (spilledWords != 0) {
+                    cpu->Regs()[6] = spilled[0];
+                }
+                cpu->Regs()[12] = target;
+                const u32 directStack = originalStack + sizeof(u32);
+                cpu->Regs()[Reg::SP] = directStack;
+                CallSVC(DARWIN_SWI_SYSCALL);
+                if (cpu->Regs()[Reg::SP] == directStack) {
+                    cpu->Regs()[Reg::SP] = originalStack;
+                }
+                /* The nested dispatch already performed syscall-boundary
+                 * scheduling and any pending context-transition halt. */
+                return;
             }
             case SYS_exit: // 1
                 printf("Guest exited with code %d\n", cpu->Regs()[0]);
@@ -1217,10 +1351,6 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 InterruptDebuggerMachCalls();
                 NotifyNativeDebuggerWaiters();
                 NotifyNativeDebuggerCoordinator();
-                break;
-            case SYS_fork: // 2
-                printf("fork() not supported\n");
-                cpu->Regs()[0] = ENOSYS;
                 break;
             case SYS_read: // 3
             case SYS_read_nocancel: // 396
@@ -1260,6 +1390,17 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 cpu->Regs()[0] = guest_close(
                     NR, static_cast<int>(cpu->Regs()[0]));
                 break;
+            case SYS_link:
+                cpu->Regs()[0] = guest_link(
+                    cpu->Regs()[0], cpu->Regs()[1]);
+                break;
+            case SYS_chdir:
+                cpu->Regs()[0] = guest_chdir(cpu->Regs()[0]);
+                break;
+            case SYS_fchdir:
+                cpu->Regs()[0] = guest_fchdir(
+                    static_cast<int>(cpu->Regs()[0]));
+                break;
             case SYS_dup: // 41
                 cpu->Regs()[0] = guest_dup(
                     static_cast<int>(cpu->Regs()[0]));
@@ -1298,35 +1439,55 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 cpu->Regs()[0] = guest_getsockname(
                     cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
                 break;
-            case 33:
+            case SYS_getpeername:
+                cpu->Regs()[0] = guest_getpeername(
+                    static_cast<int>(cpu->Regs()[0]),
+                    cpu->Regs()[1], cpu->Regs()[2]);
+                break;
+            case SYS_accept:
+            case SYS_accept_nocancel:
+                cpu->Regs()[0] = guest_accept(
+                    NR, static_cast<int>(cpu->Regs()[0]),
+                    cpu->Regs()[1], cpu->Regs()[2]);
+                break;
+            case SYS_access:
                 cpu->Regs()[0] = guest_access(cpu->Regs()[0], cpu->Regs()[1]);
                 break;
-            case 46:
+            case SYS_chflags:
+                cpu->Regs()[0] = guest_chflags(
+                    cpu->Regs()[0], cpu->Regs()[1]);
+                break;
+            case SYS_sigaction:
                 cpu->Regs()[0] = guest_sigaction(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
                 break;
-            case 48:
+            case SYS_sigprocmask:
                 cpu->Regs()[0] = guest_sigprocmask(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
                 break;
             case SYS_sigaltstack: // 53
                 cpu->Regs()[0] = GuestSigaltstack(
                     cpu->Regs()[0], cpu->Regs()[1]);
                 break;
-            case 54:
+            case SYS_ioctl:
                 cpu->Regs()[0] = guest_ioctl(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
                 break;
-            case 58:
-                cpu->Regs()[0] = guest_readlink(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+            case SYS_readlink:
+                cpu->Regs()[0] = static_cast<u32>(guest_readlink(
+                    cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]));
                 break;
-            case 73:
+            case SYS_symlink:
+                cpu->Regs()[0] = guest_symlink(
+                    cpu->Regs()[0], cpu->Regs()[1]);
+                break;
+            case SYS_munmap:
                 cpu->Regs()[0] = guest_munmap(cpu->Regs()[0], cpu->Regs()[1]);
                 break;
-            case 74:
+            case SYS_mprotect:
                 cpu->Regs()[0] = guest_mprotect(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
                 break;
-            case 75: // posix_madvise
+            case SYS_madvise:
                 cpu->Regs()[0] = 0;
                 break;
-            case 92:
+            case SYS_fcntl:
             case SYS_fcntl_nocancel:
                 cpu->Regs()[0] = guest_fcntl(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
                 break;
@@ -1370,10 +1531,26 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                     static_cast<int>(cpu->Regs()[2]),
                     cpu->Regs()[3], cpu->Regs()[4]);
                 break;
-            case 116:
+            case SYS_gettimeofday:
                 cpu->Regs()[0] = guest_gettimeofday(cpu->Regs()[0], cpu->Regs()[1]);
                 break;
-            case 121:
+            case SYS_getgroups:
+                cpu->Regs()[0] = guest_getgroups(
+                    static_cast<int>(cpu->Regs()[0]), cpu->Regs()[1]);
+                break;
+            case SYS_getlogin:
+                cpu->Regs()[0] = guest_getlogin(
+                    cpu->Regs()[0], cpu->Regs()[1]);
+                break;
+            case SYS_readv:
+            case SYS_readv_nocancel:
+                cpu->Regs()[0] = static_cast<u32>(guest_readv(
+                    NativeGuestThreadsEnabled()
+                        ? SYS_readv : NR,
+                    static_cast<int>(cpu->Regs()[0]),
+                    cpu->Regs()[1], static_cast<int>(cpu->Regs()[2])));
+                break;
+            case SYS_writev:
             case SYS_writev_nocancel:
                 cpu->Regs()[0] = guest_writev(
                     NativeGuestThreadsEnabled()
@@ -1382,8 +1559,12 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                     cpu->Regs()[0], cpu->Regs()[1],
                     cpu->Regs()[2]);
                 break;
-            case 128:
+            case SYS_rename:
                 cpu->Regs()[0] = guest_rename(cpu->Regs()[0], cpu->Regs()[1]);
+                break;
+            case SYS_mkfifo:
+                cpu->Regs()[0] = guest_mkfifo(
+                    cpu->Regs()[0], cpu->Regs()[1]);
                 break;
             case SYS_sendto: // 133
             case SYS_sendto_nocancel: // 413
@@ -1412,6 +1593,17 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 cpu->Regs()[0] = guest_mkdir(
                     cpu->Regs()[0], cpu->Regs()[1]);
                 break;
+            case SYS_rmdir:
+                cpu->Regs()[0] = guest_rmdir(cpu->Regs()[0]);
+                break;
+            case SYS_utimes:
+                cpu->Regs()[0] = guest_utimes(
+                    cpu->Regs()[0], cpu->Regs()[1]);
+                break;
+            case SYS_futimes:
+                cpu->Regs()[0] = guest_futimes(
+                    static_cast<int>(cpu->Regs()[0]), cpu->Regs()[1]);
+                break;
             case SYS_setxattr: // 236
                 /* libsystem_kernel's ARM wrapper moves arguments five and
                  * six (position and options) from the caller stack into
@@ -1421,7 +1613,44 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                     cpu->Regs()[2], cpu->Regs()[3],
                     cpu->Regs()[4], cpu->Regs()[5]);
                 break;
-            case 153:
+            case SYS_getxattr:
+                cpu->Regs()[0] = static_cast<u32>(guest_getxattr(
+                    cpu->Regs()[0], cpu->Regs()[1],
+                    cpu->Regs()[2], cpu->Regs()[3],
+                    cpu->Regs()[4], cpu->Regs()[5]));
+                break;
+            case SYS_fgetxattr:
+                cpu->Regs()[0] = static_cast<u32>(guest_fgetxattr(
+                    static_cast<int>(cpu->Regs()[0]), cpu->Regs()[1],
+                    cpu->Regs()[2], cpu->Regs()[3],
+                    cpu->Regs()[4], cpu->Regs()[5]));
+                break;
+            case SYS_fsetxattr:
+                cpu->Regs()[0] = guest_fsetxattr(
+                    static_cast<int>(cpu->Regs()[0]), cpu->Regs()[1],
+                    cpu->Regs()[2], cpu->Regs()[3],
+                    cpu->Regs()[4], cpu->Regs()[5]);
+                break;
+            case SYS_removexattr:
+                cpu->Regs()[0] = guest_removexattr(
+                    cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                break;
+            case SYS_fremovexattr:
+                cpu->Regs()[0] = guest_fremovexattr(
+                    static_cast<int>(cpu->Regs()[0]),
+                    cpu->Regs()[1], cpu->Regs()[2]);
+                break;
+            case SYS_listxattr:
+                cpu->Regs()[0] = static_cast<u32>(guest_listxattr(
+                    cpu->Regs()[0], cpu->Regs()[1],
+                    cpu->Regs()[2], cpu->Regs()[3]));
+                break;
+            case SYS_flistxattr:
+                cpu->Regs()[0] = static_cast<u32>(guest_flistxattr(
+                    static_cast<int>(cpu->Regs()[0]),
+                    cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3]));
+                break;
+            case SYS_pread:
             case SYS_pread_nocancel:
                 cpu->Regs()[0] = guest_pread(
                     NativeGuestThreadsEnabled()
@@ -1433,18 +1662,29 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                         (static_cast<u64>(
                             cpu->Regs()[4]) << 32));
                 break;
-            case 169:
+            case SYS_pwrite:
+            case SYS_pwrite_nocancel:
+                cpu->Regs()[0] = static_cast<u32>(guest_pwrite(
+                    NativeGuestThreadsEnabled()
+                        ? SYS_pwrite : NR,
+                    static_cast<int>(cpu->Regs()[0]),
+                    cpu->Regs()[1], cpu->Regs()[2],
+                    static_cast<off_t>(
+                        static_cast<u64>(cpu->Regs()[3]) |
+                        (static_cast<u64>(cpu->Regs()[4]) << 32))));
+                break;
+            case SYS_csops:
                 cpu->Regs()[0] = guest_csops(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3]);
                 break;
-            case 170:
+            case SYS_csops_audittoken:
                 cpu->Regs()[0] = guest_csops_audittoken(
                     cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2],
                     cpu->Regs()[3], cpu->Regs()[4]);
                 break;
-            case 194:
+            case SYS_getrlimit:
                 cpu->Regs()[0] = guest_getrlimit(cpu->Regs()[0], cpu->Regs()[1]);
                 break;
-            case 197:
+            case SYS_mmap:
                 cpu->Regs()[0] = guest_mmap(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5] | ((u64)cpu->Regs()[6] << 32));
                 break;
             case SYS_lseek: { // 199
@@ -1473,27 +1713,54 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 }
                 break;
             }
-            case 202:
+            case SYS_pathconf:
+                cpu->Regs()[0] = guest_pathconf(
+                    cpu->Regs()[0], static_cast<int>(cpu->Regs()[1]));
+                break;
+            case SYS_truncate:
+                cpu->Regs()[0] = guest_truncate(
+                    cpu->Regs()[0], static_cast<off_t>(
+                        static_cast<u64>(cpu->Regs()[1]) |
+                        (static_cast<u64>(cpu->Regs()[2]) << 32)));
+                break;
+            case SYS_ftruncate:
+                cpu->Regs()[0] = syscallRetCarry(
+                    SYS_ftruncate, cpu->Regs()[0],
+                    static_cast<off_t>(
+                        static_cast<u64>(cpu->Regs()[1]) |
+                        (static_cast<u64>(cpu->Regs()[2]) << 32)),
+                    0, 0, 0, 0, 0);
+                break;
+            case SYS_sysctl:
                 cpu->Regs()[0] = guest___sysctl(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5]);
                 break;
-            case 220:
+            case SYS_getattrlist:
                 cpu->Regs()[0] = guest_getattrlist(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4]);
                 break;
-            case 266:
+            case SYS_shm_open:
                 cpu->Regs()[0] = guest_shm_open(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
                 break;
-            case 274:
+            case SYS_shm_unlink:
+                cpu->Regs()[0] = guest_shm_unlink(cpu->Regs()[0]);
+                break;
+            case SYS_poll:
+            case SYS_poll_nocancel:
+                cpu->Regs()[0] = guest_poll(
+                    NR, cpu->Regs()[0], cpu->Regs()[1],
+                    static_cast<int>(cpu->Regs()[2]));
+                break;
+            case SYS_sysctlbyname:
                 cpu->Regs()[0] = guest___sysctlbyname(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5]);
                 break;
-            case 286:
+            case SYS_gettid:
                 cpu->Regs()[0] = guest_pthread_getugid_np(cpu->Regs()[0], cpu->Regs()[1]);
                 break;
-            case 294: // __shared_region_check_np
+            case SYS_shared_region_check_np:
                 cpu->Regs()[0] = return_with_carry_direct(EINVAL, true);
                 break;
-            case 300: // psynch_rw_upgrade
-            case 306: // psynch_rw_rdlock
-            case 307: { // psynch_rw_wrlock
+            case SYS_psynch_rw_upgrade:
+            case SYS_psynch_rw_rdlock:
+            case SYS_psynch_rw_wrlock: {
                 const bool tracePsynchRw =
                     getenv("LC32_TRACE_PSYNCH_RW") != nullptr;
                 if(tracePsynchRw) {
@@ -1511,7 +1778,7 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 cpu->Regs()[0] =
                     GuestPsynchRwWait(
                         cpu->Regs()[0], cpu->Regs()[1],
-                        cpu->Regs()[3], NR != 306);
+                        cpu->Regs()[3], NR != SYS_psynch_rw_rdlock);
                 if(tracePsynchRw) {
                     fprintf(stderr,
                         "LC32: psynch_rw return tid=%llu nr=%d "
@@ -1522,30 +1789,30 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 }
                 break;
             }
-            case 301: // psynch_mutexwait
+            case SYS_psynch_mutexwait:
                 cpu->Regs()[0] = GuestPsynchMutexWait(
                     cpu->Regs()[0], cpu->Regs()[1],
                     cpu->Regs()[2], cpu->Regs()[5]);
                 break;
-            case 302: // psynch_mutexdrop
+            case SYS_psynch_mutexdrop:
                 cpu->Regs()[0] = GuestPsynchMutexDrop(
                     cpu->Regs()[0], cpu->Regs()[1],
                     cpu->Regs()[2], cpu->Regs()[5]);
                 break;
-            case 303: // psynch_cvbroad
+            case SYS_psynch_cvbroad:
                 cpu->Regs()[0] = GuestPsynchConditionSignal(
                     cpu->Regs()[0], cpu->Regs()[1],
                     cpu->Regs()[2], cpu->Regs()[3],
                     MACH_PORT_NULL, true);
                 break;
-            case 304: // psynch_cvsignal
+            case SYS_psynch_cvsignal:
                 cpu->Regs()[0] = GuestPsynchConditionSignal(
                     cpu->Regs()[0], cpu->Regs()[1],
                     cpu->Regs()[2], cpu->Regs()[3],
                     static_cast<mach_port_t>(cpu->Regs()[4]),
                     false);
                 break;
-            case 305: { // psynch_cvwait
+            case SYS_psynch_cvwait: {
                 /* The ARMv7 syscall veneer saves r4-r6/r8.  Relative
                  * timeout seconds and nanoseconds are therefore at the
                  * original arguments' stack slots, sp+32 and sp+40. */
@@ -1562,8 +1829,8 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                     MemoryRead32(stack + 40, false));
                 break;
             }
-            case 308: // psynch_rw_unlock
-            case 309: { // psynch_rw_unlock2
+            case SYS_psynch_rw_unlock:
+            case SYS_psynch_rw_unlock2: {
                 const bool tracePsynchRw =
                     getenv("LC32_TRACE_PSYNCH_RW") != nullptr;
                 if(tracePsynchRw) {
@@ -1592,11 +1859,11 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 }
                 break;
             }
-            case 312: // psynch_cvclrprepost
+            case SYS_psynch_cvclrprepost:
                 cpu->Regs()[0] =
                     return_with_carry_direct(0, false);
                 break;
-            case 328:
+            case SYS___pthread_kill:
                 printf("pthread_kill called with signal %u\n", cpu->Regs()[1]);
                 if (cpu->Regs()[1] == 0) {
                     // Signal zero only probes whether the target thread exists.
@@ -1613,10 +1880,10 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                     return;
                 }
                 break;
-            case 329:
+            case SYS___pthread_sigmask:
                 cpu->Regs()[0] = guest_pthread_sigmask(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
                 break;
-            case 331: // __disable_threadsignal
+            case SYS___disable_threadsignal:
                 /*
                  * XNU marks the terminating uthread as unable to receive
                  * signals or cancellation. Guest signal delivery is already
@@ -1628,37 +1895,50 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                     return_with_carry_direct(0, false);
                 break;
 #if 0
-                case 330:
+                case SYS___sigwait:
                     backend.reg_write(ArmConst.UC_ARM_REG_R0, sigwait(emulator));
                     break;
 #endif
-            case 336:
+            case SYS_proc_info:
                 cpu->Regs()[0] = guest_proc_info(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3] | ((u64)cpu->Regs()[4] << 32), cpu->Regs()[5], cpu->Regs()[6]);
                 break;
-            case 338:
+            case SYS_stat64:
                 cpu->Regs()[0] = guest_stat64(cpu->Regs()[0], cpu->Regs()[1]);
                 break;
-            case 339:
+            case SYS_fstat64:
                 cpu->Regs()[0] = guest_fstat(cpu->Regs()[0], cpu->Regs()[1]);
                 break;
-            case 340:
+            case SYS_lstat64:
                 cpu->Regs()[0] = guest_lstat(cpu->Regs()[0], cpu->Regs()[1]);
                 break;
-            case 344:
-                cpu->Regs()[0] = guest_getdirentries64(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3]);
+            case SYS_getdirentries64:
+                cpu->Regs()[0] = guest_getdirentries64(
+                    static_cast<int>(cpu->Regs()[0]), cpu->Regs()[1],
+                    cpu->Regs()[2], cpu->Regs()[3]);
                 break;
-            case 345:
+            case SYS_statfs64:
                 cpu->Regs()[0] = guest_statfs64(cpu->Regs()[0], cpu->Regs()[1]);
                 break;
-            case 346:
+            case SYS_fstatfs64:
                 cpu->Regs()[0] = guest_fstatfs64(cpu->Regs()[0], cpu->Regs()[1]);
                 break;
-            case 360: // bsdthread_create
+            case SYS___pthread_chdir:
+                cpu->Regs()[0] = guest_pthread_chdir(cpu->Regs()[0]);
+                break;
+            case SYS___pthread_fchdir:
+                cpu->Regs()[0] = guest_pthread_fchdir(
+                    static_cast<int>(cpu->Regs()[0]));
+                break;
+            case SYS_lchown:
+                cpu->Regs()[0] = guest_lchown(
+                    cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
+                break;
+            case SYS_bsdthread_create:
                 cpu->Regs()[0] = GuestBsdthreadCreate(
                     cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2],
                     cpu->Regs()[3], cpu->Regs()[4]);
                 break;
-            case 361: // bsdthread_terminate
+            case SYS_bsdthread_terminate:
                 cpu->Regs()[0] = GuestBsdthreadTerminate(
                     cpu->Regs()[0], cpu->Regs()[1],
                     static_cast<mach_port_t>(cpu->Regs()[2]),
@@ -1682,13 +1962,13 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                     cpu->Regs()[3], static_cast<int>(cpu->Regs()[4]),
                     cpu->Regs()[5]);
                 break;
-            case 366:
+            case SYS_bsdthread_register:
                 cpu->Regs()[0] = guest_bsdthread_register(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2], cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5] | ((u64)cpu->Regs()[6] << 32));
                 break;
-            case 367: // workq_open
+            case SYS_workq_open:
                 cpu->Regs()[0] = guest_workq_open();
                 break;
-            case 368: { // workq_kernreturn
+            case SYS_workq_kernreturn: {
                 const int operation = static_cast<int>(cpu->Regs()[0]);
                 cpu->Regs()[0] = guest_workq_kernreturn(
                     operation, cpu->Regs()[1], cpu->Regs()[2],
@@ -1712,59 +1992,133 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 }
             }
                 break;
-            case 372: { // thread_selfid
+            case SYS_thread_selfid: {
                 const u64 result = GuestCurrentThreadSelfId();
                 cpu->Regs()[0] = static_cast<u32>(result);
                 cpu->Regs()[1] = static_cast<u32>(result >> 32);
                 cpsr->setCarry(false);
                 break;
             }
-            case 374: { // kevent_qos
+            case SYS_kevent_qos: {
                 /*
                  * libsystem_kernel's ARM wrapper loads arguments 5-7 into
                  * r4-r6 and leaves argument 8 in its caller's stack. It has
                  * pushed r4-r6/r8 by the time SVC executes, hence sp + 28.
                  */
-                const u32 flags = MemoryRead32(cpu->Regs()[Reg::SP] + 28,
-                    false);
+                u32 flags = 0;
+                if (!read_guest_memory_with_permissions(
+                        static_cast<u64>(cpu->Regs()[Reg::SP]) + 28,
+                        &flags, sizeof(flags), PROT_READ)) {
+                    cpu->Regs()[0] =
+                        return_with_carry_direct(EFAULT, true);
+                    break;
+                }
                 cpu->Regs()[0] = guest_kevent_qos(
                     cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2],
                     cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5],
                     cpu->Regs()[6], flags);
                 break;
             }
-            case 478: // bsdthread_ctl
+            case SYS_bsdthread_ctl:
                 cpu->Regs()[0] = guest_bsdthread_ctl(
                     cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2],
                     cpu->Regs()[3]);
                 break;
-            case 381:
+            case SYS___mac_syscall:
                 cpu->Regs()[0] = guest_sandbox_ms(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
                 break;
-            case 489: //mremap_encrypted
+            case SYS_mremap_encrypted:
                 printf("LC32: attempted to load encrypted binaries?\n");
                 cpu->Regs()[0] = 0; //return_with_carry_direct(EPERM, true);
                 break;
-            case 500:
+            case SYS_getentropy:
                 cpu->Regs()[0] = guest_getentropy(cpu->Regs()[0], cpu->Regs()[1]);
                 break;
-            case 515: // ulock_wait
+            case SYS_ulock_wait:
                 cpu->Regs()[0] = GuestUlockWait(
                     cpu->Regs()[0], cpu->Regs()[1],
                     cpu->Regs()[2] |
                         (static_cast<u64>(cpu->Regs()[3]) << 32),
                     cpu->Regs()[4]);
                 break;
-            case 516: // ulock_wake
+            case SYS_ulock_wake:
                 cpu->Regs()[0] = GuestUlockWake(
                     cpu->Regs()[0], cpu->Regs()[1],
                     cpu->Regs()[2] |
                         (static_cast<u64>(cpu->Regs()[3]) << 32));
                 break;
-            case SYS_abort_with_payload:
-                cpu->Regs()[0] = guest_abort_with_payload(cpu->Regs()[0], cpu->Regs()[1] | ((u64)cpu->Regs()[2] << 32), cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5], cpu->Regs()[6] | ((u64)cpu->Regs()[8] << 32));
+            /* These operations cannot be honored by an iOS app sandbox and
+             * must never be forwarded into the process hosting LiveExec32.
+             * Return the kernel-visible sandbox failure instead of turning a
+             * guest feature probe into an emulator crash. */
+            case SYS_fork:
+            case SYS_vfork:
+            case SYS_execve:
+            case SYS_posix_spawn:
+            case SYS_ptrace:
+            case SYS_kill:
+            case SYS_setlogin:
+            case SYS_setuid:
+            case SYS_revoke:
+            case SYS_setgroups:
+            case SYS_setpgid:
+            case SYS_setpriority:
+            case SYS_setreuid:
+            case SYS_setregid:
+            case SYS_setsid:
+            case SYS_setprivexec:
+            case SYS_setgid:
+            case SYS_setegid:
+            case SYS_seteuid:
+            case SYS_setrlimit:
+            case SYS_mknod:
+            case SYS_reboot:
+            case SYS_chroot:
+            case SYS_swapon:
+            case SYS_acct:
+            case SYS_settimeofday:
+            case SYS_adjtime:
+            case SYS_nfssvc:
+            case SYS_unmount:
+            case SYS_quotactl:
+            case SYS_mount:
+            case SYS_initgroups:
+            case SYS_audit:
+            case SYS_auditon:
+            case SYS_getauid:
+            case SYS_setauid:
+            case SYS_getaudit_addr:
+            case SYS_setaudit_addr:
+            case SYS_auditctl:
+            case SYS___mac_execve:
+            case SYS___mac_mount:
+            case SYS___mac_set_file:
+            case SYS___mac_set_link:
+            case SYS___mac_set_proc:
+            case SYS___mac_set_fd:
+                cpu->Regs()[0] =
+                    return_with_carry_direct(EPERM, true);
+                break;
+            case SYS_abort_with_payload: {
+                u32 reasonFlagsHigh = 0;
+                if (!read_guest_memory_with_permissions(
+                        static_cast<u64>(cpu->Regs()[Reg::SP]) + 28,
+                        &reasonFlagsHigh, sizeof(reasonFlagsHigh),
+                        PROT_READ)) {
+                    cpu->Regs()[0] =
+                        return_with_carry_direct(EFAULT, true);
+                    break;
+                }
+                cpu->Regs()[0] = guest_abort_with_payload(
+                    cpu->Regs()[0],
+                    cpu->Regs()[1] |
+                        (static_cast<u64>(cpu->Regs()[2]) << 32),
+                    cpu->Regs()[3], cpu->Regs()[4], cpu->Regs()[5],
+                    cpu->Regs()[6] |
+                        (static_cast<u64>(reasonFlagsHigh) << 32));
                 DumpCrashReport(SIGABRT);
                 return;
+            }
             case (int)0x80000000:
                 NR = cpu->Regs()[3];
                 if(handleMachineDependentSyscall(NR)) {
@@ -2073,6 +2427,22 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 break;
             }
             default:
+                if (NR > 0 && NR < 1000) {
+                    /* Keep ordinary guest feature probes recoverable. The
+                     * explicit list above uses EPERM for operations that an
+                     * app process must not apply to its native host; other
+                     * known-but-unimplemented BSD calls report ENOSYS. */
+                    static std::array<std::atomic_bool, 1000> warned{};
+                    if (!warned[static_cast<size_t>(NR)].exchange(
+                            true, std::memory_order_relaxed)) {
+                        fprintf(stderr,
+                            "LC32: unimplemented Darwin syscall %d; "
+                            "returning ENOSYS\n", NR);
+                    }
+                    cpu->Regs()[0] =
+                        return_with_carry_direct(ENOSYS, true);
+                    break;
+                }
                 printf("Unhandled svc number: %d\n", NR);
                 SetPendingGuestCrashMessage(
                     "Unhandled Darwin syscall number %d", NR);

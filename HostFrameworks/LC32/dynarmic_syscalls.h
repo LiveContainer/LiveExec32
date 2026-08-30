@@ -29,7 +29,7 @@ mach_msg_return_t guest_mach_msg_trap(
     mach_msg_size_t receive_size, mach_port_t receive_name,
     mach_msg_timeout_t timeout, mach_port_t notify);
 
-int guest_getdirentries64(int fd, u32 guest_buffer, int nbytes,
+int guest_getdirentries64(int fd, u32 guest_buffer, u32 nbytes,
                           u32 guest_basep);
 int guest_stat64(u32 guest_path, u32 guest_buffer);
 int guest_fstat(int fildes, u32 guest_buffer);
@@ -62,6 +62,10 @@ int guest_getsockopt(int socket, int level, int option, u32 guest_value,
                      u32 guest_value_length);
 int guest_getsockname(int socket, u32 guest_address,
                       u32 guest_address_length);
+int guest_getpeername(int socket, u32 guest_address,
+                      u32 guest_address_length);
+int guest_accept(int syscall_number, int socket, u32 guest_address,
+                 u32 guest_address_length);
 ssize_t guest_recvfrom(int syscall_number, int socket, u32 guest_buffer,
                        size_t length, int flags, u32 guest_from,
                        u32 guest_from_length);
@@ -95,6 +99,10 @@ LC32_DYNARMIC_HIDDEN int guest_dup(int fildes);
 LC32_DYNARMIC_HIDDEN int guest_dup2(
     int source, int destination);
 int guest_open(int syscall_number, u32 guest_path, int oflag, int mode);
+int guest_chdir(u32 guest_path);
+int guest_fchdir(int fildes);
+int guest_pthread_chdir(u32 guest_path);
+int guest_pthread_fchdir(int fildes);
 int guest_unlink(u32 guest_path);
 int guest_chmod(u32 guest_path, mode_t mode);
 int guest_chown(u32 guest_path, uid_t owner, gid_t group);
