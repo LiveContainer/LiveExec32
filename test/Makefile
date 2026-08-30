@@ -41,7 +41,7 @@ GUEST_FRAMEWORK_DIR ?= $(abspath ../GuestMakefile/.theos/obj/armv7s)
 TEST_OUTPUT_DIR ?= /private/tmp
 ROOTFS ?= $(abspath ../Resources/RootFS)
 
-export CLANG_MODULE_CACHE_PATH := $(CURDIR)/.theos/module-cache
+include ../module-cache.mk
 
 ADDITIONAL_CFLAGS := -Wno-deprecated-module-dot-map
 ADDITIONAL_LDFLAGS := -fno-autolink

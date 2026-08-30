@@ -7,6 +7,8 @@ STRIP = 0
 # Signing happens after framework embedding and, for Mac tests, after vtool.
 TARGET_CODESIGN =
 
+include module-cache.mk
+
 include $(THEOS)/makefiles/common.mk
 
 APPLICATION_NAME = LiveExec32

@@ -2,11 +2,12 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd "$SCRIPT_DIR/../.." && pwd)
 cd "$SCRIPT_DIR"
 
 MACOSX_SDK_DIR=$(xcrun --sdk macosx --show-sdk-path)
 CLANG=$(xcrun --sdk macosx --find clang)
-MODULE_CACHE=${CLANG_MODULE_CACHE_PATH:-${TMPDIR:-/tmp}/LiveExec32-GenerateShimAPI-ModuleCache}
+MODULE_CACHE=${CLANG_MODULE_CACHE_PATH:-$REPO_ROOT/.theos/module-cache}
 mkdir -p "$MODULE_CACHE"
 
 compile_catalyst() {

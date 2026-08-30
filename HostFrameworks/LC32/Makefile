@@ -6,6 +6,8 @@ STRIP = 0
 # The root app signs the embedded copy after its optional Catalyst rewrite.
 TARGET_CODESIGN =
 
+include ../../module-cache.mk
+
 include $(THEOS)/makefiles/common.mk
 
 FRAMEWORK_NAME = LiveExec32Shared

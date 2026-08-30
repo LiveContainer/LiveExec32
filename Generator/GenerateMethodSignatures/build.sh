@@ -1,7 +1,10 @@
 #!/bin/sh
 
 set -eu
-cd "$(dirname "$0")"
+
+SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd "$SCRIPT_DIR/../.." && pwd)
+cd "$SCRIPT_DIR"
 
 if [ -z "${THEOS:-}" ]; then
     echo "THEOS must point to a Theos installation with an armv7-capable SDK" >&2
@@ -15,8 +18,7 @@ if [ ! -d "$GENERATOR_SDK_PATH" ]; then
     exit 1
 fi
 
-GENERATOR_CACHE_ROOT="${TMPDIR:-/tmp}"
-GENERATOR_MODULE_CACHE="${CLANG_MODULE_CACHE_PATH:-${GENERATOR_CACHE_ROOT}/LiveExec32-GenerateMethodSignatures-ModuleCache}"
+GENERATOR_MODULE_CACHE="${CLANG_MODULE_CACHE_PATH:-$REPO_ROOT/.theos/module-cache}"
 mkdir -p "$GENERATOR_MODULE_CACHE"
 
 xcrun --sdk iphoneos clang \

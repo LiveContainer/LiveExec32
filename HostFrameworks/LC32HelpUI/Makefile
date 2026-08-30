@@ -7,6 +7,8 @@ STRIP = 0
 # the optional Catalyst rewrite.
 TARGET_CODESIGN =
 
+include ../../module-cache.mk
+
 include $(THEOS)/makefiles/common.mk
 
 FRAMEWORK_NAME = LC32HelpUI

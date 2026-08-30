@@ -31,7 +31,7 @@ $(error Generated guest shims are missing; run gmake -C GuestMakefile generate-s
 endif
 endif
 
-export CLANG_MODULE_CACHE_PATH := $(CURDIR)/.theos/module-cache
+include ../module-cache.mk
 
 ADDITIONAL_CFLAGS = \
   -I$(abspath ../include) \
