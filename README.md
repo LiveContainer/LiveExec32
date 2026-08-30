@@ -1,10 +1,12 @@
 # LiveExec32
 Run 32-bit binaries on 64-bit iOS by passing through syscalls.
 
+Not all apps will work and will mostly run into missing symbols issue. Please open an issue for that.
+
 > [!NOTE]
 > Some further work in this branch is done by LLM, mainly GPT-5.6 Sol; notable for implementing GDB Stub, Native Threads, more shims, etc.
 > Its commit history is kept for later reference.
-> Last commit before LLM is [760e9c7](https://github.com/LiveContainer/LiveExec32/commit/760e9c7da2856285a54404e7a6e00ee9fb99fd14)
+> Last commit before LLM is [dbd36e3](https://github.com/LiveContainer/LiveExec32/commit/dbd36e3e42e4e675e6fd542d4a487b61dbdc755d)
 >
 > While I'd love to work more on it myself more, I can't really do it due to lack of time and I have too many side projects still left in the dust.
 > I still try to review changes. LLM also validates them through test cases made by itself.
