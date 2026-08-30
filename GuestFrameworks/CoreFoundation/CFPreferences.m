@@ -35,3 +35,17 @@ CFIndex CFPreferencesGetAppIntegerValue(
         LC32_CF_HOST(key), LC32_CF_HOST(applicationID),
         LC32_CF_U32((uintptr_t)keyExistsAndHasValidFormat));
 }
+
+void CFPreferencesSetAppValue(CFStringRef key, CFPropertyListRef value,
+                              CFStringRef applicationID) {
+    if(!key || !applicationID) return;
+    LC32_CF_CALL(LC32CoreFoundationOpPreferencesSetAppValue,
+        LC32_CF_HOST(key), LC32_CF_HOST(value),
+        LC32_CF_HOST(applicationID));
+}
+
+Boolean CFPreferencesAppSynchronize(CFStringRef applicationID) {
+    return applicationID && LC32_CF_CALL(
+        LC32CoreFoundationOpPreferencesAppSynchronize,
+        LC32_CF_HOST(applicationID));
+}

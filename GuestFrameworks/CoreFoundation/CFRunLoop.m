@@ -25,6 +25,12 @@ static uint64_t LC32CFRunLoopDoubleBits(double value) {
     return representation.bits;
 }
 
+void CFRunLoopAddCommonMode(CFRunLoopRef runLoop, CFRunLoopMode mode) {
+    if(!runLoop || !mode) return;
+    LC32_CF_CALL(LC32CoreFoundationOpRunLoopAddCommonMode,
+        LC32_CF_HOST(runLoop), LC32_CF_HOST(mode));
+}
+
 void CFRunLoopAddSource(CFRunLoopRef runLoop, CFRunLoopSourceRef source,
                         CFRunLoopMode mode) {
     if(!runLoop || !source || !mode) return;

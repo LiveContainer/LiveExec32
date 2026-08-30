@@ -175,6 +175,10 @@ void CFSetAddValue(CFMutableSetRef set, const void *value) {
         LC32_CF_HOST(set), LC32_CF_HOST(value));
 }
 
+void CFSetReplaceValue(CFMutableSetRef set, const void *value) {
+    if(CFSetContainsValue(set, value)) CFSetSetValue(set, value);
+}
+
 void CFSetSetValue(CFMutableSetRef set, const void *value) {
     if(!set || !value) return;
     LC32_CF_CALL(LC32CoreFoundationOpSetSetValue,

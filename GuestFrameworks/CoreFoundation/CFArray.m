@@ -1,5 +1,6 @@
 #import <LC32/LC32.h>
 #import <CoreFoundation/CoreFoundation+LC32.h>
+#import <objc/runtime.h>
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -8,6 +9,57 @@
 enum {
     LC32MaximumArraySortEntries = 1024 * 1024,
 };
+
+@interface LC32CFArrayCallbackMode : NSObject {
+@public
+    LC32CoreFoundationCallbacksMode mode;
+}
+@end
+
+@implementation LC32CFArrayCallbackMode
+@end
+
+static char LC32ArrayCallbackModeAssociationKey;
+
+static void LC32SetArrayCallbackMode(
+        CFArrayRef array, LC32CoreFoundationCallbacksMode mode) {
+    if(!array) return;
+    LC32CFArrayCallbackMode *storedMode =
+        [LC32CFArrayCallbackMode new];
+    storedMode->mode = mode;
+    objc_setAssociatedObject((id)array,
+        &LC32ArrayCallbackModeAssociationKey, storedMode,
+        OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [storedMode release];
+}
+
+static LC32CoreFoundationCallbacksMode LC32ArrayCallbackMode(
+        CFArrayRef array) {
+    LC32CFArrayCallbackMode *storedMode = array
+        ? objc_getAssociatedObject((id)array,
+            &LC32ArrayCallbackModeAssociationKey)
+        : nil;
+    /* Foundation arrays and older LC32 arrays use ordinary object equality. */
+    return storedMode ? storedMode->mode
+                      : LC32CoreFoundationCallbacksCFType;
+}
+
+static Boolean LC32ArrayRangeIsValid(CFArrayRef array, CFRange range) {
+    if(!array || range.location < 0 || range.length < 0) return false;
+    const CFIndex count = CFArrayGetCount(array);
+    return count >= 0 && range.location <= count &&
+        range.length <= count - range.location;
+}
+
+static Boolean LC32ArrayValuesEqual(CFArrayRef array,
+                                     const void *first,
+                                     const void *second) {
+    if(first == second) return true;
+    if(!first || !second) return false;
+    return LC32ArrayCallbackMode(array) ==
+            LC32CoreFoundationCallbacksNull
+        ? false : CFEqual(first, second);
+}
 
 extern const void *__CFTypeCollectionRetain(CFAllocatorRef allocator, const void *ptr);
 extern void __CFTypeCollectionRelease(CFAllocatorRef allocator, const void *ptr);
@@ -50,6 +102,8 @@ CFArrayRef CFArrayCreate(CFAllocatorRef allocator, const void **values, CFIndex 
     }
     NSArray *result = [[NSArray alloc] initWithArray:array];
     [array release];
+    LC32SetArrayCallbackMode((CFArrayRef)result,
+                             LC32CoreFoundationCallbacksCFType);
     return (CFArrayRef)result;
 }
 
@@ -126,15 +180,20 @@ CFMutableArrayRef CFArrayCreateMutable(CFAllocatorRef allocator,
             "LC32: CFArrayCreateMutable called with custom callbacks");
         HALT;
     }
-    return (CFMutableArrayRef)LC32_CF_CALL(
+    CFMutableArrayRef array = (CFMutableArrayRef)LC32_CF_CALL(
         LC32CoreFoundationOpArrayCreateMutable,
         LC32_CF_U32(capacity), LC32_CF_U32(mode));
+    LC32SetArrayCallbackMode(array, mode);
+    return array;
 }
 
 CFArrayRef CFArrayCreateCopy(CFAllocatorRef allocator,
                              CFArrayRef array) {
     (void)allocator;
-    return array ? (CFArrayRef)[(NSArray *)array copy] : NULL;
+    if(!array) return NULL;
+    CFArrayRef copy = (CFArrayRef)[(NSArray *)array copy];
+    LC32SetArrayCallbackMode(copy, LC32ArrayCallbackMode(array));
+    return copy;
 }
 
 CFMutableArrayRef CFArrayCreateMutableCopy(CFAllocatorRef allocator,
@@ -142,7 +201,10 @@ CFMutableArrayRef CFArrayCreateMutableCopy(CFAllocatorRef allocator,
                                            CFArrayRef array) {
     (void)allocator;
     if(capacity < 0 || !array) return NULL;
-    return (CFMutableArrayRef)[(NSArray *)array mutableCopy];
+    CFMutableArrayRef copy =
+        (CFMutableArrayRef)[(NSArray *)array mutableCopy];
+    LC32SetArrayCallbackMode(copy, LC32ArrayCallbackMode(array));
+    return copy;
 }
 
 void CFArrayAppendValue(CFMutableArrayRef array, const void *value) {
@@ -186,9 +248,8 @@ void CFArraySetValueAtIndex(CFMutableArrayRef array, CFIndex index,
 }
 
 Boolean CFArrayContainsValue(CFArrayRef theArray, CFRange range, const void *value) {
-    static_assert(sizeof(CFRange) == sizeof(NSRange));
-    return [(NSArray *)theArray indexOfObject:(id)value
-                                      inRange:*(NSRange *)&range] != NSNotFound;
+    return CFArrayGetFirstIndexOfValue(theArray, range, value) !=
+        kCFNotFound;
 }
 
 CFIndex CFArrayGetCount(CFArrayRef theArray) {
@@ -233,6 +294,135 @@ void CFArrayApplyFunction(CFArrayRef array, CFRange range,
             array, range.location + offset);
         applier(value, context);
     }
+}
+
+CFIndex CFArrayGetCountOfValue(CFArrayRef array, CFRange range,
+                               const void *value) {
+    if(!LC32ArrayRangeIsValid(array, range)) return 0;
+    CFIndex matches = 0;
+    for(CFIndex offset = 0; offset < range.length; ++offset) {
+        if(LC32ArrayValuesEqual(array,
+                CFArrayGetValueAtIndex(array, range.location + offset),
+                value)) {
+            ++matches;
+        }
+    }
+    return matches;
+}
+
+CFIndex CFArrayGetFirstIndexOfValue(CFArrayRef array, CFRange range,
+                                    const void *value) {
+    if(!LC32ArrayRangeIsValid(array, range)) return kCFNotFound;
+    for(CFIndex offset = 0; offset < range.length; ++offset) {
+        const CFIndex index = range.location + offset;
+        if(LC32ArrayValuesEqual(array,
+                CFArrayGetValueAtIndex(array, index), value)) {
+            return index;
+        }
+    }
+    return kCFNotFound;
+}
+
+CFIndex CFArrayGetLastIndexOfValue(CFArrayRef array, CFRange range,
+                                   const void *value) {
+    if(!LC32ArrayRangeIsValid(array, range)) return kCFNotFound;
+    for(CFIndex offset = range.length; offset > 0; --offset) {
+        const CFIndex index = range.location + offset - 1;
+        if(LC32ArrayValuesEqual(array,
+                CFArrayGetValueAtIndex(array, index), value)) {
+            return index;
+        }
+    }
+    return kCFNotFound;
+}
+
+CFIndex CFArrayBSearchValues(CFArrayRef array, CFRange range,
+                             const void *value,
+                             CFComparatorFunction comparator,
+                             void *context) {
+    if(!comparator || !LC32ArrayRangeIsValid(array, range))
+        return kCFNotFound;
+
+    /* comparator is ARM32 code, so keep the complete binary search in the
+     * guest instead of handing its function pointer to native CF. */
+    CFIndex low = range.location;
+    CFIndex high = range.location + range.length;
+    while(low < high) {
+        const CFIndex middle = low + (high - low) / 2;
+        const CFComparisonResult comparison = comparator(
+            CFArrayGetValueAtIndex(array, middle), value, context);
+        if(comparison < 0) {
+            low = middle + 1;
+        } else if(comparison > 0) {
+            high = middle;
+        } else {
+            return middle;
+        }
+    }
+    return low;
+}
+
+void CFArrayReplaceValues(CFMutableArrayRef array, CFRange range,
+                          const void **newValues, CFIndex newCount) {
+    if(!LC32ArrayRangeIsValid(array, range) || newCount < 0 ||
+       (newCount && !newValues) ||
+       (uint64_t)newCount > LC32MaximumArraySortEntries ||
+       (uint64_t)newCount > SIZE_MAX / sizeof(void *)) return;
+
+    const void **snapshot = NULL;
+    if(newCount) {
+        snapshot = malloc((size_t)newCount * sizeof(*snapshot));
+        if(!snapshot) return;
+        const Boolean storesObjects = LC32ArrayCallbackMode(array) !=
+            LC32CoreFoundationCallbacksNull;
+        for(CFIndex index = 0; index < newCount; ++index) {
+            if(!newValues[index]) {
+                for(CFIndex retained = 0; retained < index; ++retained) {
+                    if(storesObjects) CFRelease(snapshot[retained]);
+                }
+                free(snapshot);
+                return;
+            }
+            snapshot[index] = newValues[index];
+            if(storesObjects) CFRetain(snapshot[index]);
+        }
+    }
+
+    const CFIndex commonCount = range.length < newCount
+        ? range.length : newCount;
+    for(CFIndex index = 0; index < commonCount; ++index) {
+        CFArraySetValueAtIndex(array, range.location + index,
+                               snapshot[index]);
+    }
+    if(range.length > newCount) {
+        for(CFIndex index = newCount; index < range.length; ++index)
+            CFArrayRemoveValueAtIndex(array, range.location + newCount);
+    } else {
+        for(CFIndex index = range.length; index < newCount; ++index) {
+            CFArrayInsertValueAtIndex(array, range.location + index,
+                                      snapshot[index]);
+        }
+    }
+
+    if(snapshot) {
+        if(LC32ArrayCallbackMode(array) !=
+                LC32CoreFoundationCallbacksNull) {
+            for(CFIndex index = 0; index < newCount; ++index)
+                CFRelease(snapshot[index]);
+        }
+        free(snapshot);
+    }
+}
+
+void CFArrayExchangeValuesAtIndices(CFMutableArrayRef array,
+                                    CFIndex firstIndex,
+                                    CFIndex secondIndex) {
+    if(!array || firstIndex < 0 || secondIndex < 0) return;
+    const CFIndex count = CFArrayGetCount(array);
+    if(firstIndex >= count || secondIndex >= count ||
+       firstIndex == secondIndex) return;
+    [(NSMutableArray *)array exchangeObjectAtIndex:(NSUInteger)firstIndex
+                                withObjectAtIndex:(NSUInteger)secondIndex];
 }
 
 void CFArraySortValues(CFMutableArrayRef array, CFRange range,

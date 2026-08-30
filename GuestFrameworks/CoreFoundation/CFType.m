@@ -1,5 +1,7 @@
 #import <CoreFoundation/CoreFoundation+LC32.h>
 
+#include <stdint.h>
+
 static CFTypeID LC32KnownTypeID(LC32CoreFoundationKnownType type) {
     return (CFTypeID)LC32_CF_CALL(
         LC32CoreFoundationOpGetKnownTypeID, LC32_CF_U32(type));
@@ -8,6 +10,14 @@ static CFTypeID LC32KnownTypeID(LC32CoreFoundationKnownType type) {
 CFTypeID CFGetTypeID(CFTypeRef object) {
     return object ? (CFTypeID)LC32_CF_CALL(
         LC32CoreFoundationOpGetTypeID, LC32_CF_HOST(object)) : 0;
+}
+
+CFTypeRef CFAutorelease(CFTypeRef object) {
+    return [(id)object autorelease];
+}
+
+CFIndex CFGetRetainCount(CFTypeRef object) {
+    return object ? (CFIndex)[(id)object retainCount] : 0;
 }
 
 CFTypeID CFArrayGetTypeID(void) {
@@ -79,6 +89,47 @@ CFComparisonResult CFNumberCompare(CFNumberRef number,
 CFNumberType CFNumberGetType(CFNumberRef number) {
     return number ? (CFNumberType)LC32_CF_CALL(
         LC32CoreFoundationOpNumberGetType, LC32_CF_HOST(number)) : 0;
+}
+
+CFIndex CFNumberGetByteSize(CFNumberRef number) {
+    switch(CFNumberGetType(number)) {
+        case kCFNumberSInt8Type:
+        case kCFNumberCharType:
+            return sizeof(int8_t);
+        case kCFNumberSInt16Type:
+        case kCFNumberShortType:
+            return sizeof(int16_t);
+        case kCFNumberSInt32Type:
+        case kCFNumberIntType:
+        case kCFNumberLongType:
+        case kCFNumberCFIndexType:
+        case kCFNumberNSIntegerType:
+            return sizeof(int32_t);
+        case kCFNumberFloat32Type:
+        case kCFNumberFloatType:
+        case kCFNumberCGFloatType:
+            return sizeof(float);
+        case kCFNumberSInt64Type:
+        case kCFNumberLongLongType:
+            return sizeof(int64_t);
+        case kCFNumberFloat64Type:
+        case kCFNumberDoubleType:
+            return sizeof(double);
+    }
+    return 0;
+}
+
+Boolean CFNumberIsFloatType(CFNumberRef number) {
+    switch(CFNumberGetType(number)) {
+        case kCFNumberFloat32Type:
+        case kCFNumberFloat64Type:
+        case kCFNumberFloatType:
+        case kCFNumberDoubleType:
+        case kCFNumberCGFloatType:
+            return true;
+        default:
+            return false;
+    }
 }
 
 CFTypeRef CFMakeCollectable(CFTypeRef object) {

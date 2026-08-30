@@ -1,15 +1,23 @@
 #import <CoreFoundation/CoreFoundation+LC32.h>
 
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
-const CFStringRef kCFBundleVersionKey = CFSTR("CFBundleVersion");
 const CFRunLoopMode kCFRunLoopCommonModes = CFSTR("kCFRunLoopCommonModes");
 
 typedef union {
     CFUUIDBytes bytes;
     UInt8 rawBytes[16];
 } LC32CFUUIDBytes;
+
+typedef struct LC32CFConstantUUIDEntry {
+    LC32CFUUIDBytes storage;
+    CFUUIDRef uuid;
+    struct LC32CFConstantUUIDEntry *next;
+} LC32CFConstantUUIDEntry;
+
+static LC32CFConstantUUIDEntry *LC32CFConstantUUIDs;
 
 _Static_assert(sizeof(CFUUIDBytes) == 16,
                "CFUUIDBytes must contain exactly 16 bytes");
@@ -51,6 +59,18 @@ static Boolean LC32CFUUIDParseString(const char *text,
     return true;
 }
 
+static LC32CFUUIDBytes LC32CFUUIDBytesMake(
+        UInt8 byte0, UInt8 byte1, UInt8 byte2, UInt8 byte3,
+        UInt8 byte4, UInt8 byte5, UInt8 byte6, UInt8 byte7,
+        UInt8 byte8, UInt8 byte9, UInt8 byte10, UInt8 byte11,
+        UInt8 byte12, UInt8 byte13, UInt8 byte14, UInt8 byte15) {
+    const LC32CFUUIDBytes storage = {.bytes = {
+        byte0, byte1, byte2, byte3, byte4, byte5, byte6, byte7,
+        byte8, byte9, byte10, byte11, byte12, byte13, byte14, byte15,
+    }};
+    return storage;
+}
+
 /* Foundation's iOS 6 import is two-level bound to CoreFoundation. */
 NSString * const NSGregorianCalendar = @"gregorian";
 
@@ -67,6 +87,156 @@ CFDictionaryRef CFBundleGetInfoDictionary(CFBundleRef bundle) {
     return bundle
         ? (CFDictionaryRef)[(NSBundle *)bundle infoDictionary]
         : NULL;
+}
+
+CFDictionaryRef CFBundleGetLocalInfoDictionary(CFBundleRef bundle) {
+    return bundle
+        ? (CFDictionaryRef)[(NSBundle *)bundle localizedInfoDictionary]
+        : NULL;
+}
+
+CFTypeRef CFBundleGetValueForInfoDictionaryKey(CFBundleRef bundle,
+                                                CFStringRef key) {
+    if(!bundle || !key) return NULL;
+    return (CFTypeRef)[(NSBundle *)bundle
+        objectForInfoDictionaryKey:(NSString *)key];
+}
+
+CFStringRef CFBundleGetDevelopmentRegion(CFBundleRef bundle) {
+    return bundle
+        ? (CFStringRef)[(NSBundle *)bundle developmentLocalization]
+        : NULL;
+}
+
+static CFURLRef LC32CFBundleCopyURL(NSURL *url) {
+    return url ? (CFURLRef)[url copy] : NULL;
+}
+
+CFURLRef CFBundleCopySupportFilesDirectoryURL(CFBundleRef bundle) {
+    return bundle ? LC32CFBundleCopyURL([(NSBundle *)bundle bundleURL]) : NULL;
+}
+
+CFURLRef CFBundleCopyResourcesDirectoryURL(CFBundleRef bundle) {
+    return bundle ? LC32CFBundleCopyURL([(NSBundle *)bundle resourceURL]) : NULL;
+}
+
+CFURLRef CFBundleCopyPrivateFrameworksURL(CFBundleRef bundle) {
+    return bundle
+        ? LC32CFBundleCopyURL([(NSBundle *)bundle privateFrameworksURL]) : NULL;
+}
+
+CFURLRef CFBundleCopySharedFrameworksURL(CFBundleRef bundle) {
+    return bundle
+        ? LC32CFBundleCopyURL([(NSBundle *)bundle sharedFrameworksURL]) : NULL;
+}
+
+CFURLRef CFBundleCopySharedSupportURL(CFBundleRef bundle) {
+    return bundle
+        ? LC32CFBundleCopyURL([(NSBundle *)bundle sharedSupportURL]) : NULL;
+}
+
+CFURLRef CFBundleCopyBuiltInPlugInsURL(CFBundleRef bundle) {
+    return bundle
+        ? LC32CFBundleCopyURL([(NSBundle *)bundle builtInPlugInsURL]) : NULL;
+}
+
+CFURLRef CFBundleCopyExecutableURL(CFBundleRef bundle) {
+    return bundle
+        ? LC32CFBundleCopyURL([(NSBundle *)bundle executableURL]) : NULL;
+}
+
+CFURLRef CFBundleCopyAuxiliaryExecutableURL(CFBundleRef bundle,
+                                            CFStringRef executableName) {
+    if(!bundle || !executableName) return NULL;
+    return LC32CFBundleCopyURL([(NSBundle *)bundle
+        URLForAuxiliaryExecutable:(NSString *)executableName]);
+}
+
+CFArrayRef CFBundleCopyExecutableArchitectures(CFBundleRef bundle) {
+    return bundle
+        ? (CFArrayRef)[[(NSBundle *)bundle executableArchitectures] copy]
+        : NULL;
+}
+
+CFArrayRef CFBundleCopyBundleLocalizations(CFBundleRef bundle) {
+    return bundle ? (CFArrayRef)[[(NSBundle *)bundle localizations] copy]
+                  : NULL;
+}
+
+CFArrayRef CFBundleCopyPreferredLocalizationsFromArray(
+        CFArrayRef localizations) {
+    return localizations ? (CFArrayRef)[[NSBundle
+        preferredLocalizationsFromArray:(NSArray *)localizations] copy] : NULL;
+}
+
+CFArrayRef CFBundleCopyLocalizationsForPreferences(
+        CFArrayRef localizations, CFArrayRef preferences) {
+    if(!localizations || !preferences) return NULL;
+    return (CFArrayRef)[[NSBundle
+        preferredLocalizationsFromArray:(NSArray *)localizations
+        forPreferences:(NSArray *)preferences] copy];
+}
+
+CFArrayRef CFBundleCopyResourceURLsOfType(
+        CFBundleRef bundle, CFStringRef resourceType,
+        CFStringRef subdirectoryName) {
+    if(!bundle) return NULL;
+    return (CFArrayRef)[[(NSBundle *)bundle
+        URLsForResourcesWithExtension:(NSString *)resourceType
+        subdirectory:(NSString *)subdirectoryName] copy];
+}
+
+CFURLRef CFBundleCopyResourceURLForLocalization(
+        CFBundleRef bundle, CFStringRef resourceName, CFStringRef resourceType,
+        CFStringRef subdirectoryName, CFStringRef localizationName) {
+    if(!bundle || !resourceName) return NULL;
+    return LC32CFBundleCopyURL([(NSBundle *)bundle
+        URLForResource:(NSString *)resourceName
+        withExtension:(NSString *)resourceType
+        subdirectory:(NSString *)subdirectoryName
+        localization:(NSString *)localizationName]);
+}
+
+CFArrayRef CFBundleCopyResourceURLsOfTypeForLocalization(
+        CFBundleRef bundle, CFStringRef resourceType,
+        CFStringRef subdirectoryName, CFStringRef localizationName) {
+    if(!bundle) return NULL;
+    return (CFArrayRef)[[(NSBundle *)bundle
+        URLsForResourcesWithExtension:(NSString *)resourceType
+        subdirectory:(NSString *)subdirectoryName
+        localization:(NSString *)localizationName] copy];
+}
+
+Boolean CFBundlePreflightExecutable(CFBundleRef bundle, CFErrorRef *error) {
+    if(!bundle) {
+        if(error) *error = NULL;
+        return false;
+    }
+    return LC32_CF_CALL(LC32CoreFoundationOpBundlePreflightExecutable,
+        LC32_CF_HOST(bundle), LC32_CF_U32((uintptr_t)error));
+}
+
+Boolean CFBundleLoadExecutableAndReturnError(CFBundleRef bundle,
+                                             CFErrorRef *error) {
+    if(!bundle) {
+        if(error) *error = NULL;
+        return false;
+    }
+    return LC32_CF_CALL(
+        LC32CoreFoundationOpBundleLoadExecutableAndReturnError,
+        LC32_CF_HOST(bundle), LC32_CF_U32((uintptr_t)error));
+}
+
+Boolean CFBundleLoadExecutable(CFBundleRef bundle) {
+    return bundle && [(NSBundle *)bundle load];
+}
+
+Boolean CFBundleIsExecutableLoaded(CFBundleRef bundle) {
+    return bundle && [(NSBundle *)bundle isLoaded];
+}
+
+void CFBundleUnloadExecutable(CFBundleRef bundle) {
+    if(bundle) [(NSBundle *)bundle unload];
 }
 
 CFStringRef CFBundleGetIdentifier(CFBundleRef bundle) {
@@ -138,9 +308,79 @@ CFRunLoopRef CFRunLoopGetCurrent(void) {
         LC32CoreFoundationOpRunLoopGetCurrent);
 }
 
+CFTypeID CFUUIDGetTypeID(void) {
+    static CFTypeID typeID;
+    if(typeID) return typeID;
+    @synchronized([NSUUID class]) {
+        if(!typeID) {
+            CFUUIDRef uuid = CFUUIDCreate(kCFAllocatorDefault);
+            if(uuid) {
+                typeID = CFGetTypeID(uuid);
+                CFRelease(uuid);
+            }
+        }
+    }
+    return typeID;
+}
+
 CFUUIDRef CFUUIDCreate(CFAllocatorRef allocator) {
     (void)allocator;
     return (CFUUIDRef)[[NSUUID alloc] init];
+}
+
+CFUUIDRef CFUUIDCreateWithBytes(
+        CFAllocatorRef allocator,
+        UInt8 byte0, UInt8 byte1, UInt8 byte2, UInt8 byte3,
+        UInt8 byte4, UInt8 byte5, UInt8 byte6, UInt8 byte7,
+        UInt8 byte8, UInt8 byte9, UInt8 byte10, UInt8 byte11,
+        UInt8 byte12, UInt8 byte13, UInt8 byte14, UInt8 byte15) {
+    const LC32CFUUIDBytes storage = LC32CFUUIDBytesMake(
+        byte0, byte1, byte2, byte3, byte4, byte5, byte6, byte7,
+        byte8, byte9, byte10, byte11, byte12, byte13, byte14, byte15);
+    return CFUUIDCreateFromUUIDBytes(allocator, storage.bytes);
+}
+
+CFUUIDRef CFUUIDCreateFromString(CFAllocatorRef allocator,
+                                 CFStringRef uuidString) {
+    (void)allocator;
+    return uuidString ? (CFUUIDRef)[[NSUUID alloc]
+        initWithUUIDString:(NSString *)uuidString] : NULL;
+}
+
+CFUUIDRef CFUUIDGetConstantUUIDWithBytes(
+        CFAllocatorRef allocator,
+        UInt8 byte0, UInt8 byte1, UInt8 byte2, UInt8 byte3,
+        UInt8 byte4, UInt8 byte5, UInt8 byte6, UInt8 byte7,
+        UInt8 byte8, UInt8 byte9, UInt8 byte10, UInt8 byte11,
+        UInt8 byte12, UInt8 byte13, UInt8 byte14, UInt8 byte15) {
+    const LC32CFUUIDBytes storage = LC32CFUUIDBytesMake(
+        byte0, byte1, byte2, byte3, byte4, byte5, byte6, byte7,
+        byte8, byte9, byte10, byte11, byte12, byte13, byte14, byte15);
+
+    @synchronized([NSUUID class]) {
+        for(LC32CFConstantUUIDEntry *entry = LC32CFConstantUUIDs;
+                entry; entry = entry->next) {
+            if(memcmp(entry->storage.rawBytes, storage.rawBytes,
+                      sizeof(storage.rawBytes)) == 0) {
+                return entry->uuid;
+            }
+        }
+
+        CFUUIDRef uuid = CFUUIDCreateFromUUIDBytes(allocator,
+                                                   storage.bytes);
+        if(!uuid) return NULL;
+        LC32CFConstantUUIDEntry *entry = malloc(sizeof(*entry));
+        if(!entry) {
+            /* The create retain is deliberately leaked: this API promises
+             * process-lifetime identity even if caching metadata is OOM. */
+            return uuid;
+        }
+        entry->storage = storage;
+        entry->uuid = uuid;
+        entry->next = LC32CFConstantUUIDs;
+        LC32CFConstantUUIDs = entry;
+        return uuid;
+    }
 }
 
 CFUUIDRef CFUUIDCreateFromUUIDBytes(CFAllocatorRef allocator,

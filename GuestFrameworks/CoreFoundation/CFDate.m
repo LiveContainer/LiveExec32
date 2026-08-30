@@ -55,6 +55,40 @@ CFDateFormatterRef CFDateFormatterCreate(CFAllocatorRef allocator,
         LC32_CF_U32(timeStyle));
 }
 
+CFTypeID CFDateFormatterGetTypeID(void) {
+    CFDateFormatterRef formatter = CFDateFormatterCreate(
+        kCFAllocatorDefault, CFLocaleGetSystem(),
+        kCFDateFormatterNoStyle, kCFDateFormatterNoStyle);
+    if(!formatter) return 0;
+    const CFTypeID typeID = CFGetTypeID(formatter);
+    CFRelease(formatter);
+    return typeID;
+}
+
+CFLocaleRef CFDateFormatterGetLocale(CFDateFormatterRef formatter) {
+    return formatter ? (CFLocaleRef)[(NSDateFormatter *)formatter locale]
+                     : NULL;
+}
+
+CFDateFormatterStyle CFDateFormatterGetDateStyle(
+        CFDateFormatterRef formatter) {
+    return formatter
+        ? (CFDateFormatterStyle)[(NSDateFormatter *)formatter dateStyle]
+        : kCFDateFormatterNoStyle;
+}
+
+CFDateFormatterStyle CFDateFormatterGetTimeStyle(
+        CFDateFormatterRef formatter) {
+    return formatter
+        ? (CFDateFormatterStyle)[(NSDateFormatter *)formatter timeStyle]
+        : kCFDateFormatterNoStyle;
+}
+
+CFStringRef CFDateFormatterGetFormat(CFDateFormatterRef formatter) {
+    return formatter ? (CFStringRef)[(NSDateFormatter *)formatter dateFormat]
+                     : NULL;
+}
+
 void CFDateFormatterSetFormat(CFDateFormatterRef formatter,
                               CFStringRef formatString) {
     if(!formatter || !formatString) return;
@@ -70,4 +104,43 @@ CFStringRef CFDateFormatterCreateStringWithAbsoluteTime(
     return (CFStringRef)LC32_CF_CALL(
         LC32CoreFoundationOpDateFormatterCreateStringWithAbsoluteTime,
         LC32_CF_HOST(formatter), LC32CFDoubleBits(at));
+}
+
+CFStringRef CFDateFormatterCreateStringWithDate(
+        CFAllocatorRef allocator, CFDateFormatterRef formatter,
+        CFDateRef date) {
+    return date ? CFDateFormatterCreateStringWithAbsoluteTime(
+        allocator, formatter, CFDateGetAbsoluteTime(date)) : NULL;
+}
+
+CFDateRef CFDateFormatterCreateDateFromString(
+        CFAllocatorRef allocator, CFDateFormatterRef formatter,
+        CFStringRef string, CFRange *range) {
+    (void)allocator;
+    if(!formatter || !string) return NULL;
+    return (CFDateRef)LC32_CF_CALL(
+        LC32CoreFoundationOpDateFormatterCreateDateFromString,
+        LC32_CF_HOST(formatter), LC32_CF_HOST(string),
+        LC32_CF_U32((uintptr_t)range));
+}
+
+Boolean CFDateFormatterGetAbsoluteTimeFromString(
+        CFDateFormatterRef formatter, CFStringRef string,
+        CFRange *range, CFAbsoluteTime *absoluteTime) {
+    if(!formatter || !string) return false;
+    return LC32_CF_CALL(
+        LC32CoreFoundationOpDateFormatterGetAbsoluteTimeFromString,
+        LC32_CF_HOST(formatter), LC32_CF_HOST(string),
+        LC32_CF_U32((uintptr_t)range),
+        LC32_CF_U32((uintptr_t)absoluteTime));
+}
+
+CFStringRef CFDateFormatterCreateDateFormatFromTemplate(
+        CFAllocatorRef allocator, CFStringRef templateString,
+        CFOptionFlags options, CFLocaleRef locale) {
+    (void)allocator;
+    if(!templateString) return NULL;
+    return (CFStringRef)[[NSDateFormatter
+        dateFormatFromTemplate:(NSString *)templateString
+        options:(NSUInteger)options locale:(NSLocale *)locale] copy];
 }

@@ -3,6 +3,12 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+CFTypeID CFErrorGetTypeID(void) {
+    NSError *error = [NSError errorWithDomain:@"LC32.CFErrorType"
+                                         code:0 userInfo:nil];
+    return CFGetTypeID((CFTypeRef)error);
+}
+
 CFErrorRef CFErrorCreate(CFAllocatorRef allocator, CFErrorDomain domain,
                          CFIndex code, CFDictionaryRef userInfo) {
     (void)allocator;
@@ -72,4 +78,15 @@ CFDictionaryRef CFErrorCopyUserInfo(CFErrorRef error) {
 CFStringRef CFErrorCopyDescription(CFErrorRef error) {
     return error ? (CFStringRef)LC32_CF_CALL(
         LC32CoreFoundationOpErrorCopyDescription, LC32_CF_HOST(error)) : NULL;
+}
+
+CFStringRef CFErrorCopyFailureReason(CFErrorRef error) {
+    return error ? (CFStringRef)[[(NSError *)error localizedFailureReason] copy]
+                 : NULL;
+}
+
+CFStringRef CFErrorCopyRecoverySuggestion(CFErrorRef error) {
+    return error
+        ? (CFStringRef)[[(NSError *)error localizedRecoverySuggestion] copy]
+        : NULL;
 }

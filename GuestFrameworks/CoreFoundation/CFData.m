@@ -1,6 +1,7 @@
 #import <CoreFoundation/CoreFoundation+LC32.h>
 
 #include <stdint.h>
+#include <string.h>
 
 extern UInt8 *LC32GetMutableDataGuestBytes(NSMutableData *data);
 extern BOOL LC32ReserveMutableDataGuestCapacity(NSMutableData *data,
@@ -141,4 +142,59 @@ void CFDataSetLength(CFMutableDataRef data, CFIndex length) {
     LC32_CF_CALL(LC32CoreFoundationOpDataSetLength,
         LC32_CF_HOST(data), LC32_CF_U32(length));
     LC32InvalidateDataGuestBuffer((NSData *)data);
+}
+
+CFRange CFDataFind(CFDataRef data, CFDataRef dataToFind,
+                   CFRange searchRange,
+                   CFDataSearchFlags compareOptions) {
+    const CFRange notFound = CFRangeMake(kCFNotFound, 0);
+    if(!data || !dataToFind || !LC32CFDataValidRange(searchRange))
+        return notFound;
+
+    const CFIndex dataLength = CFDataGetLength(data);
+    const CFIndex needleLength = CFDataGetLength(dataToFind);
+    if(searchRange.location > dataLength ||
+       searchRange.length > dataLength - searchRange.location ||
+       needleLength < 0 || needleLength > searchRange.length) {
+        return notFound;
+    }
+
+    const Boolean backwards =
+        (compareOptions & kCFDataSearchBackwards) != 0;
+    const Boolean anchored =
+        (compareOptions & kCFDataSearchAnchored) != 0;
+    if(needleLength == 0) return notFound;
+
+    const UInt8 *haystack = CFDataGetBytePtr(data);
+    const UInt8 *needle = CFDataGetBytePtr(dataToFind);
+    if(!haystack || !needle) return notFound;
+
+    const CFIndex lastStart = searchRange.location +
+        searchRange.length - needleLength;
+    if(anchored) {
+        const CFIndex location = backwards
+            ? lastStart : searchRange.location;
+        return memcmp(haystack + location, needle,
+                      (size_t)needleLength) == 0
+            ? CFRangeMake(location, needleLength) : notFound;
+    }
+
+    if(backwards) {
+        for(CFIndex location = lastStart;
+                location >= searchRange.location; --location) {
+            if(memcmp(haystack + location, needle,
+                      (size_t)needleLength) == 0) {
+                return CFRangeMake(location, needleLength);
+            }
+        }
+    } else {
+        for(CFIndex location = searchRange.location;
+                location <= lastStart; ++location) {
+            if(memcmp(haystack + location, needle,
+                      (size_t)needleLength) == 0) {
+                return CFRangeMake(location, needleLength);
+            }
+        }
+    }
+    return notFound;
 }

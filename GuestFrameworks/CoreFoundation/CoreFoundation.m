@@ -67,9 +67,23 @@ ___CFConstantStringClassReference = _OBJC_CLASS_$___NSCFConstantString \
 
 // For convenience, most CF functions are shims of Objective-C
 CFURLRef CFURLCreateWithFileSystemPath(CFAllocatorRef allocator, CFStringRef filePath, CFURLPathStyle pathStyle, Boolean isDirectory) {
-    // unused: allocator, pathStyle
-    return (CFURLRef)[[NSURL alloc]
-        initFileURLWithPath:(NSString *)filePath isDirectory:isDirectory];
+    (void)allocator;
+    if(!filePath) return NULL;
+    return (CFURLRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCreateWithFileSystemPath,
+        LC32_CF_HOST(filePath), LC32_CF_U32(pathStyle),
+        LC32_CF_U32(isDirectory));
+}
+
+CFURLRef CFURLCreateWithFileSystemPathRelativeToBase(
+        CFAllocatorRef allocator, CFStringRef filePath,
+        CFURLPathStyle pathStyle, Boolean isDirectory, CFURLRef baseURL) {
+    (void)allocator;
+    if(!filePath) return NULL;
+    return (CFURLRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCreateWithFileSystemPathRelativeToBase,
+        LC32_CF_HOST(filePath), LC32_CF_U32(pathStyle),
+        LC32_CF_U32(isDirectory), LC32_CF_HOST(baseURL));
 }
 
 CFURLRef CFURLCreateFromFileSystemRepresentation(
@@ -81,6 +95,17 @@ CFURLRef CFURLCreateFromFileSystemRepresentation(
         LC32CoreFoundationOpURLCreateFromFileSystemRepresentation,
         LC32_CF_U32((uintptr_t)buffer), LC32_CF_U32(bufferLength),
         LC32_CF_U32(isDirectory));
+}
+
+CFURLRef CFURLCreateFromFileSystemRepresentationRelativeToBase(
+        CFAllocatorRef allocator, const UInt8 *buffer,
+        CFIndex bufferLength, Boolean isDirectory, CFURLRef baseURL) {
+    (void)allocator;
+    if(bufferLength < 0 || (bufferLength && !buffer)) return NULL;
+    return (CFURLRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCreateFromFileSystemRepresentationRelativeToBase,
+        LC32_CF_U32((uintptr_t)buffer), LC32_CF_U32(bufferLength),
+        LC32_CF_U32(isDirectory), LC32_CF_HOST(baseURL));
 }
 
 CFURLRef CFURLCreateWithString(CFAllocatorRef allocator,
@@ -117,6 +142,198 @@ CFStringRef CFURLCopyFileSystemPath(CFURLRef url,
     return url ? (CFStringRef)LC32_CF_CALL(
         LC32CoreFoundationOpURLCopyFileSystemPath,
         LC32_CF_HOST(url), LC32_CF_U32(pathStyle)) : NULL;
+}
+
+CFTypeID CFURLGetTypeID(void) {
+    return (CFTypeID)LC32_CF_CALL0(
+        LC32CoreFoundationOpURLGetTypeID);
+}
+
+CFStringRef CFURLGetString(CFURLRef url) {
+    return url ? (CFStringRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLGetString,
+        LC32_CF_HOST(url)) : NULL;
+}
+
+CFURLRef CFURLGetBaseURL(CFURLRef url) {
+    return url ? (CFURLRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLGetBaseURL,
+        LC32_CF_HOST(url)) : NULL;
+}
+
+Boolean CFURLCanBeDecomposed(CFURLRef url) {
+    return url && LC32_CF_CALL(
+        LC32CoreFoundationOpURLCanBeDecomposed,
+        LC32_CF_HOST(url));
+}
+
+CFURLRef CFURLCopyAbsoluteURL(CFURLRef url) {
+    return url ? (CFURLRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCopyAbsoluteURL,
+        LC32_CF_HOST(url)) : NULL;
+}
+
+CFStringRef CFURLCopyScheme(CFURLRef url) {
+    return url ? (CFStringRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCopyScheme,
+        LC32_CF_HOST(url)) : NULL;
+}
+
+CFStringRef CFURLCopyHostName(CFURLRef url) {
+    return url ? (CFStringRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCopyHostName,
+        LC32_CF_HOST(url)) : NULL;
+}
+
+CFStringRef CFURLCopyPath(CFURLRef url) {
+    return url ? (CFStringRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCopyPath,
+        LC32_CF_HOST(url)) : NULL;
+}
+
+CFStringRef CFURLCopyStrictPath(CFURLRef url, Boolean *isAbsolute) {
+    return url ? (CFStringRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCopyStrictPath,
+        LC32_CF_HOST(url), LC32_CF_U32((uintptr_t)isAbsolute)) : NULL;
+}
+
+CFStringRef CFURLCopyResourceSpecifier(CFURLRef url) {
+    return url ? (CFStringRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCopyResourceSpecifier,
+        LC32_CF_HOST(url)) : NULL;
+}
+
+CFStringRef CFURLCopyUserName(CFURLRef url) {
+    return url ? (CFStringRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCopyUserName,
+        LC32_CF_HOST(url)) : NULL;
+}
+
+CFStringRef CFURLCopyPassword(CFURLRef url) {
+    return url ? (CFStringRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCopyPassword,
+        LC32_CF_HOST(url)) : NULL;
+}
+
+CFStringRef CFURLCopyQueryString(
+        CFURLRef url, CFStringRef charactersToLeaveEscaped) {
+    return url ? (CFStringRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCopyQueryString,
+        LC32_CF_HOST(url), LC32_CF_HOST(charactersToLeaveEscaped)) : NULL;
+}
+
+CFStringRef CFURLCopyFragment(
+        CFURLRef url, CFStringRef charactersToLeaveEscaped) {
+    return url ? (CFStringRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCopyFragment,
+        LC32_CF_HOST(url), LC32_CF_HOST(charactersToLeaveEscaped)) : NULL;
+}
+
+CFStringRef CFURLCopyLastPathComponent(CFURLRef url) {
+    return url ? (CFStringRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCopyLastPathComponent,
+        LC32_CF_HOST(url)) : NULL;
+}
+
+SInt32 CFURLGetPortNumber(CFURLRef url) {
+    return url ? (SInt32)LC32_CF_CALL(
+        LC32CoreFoundationOpURLGetPortNumber,
+        LC32_CF_HOST(url)) : -1;
+}
+
+Boolean CFURLHasDirectoryPath(CFURLRef url) {
+    return url && LC32_CF_CALL(
+        LC32CoreFoundationOpURLHasDirectoryPath,
+        LC32_CF_HOST(url));
+}
+
+CFURLRef CFURLCreateCopyAppendingPathComponent(
+        CFAllocatorRef allocator, CFURLRef url,
+        CFStringRef pathComponent, Boolean isDirectory) {
+    (void)allocator;
+    return url && pathComponent ? (CFURLRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCreateCopyAppendingPathComponent,
+        LC32_CF_HOST(url), LC32_CF_HOST(pathComponent),
+        LC32_CF_U32(isDirectory)) : NULL;
+}
+
+CFURLRef CFURLCreateCopyDeletingLastPathComponent(
+        CFAllocatorRef allocator, CFURLRef url) {
+    (void)allocator;
+    return url ? (CFURLRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCreateCopyDeletingLastPathComponent,
+        LC32_CF_HOST(url)) : NULL;
+}
+
+CFURLRef CFURLCreateCopyAppendingPathExtension(
+        CFAllocatorRef allocator, CFURLRef url, CFStringRef extension) {
+    (void)allocator;
+    return url && extension ? (CFURLRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCreateCopyAppendingPathExtension,
+        LC32_CF_HOST(url), LC32_CF_HOST(extension)) : NULL;
+}
+
+CFURLRef CFURLCreateCopyDeletingPathExtension(
+        CFAllocatorRef allocator, CFURLRef url) {
+    (void)allocator;
+    return url ? (CFURLRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCreateCopyDeletingPathExtension,
+        LC32_CF_HOST(url)) : NULL;
+}
+
+Boolean CFURLGetFileSystemRepresentation(
+        CFURLRef url, Boolean resolveAgainstBase,
+        UInt8 *buffer, CFIndex maxBufferLength) {
+    if(!url || maxBufferLength < 0 ||
+       (maxBufferLength && !buffer)) return false;
+    return LC32_CF_CALL(
+        LC32CoreFoundationOpURLGetFileSystemRepresentation,
+        LC32_CF_HOST(url), LC32_CF_U32(resolveAgainstBase),
+        LC32_CF_U32((uintptr_t)buffer),
+        LC32_CF_U32(maxBufferLength));
+}
+
+CFIndex CFURLGetBytes(CFURLRef url, UInt8 *buffer,
+                      CFIndex bufferLength) {
+    if(!url || bufferLength < 0) return -1;
+    return (CFIndex)(int32_t)LC32_CF_CALL(
+        LC32CoreFoundationOpURLGetBytes,
+        LC32_CF_HOST(url), LC32_CF_U32((uintptr_t)buffer),
+        LC32_CF_U32(bufferLength));
+}
+
+CFRange CFURLGetByteRangeForComponent(
+        CFURLRef url, CFURLComponentType component,
+        CFRange *rangeIncludingSeparators) {
+    CFRange result = CFRangeMake(kCFNotFound, 0);
+    if(!url) {
+        if(rangeIncludingSeparators)
+            *rangeIncludingSeparators = result;
+        return result;
+    }
+    if(!LC32_CF_CALL(
+            LC32CoreFoundationOpURLGetByteRangeForComponent,
+            LC32_CF_HOST(url), LC32_CF_U32(component),
+            LC32_CF_U32((uintptr_t)&result),
+            LC32_CF_U32((uintptr_t)rangeIncludingSeparators))) {
+        result = CFRangeMake(kCFNotFound, 0);
+        if(rangeIncludingSeparators)
+            *rangeIncludingSeparators = result;
+    }
+    return result;
+}
+
+Boolean CFURLSetResourcePropertyForKey(
+        CFURLRef url, CFStringRef key, CFTypeRef propertyValue,
+        CFErrorRef *error) {
+    if(!url || !key) {
+        if(error) *error = NULL;
+        return false;
+    }
+    return LC32_CF_CALL(
+        LC32CoreFoundationOpURLSetResourcePropertyForKey,
+        LC32_CF_HOST(url), LC32_CF_HOST(key),
+        LC32_CF_HOST(propertyValue), LC32_CF_U32((uintptr_t)error));
 }
 
 void CFRelease(CFTypeRef ref) {

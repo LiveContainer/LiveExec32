@@ -107,12 +107,16 @@ $(eval $(call lc32_guest_test,lc32-collection-object-buffers,collection_object_b
 $(eval $(call lc32_guest_test,lc32-collection-variadic,collection_variadic.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-attributed-string,corefoundation_attributed_string.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-bundle-url,corefoundation_bundle_url.m,Foundation CoreFoundation))
+$(eval $(call lc32_guest_test,lc32-corefoundation-common-wrappers,corefoundation_common_wrappers.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-read-stream,corefoundation_read_stream.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-run-loop,corefoundation_run_loop.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-run-loop-source,corefoundation_run_loop_source.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-run-loop-timer,corefoundation_run_loop_timer.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-socket,corefoundation_socket.m,Foundation CoreFoundation))
+$(eval $(call lc32_guest_test,lc32-corefoundation-string-character-set,corefoundation_string_character_set.m,Foundation CoreFoundation))
+$(eval $(call lc32_guest_test,lc32-corefoundation-time-zone,corefoundation_time_zone.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-url-propertylist,corefoundation_url_propertylist.m,Foundation CoreFoundation))
+$(eval $(call lc32_guest_test,lc32-corefoundation-url-common,corefoundation_url_common.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-uuid,corefoundation_uuid.c,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-write-stream,corefoundation_write_stream.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-cxx-lifecycle,cxx_lifecycle.mm,Foundation UIKit LC32))
@@ -170,12 +174,16 @@ lc32-thread-perform_CFLAGS := -fblocks
 
 lc32-corefoundation-attributed-string_CFLAGS := -fno-objc-arc
 lc32-corefoundation-bundle-url_CFLAGS := -fno-objc-arc
+lc32-corefoundation-common-wrappers_CFLAGS := -fno-objc-arc
 lc32-corefoundation-read-stream_CFLAGS := -fno-objc-arc
 lc32-corefoundation-run-loop_CFLAGS := -fno-objc-arc
 lc32-corefoundation-run-loop-source_CFLAGS := -fno-objc-arc
 lc32-corefoundation-run-loop-timer_CFLAGS := -fno-objc-arc
 lc32-corefoundation-socket_CFLAGS := -fno-objc-arc
+lc32-corefoundation-string-character-set_CFLAGS := -fno-objc-arc
+lc32-corefoundation-time-zone_CFLAGS := -fno-objc-arc
 lc32-corefoundation-url-propertylist_CFLAGS := -fno-objc-arc
+lc32-corefoundation-url-common_CFLAGS := -fno-objc-arc
 lc32-corefoundation-write-stream_CFLAGS := -fno-objc-arc
 lc32-coretext-bridge_CFLAGS := -fno-objc-arc
 lc32-foundation-null-utf8_CFLAGS := -fno-objc-arc

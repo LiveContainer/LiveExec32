@@ -50,6 +50,20 @@ CFStringRef CFStringCreateWithCString(CFAllocatorRef allocator,
         LC32_CF_U32((uintptr_t)cString), LC32_CF_U32(encoding));
 }
 
+CFStringRef CFStringCreateWithCStringNoCopy(
+        CFAllocatorRef allocator, const char *cString,
+        CFStringEncoding encoding, CFAllocatorRef contentsDeallocator) {
+    /* Guest storage cannot be retained or freed by the arm64 peer. */
+    (void)contentsDeallocator;
+    return CFStringCreateWithCString(allocator, cString, encoding);
+}
+
+CFStringRef CFStringCreateWithFileSystemRepresentation(
+        CFAllocatorRef allocator, const char *buffer) {
+    return CFStringCreateWithCString(
+        allocator, buffer, kCFStringEncodingUTF8);
+}
+
 CFStringRef CFStringCreateWithBytes(CFAllocatorRef allocator,
                                     const UInt8 *bytes, CFIndex numBytes,
                                     CFStringEncoding encoding,
@@ -118,6 +132,15 @@ CFArrayRef CFStringCreateArrayBySeparatingStrings(
         LC32_CF_HOST(string), LC32_CF_HOST(separatorString));
 }
 
+CFStringRef CFStringCreateByCombiningStrings(
+        CFAllocatorRef allocator, CFArrayRef array,
+        CFStringRef separatorString) {
+    (void)allocator;
+    if(!array || !separatorString) return NULL;
+    return (CFStringRef)[[(NSArray *)array
+        componentsJoinedByString:(NSString *)separatorString] copy];
+}
+
 CFStringRef CFStringCreateWithFormatAndArguments(
         CFAllocatorRef allocator, CFDictionaryRef formatOptions,
         CFStringRef format, va_list arguments) {
@@ -141,6 +164,34 @@ CFStringRef CFStringCreateWithFormat(CFAllocatorRef allocator,
 
 void CFStringAppend(CFMutableStringRef string, CFStringRef appendedString) {
     [(NSMutableString *)string appendString:(NSString *)appendedString];
+}
+
+void CFStringDelete(CFMutableStringRef string, CFRange range) {
+    if(!string || !LC32CFStringValidRange(range)) return;
+    [(NSMutableString *)string deleteCharactersInRange:
+        NSMakeRange((NSUInteger)range.location, (NSUInteger)range.length)];
+}
+
+void CFStringInsert(CFMutableStringRef string, CFIndex index,
+                    CFStringRef insertedString) {
+    if(!string || !insertedString || index < 0) return;
+    [(NSMutableString *)string insertString:(NSString *)insertedString
+                                    atIndex:(NSUInteger)index];
+}
+
+void CFStringReplace(CFMutableStringRef string, CFRange range,
+                     CFStringRef replacement) {
+    if(!string || !replacement || !LC32CFStringValidRange(range)) return;
+    [(NSMutableString *)string
+        replaceCharactersInRange:NSMakeRange(
+            (NSUInteger)range.location, (NSUInteger)range.length)
+        withString:(NSString *)replacement];
+}
+
+void CFStringReplaceAll(CFMutableStringRef string,
+                        CFStringRef replacement) {
+    if(string && replacement)
+        [(NSMutableString *)string setString:(NSString *)replacement];
 }
 
 void CFStringAppendCString(CFMutableStringRef string, const char *cString,
@@ -284,6 +335,22 @@ CFIndex CFStringGetMaximumSizeForEncoding(CFIndex length,
         LC32_CF_U32(length), LC32_CF_U32(encoding));
 }
 
+CFIndex CFStringGetMaximumSizeOfFileSystemRepresentation(
+        CFStringRef string) {
+    return string ? (CFIndex)(int32_t)LC32_CF_CALL(
+        LC32CoreFoundationOpStringGetMaximumSizeOfFileSystemRepresentation,
+        LC32_CF_HOST(string)) : 0;
+}
+
+Boolean CFStringGetFileSystemRepresentation(
+        CFStringRef string, char *buffer, CFIndex maxBufferLength) {
+    if(!string || !buffer || maxBufferLength <= 0) return false;
+    return LC32_CF_CALL(
+        LC32CoreFoundationOpStringGetFileSystemRepresentation,
+        LC32_CF_HOST(string), LC32_CF_U32((uintptr_t)buffer),
+        LC32_CF_U32(maxBufferLength));
+}
+
 CFIndex CFStringGetBytes(CFStringRef string, CFRange range,
                          CFStringEncoding encoding, UInt8 lossByte,
                          Boolean isExternalRepresentation, UInt8 *buffer,
@@ -378,6 +445,27 @@ SInt32 CFStringGetIntValue(CFStringRef string) {
     return string ? (SInt32)(int32_t)LC32_CF_CALL(
         LC32CoreFoundationOpStringGetIntValue,
         LC32_CF_HOST(string)) : 0;
+}
+
+double CFStringGetDoubleValue(CFStringRef string) {
+    return string ? [(NSString *)string doubleValue] : 0.0;
+}
+
+CFRange CFStringGetRangeOfComposedCharactersAtIndex(
+        CFStringRef string, CFIndex index) {
+    if(!string || index < 0 || index >= CFStringGetLength(string))
+        return CFRangeMake(kCFNotFound, 0);
+    const NSRange range = [(NSString *)string
+        rangeOfComposedCharacterSequenceAtIndex:(NSUInteger)index];
+    return CFRangeMake((CFIndex)range.location, (CFIndex)range.length);
+}
+
+void CFStringCapitalize(CFMutableStringRef string, CFLocaleRef locale) {
+    if(!string) return;
+    NSString *capitalized = locale
+        ? [(NSString *)string capitalizedStringWithLocale:(NSLocale *)locale]
+        : [(NSString *)string capitalizedString];
+    [(NSMutableString *)string setString:capitalized];
 }
 
 void CFStringUppercase(CFMutableStringRef string, CFLocaleRef locale) {

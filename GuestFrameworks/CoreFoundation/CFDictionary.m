@@ -237,6 +237,11 @@ CFIndex CFDictionaryGetCount(CFDictionaryRef dictionary) {
         LC32_CF_HOST(dictionary)) : 0;
 }
 
+CFIndex CFDictionaryGetCountOfKey(CFDictionaryRef dictionary,
+                                  const void *key) {
+    return CFDictionaryContainsKey(dictionary, key) ? 1 : 0;
+}
+
 Boolean CFDictionaryContainsKey(CFDictionaryRef dictionary,
                                 const void *key) {
     if(!dictionary || !key) return false;
@@ -245,6 +250,59 @@ Boolean CFDictionaryContainsKey(CFDictionaryRef dictionary,
     return LC32_CF_CALL(LC32CoreFoundationOpDictionaryContainsKey,
         LC32_CF_HOST(dictionary), LC32_CF_U32(keyMode),
         LC32DictionaryOperand(key, keyMode)) != 0;
+}
+
+typedef struct {
+    const void *candidate;
+    LC32CoreFoundationCallbacksMode mode;
+    CFIndex count;
+} LC32CFDictionaryValueCountContext;
+
+static Boolean LC32DictionaryValuesEqual(
+        const void *first, const void *second,
+        LC32CoreFoundationCallbacksMode mode) {
+    if(first == second) return true;
+    if(!first || !second) return false;
+    switch(mode) {
+        case LC32CoreFoundationCallbacksCFType:
+        case LC32CoreFoundationCallbacksWeakCFType:
+        case LC32CoreFoundationCallbacksWeakCFTypeNoDescription:
+        case LC32CoreFoundationCallbacksCopyString:
+            return CFEqual(first, second);
+        case LC32CoreFoundationCallbacksNull:
+        case LC32CoreFoundationCallbacksRetainedObjectNoDescriptionOrEqual:
+        case LC32CoreFoundationCallbacksInvalid:
+            return false;
+    }
+    return false;
+}
+
+static void LC32CountMatchingDictionaryValue(
+        const void *key, const void *value, void *opaqueContext) {
+    (void)key;
+    LC32CFDictionaryValueCountContext *context = opaqueContext;
+    if(LC32DictionaryValuesEqual(value, context->candidate,
+                                 context->mode)) {
+        ++context->count;
+    }
+}
+
+CFIndex CFDictionaryGetCountOfValue(CFDictionaryRef dictionary,
+                                    const void *value) {
+    if(!dictionary || !value) return 0;
+    LC32CFDictionaryValueCountContext context = {
+        .candidate = value,
+        .mode = LC32DictionaryValueMode(dictionary),
+        .count = 0,
+    };
+    CFDictionaryApplyFunction(dictionary,
+        LC32CountMatchingDictionaryValue, &context);
+    return context.count;
+}
+
+Boolean CFDictionaryContainsValue(CFDictionaryRef dictionary,
+                                  const void *value) {
+    return CFDictionaryGetCountOfValue(dictionary, value) != 0;
 }
 
 const void *CFDictionaryGetValue(CFDictionaryRef dictionary,
@@ -331,7 +389,8 @@ void CFDictionaryApplyFunction(CFDictionaryRef dictionary,
 
 void CFDictionaryAddValue(CFMutableDictionaryRef dictionary,
                           const void *key, const void *value) {
-    CFDictionarySetValue(dictionary, key, value);
+    if(!CFDictionaryContainsKey(dictionary, key))
+        CFDictionarySetValue(dictionary, key, value);
 }
 
 void CFDictionarySetValue(CFMutableDictionaryRef dictionary,
@@ -345,6 +404,12 @@ void CFDictionarySetValue(CFMutableDictionaryRef dictionary,
         LC32_CF_HOST(dictionary), LC32_CF_U32(keyMode),
         LC32DictionaryOperand(key, keyMode), LC32_CF_U32(valueMode),
         LC32DictionaryOperand(value, valueMode));
+}
+
+void CFDictionaryReplaceValue(CFMutableDictionaryRef dictionary,
+                              const void *key, const void *value) {
+    if(CFDictionaryContainsKey(dictionary, key))
+        CFDictionarySetValue(dictionary, key, value);
 }
 
 void CFDictionaryRemoveValue(CFMutableDictionaryRef dictionary,

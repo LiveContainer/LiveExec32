@@ -81,3 +81,31 @@ CFPropertyListRef CFPropertyListCreateWithData(
     if(mappedData) dispatch_release(mappedData);
     return result;
 }
+
+CFDataRef CFPropertyListCreateData(
+        CFAllocatorRef allocator, CFPropertyListRef propertyList,
+        CFPropertyListFormat format, CFOptionFlags options,
+        CFErrorRef *error) {
+    (void)allocator;
+    if(!propertyList) {
+        if(error) *error = NULL;
+        return NULL;
+    }
+    return (CFDataRef)LC32_CF_CALL(
+        LC32CoreFoundationOpPropertyListCreateData,
+        LC32_CF_HOST(propertyList), LC32_CF_U32(format),
+        LC32_CF_U32(options), LC32_CF_U32((uintptr_t)error));
+}
+
+Boolean CFPropertyListIsValid(CFPropertyListRef propertyList,
+                              CFPropertyListFormat format) {
+    return propertyList && LC32_CF_CALL(
+        LC32CoreFoundationOpPropertyListIsValid,
+        LC32_CF_HOST(propertyList), LC32_CF_U32(format));
+}
+
+CFDataRef CFPropertyListCreateXMLData(CFAllocatorRef allocator,
+                                      CFPropertyListRef propertyList) {
+    return CFPropertyListCreateData(allocator, propertyList,
+        kCFPropertyListXMLFormat_v1_0, 0, NULL);
+}

@@ -73,6 +73,39 @@ typedef enum : uint32_t {
     LC32CoreFoundationOpBundleCopyBundleURL = 50,
     LC32CoreFoundationOpURLCopyFileSystemPath = 51,
 
+    /* Public CFURL operations. Keep this range contiguous so the guest and
+     * host bridge remain easy to audit against CFURL.h. */
+    LC32CoreFoundationOpURLGetTypeID = 52,
+    LC32CoreFoundationOpURLGetString = 53,
+    LC32CoreFoundationOpURLGetBaseURL = 54,
+    LC32CoreFoundationOpURLCanBeDecomposed = 55,
+    LC32CoreFoundationOpURLCopyAbsoluteURL = 56,
+    LC32CoreFoundationOpURLCopyScheme = 57,
+    LC32CoreFoundationOpURLCopyHostName = 58,
+    LC32CoreFoundationOpURLCopyPath = 59,
+    LC32CoreFoundationOpURLCopyStrictPath = 60,
+    LC32CoreFoundationOpURLCopyResourceSpecifier = 61,
+    LC32CoreFoundationOpURLCopyUserName = 62,
+    LC32CoreFoundationOpURLCopyPassword = 63,
+    LC32CoreFoundationOpURLCopyQueryString = 64,
+    LC32CoreFoundationOpURLCopyFragment = 65,
+    LC32CoreFoundationOpURLCopyLastPathComponent = 66,
+    LC32CoreFoundationOpURLGetPortNumber = 67,
+    LC32CoreFoundationOpURLHasDirectoryPath = 68,
+    LC32CoreFoundationOpURLCreateCopyAppendingPathComponent = 69,
+    LC32CoreFoundationOpURLCreateCopyDeletingLastPathComponent = 70,
+    LC32CoreFoundationOpURLCreateCopyAppendingPathExtension = 71,
+    LC32CoreFoundationOpURLCreateCopyDeletingPathExtension = 72,
+    LC32CoreFoundationOpURLGetFileSystemRepresentation = 73,
+    LC32CoreFoundationOpURLSetResourcePropertyForKey = 74,
+    LC32CoreFoundationOpURLCreateWithFileSystemPath = 75,
+    LC32CoreFoundationOpURLCreateWithFileSystemPathRelativeToBase = 76,
+    LC32CoreFoundationOpURLGetBytes = 77,
+    LC32CoreFoundationOpURLGetByteRangeForComponent = 78,
+    LC32CoreFoundationOpURLCreateFromFileSystemRepresentationRelativeToBase = 79,
+    LC32CoreFoundationOpBundlePreflightExecutable = 80,
+    LC32CoreFoundationOpBundleLoadExecutableAndReturnError = 81,
+
     /* String operations use an isolated range so parallel bridge work can
      * add lower-valued opcode families without changing this guest ABI. */
     LC32CoreFoundationOpStringCreateWithBytes = 100,
@@ -94,6 +127,8 @@ typedef enum : uint32_t {
     LC32CoreFoundationOpStringConvertNSStringEncodingToEncoding = 116,
     LC32CoreFoundationOpStringConvertIANACharSetNameToEncoding = 117,
     LC32CoreFoundationOpStringConvertEncodingToIANACharSetName = 118,
+    LC32CoreFoundationOpStringGetMaximumSizeOfFileSystemRepresentation = 119,
+    LC32CoreFoundationOpStringGetFileSystemRepresentation = 120,
 
     /* Date, error, locale, and preferences operations used by Security. */
     LC32CoreFoundationOpDateCreate = 200,
@@ -117,6 +152,12 @@ typedef enum : uint32_t {
     /* Property-list serialization operations used by Security. */
     LC32CoreFoundationOpPropertyListCreateWithData = 217,
     LC32CoreFoundationOpPropertyListCreateDeepCopy = 218,
+    LC32CoreFoundationOpPreferencesSetAppValue = 219,
+    LC32CoreFoundationOpPreferencesAppSynchronize = 220,
+    LC32CoreFoundationOpPropertyListCreateData = 221,
+    LC32CoreFoundationOpPropertyListIsValid = 222,
+    LC32CoreFoundationOpDateFormatterCreateDateFromString = 223,
+    LC32CoreFoundationOpDateFormatterGetAbsoluteTimeFromString = 224,
 
     /* CFSet operations used by the guest Security framework. */
     LC32CoreFoundationOpSetCreate = 300,
@@ -138,6 +179,10 @@ typedef enum : uint32_t {
     LC32CoreFoundationOpAttributedStringCreateWithSubstring = 402,
     LC32CoreFoundationOpAttributedStringGetLength = 403,
     LC32CoreFoundationOpAttributedStringReplaceAttributedString = 404,
+    LC32CoreFoundationOpAttributedStringGetAttributes = 405,
+    LC32CoreFoundationOpAttributedStringGetAttribute = 406,
+    LC32CoreFoundationOpAttributedStringGetAttributesLongest = 407,
+    LC32CoreFoundationOpAttributedStringGetAttributeLongest = 408,
 
     /* CFReadStream operations used by the legacy YouTube Widevine client. */
     LC32CoreFoundationOpReadStreamOpen = 500,
@@ -185,6 +230,7 @@ typedef enum : uint32_t {
     LC32CoreFoundationOpRunLoopWakeUp = 612,
     LC32CoreFoundationOpRunLoopTimerCreate = 613,
     LC32CoreFoundationOpRunLoopSourceCreate = 614,
+    LC32CoreFoundationOpRunLoopAddCommonMode = 615,
 
     /* Callback-aware socket operations used by legacy YouTube. */
     LC32CoreFoundationOpSocketCreate = 700,

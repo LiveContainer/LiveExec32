@@ -33,6 +33,12 @@ int main(void) {
         kCFAllocatorDefault, expected.bytes);
     check("uuid-create-from-bytes", uuid != NULL);
 
+    CFUUIDRef scalarUUID = CFUUIDCreateWithBytes(kCFAllocatorDefault,
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff);
+    check("uuid-create-with-scalar-bytes", scalarUUID &&
+        CFEqual(scalarUUID, uuid));
+
     const CFUUIDBytes actual = CFUUIDGetUUIDBytes(uuid);
     check("uuid-get-bytes", memcmp(
         &actual, &expected.bytes, sizeof(actual)) == 0);
@@ -46,6 +52,28 @@ int main(void) {
     check("uuid-byte-order", copied && strcasecmp(
         text, "00112233-4455-6677-8899-AABBCCDDEEFF") == 0);
 
+    CFUUIDRef parsed = CFUUIDCreateFromString(kCFAllocatorDefault,
+        CFSTR("00112233-4455-6677-8899-aabbccddeeff"));
+    CFUUIDRef invalid = CFUUIDCreateFromString(
+        kCFAllocatorDefault, CFSTR("not-a-uuid"));
+    check("uuid-create-from-string", parsed && CFEqual(parsed, uuid));
+    check("uuid-create-from-invalid-string", invalid == NULL);
+    check("uuid-type-id", uuid && CFUUIDGetTypeID() != 0 &&
+        CFGetTypeID(uuid) == CFUUIDGetTypeID());
+
+    CFUUIDRef constant1 = CFUUIDGetConstantUUIDWithBytes(
+        kCFAllocatorDefault,
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff);
+    CFUUIDRef constant2 = CFUUIDGetConstantUUIDWithBytes(
+        kCFAllocatorDefault,
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff);
+    check("uuid-constant-content", constant1 && CFEqual(constant1, uuid));
+    check("uuid-constant-identity", constant1 == constant2);
+
+    if(parsed) CFRelease(parsed);
+    if(scalarUUID) CFRelease(scalarUUID);
     if(string) CFRelease(string);
     if(uuid) CFRelease(uuid);
     return failures != 0;

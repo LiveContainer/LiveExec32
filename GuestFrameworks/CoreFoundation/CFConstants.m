@@ -32,8 +32,14 @@ const CFAllocatorRef kCFAllocatorNull =
 const CFTimeInterval kCFAbsoluteTimeIntervalSince1970 = 978307200.0;
 
 const CFStringRef kCFBundleExecutableKey = CFSTR("CFBundleExecutable");
+const CFStringRef kCFBundleInfoDictionaryVersionKey =
+    CFSTR("CFBundleInfoDictionaryVersion");
 const CFStringRef kCFBundleIdentifierKey = CFSTR("CFBundleIdentifier");
+const CFStringRef kCFBundleVersionKey = CFSTR("CFBundleVersion");
+const CFStringRef kCFBundleDevelopmentRegionKey =
+    CFSTR("CFBundleDevelopmentRegion");
 const CFStringRef kCFBundleNameKey = CFSTR("CFBundleName");
+const CFStringRef kCFBundleLocalizationsKey = CFSTR("CFBundleLocalizations");
 
 const CFRunLoopMode kCFRunLoopDefaultMode =
     CFSTR("kCFRunLoopDefaultMode");
@@ -55,10 +61,17 @@ const CFStreamPropertyKey kCFStreamPropertyDataWritten =
 const CFErrorDomain kCFErrorDomainMach = CFSTR("NSMachErrorDomain");
 const CFErrorDomain kCFErrorDomainOSStatus = CFSTR("NSOSStatusErrorDomain");
 const CFErrorDomain kCFErrorDomainPOSIX = CFSTR("NSPOSIXErrorDomain");
+const CFErrorDomain kCFErrorDomainCocoa = CFSTR("NSCocoaErrorDomain");
 const CFStringRef kCFErrorDescriptionKey = CFSTR("NSDescription");
 const CFStringRef kCFErrorLocalizedDescriptionKey =
     CFSTR("NSLocalizedDescription");
+const CFStringRef kCFErrorLocalizedFailureReasonKey =
+    CFSTR("NSLocalizedFailureReason");
+const CFStringRef kCFErrorLocalizedRecoverySuggestionKey =
+    CFSTR("NSLocalizedRecoverySuggestion");
 const CFStringRef kCFErrorUnderlyingErrorKey = CFSTR("NSUnderlyingError");
+const CFStringRef kCFErrorURLKey = CFSTR("NSURL");
+const CFStringRef kCFErrorFilePathKey = CFSTR("NSFilePath");
 
 const CFCalendarIdentifier kCFGregorianCalendar = CFSTR("gregorian");
 const CFLocaleKey kCFLocaleCountryCode = CFSTR("kCFLocaleCountryCodeKey");
