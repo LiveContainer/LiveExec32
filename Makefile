@@ -2,7 +2,7 @@ ARCHS := arm64
 TARGET := iphone:clang:latest:16.0
 FINALPACKAGE = 1
 GO_EASY_ON_ME := 1
-PACKAGE_FORMAT := ipa
+PACKAGE_FORMAT ?= ipa
 STRIP = 0
 # Signing happens after framework embedding and, for Mac tests, after vtool.
 TARGET_CODESIGN =
@@ -11,16 +11,26 @@ include module-cache.mk
 
 include $(THEOS)/makefiles/common.mk
 
+# The rootless package transform happens inside Theos' deb recipe, after the
+# normal before-package hooks. Package a private clean copy at that final
+# boundary so Finder cannot recreate .DS_Store files in the visible staging
+# directory while dm.pl is enumerating it.
+ifeq ($(_THEOS_PACKAGE_FORMAT),deb)
+_THEOS_PLATFORM_DPKG_DEB := $(CURDIR)/Scripts/dm-clean.sh
+endif
+
 APPLICATION_NAME = LiveExec32
 
-LiveExec32_FILES = main.c
-# LoadEmbeddedFramework appends <name>.framework/<name> to these framework
-# roots. The libroot-resolved fallback covers jailbreak prefixes other than
-# the common /var/jb layout.
+LiveExec32_FILES = App/main.c
+# LoadFrameworkFromSearchPaths appends <name>.framework/<name> to these
+# framework roots. LoadFramework falls back to the libroot-resolved path for
+# jailbreak prefixes other than the common /var/jb layout.
 LiveExec32_LDFLAGS = \
 	-Wl,-rpath,@executable_path/Frameworks \
 	-Wl,-rpath,@loader_path/Frameworks \
-	-Wl,-rpath,/var/jb/Applications/LiveExec32.app/Frameworks
+	-Wl,-rpath,@loader_path/.jbroot/Applications/LiveExec32.app/Frameworks \
+	-Wl,-rpath,/var/jb/Applications/LiveExec32.app/Frameworks \
+	-Wl,-rpath,/var/jb/usr/lib
 LiveExec32_FRAMEWORKS = UIKit
 LiveExec32_RESOURCE_DIRS = Resources
 
@@ -98,5 +108,18 @@ include $(THEOS_MAKE_PATH)/application.mk
 # Theos updates an existing IPA with `zip -u`, which retains entries removed
 # from the staging tree. Recreate the archive so dependency transitions cannot
 # leave obsolete binaries (such as the former libdynarmic.dylib) packaged.
+ifeq ($(_THEOS_PACKAGE_FORMAT),ipa)
 before-package::
 	@rm -f "$(_THEOS_IPA_PACKAGE_FILENAME)"
+endif
+
+# Finder can recreate these inside Theos' staging tree between clean/stage and
+# package; never ship host metadata in either archive format.
+before-package::
+	@find "$(THEOS_STAGING_DIR)" -type f -name .DS_Store -delete
+
+# The injector is shipped only in jailbreak packages, never in the IPA.
+ifeq ($(_THEOS_PACKAGE_FORMAT),deb)
+SUBPROJECTS += Tweak
+endif
+include $(THEOS_MAKE_PATH)/aggregate.mk

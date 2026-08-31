@@ -1,0 +1,11 @@
+#!/bin/sh
+
+case "${1:-}" in
+    remove|purge)
+        if command -v killall >/dev/null 2>&1; then
+            killall -9 installd 2>/dev/null || true
+        fi
+        ;;
+esac
+
+exit 0

@@ -84,6 +84,13 @@ jobs:
     - name: Assemble guest root filesystem
       run: bash GuestMakefile/pack-ramdisk.sh
 
+    # Validate the aggregate and rootless path rewriting, but keep the nightly
+    # release IPA-only.
+    - name: Build rootless jailbreak package
+      run: >-
+        gmake package PACKAGE_FORMAT=deb
+        THEOS_PACKAGE_SCHEME=rootless
+
     - name: Save extracted guest ramdisk
       if: steps.ramdisk-cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@v6
