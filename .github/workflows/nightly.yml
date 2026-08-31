@@ -84,8 +84,8 @@ jobs:
     - name: Assemble guest root filesystem
       run: bash GuestMakefile/pack-ramdisk.sh
 
-    # Validate the aggregate and rootless path rewriting, but keep the nightly
-    # release IPA-only.
+    # Validate the aggregate and rootless path rewriting, and retain the
+    # resulting package for the nightly release.
     - name: Build rootless jailbreak package
       run: >-
         gmake package PACKAGE_FORMAT=deb
@@ -107,12 +107,13 @@ jobs:
       run: |
         printf 'subject=%s\n' "$(git log -1 --pretty=%s)" >> "$GITHUB_OUTPUT"
 
-    - name: Upload Artifact
+    - name: Upload packages
       id: artifact
       uses: actions/upload-artifact@v7
       with:
-        path: packages/*.ipa
-        archive: false
+        path: |
+          packages/*.ipa
+          packages/*.deb
         if-no-files-found: error
 
   release:
@@ -129,7 +130,7 @@ jobs:
       contents: write
 
     steps:
-    - name: Download IPA
+    - name: Download packages
       uses: actions/download-artifact@v8
       with:
         artifact-ids: ${{ needs.build.outputs.artifact-id }}
@@ -147,3 +148,4 @@ jobs:
           This is a nightly release [created automatically with GitHub Actions workflow](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}).
         files: |
           packages/*.ipa
+          packages/*.deb

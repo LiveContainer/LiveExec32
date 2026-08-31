@@ -4,6 +4,3 @@
 [submodule "External/mini-gdbstub"]
 	path = External/mini-gdbstub
 	url = https://github.com/LiveContainer/mini-gdbstub.git
-[submodule "Tweak/ChOma"]
-	path = Tweak/ChOma
-	url = https://github.com/opa334/ChOma
