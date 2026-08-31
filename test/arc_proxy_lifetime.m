@@ -2,6 +2,7 @@
 #import <UIKit/UIKit.h>
 
 #include <stdio.h>
+#include <LC32ObjCBridgeABI.h>
 
 /*
  * These helpers are compiled without ARC.  In particular, the opaque pool is
@@ -21,9 +22,21 @@ extern BOOL LC32TestDirectObjCRetainBridgesHost(void);
 - (uint64_t)host_self;
 @end
 
+static NSUInteger LC32ARCGuestViewDeallocCount;
+
+@interface LC32ARCGuestView : UIView
+@end
+
+@implementation LC32ARCGuestView
+- (void)dealloc {
+    LC32ARCGuestViewDeallocCount++;
+}
+@end
+
 extern uint64_t LC32GetHostSelector(SEL selector);
 extern uint64_t LC32InvokeHostSelector(
     uint64_t object, uint64_t selector, ...);
+extern uint64_t LC32LookupHostMapping(uint32_t guestObject);
 extern id LC32AdoptHostInitializerResultARC(
     id object, uint64_t hostResult) NS_RETURNS_RETAINED;
 
@@ -45,7 +58,8 @@ static BOOL LC32TestARCInitializerAdoption(void) {
         [NSDictionary dictionary];
     __strong NSDictionary *initializedDictionary =
         LC32CreateARCAdoptedObject(NSDictionary.class);
-    const BOOL canonicalPassed =
+    const BOOL canonicalPassed = convenienceDictionary != nil &&
+        initializedDictionary != nil &&
         initializedDictionary == convenienceDictionary &&
         initializedDictionary.count == 0 &&
         [initializedDictionary objectForKey:@"missing"] == nil;
@@ -58,13 +72,24 @@ static BOOL LC32TestARCInitializerAdoption(void) {
      * helper's paired retain which is balanced by strong-local cleanup. */
     __strong NSMutableDictionary *initializedMutableDictionary =
         LC32CreateARCAdoptedObject(NSMutableDictionary.class);
-    const uint64_t reverseMappedGuest = LC32InvokeHostSelector(
-        [initializedMutableDictionary host_self],
-        LC32GetHostSelector(@selector(guest_self)),
-        (uint64_t)0);
-    const BOOL directPassed = initializedMutableDictionary.count == 0 &&
-        (uint32_t)reverseMappedGuest ==
-            (uint32_t)(uintptr_t)initializedMutableDictionary;
+    const uint32_t directGuestAddress =
+        (uint32_t)(uintptr_t)initializedMutableDictionary;
+    const uint64_t directHostAddress =
+        LC32LookupHostMapping(directGuestAddress);
+    const BOOL directMappingWasLive = directGuestAddress != 0 &&
+        directHostAddress != 0 &&
+        directHostAddress != LC32_HOST_MAPPING_DEAD;
+    const uint64_t reverseMappedGuest = directMappingWasLive
+        ? LC32InvokeHostSelector(
+            directHostAddress, LC32GetHostSelector(@selector(guest_self)),
+            (uint64_t)0)
+        : 0;
+    const BOOL directMappingStayedLive = directMappingWasLive &&
+        LC32LookupHostMapping(directGuestAddress) == directHostAddress;
+    const BOOL directPassed = initializedMutableDictionary != nil &&
+        directMappingWasLive && directMappingStayedLive &&
+        initializedMutableDictionary.count == 0 &&
+        (uint32_t)reverseMappedGuest == directGuestAddress;
     initializedMutableDictionary = nil;
 
     printf("arc-initializer-canonical-adoption: %s\n",
@@ -72,6 +97,56 @@ static BOOL LC32TestARCInitializerAdoption(void) {
     printf("arc-initializer-direct-adoption: %s\n",
            directPassed ? "PASS" : "FAIL");
     return canonicalPassed && canonicalSurvivedRelease && directPassed;
+}
+
+static BOOL LC32TestARCGuestMirrorInitializerHandoff(void) {
+    /* The regression is initializer ownership. A nonzero size still exercises
+     * the CGRect argument and return bridges without coupling lifetime coverage
+     * to the separate origin-translation behavior. */
+    const CGRect initialFrame = CGRectMake(0.0, 0.0, 180.0, 48.0);
+    const NSUInteger deallocCountBefore =
+        LC32ARCGuestViewDeallocCount;
+    __strong LC32ARCGuestView *view =
+        [[LC32ARCGuestView alloc] initWithFrame:initialFrame];
+    const uint32_t guestAddress = (uint32_t)(uintptr_t)view;
+    const uint64_t hostAddress = LC32LookupHostMapping(guestAddress);
+    const BOOL mappingWasLive = guestAddress != 0 && hostAddress != 0 &&
+        hostAddress != LC32_HOST_MAPPING_DEAD;
+    const CGRect returnedFrame = view.frame;
+    const BOOL frameMatches =
+        returnedFrame.origin.x == initialFrame.origin.x &&
+        returnedFrame.origin.y == initialFrame.origin.y &&
+        returnedFrame.size.width == initialFrame.size.width &&
+        returnedFrame.size.height == initialFrame.size.height;
+    const BOOL classMatches =
+        [view isKindOfClass:LC32ARCGuestView.class];
+    const BOOL initialized = view != nil && frameMatches && classMatches;
+    const BOOL mappingStayedLive = mappingWasLive &&
+        LC32LookupHostMapping(guestAddress) == hostAddress;
+    view = nil;
+    const BOOL mappingWasRemoved = guestAddress != 0 &&
+        LC32LookupHostMapping(guestAddress) == 0;
+    const BOOL passed = initialized && mappingWasLive && mappingStayedLive &&
+        mappingWasRemoved &&
+        LC32ARCGuestViewDeallocCount == deallocCountBefore + 1;
+
+    printf("arc-guest-mirror-initializer-handoff: %s\n",
+           passed ? "PASS" : "FAIL");
+    if(!passed) {
+        printf("  initialized=%d frame=%d class=%d "
+               "actual={{%.0f,%.0f},{%.0f,%.0f}} "
+               "mapping-live=%d mapping-stayed-live=%d "
+               "mapping-removed=%d dealloc=%lu->%lu "
+               "guest=0x%08x host=0x%llx\n",
+               initialized, frameMatches, classMatches,
+               returnedFrame.origin.x, returnedFrame.origin.y,
+               returnedFrame.size.width, returnedFrame.size.height,
+               mappingWasLive, mappingStayedLive, mappingWasRemoved,
+               (unsigned long)deallocCountBefore,
+               (unsigned long)LC32ARCGuestViewDeallocCount, guestAddress,
+               (unsigned long long)hostAddress);
+    }
+    return passed;
 }
 
 static BOOL LC32TestARCGeneratedBorrowedReturn(void) {
@@ -216,8 +291,11 @@ int main(void) {
         LC32TestARCWeakOnlyBorrowedReturn();
     const BOOL arcInitializerAdoptionPassed =
         LC32TestARCInitializerAdoption();
+    const BOOL arcGuestMirrorInitializerPassed =
+        LC32TestARCGuestMirrorInitializerHandoff();
     return passed && unretainedBorrowedPassed && directObjCRetainPassed &&
         retainedFamilyPassed && arcGeneratedShimPassed &&
         arcEarlyReleasePassed && arcWeakOnlyPassed &&
-        arcInitializerAdoptionPassed ? 0 : 1;
+        arcInitializerAdoptionPassed &&
+        arcGuestMirrorInitializerPassed ? 0 : 1;
 }

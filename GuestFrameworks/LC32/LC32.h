@@ -194,6 +194,17 @@ static inline uint64_t LC32HostSelectorReturningGuestObject(
     return selector | LC32_HOST_SELECTOR_RETURN_GUEST_OBJECT;
 }
 
+/*
+ * Most guest Objective-C receivers must already have an authoritative host
+ * mapping.  Use this only for a raw native result whose ownership is still
+ * held by the immediate caller, before that result can be published as a
+ * guest proxy (for example, a class-cluster initializer replacement).
+ */
+static inline uint64_t LC32HostSelectorAllowingUnmappedReceiver(
+        uint64_t selector) {
+    return selector | LC32_HOST_SELECTOR_ALLOW_UNMAPPED_RECEIVER;
+}
+
 // Marks guest-owned temporary storage for a pointer argument. The host bridge
 // replaces the tagged ARM address with a native pointer for the duration of
 // objc_msgSend, then copies the 64-bit temporary back into guest memory.

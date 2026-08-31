@@ -162,7 +162,8 @@ $(eval $(call lc32_guest_test,lc32-uikit-legacy-window-root,uikit_legacy_window_
 $(eval $(call lc32_guest_test,lc32-security-secitem,security_secitem.m,Foundation Security LC32))
 
 # Per-target and per-source language modes from the old build wrappers.
-lc32-arc-proxy-lifetime_CFLAGS := -fobjc-arc -fblocks
+lc32-arc-proxy-lifetime_CFLAGS := -fobjc-arc -fblocks \
+	-I$(abspath ../include)
 arc_proxy_lifetime_support.m_CFLAGS := -fno-objc-arc
 
 lc32-ownership-publication-race_CFLAGS := -fobjc-arc
@@ -191,6 +192,7 @@ lc32-uikit-legacy-window-root_CFLAGS := -fno-objc-arc -Wall -Wextra -Werror
 
 lc32-cxx-lifecycle_CCFLAGS := -std=c++14
 
+lc32-guest-proxy-lifetime_CFLAGS := -I$(abspath ../include)
 lc32-nsrange-bridge_USE_MODULES := 1
 lc32-nsrange-bridge_CFLAGS := -I$(abspath ../GuestFrameworks) -I$(abspath ../include)
 lc32-scalar-pointer-bridge_USE_MODULES := 1

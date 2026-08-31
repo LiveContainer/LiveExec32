@@ -72,6 +72,7 @@ struct LC32GuestUIKitPolicy {
 };
 
 const LC32GuestUIKitPolicy& LC32GuestInterfacePolicy(void);
+id LC32ObjectProperty(id object, const char *name);
 
 std::atomic<NSInteger> LC32LegacyRequestedOrientation{
     UIInterfaceOrientationUnknown};
@@ -513,8 +514,8 @@ CGRect LC32WindowSceneBounds(UIWindow *window) {
      * preserves the source coordinate space instead of copying raw numbers. */
     id<UICoordinateSpace> coordinateSpace = nil;
     if(@available(iOS 26.0, *)) {
-        coordinateSpace =
-            scene.effectiveGeometry.coordinateSpace;
+        coordinateSpace = (id<UICoordinateSpace>)LC32ObjectProperty(
+            scene.effectiveGeometry, "coordinateSpace");
         if(coordinateSpace) return coordinateSpace.bounds;
     }
     coordinateSpace = scene.coordinateSpace;
@@ -549,7 +550,8 @@ CGRect LC32LegacyViewportInView(UIWindow *window, UIView *view) {
     } else {
         UIWindowScene *scene = window.windowScene;
         if(@available(iOS 26.0, *)) {
-            sourceSpace = scene.effectiveGeometry.coordinateSpace;
+            sourceSpace = (id<UICoordinateSpace>)LC32ObjectProperty(
+                scene.effectiveGeometry, "coordinateSpace");
         }
         if(!sourceSpace) sourceSpace = scene.coordinateSpace;
         sourceBounds = sourceSpace.bounds;
@@ -717,7 +719,9 @@ void LC32ApplyLegacyWindowPolicy(UIWindow *window) {
         orientations = LC32GuestInterfacePolicy().declaredOrientations;
     }
 
-    [orientationController setNeedsUpdateOfSupportedInterfaceOrientations];
+    if(@available(iOS 16.0, *)) {
+        [orientationController setNeedsUpdateOfSupportedInterfaceOrientations];
+    }
     [rootController setNeedsStatusBarAppearanceUpdate];
 
     UIWindowScene *scene = window.windowScene;

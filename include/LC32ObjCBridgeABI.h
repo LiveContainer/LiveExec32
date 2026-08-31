@@ -32,8 +32,14 @@
     UINT64_C(0x4000000000000000)
 #define LC32_HOST_SELECTOR_RETURN_STRUCT \
     UINT64_C(0x8000000000000000)
+#define LC32_HOST_SELECTOR_ALLOW_UNMAPPED_RECEIVER \
+    UINT64_C(0x2000000000000000)
 #define LC32_HOST_SELECTOR_FLAG_MASK \
-    UINT64_C(0xc000000000000000)
+    UINT64_C(0xe000000000000000)
+
+/* LC32LookupHostMapping distinguishes a guest-only object from an object whose
+ * native mapping is still quarantined but no longer callable. */
+#define LC32_HOST_MAPPING_DEAD UINT64_MAX
 
 #define LC32_HOST_OBJECT_ARRAY_MAGIC UINT32_C(0x4f413332) /* "OA32" */
 #define LC32_HOST_OBJECT_ARRAY_MAX_COUNT UINT32_C(1048576)
@@ -67,6 +73,10 @@ typedef enum LC32HostMappingOperation {
     LC32HostMappingClearIfEqual = 2,
     LC32HostMappingBeginGuestTeardown = 3,
     LC32HostMappingFinishGuestTeardown = 4,
+    /* Finish the exact retiring generation and consume the paired native
+     * ownership in the same host operation. This avoids exposing a raw host
+     * address after its registry entry has been removed. */
+    LC32HostMappingFinishGuestTeardownAndReleaseHost = 5,
 } LC32HostMappingOperation;
 
 typedef struct LC32HostObjectArrayDescriptor {

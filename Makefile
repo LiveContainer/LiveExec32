@@ -1,5 +1,5 @@
 ARCHS := arm64
-TARGET := iphone:clang:latest:16.0
+TARGET := iphone:clang:latest:15.0
 FINALPACKAGE = 1
 GO_EASY_ON_ME := 1
 PACKAGE_FORMAT ?= ipa

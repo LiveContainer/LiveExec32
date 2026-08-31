@@ -4,6 +4,11 @@
 
 #include <poll.h>
 
+extern "C" kern_return_t host_get_io_main(
+    host_t host, io_main_t *io_main) __attribute__((weak_import));
+extern "C" kern_return_t host_get_io_master(
+    host_t host, io_main_t *io_main) __attribute__((weak_import));
+
 // guest syscalls
 int guest_csops(pid_t pid, unsigned int ops, u32 guest_useraddr, size_t usersize) {
     char *host_useraddr = (char *)malloc(usersize);
@@ -880,9 +885,17 @@ guest_mach_msg_trap(u32 guest_msg,
             MACH_MSG_UNION(host_get_io_main, Mess);
             host_header->msgh_bits |= MACH_MSGH_BITS_COMPLEX;
             host_header->msgh_size = sizeof(Mess->Out);
-            result = host_get_io_main(
-                Mess->In.Head.msgh_request_port,
-                &Mess->Out.io_main.name);
+            if(host_get_io_main != nullptr) {
+                result = host_get_io_main(
+                    Mess->In.Head.msgh_request_port,
+                    &Mess->Out.io_main.name);
+            } else if(host_get_io_master != nullptr) {
+                result = host_get_io_master(
+                    Mess->In.Head.msgh_request_port,
+                    &Mess->Out.io_main.name);
+            } else {
+                result = KERN_NOT_SUPPORTED;
+            }
             Mess->Out.io_main.type = MACH_MSG_PORT_DESCRIPTOR;
             Mess->Out.io_main.disposition = MACH_MSG_TYPE_MOVE_SEND;
             Mess->Out.msgh_body.msgh_descriptor_count = 1;

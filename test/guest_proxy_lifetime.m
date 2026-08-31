@@ -1,6 +1,17 @@
 #import <Foundation/Foundation.h>
 
 #include <stdio.h>
+#include <LC32ObjCBridgeABI.h>
+
+@interface NSObject (LC32GuestProxyLifetimeTests)
+- (uint64_t)host_self;
+@end
+
+extern uint64_t LC32GetHostSelector(SEL selector);
+extern uint64_t LC32InvokeHostSelector(
+    uint64_t object, uint64_t selector, ...);
+extern id LC32HostToGuestObject(uint64_t hostObject);
+extern uint64_t LC32LookupHostMapping(uint32_t guestObject);
 
 static NSUInteger deallocCount;
 static NSUInteger cleanupDeallocCount;
@@ -54,6 +65,124 @@ int main(void) {
     printf("guest-only-object-stays-local: %s\n",
         guestOnlyObjectStayedLocal ? "PASS" : "FAIL");
 
+    /* Deliberately consume the provisional native peer without releasing its
+     * guest allocation. The authoritative entry remains Live while its native
+     * weak slot becomes nil; a later cached raw-address dispatch must return
+     * safely instead of reading the freed object's isa. */
+    NSAutoreleasePool *stalePool = [NSAutoreleasePool new];
+    NSObject *staleMappedProbe = [NSObject alloc];
+    const uint32_t staleGuestAddress =
+        (uint32_t)(uintptr_t)staleMappedProbe;
+    const uint64_t staleHostAddress = staleMappedProbe.host_self;
+    const BOOL staleMappedSetupSucceeded = staleMappedProbe != nil &&
+        staleHostAddress != 0 &&
+        LC32LookupHostMapping(staleGuestAddress) == staleHostAddress;
+    LC32InvokeHostSelector(staleHostAddress,
+        LC32GetHostSelector(@selector(release)), (uint64_t)0);
+    const uint64_t staleRetainCount = LC32InvokeHostSelector(
+        staleHostAddress, LC32GetHostSelector(@selector(retainCount)),
+        (uint64_t)0);
+    const BOOL staleMappedReceiverWasRejected = staleRetainCount == 0;
+    [staleMappedProbe autorelease];
+    [stalePool drain];
+    const BOOL staleMappingWasRemoved =
+        LC32LookupHostMapping(staleGuestAddress) == 0;
+    const uint64_t staleAfterCleanupRetainCount = LC32InvokeHostSelector(
+        staleHostAddress, LC32GetHostSelector(@selector(retainCount)),
+        (uint64_t)0);
+    const BOOL staleUnmappedReceiverWasRejected =
+        staleAfterCleanupRetainCount == 0 && staleMappingWasRemoved;
+    printf("dead-mapped-receiver-setup: %s\n",
+        staleMappedSetupSucceeded ? "PASS" : "FAIL");
+    printf("dead-mapped-receiver-is-rejected: %s\n",
+        staleMappedReceiverWasRejected ? "PASS" : "FAIL");
+    printf("dead-unmapped-receiver-is-rejected: %s\n",
+        staleUnmappedReceiverWasRejected ? "PASS" : "FAIL");
+
+    const uint64_t arbitraryReceiverResult = LC32InvokeHostSelector(
+        UINT64_C(0x1b8), LC32GetHostSelector(@selector(retainCount)),
+        (uint64_t)0);
+    const BOOL arbitraryUnmappedReceiverWasRejected =
+        arbitraryReceiverResult == 0;
+    printf("arbitrary-unmapped-receiver-is-rejected: %s\n",
+        arbitraryUnmappedReceiverWasRejected ? "PASS" : "FAIL");
+
+    const uint64_t rawOwnedHostObject = LC32InvokeHostSelector(
+        [(id)NSObject.class host_self],
+        LC32GetHostSelector(@selector(new)), (uint64_t)0);
+    const uint64_t rawOwnedRetainCount = LC32InvokeHostSelector(
+        rawOwnedHostObject,
+        LC32GetHostSelector(@selector(retainCount)) |
+            LC32_HOST_SELECTOR_ALLOW_UNMAPPED_RECEIVER,
+        (uint64_t)0);
+    LC32InvokeHostSelector(rawOwnedHostObject,
+        LC32GetHostSelector(@selector(release)) |
+            LC32_HOST_SELECTOR_ALLOW_UNMAPPED_RECEIVER,
+        (uint64_t)0);
+    const BOOL explicitlyOwnedUnmappedReceiverWorked =
+        rawOwnedHostObject != 0 && rawOwnedRetainCount == 1;
+    printf("explicitly-owned-unmapped-receiver-works: %s\n",
+        explicitlyOwnedUnmappedReceiverWorked ? "PASS" : "FAIL");
+
+    /* A native-to-guest conversion installs a Pinned mapping. Destroy its
+     * native peer while an extra guest owner remains, reproducing the state
+     * created when LC32GuestLifetimePin runs during native deallocation. The
+     * Retiring entry belongs to this thread, but it has no native lifetime
+     * lease and therefore must still reject a later raw-address dispatch. */
+    const uint64_t hostNSObjectClass = [(id)NSObject.class host_self];
+    const uint64_t deadPinnedHostAddress = LC32InvokeHostSelector(
+        hostNSObjectClass, LC32GetHostSelector(@selector(new)),
+        (uint64_t)0);
+    NSObject *deadPinnedProbe =
+        LC32HostToGuestObject(deadPinnedHostAddress);
+    const uint32_t deadPinnedGuestAddress =
+        (uint32_t)(uintptr_t)deadPinnedProbe;
+    const uint64_t hostRelease =
+        LC32GetHostSelector(@selector(release));
+    const BOOL deadPinnedSetupSucceeded = hostNSObjectClass != 0 &&
+        deadPinnedHostAddress != 0 && deadPinnedProbe != nil &&
+        LC32LookupHostMapping(deadPinnedGuestAddress) ==
+            deadPinnedHostAddress;
+    BOOL deadPinnedReceiverWasRejected = NO;
+    BOOL deadPinnedMappingBecameDead = NO;
+    BOOL deadPinnedMappingWasCleaned = NO;
+    if(deadPinnedSetupSucceeded) {
+        [deadPinnedProbe retain];
+        LC32InvokeHostSelector(
+            deadPinnedHostAddress, hostRelease, (uint64_t)0);
+        LC32InvokeHostSelector(
+            deadPinnedHostAddress, hostRelease, (uint64_t)0);
+        deadPinnedMappingBecameDead =
+            LC32LookupHostMapping(deadPinnedGuestAddress) ==
+                LC32_HOST_MAPPING_DEAD;
+        const uint64_t deadPinnedRetainCount = LC32InvokeHostSelector(
+            deadPinnedHostAddress,
+            LC32GetHostSelector(@selector(retainCount)), (uint64_t)0);
+        deadPinnedReceiverWasRejected = deadPinnedRetainCount == 0;
+        [deadPinnedProbe release];
+        const BOOL deadPinnedMappingWasRemoved =
+            LC32LookupHostMapping(deadPinnedGuestAddress) == 0;
+        const uint64_t deadPinnedAfterCleanupRetainCount =
+            LC32InvokeHostSelector(deadPinnedHostAddress,
+                LC32GetHostSelector(@selector(retainCount)), (uint64_t)0);
+        deadPinnedMappingWasCleaned =
+            deadPinnedAfterCleanupRetainCount == 0 &&
+            deadPinnedMappingWasRemoved;
+    } else if(deadPinnedHostAddress) {
+        /* The raw +1 from +new must not leak merely because proxy setup failed. */
+        LC32InvokeHostSelector(deadPinnedHostAddress,
+            hostRelease | LC32_HOST_SELECTOR_ALLOW_UNMAPPED_RECEIVER,
+            (uint64_t)0);
+    }
+    printf("dead-retiring-pinned-receiver-setup: %s\n",
+        deadPinnedSetupSucceeded ? "PASS" : "FAIL");
+    printf("dead-pinned-mapping-becomes-dead: %s\n",
+        deadPinnedMappingBecameDead ? "PASS" : "FAIL");
+    printf("dead-retiring-pinned-receiver-is-rejected: %s\n",
+        deadPinnedReceiverWasRejected ? "PASS" : "FAIL");
+    printf("dead-pinned-mapping-is-cleaned: %s\n",
+        deadPinnedMappingWasCleaned ? "PASS" : "FAIL");
+
     LC32GuestProxyLifetimeProbe *probe =
         [[LC32GuestProxyLifetimeProbe alloc] init];
 
@@ -67,8 +196,16 @@ int main(void) {
 
     LC32GuestProxyLifetimeProbe *stored =
         [hostBackedArray objectAtIndex:0];
-    const BOOL survivedHostOwnership =
-        [stored marker] == 0x51a7;
+    const NSUInteger storedMarker = [stored marker];
+    const BOOL survivedHostOwnership = hostBackedArray != nil &&
+        probe != nil && storedMarker == 0x51a7 && deallocCount == 1;
+    if(!survivedHostOwnership) {
+        fprintf(stderr,
+            "pre-retained proxy diagnostic: original=%p stored=%p "
+            "marker=0x%lx deallocCount=%lu\n",
+            probe, stored, (unsigned long)storedMarker,
+            (unsigned long)deallocCount);
+    }
     printf("host-retains-pre-retained-guest-proxy: %s\n",
         survivedHostOwnership ? "PASS" : "FAIL");
 
@@ -87,8 +224,19 @@ int main(void) {
 
     LC32GuestProxyLifetimeProbe *storedAutoreleased =
         [hostBackedArray objectAtIndex:0];
-    const BOOL survivedGuestAutoreleasePool =
-        [storedAutoreleased marker] == 0x51a7 && deallocCount == 2;
+    const NSUInteger storedAutoreleasedMarker =
+        [storedAutoreleased marker];
+    const BOOL survivedGuestAutoreleasePool = hostBackedArray != nil &&
+        autoreleasedProbe != nil &&
+        storedAutoreleasedMarker == 0x51a7 && deallocCount == 2;
+    if(!survivedGuestAutoreleasePool) {
+        fprintf(stderr,
+            "autoreleased proxy diagnostic: original=%p stored=%p "
+            "marker=0x%lx deallocCount=%lu\n",
+            autoreleasedProbe, storedAutoreleased,
+            (unsigned long)storedAutoreleasedMarker,
+            (unsigned long)deallocCount);
+    }
     printf("host-retains-autoreleased-guest-proxy: %s\n",
         survivedGuestAutoreleasePool ? "PASS" : "FAIL");
 
@@ -109,7 +257,8 @@ int main(void) {
     [cleanupArray removeObject:guestFinalProbe];
     [guestFinalProbe release];
     const BOOL guestFinalCleanupPassed =
-        cleanupArray.count == 0 && cleanupCallbackCount == 1 &&
+        cleanupArray != nil && cleanupArray.count == 0 &&
+        cleanupCallbackCount == 1 &&
         cleanupDeallocCount == 1;
     printf("guest-final-release-keeps-host-peer-alive: %s\n",
         guestFinalCleanupPassed ? "PASS" : "FAIL");
@@ -124,7 +273,8 @@ int main(void) {
     [nativeFinalProbe release];
     [cleanupArray removeAllObjects];
     const BOOL nativeFinalCleanupPassed =
-        cleanupArray.count == 0 && cleanupCallbackCount == 2 &&
+        cleanupArray != nil && cleanupArray.count == 0 &&
+        cleanupCallbackCount == 2 &&
         cleanupDeallocCount == 2;
     printf("native-final-release-keeps-host-peer-alive: %s\n",
         nativeFinalCleanupPassed ? "PASS" : "FAIL");
@@ -134,7 +284,15 @@ int main(void) {
 
     [hostBackedArray release];
     [pool drain];
-    return !(guestOnlyObjectStayedLocal && survivedHostOwnership &&
+    return !(guestOnlyObjectStayedLocal &&
+             staleMappedSetupSucceeded &&
+             staleMappedReceiverWasRejected &&
+             staleUnmappedReceiverWasRejected &&
+             arbitraryUnmappedReceiverWasRejected &&
+             explicitlyOwnedUnmappedReceiverWorked &&
+             deadPinnedSetupSucceeded && deadPinnedMappingBecameDead &&
+             deadPinnedReceiverWasRejected &&
+             deadPinnedMappingWasCleaned && survivedHostOwnership &&
              releasedWithHostOwnership &&
              survivedGuestAutoreleasePool &&
              autoreleasedProxyDeallocatedOnce &&

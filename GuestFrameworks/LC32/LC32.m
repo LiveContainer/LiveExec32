@@ -1,4 +1,5 @@
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import "LC32.h"
@@ -115,7 +116,8 @@ id LC32HostToGuestObject(uint64_t host_object) {
     static uint64_t hostPtr = 0;
     uint64_t selector = LC32CachedHostSelector(
         &hostPtr, @selector(guest_self), NO);
-    return (id)LC32InvokeHostSelector(host_object, selector);
+    return (id)LC32InvokeHostSelector(host_object,
+        LC32HostSelectorAllowingUnmappedReceiver(selector));
 }
 
 id LC32HostToGuestOwnedObject(uint64_t host_object) {
@@ -124,8 +126,25 @@ id LC32HostToGuestOwnedObject(uint64_t host_object) {
 }
 
 id LC32DisposeFailedInit(id object) {
-    [object setHost_self:0];
-    return object_dispose(object);
+    const uint32_t guestObject = (uint32_t)(uintptr_t)object;
+    const uint64_t mapping = LC32LookupHostMapping(guestObject);
+    uint32_t teardownToken = 0;
+    if(mapping == LC32_HOST_MAPPING_DEAD) {
+        /* A native initializer may destroy its receiver before returning nil.
+         * Its lifetime pin leaves a noncallable NativePeerDeallocating entry;
+         * MRC disposes the consumed guest allocation directly, so explicitly
+         * retire that exact generation around object_dispose. */
+        teardownToken = LC32UpdateHostMapping(
+            guestObject, LC32HostMappingBeginGuestTeardown, 0);
+    } else {
+        [object setHost_self:0];
+    }
+
+    id disposedObject = object_dispose(object);
+    if(teardownToken && !LC32UpdateHostMapping(
+            guestObject, LC32HostMappingFinishGuestTeardown,
+            teardownToken)) abort();
+    return disposedObject;
 }
 
 static id LC32BindHostInitializerResult(id object, uint64_t hostResult) {
@@ -136,8 +155,23 @@ static id LC32BindHostInitializerResult(id object, uint64_t hostResult) {
         &bindGuestSelector,
         sel_registerName("LC32_bindGuestSelfIfAbsent:"), NO);
     return (id)(uintptr_t)(uint32_t)LC32InvokeHostSelector(
-        hostResult, selector,
+        hostResult, LC32HostSelectorAllowingUnmappedReceiver(selector),
         (uint64_t)(uint32_t)(uintptr_t)object, (uint64_t)0);
+}
+
+static void LC32ReleaseUnboundHostInitializerResult(uint64_t hostResult) {
+    if(!hostResult) return;
+
+    /* An init-family native result is already +1. If binding it to a guest
+     * proxy fails, release that exact ownership before abandoning the guest
+     * allocation. The result may not have a registry entry yet, so this is
+     * one of the narrow raw-result calls allowed to use an unmapped receiver. */
+    static uint64_t releaseSelector __attribute__((aligned(8)));
+    const uint64_t selector = LC32CachedHostSelector(
+        &releaseSelector, @selector(release), NO);
+    LC32InvokeHostSelector(
+        hostResult, LC32HostSelectorAllowingUnmappedReceiver(selector),
+        (uint64_t)0);
 }
 
 id LC32AdoptHostInitializerResult(id object, uint64_t hostResult) {
@@ -154,12 +188,12 @@ id LC32AdoptHostInitializerResult(id object, uint64_t hostResult) {
      */
     id canonicalObject = LC32BindHostInitializerResult(object, hostResult);
     if(!canonicalObject) {
+        LC32ReleaseUnboundHostInitializerResult(hostResult);
         return LC32DisposeFailedInit(object);
     }
     if(canonicalObject != object) {
         _objc_rootRetain(canonicalObject);
-        [object setHost_self:0];
-        object_dispose(object);
+        LC32DisposeFailedInit(object);
         return canonicalObject;
     }
     [object setHost_self:hostResult];
@@ -177,6 +211,7 @@ id LC32AdoptHostInitializerResultARC(id object, uint64_t hostResult) {
 
     id canonicalObject = LC32BindHostInitializerResult(object, hostResult);
     if(!canonicalObject) {
+        LC32ReleaseUnboundHostInitializerResult(hostResult);
         [object setHost_self:0];
         return nil;
     }
@@ -193,7 +228,12 @@ id LC32AdoptHostInitializerResultARC(id object, uint64_t hostResult) {
     /* A retained-result C function must provide a +1 distinct from ARC's
      * strong `self`, which the compiler releases on return. This paired retain
      * is balanced by that release, leaving the initializer's original +1. */
-    return [object retain];
+    /* Clang lowers a direct [object retain] expression to objc_retain even in
+     * this MRC framework. That bypasses LC32_retain and adds only the guest
+     * half of the ownership pair, while ARC's later strong-self cleanup still
+     * dispatches through LC32_release and consumes the native half. Force an
+     * ordinary message send so the swizzled retain bridges both objects. */
+    return ((id (*)(id, SEL))objc_msgSend)(object, @selector(retain));
 }
 
 /*
@@ -315,10 +355,15 @@ static void LC32LeaveOwnershipWriter(uint32_t token) {
         &LC32OwnershipGateStripes[index].state, 0, __ATOMIC_RELEASE);
 }
 
-static uint64_t LC32ExistingHostSelf(id object) {
+static uint64_t LC32RawExistingHostSelf(id object) {
     return object
         ? LC32LookupHostMapping((uint32_t)(uintptr_t)object)
         : 0;
+}
+
+static uint64_t LC32ExistingHostSelf(id object) {
+    const uint64_t mapping = LC32RawExistingHostSelf(object);
+    return mapping == LC32_HOST_MAPPING_DEAD ? 0 : mapping;
 }
 
 @implementation LC32GuestBuffer
@@ -344,21 +389,14 @@ static uint64_t LC32ExistingHostSelf(id object) {
  * ownership and the helpers continue to stay entirely inside guest libobjc.
  */
 uint32_t LC32ReleaseGuestLifetimePin(id object) {
-    /* Host-first weak-retain tokens and the first-publication ownership gate
-     * guarantee that a native mirror whose transferred guard is its sole +1
-     * has either exactly the guest lifetime pin or a stable additional guest
-     * owner.  Do not speculatively decrement and then restore the pin: the
-     * other owner could disappear in that gap. */
-    if(_objc_rootRetainCount(object) != 1) {
-        return 0;
-    }
-
-    /* The count can only change here through an invalid unpaired strong race.
-     * Fail loudly instead of continuing with a detached or double-released
-     * lifetime pin.  The private primitive does not invoke -dealloc itself. */
-    if(!_objc_rootReleaseWasZero(object)) abort();
-    [object dealloc];
-    return 1;
+    /* This consumes exactly the guest +1 owned by LC32GuestLifetimePin. It is
+     * not a finality probe: when ordinary guest owners remain, their count must
+     * still decrease so the last one can eventually remove the native-death
+     * tombstone. The private primitive atomically reports whether this exact
+     * decrement reached zero without invoking -dealloc itself. */
+    const BOOL releasedToZero = _objc_rootReleaseWasZero(object);
+    if(releasedToZero) [object dealloc];
+    return releasedToZero;
 }
 
 static BOOL LC32OperationTraceEnabled(void) {
@@ -465,7 +503,7 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
                     guestObject,
                     LC32HostMappingPublishProvisional,
                     ptr)) abort();
-        } else if(existing) {
+        } else if(existing && existing != LC32_HOST_MAPPING_DEAD) {
             if(!LC32UpdateHostMapping(
                     guestObject,
                     LC32HostMappingClearIfEqual,
@@ -500,15 +538,18 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
             class_getName(self.class), (uint32_t)self.class,
             (uint32_t)self, object_isClass(self));
     }
-    uint64_t ptr = LC32ExistingHostSelf(self);
+    uint64_t ptr = LC32RawExistingHostSelf(self);
+    if(ptr == LC32_HOST_MAPPING_DEAD) return 0;
     if(!ptr) {
         @synchronized(self) {
-            ptr = LC32ExistingHostSelf(self);
+            ptr = LC32RawExistingHostSelf(self);
+            if(ptr == LC32_HOST_MAPPING_DEAD) return 0;
             if(!ptr) {
                 const uint32_t writer =
                     LC32EnterOwnershipWriter(self);
                 @try {
-                    ptr = LC32ExistingHostSelf(self);
+                    ptr = LC32RawExistingHostSelf(self);
+                    if(ptr == LC32_HOST_MAPPING_DEAD) return 0;
                     if(!ptr) {
                         /*
                          * Retains performed while an object is guest-only
@@ -537,7 +578,9 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
                                 &retainSelector, @selector(retain), NO);
                             for(NSUInteger count = 1;
                                     count < guestRetainCount; count++) {
-                                LC32InvokeHostSelector(ptr, selector);
+                                LC32InvokeHostSelector(ptr,
+                                    LC32HostSelectorAllowingUnmappedReceiver(
+                                        selector));
                             }
                         }
 
@@ -614,7 +657,18 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
              * The zeroing root primitive has already made new weak loads
              * fail, and a publisher cannot legitimately start for an object
              * whose final guest ownership was consumed. */
-            if(releasedToZero) [self dealloc];
+            if(releasedToZero) {
+                const uint32_t guestSelf =
+                    (uint32_t)(uintptr_t)self;
+                const uint32_t token = LC32UpdateHostMapping(
+                    guestSelf,
+                    LC32HostMappingBeginGuestTeardown, 0);
+                [self dealloc];
+                if(token && !LC32UpdateHostMapping(
+                        guestSelf,
+                        LC32HostMappingFinishGuestTeardown,
+                        token)) abort();
+            }
             return;
         }
         LC32LeaveOwnershipReader(reader);
@@ -634,8 +688,10 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
         if(!token) abort();
         [self dealloc];
         if(!LC32UpdateHostMapping(
-                guestSelf, LC32HostMappingFinishGuestTeardown,
+                guestSelf,
+                LC32HostMappingFinishGuestTeardownAndReleaseHost,
                 token)) abort();
+        return;
     }
 
     static uint64_t _host_cmd;

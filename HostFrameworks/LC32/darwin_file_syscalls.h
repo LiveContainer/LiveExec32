@@ -11,7 +11,7 @@ int LC32CopyGuestCString(u32 guest_string, char output[PATH_MAX]);
 int LC32GuestPathToHost(u32 guest_path, char output[PATH_MAX]);
 
 int guest_link(u32 guest_source, u32 guest_destination);
-int guest_chflags(u32 guest_path, u_int flags);
+int guest_chflags(u32 guest_path, u32 flags);
 int guest_symlink(u32 guest_target, u32 guest_link_path);
 int guest_mkfifo(u32 guest_path, mode_t mode);
 int guest_rmdir(u32 guest_path);

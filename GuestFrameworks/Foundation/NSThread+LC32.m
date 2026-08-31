@@ -71,8 +71,9 @@ static void LC32NSThreadDestroyState(LC32NSThreadState *state) {
     if(hostThread) {
         static uint64_t releaseSelector __attribute__((aligned(8)));
         LC32InvokeHostSelector(hostThread,
-            LC32CachedHostSelector(&releaseSelector,
-                @selector(release), NO), (uint64_t)0);
+            LC32HostSelectorAllowingUnmappedReceiver(
+                LC32CachedHostSelector(&releaseSelector,
+                    @selector(release), NO)), (uint64_t)0);
     }
     pthread_cond_destroy(&state->ready);
     pthread_mutex_destroy(&state->lock);
@@ -91,8 +92,9 @@ static uint64_t LC32HostNSThread(SEL selector) {
     if(hostThread) {
         static uint64_t retainSelector __attribute__((aligned(8)));
         LC32InvokeHostSelector(hostThread,
-            LC32CachedHostSelector(&retainSelector,
-                @selector(retain), NO), (uint64_t)0);
+            LC32HostSelectorAllowingUnmappedReceiver(
+                LC32CachedHostSelector(&retainSelector,
+                    @selector(retain), NO)), (uint64_t)0);
     }
     return hostThread;
 }
@@ -110,8 +112,9 @@ static void LC32NSThreadPublishHostThread(
     if(hostThread) {
         static uint64_t releaseSelector __attribute__((aligned(8)));
         LC32InvokeHostSelector(hostThread,
-            LC32CachedHostSelector(&releaseSelector,
-                @selector(release), NO), (uint64_t)0);
+            LC32HostSelectorAllowingUnmappedReceiver(
+                LC32CachedHostSelector(&releaseSelector,
+                    @selector(release), NO)), (uint64_t)0);
     }
 }
 

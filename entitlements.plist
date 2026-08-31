@@ -6,7 +6,5 @@
 	<string>PMAP_CS_APP_STORE</string>
 	<key>get-task-allow</key>
 	<true/>
-	<key>com.apple.private.amfi.can-execute-cdhash</key>
-	<true/>
 </dict>
 </plist>

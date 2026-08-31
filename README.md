@@ -113,8 +113,11 @@ Yes. The bundled Dynarmic revision includes the dual-mapping/TXM JIT path
 required by iOS 26+, while non-iOS hosts remain single-mapped by default.
 
 ### Will this be available as a jailbreak tweak?
-Yes, but no plan for this yet. This could be made as transparent as possible,
-by allowing 32-bit apps to install and replace main binary with LiveExec32 when SpringBoard launches 32-bit app(?)
+Yes eta now. During install, LiveExec32 shim is injected to the pending 32-bit
+app so installd doesn't reject it and makes everything easier to handle.
+
+## Will this allow running encrypted 32-bit apps (ie directly installed from App Store)?
+Idk, need to research into this next
 
 ## License
 Apache License 2.0

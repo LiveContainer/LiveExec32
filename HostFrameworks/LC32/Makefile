@@ -1,5 +1,5 @@
 ARCHS := arm64
-TARGET := iphone:clang:latest:16.0
+TARGET := iphone:clang:latest:15.0
 FINALPACKAGE = 1
 GO_EASY_ON_ME := 1
 STRIP = 0
@@ -78,7 +78,7 @@ LiveExec32Shared_INSTALL = 0
 # mini-gdbstub is a static dependency of this framework rather than of the
 # launcher, which also keeps direct framework builds complete.
 before-LiveExec32Shared-all:: lc32-dynarmic-static
-	$(MAKE) -C ../../External/mini-gdbstub ARCH=rv32 CC="cc -isysroot $(ISYSROOT) -miphoneos-version-min=16.0"
+	$(MAKE) -C ../../External/mini-gdbstub ARCH=rv32 CC="cc -isysroot $(ISYSROOT) -miphoneos-version-min=15.0"
 
 internal-clean::
 	$(MAKE) -C ../../External/mini-gdbstub clean

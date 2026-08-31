@@ -303,7 +303,15 @@ void Dynarmic_nativeDestroy() {
             guestThreadMutex);
         for (const GuestThreadContext &thread :
                 guestThreads) {
-            if (MACH_PORT_VALID(thread.threadPort)) {
+            /*
+             * The main-thread entry names the borrowed port returned by
+             * pthread_mach_thread_np().  All other registry ports are
+             * synthetic receive rights allocated by AllocateGuestThreadPort.
+             * Destroying the borrowed pthread port violates its Mach-port
+             * guard on iOS (EXC_GUARD/GUARD_EXC_MOD_REFS).
+             */
+            if (thread.debuggerId != 1 &&
+                    MACH_PORT_VALID(thread.threadPort)) {
                 threadPorts.push_back(
                     thread.threadPort);
             }

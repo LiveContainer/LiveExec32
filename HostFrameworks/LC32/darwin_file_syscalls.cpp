@@ -248,7 +248,7 @@ int guest_link(u32 guest_source, u32 guest_destination) {
         SYS_link, host_source, host_destination, 0, 0, 0, 0, 0);
 }
 
-int guest_chflags(u32 guest_path, u_int flags) {
+int guest_chflags(u32 guest_path, u32 flags) {
     char host_path[PATH_MAX];
     const int error = GuestPathToHost(guest_path, host_path);
     if (error != 0) {

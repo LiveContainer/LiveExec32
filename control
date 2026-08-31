@@ -2,7 +2,7 @@ Package: com.kdt.liveexec32
 Name: LiveExec32
 Version: 0.0.1
 Architecture: iphoneos-arm
-Depends: firmware (>= 16.0), mobilesubstrate
+Depends: firmware (>= 15.0), mobilesubstrate
 Description: Run 32-bit iOS applications on 64-bit devices.
 Maintainer: khanhduytran0
 Author: khanhduytran0
