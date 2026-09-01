@@ -13,6 +13,7 @@
 #include <copyfile.h>
 #include <dlfcn.h>
 #include <dirent.h>
+#include <libkern/OSByteOrder.h>
 #include <sys/mman.h>
 #include <sys/clonefile.h>
 #include <mach/arm/thread_status.h>
@@ -80,6 +81,7 @@ namespace {
 
 constexpr uint32_t LC32MaximumFatSlices = 32;
 constexpr uint32_t LC32MaximumLoadCommands = 65536;
+constexpr uint32_t LC32EmbeddedSignatureMagic = 0xfade0cc0;
 
 struct LC32MappedMachO {
     uintptr_t address = 0;
@@ -101,6 +103,38 @@ uint32_t LC32BaseCPUSubtype(cpu_subtype_t subtype) {
 
 bool LC32RangeFits(uint64_t offset, uint64_t size, uint64_t containerSize) {
     return offset <= containerSize && size <= containerSize - offset;
+}
+
+bool LC32ReadEmbeddedSignatureLength(
+        const uint8_t *imageBytes, size_t imageSize,
+        const linkedit_data_command &command,
+        uint32_t *signatureLength) {
+    if(imageBytes == nullptr || signatureLength == nullptr ||
+            command.datasize < sizeof(uint32_t) * 3 ||
+            !LC32RangeFits(command.dataoff,
+                command.datasize, imageSize)) {
+        return false;
+    }
+
+    const uint8_t *signature = imageBytes + command.dataoff;
+    uint32_t magic = 0;
+    uint32_t length = 0;
+    uint32_t count = 0;
+    memcpy(&magic, signature, sizeof(magic));
+    memcpy(&length, signature + sizeof(uint32_t), sizeof(length));
+    memcpy(&count, signature + sizeof(uint32_t) * 2, sizeof(count));
+    magic = OSSwapBigToHostInt32(magic);
+    length = OSSwapBigToHostInt32(length);
+    count = OSSwapBigToHostInt32(count);
+
+    const uint64_t indexBytes =
+        sizeof(uint32_t) * 3 + static_cast<uint64_t>(count) * 8;
+    if(magic != LC32EmbeddedSignatureMagic ||
+            length < indexBytes || length > command.datasize) {
+        return false;
+    }
+    *signatureLength = length;
+    return true;
 }
 
 bool LC32RoundUpGuestPage(uint32_t size, uint32_t *roundedSize) {
@@ -256,11 +290,16 @@ bool LC32ValidateARMImage(
                     sizeof(encryption_info_command_64) :
                     sizeof(encryption_info_command);
             if(command.cmdsize < encryptionCommandSize) return false;
-            encryption_info_command encryption = {};
-            memcpy(&encryption,
-                fileBytes + offset + commandOffset,
-                sizeof(encryption));
-            if(encryption.cryptid != 0) return false;
+        } else if(command.cmd == LC_CODE_SIGNATURE) {
+            if(command.cmdsize < sizeof(linkedit_data_command)) {
+                return false;
+            }
+            linkedit_data_command signature = {};
+            memcpy(&signature, commandBytes, sizeof(signature));
+            if(!LC32RangeFits(signature.dataoff,
+                    signature.datasize, size)) {
+                return false;
+            }
         }
         commandOffset += command.cmdsize;
     }
@@ -400,8 +439,8 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
     void *fileMapping = mmap(NULL, mappingSize,
         PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
     const int mappingError = errno;
-    close(fd);
     if(fileMapping == MAP_FAILED) {
+        close(fd);
         LC32MapFileFailure(path, strerror(mappingError));
     }
 
@@ -409,9 +448,10 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
     if(!LC32SelectARMImage(
             static_cast<const uint8_t *>(fileMapping),
             fileSize, &selectedImage)) {
+        close(fd);
         munmap(fileMapping, mappingSize);
         LC32MapFileFailure(path,
-            "no valid, decrypted ARM32 Mach-O slice");
+            "no valid ARM32 Mach-O slice");
     }
     uintptr_t map = selectedImage.address;
     
@@ -421,11 +461,13 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
     // qXfer:libraries:read needs the complete host path so LLDB can load the
     // matching Mach-O and apply its symbols at the reported guest base.
     if(guestMappingLen >= 1000) {
+        close(fd);
         munmap(fileMapping, mappingSize);
         LC32MapFileFailure(path, "guest image table is full");
     }
     guestMappings[guestMappingLen].name = strdup(path);
     if(guestMappings[guestMappingLen].name == nullptr) {
+        close(fd);
         munmap(fileMapping, mappingSize);
         LC32MapFileFailure(path, "could not allocate the image path");
     }
@@ -451,6 +493,13 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
     load_command *lc;
     int firstIndex = 0;
     u32 firstSegmentVMAddr = 0;
+    bool foundHeaderSegment = false;
+    u32 headerSegmentGuestAddress = 0;
+    u32 headerSegmentFileSize = 0;
+    bool foundEncryptionCommand = false;
+    encryption_info_command encryption = {};
+    bool foundCodeSignature = false;
+    linkedit_data_command codeSignature = {};
     for (uint i = 0; i < header->ncmds; i++, cur += lc->cmdsize) {
         lc = (load_command *)cur;
         if(!isDyld && lc->cmd == LC_VERSION_MIN_IPHONEOS &&
@@ -500,6 +549,15 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
             }
             const u32 guestSegmentAddress =
                 static_cast<u32>(guestSegmentAddress64);
+            if(segment.fileoff == 0 && segment.filesize != 0) {
+                if(foundHeaderSegment) {
+                    LC32MapFileFailure(path,
+                        "multiple file-backed header segments");
+                }
+                foundHeaderSegment = true;
+                headerSegmentGuestAddress = guestSegmentAddress;
+                headerSegmentFileSize = segment.filesize;
+            }
             printf("Mapping 0x%lx-0x%lx to 0x%x\n",
                 map + segment.fileoff,
                 map + segment.fileoff + segment.filesize,
@@ -580,8 +638,217 @@ u32 Dynarmic_map_file(bool isDyld, u32 target, const char *path) {
             threadHandle.jit->Regs()[Reg::PC] =
                 static_cast<u32>(guestProgramCounter);
             threadHandle.jit->SetCpsr(state.__cpsr);
+        } else if(!isDyld &&
+                (lc->cmd == LC_ENCRYPTION_INFO ||
+                 lc->cmd == LC_ENCRYPTION_INFO_64)) {
+            if(foundEncryptionCommand) {
+                LC32MapFileFailure(path,
+                    "multiple encryption load commands");
+            }
+            memcpy(&encryption, lc, sizeof(encryption));
+            foundEncryptionCommand = true;
+        } else if(!isDyld && lc->cmd == LC_CODE_SIGNATURE) {
+            if(foundCodeSignature ||
+                    lc->cmdsize < sizeof(codeSignature)) {
+                LC32MapFileFailure(path,
+                    "invalid or duplicate code-signature command");
+            }
+            memcpy(&codeSignature, lc, sizeof(codeSignature));
+            if(!LC32RangeFits(codeSignature.dataoff,
+                    codeSignature.datasize, selectedImage.size)) {
+                LC32MapFileFailure(path,
+                    "code signature is outside the ARM32 slice");
+            }
+            foundCodeSignature = true;
         }
     }
+
+    /*
+     * dyld assumes that the kernel's exec path has already installed the
+     * protected pager for the main executable. LiveExec32 maps that image
+     * itself, so perform the equivalent remap after every file-backed guest
+     * segment is present and before transferring control to guest dyld.
+     * Images loaded later still use dyld's normal SYS_mremap_encrypted call.
+     */
+    if(!isDyld && foundEncryptionCommand &&
+            encryption.cryptid != 0 && encryption.cryptsize != 0) {
+        if(!foundHeaderSegment ||
+                !LC32RangeFits(encryption.cryptoff,
+                    encryption.cryptsize, headerSegmentFileSize)) {
+            LC32MapFileFailure(path,
+                "encrypted range is outside the header segment");
+        }
+        const uint64_t guestEncryptedAddress64 =
+            static_cast<uint64_t>(headerSegmentGuestAddress) +
+            encryption.cryptoff;
+        if(guestEncryptedAddress64 > UINT32_MAX) {
+            LC32MapFileFailure(path,
+                "encrypted guest address is out of range");
+        }
+        const u32 guestEncryptedAddress =
+            static_cast<u32>(guestEncryptedAddress64);
+
+        /*
+         * The kernel exec path registers the selected slice's embedded
+         * signature before it installs the FairPlay pager. Only the injected
+         * arm64 shim was registered when the host process was exec'd, so add
+         * the preserved ARM32 signature explicitly. The signature offset is
+         * relative to the Mach-O slice, while fs_file_start identifies that
+         * slice in the universal file.
+         */
+        if(!foundCodeSignature || codeSignature.datasize == 0) {
+            LC32MapFileFailure(path,
+                "encrypted ARM32 slice has no code signature");
+        }
+        uint32_t embeddedSignatureLength = 0;
+        if(!LC32ReadEmbeddedSignatureLength(
+                reinterpret_cast<const uint8_t *>(map),
+                selectedImage.size, codeSignature,
+                &embeddedSignatureLength)) {
+            LC32MapFileFailure(path,
+                "encrypted ARM32 slice has a malformed code signature");
+        }
+        const uintptr_t selectedImageFileOffset =
+            selectedImage.address -
+            reinterpret_cast<uintptr_t>(fileMapping);
+        fsignatures_t signatureRegistration = {};
+        signatureRegistration.fs_file_start =
+            static_cast<off_t>(selectedImageFileOffset);
+        signatureRegistration.fs_blob_start =
+            reinterpret_cast<void *>(
+                static_cast<uintptr_t>(codeSignature.dataoff));
+        signatureRegistration.fs_blob_size = embeddedSignatureLength;
+
+        if(fcntl(fd, F_ADDFILESIGS_RETURN,
+                &signatureRegistration) == -1) {
+            const int savedErrno = errno;
+            char message[256];
+            snprintf(message, sizeof(message),
+                "could not register ARM32 code signature: %s",
+                strerror(savedErrno));
+            LC32MapFileFailure(path, message);
+        }
+        const uint64_t encryptedRangeEnd =
+            static_cast<uint64_t>(encryption.cryptoff) +
+            encryption.cryptsize;
+        if(signatureRegistration.fs_file_start < 0 ||
+                static_cast<uint64_t>(
+                    signatureRegistration.fs_file_start) <
+                        encryptedRangeEnd) {
+            LC32MapFileFailure(path,
+                "ARM32 code signature does not cover the encrypted range");
+        }
+
+        /*
+         * Guest segments normally point into the writable whole-file mapping
+         * above so dyld and the debugger can patch them. XNU only accepts an
+         * app-encryption remap from an executable vnode mapping, so create a
+         * short-lived RX view beginning at the selected slice. A native arm64
+         * process cannot ask mremap_encrypted to begin at an address inside a
+         * 16K page without shifting crypto_start, so reject such an image
+         * instead of decrypting the preceding file bytes.
+         */
+        const uint64_t selectedImageFileOffset64 =
+            static_cast<uint64_t>(selectedImageFileOffset);
+        if(selectedImageFileOffset64 > INT64_MAX ||
+                encryptedRangeEnd > SIZE_MAX ||
+                encryptedRangeEnd >
+                    static_cast<uint64_t>(INT64_MAX) -
+                        selectedImageFileOffset64) {
+            LC32MapFileFailure(path,
+                "encrypted ARM32 file offset is out of range");
+        }
+        if(vm_page_size == 0 ||
+                (vm_page_size & (vm_page_size - 1)) != 0 ||
+                (selectedImageFileOffset & (vm_page_size - 1)) != 0 ||
+                (encryption.cryptoff & (vm_page_size - 1)) != 0) {
+            LC32MapFileFailure(path,
+                "encrypted ARM32 file offset is not host-page aligned");
+        }
+        const size_t decryptionMappingSize =
+            static_cast<size_t>(encryptedRangeEnd);
+        void *executableMapping = mmap(nullptr, decryptionMappingSize,
+            PROT_READ | PROT_EXEC, MAP_PRIVATE, fd,
+            static_cast<off_t>(selectedImageFileOffset));
+        if(executableMapping == MAP_FAILED) {
+            const int savedErrno = errno;
+            char message[256];
+            snprintf(message, sizeof(message),
+                "could not create executable decryption mapping: %s",
+                strerror(savedErrno));
+            LC32MapFileFailure(path, message);
+        }
+
+        /*
+         * The injected FAT wrapper moves a formerly thin ARM32 image away
+         * from file offset zero, but FairPlay's page-key table remains
+         * indexed by offsets in that original thin image. A direct mapping
+         * would therefore decrypt with an extra selectedImageFileOffset and
+         * eventually retry forever at the old encryption boundary.
+         *
+         * Instantiate a private shadow object for the complete slice prefix
+         * before protecting the encrypted subrange. The shadow's offset zero
+         * is the ARM32 Mach-O header, while its backing faults still fetch the
+         * relocated ciphertext from the FAT file. XNU then supplies
+         * slice-relative offsets to the decrypter, matching normal execution
+         * of the original thin binary. The same-byte write leaves the mapped
+         * contents unchanged; its only purpose is to force the MAP_PRIVATE
+         * shadow into existence.
+         */
+        if(selectedImageFileOffset != 0) {
+            if(mprotect(executableMapping, decryptionMappingSize,
+                    PROT_READ | PROT_WRITE) != 0) {
+                const int savedErrno = errno;
+                (void)munmap(executableMapping,
+                    decryptionMappingSize);
+                char message[256];
+                snprintf(message, sizeof(message),
+                    "could not create ARM32 decryption shadow: %s",
+                    strerror(savedErrno));
+                LC32MapFileFailure(path, message);
+            }
+            auto *shadowTrigger =
+                static_cast<volatile uint8_t *>(executableMapping);
+            const uint8_t headerByte = shadowTrigger[0];
+            shadowTrigger[0] = headerByte;
+            if(mprotect(executableMapping, decryptionMappingSize,
+                    PROT_READ | PROT_EXEC) != 0) {
+                const int savedErrno = errno;
+                (void)munmap(executableMapping,
+                    decryptionMappingSize);
+                char message[256];
+                snprintf(message, sizeof(message),
+                    "could not protect ARM32 decryption shadow: %s",
+                    strerror(savedErrno));
+                LC32MapFileFailure(path, message);
+            }
+        }
+        const void *encryptedMapping =
+            static_cast<const uint8_t *>(executableMapping) +
+            encryption.cryptoff;
+        const int decryptionError = Dynarmic_mremap_encrypted(
+            guestEncryptedAddress, encryption.cryptsize,
+            encryption.cryptid,
+            static_cast<u32>(header->cputype),
+            static_cast<u32>(header->cpusubtype),
+            encryptedMapping);
+        (void)munmap(executableMapping, decryptionMappingSize);
+        if(decryptionError != 0) {
+            char message[256];
+            snprintf(message, sizeof(message),
+                "could not decrypt main ARM32 image (cryptid %u): %s",
+                encryption.cryptid, strerror(decryptionError));
+            LC32MapFileFailure(path, message);
+        }
+        printf("LC32: decrypted main executable range "
+            "0x%08x-0x%08llx (cryptid %u)\n",
+            guestEncryptedAddress,
+            static_cast<unsigned long long>(
+                guestEncryptedAddress64 + encryption.cryptsize),
+            encryption.cryptid);
+    }
+
+    close(fd);
     
     if(isDyld) {
         const struct section *dyldInfoSection =

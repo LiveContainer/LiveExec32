@@ -2028,8 +2028,9 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 cpu->Regs()[0] = guest_sandbox_ms(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2]);
                 break;
             case SYS_mremap_encrypted:
-                printf("LC32: attempted to load encrypted binaries?\n");
-                cpu->Regs()[0] = 0; //return_with_carry_direct(EPERM, true);
+                cpu->Regs()[0] = guest_mremap_encrypted(
+                    cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2],
+                    cpu->Regs()[3], cpu->Regs()[4]);
                 break;
             case SYS_getentropy:
                 cpu->Regs()[0] = guest_getentropy(cpu->Regs()[0], cpu->Regs()[1]);

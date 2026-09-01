@@ -4050,10 +4050,53 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
                 },
                 return_with_carry_direct(EINTR, true));
         case F_ADDFILESIGS_RETURN:
-            // fsig->fs_file_start = 0xFFFFFFFF;
-            Dynarmic_current_user_callbacks()->MemoryWrite32(
-                guest_r2, 0xFFFFFFFF);
-            return 0;
+        {
+            /* fsignatures_t contains native-sized pointer and size fields.
+             * Decode dyld's 32-bit ABI explicitly; fs_blob_start is a file
+             * offset for F_ADDFILESIGS_RETURN, not a guest pointer. */
+            struct GuestFSignatures {
+                int64_t fileStart;
+                u32 blobStart;
+                u32 blobSize;
+            } guestSignatures = {};
+            static_assert(sizeof(guestSignatures) == 16,
+                "unexpected guest fsignatures layout");
+            if(!read_guest_memory_with_permissions(
+                    guest_r2, &guestSignatures,
+                    sizeof(guestSignatures), PROT_READ)) {
+                return return_with_carry_direct(EFAULT, true);
+            }
+
+            fsignatures_t hostSignatures = {};
+            hostSignatures.fs_file_start = guestSignatures.fileStart;
+            hostSignatures.fs_blob_start =
+                reinterpret_cast<void *>(
+                    static_cast<uintptr_t>(
+                        guestSignatures.blobStart));
+            hostSignatures.fs_blob_size = guestSignatures.blobSize;
+            /* Use the public entry point here rather than a raw syscall.
+             * Jailbreaks interpose fcntl to trust and, on TXM systems,
+             * normalize the signature before asking XNU to attach it. */
+            errno = 0;
+            const int result = fcntl(
+                fildes, cmd, &hostSignatures);
+            if(result == -1) {
+                const int savedErrno = errno;
+                return return_with_carry_direct(
+                    savedErrno == 0 ? EIO : savedErrno, true);
+            }
+
+            guestSignatures.fileStart =
+                hostSignatures.fs_file_start;
+            /* XNU exposes only the returned coverage through the off_t
+             * field; the pointer and size remain input-only. */
+            if(!write_guest_memory_with_permissions(
+                    guest_r2, &guestSignatures.fileStart,
+                    sizeof(guestSignatures.fileStart), PROT_WRITE)) {
+                return return_with_carry_direct(EFAULT, true);
+            }
+            return return_with_carry_direct(result, false);
+        }
         case F_CHECK_LV:
             return 0;
         // r2 is a pointer
@@ -4416,4 +4459,288 @@ int guest_abort_with_payload(u32 reason_namespace, u64 reason_code, u32 guest_pa
             ? "(none)"
             : pendingGuestAbortMetadata.reason.c_str());
     return 0;
+}
+
+namespace {
+
+constexpr u32 LC32CryptIDNoEncryption = 0;
+constexpr u32 LC32CryptIDAppEncryption = 1;
+constexpr u32 LC32CryptIDModelEncryption = 2;
+constexpr u32 LC32CryptIDNullEncryption = 0x10;
+
+struct LC32HostVMRegion {
+    vm_address_t address = 0;
+    vm_size_t size = 0;
+    vm_prot_t protection = VM_PROT_NONE;
+    vm_prot_t maximumProtection = VM_PROT_NONE;
+};
+
+int LC32ErrnoForMachVMResult(kern_return_t result) {
+    switch(result) {
+        case KERN_INVALID_ADDRESS:
+            return EFAULT;
+        case KERN_PROTECTION_FAILURE:
+            return EACCES;
+        case KERN_MEMORY_ERROR:
+        case KERN_MEMORY_FAILURE:
+            return EIO;
+        case KERN_NO_SPACE:
+        case KERN_RESOURCE_SHORTAGE:
+            return ENOMEM;
+        case KERN_INVALID_ARGUMENT:
+        default:
+            return EINVAL;
+    }
+}
+
+bool LC32QueryHostVMRegion(
+        vm_address_t address, LC32HostVMRegion *result) {
+    if(result == nullptr) return false;
+
+    vm_address_t regionAddress = address;
+    vm_size_t regionSize = 0;
+    vm_region_basic_info_data_64_t regionInfo = {};
+    mach_msg_type_number_t regionInfoCount =
+        VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t objectName = MACH_PORT_NULL;
+    const kern_return_t regionResult = vm_region_64(
+        mach_task_self(), &regionAddress, &regionSize,
+        VM_REGION_BASIC_INFO_64,
+        reinterpret_cast<vm_region_info_t>(&regionInfo),
+        &regionInfoCount, &objectName);
+    if(objectName != MACH_PORT_NULL) {
+        (void)mach_port_deallocate(mach_task_self(), objectName);
+    }
+    if(regionResult != KERN_SUCCESS ||
+            address < regionAddress ||
+            address - regionAddress >= regionSize) {
+        return false;
+    }
+
+    result->address = regionAddress;
+    result->size = regionSize;
+    result->protection = regionInfo.protection;
+    result->maximumProtection = regionInfo.max_protection;
+    return true;
+}
+
+} // anonymous namespace
+
+int Dynarmic_mremap_encrypted(
+        u32 start, u32 length, u32 cryptid,
+        u32 cpuType, u32 cpuSubtype,
+        const void *hostSource) {
+    if((start & DYN_PAGE_MASK) != 0 ||
+            !GuestAddressRangeIsValid32(start, length)) {
+        return EINVAL;
+    }
+
+    switch(cryptid) {
+        case LC32CryptIDNoEncryption:
+            /* XNU treats an empty LC_ENCRYPTION_INFO as a no-op before
+             * looking up the supplied address. */
+            return 0;
+        case LC32CryptIDAppEncryption:
+        case LC32CryptIDModelEncryption:
+        case LC32CryptIDNullEncryption:
+            break;
+        default:
+            return EINVAL;
+    }
+
+    std::unique_lock<std::recursive_mutex> lock(guestVmMutex);
+    khash_t(memory) *memory = sharedHandle.memory;
+    if(memory == nullptr) {
+        return EFAULT;
+    }
+
+    const u64 guestEnd = static_cast<u64>(start) + length;
+    const u64 mappedEnd = length == 0
+        ? static_cast<u64>(start) + DYN_PAGE_SIZE
+        : (guestEnd + DYN_PAGE_MASK) & ~u64(DYN_PAGE_MASK);
+    uintptr_t hostStart =
+        reinterpret_cast<uintptr_t>(hostSource);
+    bool firstPage = hostSource == nullptr;
+    for(u64 guestPageAddress = start;
+            guestPageAddress < mappedEnd;
+            guestPageAddress += DYN_PAGE_SIZE) {
+        const khiter_t iterator = kh_get(
+            memory, memory, guestPageAddress);
+        if(iterator == kh_end(memory)) {
+            return EFAULT;
+        }
+        t_memory_page page = kh_value(memory, iterator);
+        if(page == nullptr || page->addr == nullptr) {
+            return EFAULT;
+        }
+        if(length != 0 &&
+                cryptid != LC32CryptIDModelEncryption &&
+                (page->perms & PROT_EXEC) == 0) {
+            return EINVAL;
+        }
+
+        if(hostSource == nullptr) {
+            const uintptr_t hostPage =
+                reinterpret_cast<uintptr_t>(page->addr);
+            if(firstPage) {
+                hostStart = hostPage;
+                firstPage = false;
+            } else if(hostPage != hostStart +
+                    static_cast<uintptr_t>(
+                        guestPageAddress - start)) {
+                /* A single native remap must never span unrelated guest
+                 * backings merely because their guest addresses are
+                 * adjacent. */
+                return EINVAL;
+            }
+        }
+    }
+
+    /* A nonzero cryptid with zero length still has to name a mapped vnode in
+     * XNU, but it does not install a pager or alter any bytes. The mapped-page
+     * validation above preserves the useful part of that contract without
+     * creating a zero-sized staging alias. */
+    if(length == 0) {
+        return 0;
+    }
+
+    const uintptr_t hostPageSize = vm_page_size;
+    if(hostPageSize == 0 ||
+            (hostPageSize & (hostPageSize - 1)) != 0) {
+        return EINVAL;
+    }
+    if((hostStart & (hostPageSize - 1)) != 0) {
+        /* Expanding the request backwards to a native-page boundary changes
+         * both crypto_start and the vnode backing offset, which can make the
+         * FairPlay pager decrypt plaintext preceding a 4K-aligned range. */
+        return EINVAL;
+    }
+    const uintptr_t hostBase = hostStart;
+    const size_t leadingBytes = 0;
+    const size_t protectedLength = length;
+    if(protectedLength > SIZE_MAX - (hostPageSize - 1)) {
+        return EINVAL;
+    }
+    const size_t stagingSize =
+        (protectedLength + hostPageSize - 1) & ~(hostPageSize - 1);
+    if(hostBase > UINTPTR_MAX - stagingSize) {
+        return EINVAL;
+    }
+
+    LC32HostVMRegion sourceRegion;
+    if(!LC32QueryHostVMRegion(
+            static_cast<vm_address_t>(hostBase), &sourceRegion) ||
+            sourceRegion.address > hostBase ||
+            sourceRegion.size < hostBase - sourceRegion.address ||
+            sourceRegion.size - (hostBase - sourceRegion.address) <
+                stagingSize) {
+        return EFAULT;
+    }
+    const vm_prot_t stagingRequiredProtection =
+        cryptid == LC32CryptIDModelEncryption
+            ? VM_PROT_READ
+            : VM_PROT_READ | VM_PROT_EXECUTE;
+    if((sourceRegion.maximumProtection &
+            stagingRequiredProtection) !=
+            stagingRequiredProtection) {
+        return EACCES;
+    }
+
+    std::vector<uint8_t> decryptedBytes;
+    try {
+        decryptedBytes.resize(length);
+    } catch(const std::exception &) {
+        return ENOMEM;
+    }
+
+    /*
+     * Never replace the live guest backing with the protected pager. Besides
+     * preserving dyld/debugger writes, the discardable alias retains the
+     * original vnode and object offset, which select the license and position
+     * the decryption key.
+     */
+    const bool callerOwnsStagingMapping = hostSource != nullptr;
+    vm_address_t stagingAddress = callerOwnsStagingMapping
+        ? static_cast<vm_address_t>(hostBase) : 0;
+    vm_prot_t stagingProtection = VM_PROT_NONE;
+    vm_prot_t stagingMaximumProtection = VM_PROT_NONE;
+    kern_return_t vmResult = KERN_SUCCESS;
+    if(callerOwnsStagingMapping) {
+        stagingProtection = sourceRegion.protection;
+        stagingMaximumProtection = sourceRegion.maximumProtection;
+    } else {
+        vmResult = vm_remap(
+            mach_task_self(), &stagingAddress,
+            static_cast<vm_size_t>(stagingSize), 0,
+            VM_FLAGS_ANYWHERE, mach_task_self(),
+            static_cast<vm_address_t>(hostBase), FALSE,
+            &stagingProtection, &stagingMaximumProtection,
+            VM_INHERIT_NONE);
+        if(vmResult != KERN_SUCCESS) {
+            return LC32ErrnoForMachVMResult(vmResult);
+        }
+    }
+    const auto releaseStagingMapping = [&] {
+        if(!callerOwnsStagingMapping && stagingAddress != 0 && vm_deallocate(
+                mach_task_self(), stagingAddress,
+                static_cast<vm_size_t>(stagingSize)) != KERN_SUCCESS) {
+            fprintf(stderr,
+                "LC32: could not release mremap_encrypted staging "
+                "mapping at %p\n",
+                reinterpret_cast<void *>(stagingAddress));
+        }
+        stagingAddress = 0;
+    };
+
+    if((stagingMaximumProtection &
+            stagingRequiredProtection) !=
+            stagingRequiredProtection) {
+        releaseStagingMapping();
+        return EACCES;
+    }
+    vmResult = vm_protect(
+        mach_task_self(), stagingAddress,
+        static_cast<vm_size_t>(stagingSize), FALSE,
+        stagingRequiredProtection);
+    if(vmResult != KERN_SUCCESS) {
+        releaseStagingMapping();
+        return LC32ErrnoForMachVMResult(vmResult);
+    }
+
+    const bool originalCarry = threadHandle.cpsr->hasCarry();
+    const int remapResult = syscallRetCarry(
+        SYS_mremap_encrypted,
+        stagingAddress, protectedLength, cryptid,
+        cpuType, cpuSubtype, 0, 0);
+    const bool remapFailed = threadHandle.cpsr->hasCarry();
+    threadHandle.cpsr->setCarry(originalCarry);
+    if(remapFailed) {
+        releaseStagingMapping();
+        return remapResult;
+    }
+
+    /* Fault the protected pager through this task's ordinary RX mapping.
+     * A self vm_read_overwrite() takes the out-of-line Mach copy path and can
+     * wait indefinitely while FairPlay services the protected object. */
+    const auto *protectedBytes = reinterpret_cast<const uint8_t *>(
+        stagingAddress + leadingBytes);
+    memcpy(decryptedBytes.data(), protectedBytes, length);
+    releaseStagingMapping();
+
+    if(ReplaceGuestMemoryRangeWithPrivateCopy(
+            start, length, decryptedBytes.data()) != 0) {
+        const int savedErrno = errno;
+        return savedErrno;
+    }
+    lock.unlock();
+    InvalidateAllGuestJits(start, length);
+    return 0;
+}
+
+int guest_mremap_encrypted(
+        u32 start, u32 length, u32 cryptid,
+        u32 cpuType, u32 cpuSubtype) {
+    const int error = Dynarmic_mremap_encrypted(
+        start, length, cryptid, cpuType, cpuSubtype);
+    return return_with_carry_direct(error, error != 0);
 }

@@ -95,6 +95,7 @@ $(eval $(call lc32_test,lc32-getsockopt-abi,getsockopt_abi.c,))
 $(eval $(call lc32_test,lc32-host-info,host_info.c,))
 $(eval $(call lc32_test,lc32-kqueue-kevent,kqueue_kevent.c,))
 $(eval $(call lc32_test,lc32-lseek-abi,lseek_abi.c,))
+$(eval $(call lc32_test,lc32-mremap-encrypted,mremap_encrypted.c,))
 $(eval $(call lc32_test,lc32-native-pthread-smoke,native_pthread_smoke.c,))
 $(eval $(call lc32_test,lc32-recvfrom-abi,recvfrom_abi.c,))
 $(eval $(call lc32_test,lc32-setsockopt-abi,setsockopt_abi.c,))
@@ -218,6 +219,7 @@ lc32-audio-session_CFLAGS := -Wno-deprecated-declarations
 lc32-audio-unit-output_CFLAGS := -Wno-deprecated-declarations
 lc32-darwin-eperm_CFLAGS := -Wno-deprecated-declarations
 lc32-darwin-safe-syscalls_CFLAGS := -Wno-deprecated-declarations
+lc32-mremap-encrypted_CFLAGS := -Wno-deprecated-declarations
 lc32-security-secitem_CFLAGS := -Wno-deprecated-declarations -Wno-nonnull
 lc32-socket-accept-abi_CFLAGS := -Wno-deprecated-declarations
 lc32-uikit-appearance_CFLAGS := -Wno-deprecated-declarations
@@ -227,7 +229,8 @@ ABI_TESTS := \
   lc32-darwin-eperm lc32-darwin-safe-syscalls lc32-debugger-stop \
   lc32-debugger-stop-main lc32-getsockname-abi \
   lc32-getsockopt-abi lc32-host-info lc32-kqueue-kevent lc32-lseek-abi \
-  lc32-native-pthread-smoke lc32-recvfrom-abi lc32-setsockopt-abi \
+  lc32-mremap-encrypted lc32-native-pthread-smoke lc32-recvfrom-abi \
+  lc32-setsockopt-abi \
   lc32-socket-accept-abi lc32-sysctl-size-query \
   lc32-vm-allocate-collision lc32-vm-copy
 AUDIO_TESTS := $(filter lc32-audio-%,$(TOOL_NAME))

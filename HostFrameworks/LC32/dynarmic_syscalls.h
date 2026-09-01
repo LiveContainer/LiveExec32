@@ -146,3 +146,5 @@ kern_return_t guest__kernelrpc_mach_vm_deallocate_trap(
 int guest_abort_with_payload(u32 reason_namespace, u64 reason_code,
                              u32 guest_payload, u32 payload_size,
                              u32 guest_reason_string, u64 reason_flags);
+int guest_mremap_encrypted(u32 start, u32 length, u32 cryptid,
+                           u32 cpu_type, u32 cpu_subtype);

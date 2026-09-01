@@ -282,6 +282,10 @@ int Dynarmic_munmap(u64 address, u64 size);
 u32 Dynarmic_direct_mmap(u32 address, u64 size, int protection, int flags, void *src, u64 off);
 u32 Dynarmic_mmap(u32 address, u64 size, int protection, int flags, int fildes, u64 off, u64 mask = DYN_PAGE_MASK);
 int Dynarmic_mprotect(u64 address, u64 size, int perms);
+/* Returns a Darwin errno value, or zero on success. */
+int Dynarmic_mremap_encrypted(u32 start, u32 length, u32 cryptid,
+                              u32 cpu_type, u32 cpu_subtype,
+                              const void *host_source = nullptr);
 int Dynarmic_mem_1write(u64 address, u64 size, char* src);
 int Dynarmic_mem_1read(u64 address, u64 size, char* dest);
 int Dynarmic_debugger_mem_read(u64 address, u64 size, char* dest);

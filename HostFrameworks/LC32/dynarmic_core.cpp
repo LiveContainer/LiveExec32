@@ -1149,6 +1149,146 @@ int Dynarmic_mem_1write(u64 address, u64 size, char* src) {
     return 0;
 }
 
+int ReplaceGuestMemoryRangeWithPrivateCopy(
+        u32 address, size_t size, const void *source) {
+    if(size == 0) return 0;
+    if(source == nullptr || (address & DYN_PAGE_MASK) != 0 ||
+            !GuestAddressRangeIsValid32(address, size) ||
+            size > SIZE_MAX - DYN_PAGE_MASK) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    const size_t mappedSize =
+        (size + DYN_PAGE_MASK) & ~size_t(DYN_PAGE_MASK);
+    struct ReplacedPage {
+        u32 address;
+        t_memory_page page;
+    };
+    std::vector<ReplacedPage> pages;
+    try {
+        pages.reserve(mappedSize / DYN_PAGE_SIZE);
+    } catch(const std::exception &) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    std::unique_lock<std::recursive_mutex> lock(guestVmMutex);
+    khash_t(memory) *memory = sharedHandle.memory;
+    if(memory == nullptr) {
+        errno = EFAULT;
+        return -1;
+    }
+    for(size_t offset = 0; offset < mappedSize;
+            offset += DYN_PAGE_SIZE) {
+        const u64 pageAddress =
+            static_cast<u64>(address) + offset;
+        const khiter_t iterator = kh_get(
+            memory, memory, pageAddress);
+        if(iterator == kh_end(memory)) {
+            errno = EFAULT;
+            return -1;
+        }
+        t_memory_page page = kh_value(memory, iterator);
+        if(page == nullptr || page->addr == nullptr) {
+            errno = EFAULT;
+            return -1;
+        }
+        const size_t pageOffset = offset;
+        const size_t replacementBytes =
+            size - pageOffset < DYN_PAGE_SIZE ?
+                size - pageOffset : DYN_PAGE_SIZE;
+        if(replacementBytes < DYN_PAGE_SIZE &&
+                page->backing != nullptr &&
+                (page->backing->hostProtection & PROT_READ) == 0) {
+            errno = EACCES;
+            return -1;
+        }
+        try {
+            pages.push_back({
+                static_cast<u32>(pageAddress), page,
+            });
+        } catch(const std::exception &) {
+            errno = ENOMEM;
+            return -1;
+        }
+    }
+
+    void *privateMapping = mmap(
+        nullptr, mappedSize,
+        PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if(privateMapping == MAP_FAILED) return -1;
+
+    t_memory_backing privateBacking =
+        static_cast<t_memory_backing>(
+            calloc(1, sizeof(struct memory_backing)));
+    if(privateBacking == nullptr) {
+        const int savedErrno = errno;
+        (void)munmap(privateMapping, mappedSize);
+        errno = savedErrno == 0 ? ENOMEM : savedErrno;
+        return -1;
+    }
+
+    auto *privateBytes = static_cast<uint8_t *>(privateMapping);
+    for(size_t index = 0; index < pages.size(); ++index) {
+        const size_t pageOffset = index * DYN_PAGE_SIZE;
+        const size_t replacementBytes =
+            size - pageOffset < DYN_PAGE_SIZE ?
+                size - pageOffset : DYN_PAGE_SIZE;
+        const size_t preservedBytes =
+            DYN_PAGE_SIZE - replacementBytes;
+        if(preservedBytes != 0) {
+            memcpy(privateBytes + pageOffset + replacementBytes,
+                static_cast<const uint8_t *>(
+                    pages[index].page->addr) + replacementBytes,
+                preservedBytes);
+        }
+    }
+    memcpy(privateBytes, source, size);
+
+    privateBacking->addr = privateMapping;
+    privateBacking->size = mappedSize;
+    privateBacking->references = pages.size();
+    privateBacking->hostProtection = PROT_READ | PROT_WRITE;
+
+    /* Every replacement page is complete before it becomes visible. Old
+     * owned backings use the guest-VM epoch retirement path, so a JIT that
+     * already loaded an old direct pointer cannot observe freed memory. */
+    InvalidateGuestMemoryLookupCaches();
+    for(const ReplacedPage &entry : pages) {
+        const u64 pageTableIndex =
+            entry.address >> DYN_PAGE_BITS;
+        if(sharedHandle.page_table != nullptr &&
+                pageTableIndex <
+                    sharedHandle.num_page_table_entries) {
+            __atomic_store_n(
+                &sharedHandle.page_table[pageTableIndex],
+                nullptr, __ATOMIC_RELEASE);
+        }
+    }
+    for(size_t index = 0; index < pages.size(); ++index) {
+        const ReplacedPage &entry = pages[index];
+        t_memory_backing oldBacking = entry.page->backing;
+        entry.page->addr = privateBytes + index * DYN_PAGE_SIZE;
+        entry.page->backing = privateBacking;
+        ReleaseMemoryBackingReference(oldBacking);
+    }
+    for(const ReplacedPage &entry : pages) {
+        const u64 pageTableIndex =
+            entry.address >> DYN_PAGE_BITS;
+        if(sharedHandle.page_table != nullptr &&
+                pageTableIndex <
+                    sharedHandle.num_page_table_entries) {
+            __atomic_store_n(
+                &sharedHandle.page_table[pageTableIndex],
+                GuestPageTablePointer(entry.address, entry.page),
+                __ATOMIC_RELEASE);
+        }
+    }
+    return 0;
+}
+
 /*
  * Class:     com_github_unidbg_arm_backend_dynarmic_Dynarmic
  * Method:    mem_read

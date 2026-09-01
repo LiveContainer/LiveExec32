@@ -446,6 +446,8 @@ void symbolicate_call_stack(
 int HostProtectionForGuestPermissions(int permissions);
 void *GuestPageTablePointer(
     u64 guestPageAddress, const t_memory_page page);
+extern "C" int ReplaceGuestMemoryRangeWithPrivateCopy(
+    u32 address, size_t size, const void *source);
 char *get_memory_page_with_permissions(
     u64 vaddr, int requiredPermissions);
 void InvalidateGuestMemoryLookupCaches();
