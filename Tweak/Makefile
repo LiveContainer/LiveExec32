@@ -2,7 +2,7 @@ ARCHS := arm64 arm64e
 TARGET := iphone:clang:latest:15.0
 FINALPACKAGE = 1
 STRIP = 0
-INSTALL_TARGET_PROCESSES = installd
+INSTALL_TARGET_PROCESSES = installd trollstorehelper
 
 include ../module-cache.mk
 include $(THEOS)/makefiles/common.mk

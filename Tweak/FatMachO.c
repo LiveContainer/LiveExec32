@@ -2,6 +2,7 @@
 #include "AdHocSigner.h"
 #include "MachOImage.h"
 
+#include <CommonCrypto/CommonDigest.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <copyfile.h>
 #include <errno.h>
@@ -20,6 +21,7 @@
 #include <sys/stat.h>
 #include <sys/stdio.h>
 #include <sys/types.h>
+#include <TargetConditionals.h>
 #include <unistd.h>
 
 #define LC32_OUTPUT_MIN_ALIGN_EXPONENT 14u
@@ -35,17 +37,28 @@
 #define LC32_CS_MAGIC_CODE_DIRECTORY 0xfade0c02u
 #define LC32_CS_MAGIC_EMBEDDED_SIGNATURE 0xfade0cc0u
 #define LC32_CS_MAGIC_EMBEDDED_ENTITLEMENTS 0xfade7171u
+#define LC32_CS_MAGIC_EMBEDDED_DER_ENTITLEMENTS 0xfade7172u
+#define LC32_CS_MAGIC_REQUIREMENTS 0xfade0c01u
+#define LC32_CS_MAGIC_BLOB_WRAPPER 0xfade0b01u
 #define LC32_CS_SLOT_CODE_DIRECTORY 0u
+#define LC32_CS_SLOT_REQUIREMENTS 2u
 #define LC32_CS_SLOT_ENTITLEMENTS 5u
+#define LC32_CS_SLOT_DER_ENTITLEMENTS 7u
 #define LC32_CS_SLOT_ALTERNATE_DIRECTORIES 0x1000u
 #define LC32_CS_SLOT_ALTERNATE_DIRECTORY_LIMIT 0x1005u
+#define LC32_CS_SLOT_CMS_SIGNATURE 0x10000u
+#define LC32_CS_ADHOC 0x2u
+#define LC32_CS_EXECSEG_MAIN_BINARY UINT64_C(0x1)
 #define LC32_CS_HASH_SHA1 1u
 #define LC32_CS_HASH_SHA256 2u
 #define LC32_CS_HASH_SHA256_TRUNCATED 3u
 #define LC32_CS_HASH_SHA384 4u
+#define LC32_CS_EARLIEST_CODE_DIRECTORY_VERSION 0x20001u
 
 static const CFStringRef LC32TeamIdentifierEntitlement =
     CFSTR("com.apple.developer.team-identifier");
+static const CFStringRef LC32ApplicationIdentifierEntitlement =
+    CFSTR("application-identifier");
 static const CFStringRef LC32ContainerRequiredEntitlement =
     CFSTR("com.apple.private.security.container-required");
 
@@ -53,6 +66,9 @@ typedef struct {
     int sourceFD;
     uint64_t sourceOffset;
     const uint8_t *sourceBytes;
+    const uint8_t *replacementBytes;
+    uint64_t replacementOffset;
+    uint64_t replacementSize;
     uint64_t size;
     cpu_type_t cpuType;
     cpu_subtype_t cpuSubtype;
@@ -88,6 +104,14 @@ typedef struct __GenericBlob {
     uint32_t length;
     char data[];
 } CS_GenericBlob;
+
+static const uint8_t LC32EmptyCMSSignature[] = {
+    0xfa, 0xde, 0x0b, 0x01,
+    0x00, 0x00, 0x00, 0x08,
+};
+
+_Static_assert(sizeof(LC32EmptyCMSSignature) == sizeof(CS_GenericBlob),
+    "empty CMS signature must contain one generic blob header");
 
 typedef struct __CodeDirectory {
     uint32_t magic;
@@ -143,6 +167,34 @@ typedef struct {
     CFMutableDictionaryRef entitlements;
     bool hasCodeSignature;
 } LC32CodeSignatureMetadata;
+
+typedef struct {
+    uint32_t type;
+    uint32_t magic;
+    const uint8_t *bytes;
+    uint32_t length;
+} LC32CodeSignatureBlobView;
+
+typedef struct {
+    const uint8_t *bytes;
+    uint32_t length;
+    uint32_t count;
+    LC32CodeSignatureBlobView blobs[LC32_MAX_CODE_SIGNATURE_BLOBS];
+} LC32CodeSignatureView;
+
+typedef struct {
+    LC32CodeSignatureBlobView requirements;
+    LC32CodeSignatureBlobView entitlements;
+    LC32CodeSignatureBlobView derEntitlements;
+    LC32CodeSignatureBlobView cmsSignature;
+} LC32CodeSignatureDonor;
+
+typedef struct {
+    uint32_t type;
+    const uint8_t *bytes;
+    uint32_t length;
+    uint8_t *ownedBytes;
+} LC32MutableCodeSignatureBlob;
 
 static void LC32SetError(
         char *buffer, size_t capacity, const char *format, ...) {
@@ -242,6 +294,33 @@ static uint32_t LC32ReadBigUInt32(const void *bytes) {
     return OSSwapBigToHostInt32(value);
 }
 
+static uint64_t LC32ReadBigUInt64(const void *bytes) {
+    uint64_t value = 0;
+    memcpy(&value, bytes, sizeof(value));
+    return OSSwapBigToHostInt64(value);
+}
+
+static uint32_t LC32TransformedCodeDirectoryFlags(uint32_t flags) {
+#if TARGET_OS_IOS
+    if(__builtin_available(iOS 17.0, *)) {
+        /* TXM accepts a Team ID or CS_ADHOC, but not both. Every transformed
+         * directory gets a Team ID below, so use that form on TXM-era iOS. */
+        return flags & ~LC32_CS_ADHOC;
+    }
+#endif
+    return flags | LC32_CS_ADHOC;
+}
+
+static void LC32WriteBigUInt32(void *bytes, uint32_t value) {
+    value = OSSwapHostToBigInt32(value);
+    memcpy(bytes, &value, sizeof(value));
+}
+
+static void LC32WriteBigUInt64(void *bytes, uint64_t value) {
+    value = OSSwapHostToBigInt64(value);
+    memcpy(bytes, &value, sizeof(value));
+}
+
 static unsigned LC32CodeDirectoryRank(uint8_t hashType) {
     switch(hashType) {
         case LC32_CS_HASH_SHA1:
@@ -277,6 +356,1008 @@ static size_t LC32CodeDirectoryHeaderSize(uint32_t version) {
         return offsetof(CS_CodeDirectory, teamOffset);
     }
     return offsetof(CS_CodeDirectory, scatterOffset);
+}
+
+static bool LC32CodeSignatureTypeIsCodeDirectory(uint32_t type) {
+    return type == LC32_CS_SLOT_CODE_DIRECTORY ||
+        (type >= LC32_CS_SLOT_ALTERNATE_DIRECTORIES &&
+         type < LC32_CS_SLOT_ALTERNATE_DIRECTORY_LIMIT);
+}
+
+static bool LC32ParseCodeSignature(
+        const uint8_t *signature, uint32_t capacity,
+        const char *description, LC32CodeSignatureView *view,
+        char *errorBuffer, size_t errorBufferCapacity) {
+    memset(view, 0, sizeof(*view));
+    if(signature == NULL || capacity < sizeof(CS_SuperBlob)) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "%s code signature is truncated", description);
+        return false;
+    }
+
+    const uint32_t magic = LC32ReadBigUInt32(
+        signature + offsetof(CS_SuperBlob, magic));
+    const uint32_t length = LC32ReadBigUInt32(
+        signature + offsetof(CS_SuperBlob, length));
+    const uint32_t count = LC32ReadBigUInt32(
+        signature + offsetof(CS_SuperBlob, count));
+    uint64_t indexEnd = 0;
+    if(magic != LC32_CS_MAGIC_EMBEDDED_SIGNATURE ||
+            length < sizeof(CS_SuperBlob) || length > capacity ||
+            count == 0 || count > LC32_MAX_CODE_SIGNATURE_BLOBS ||
+            !LC32AddUInt64(sizeof(CS_SuperBlob),
+                (uint64_t)count * sizeof(CS_BlobIndex), &indexEnd) ||
+            indexEnd > length) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "%s has a malformed embedded code signature", description);
+        return false;
+    }
+
+    for(uint32_t index = 0; index < count; index++) {
+        const uint8_t *encodedIndex = signature +
+            sizeof(CS_SuperBlob) + (size_t)index * sizeof(CS_BlobIndex);
+        const uint32_t type = LC32ReadBigUInt32(
+            encodedIndex + offsetof(CS_BlobIndex, type));
+        const uint32_t offset = LC32ReadBigUInt32(
+            encodedIndex + offsetof(CS_BlobIndex, offset));
+        if(offset < indexEnd ||
+                !LC32RangeFits(offset, sizeof(CS_GenericBlob), length)) {
+            LC32SetError(errorBuffer, errorBufferCapacity,
+                "%s code-signature blob %u has an invalid offset",
+                description, index);
+            return false;
+        }
+        const uint8_t *blob = signature + offset;
+        const uint32_t blobLength = LC32ReadBigUInt32(
+            blob + offsetof(CS_GenericBlob, length));
+        if(blobLength < sizeof(CS_GenericBlob) ||
+                !LC32RangeFits(offset, blobLength, length)) {
+            LC32SetError(errorBuffer, errorBufferCapacity,
+                "%s code-signature blob %u has an invalid length",
+                description, index);
+            return false;
+        }
+        for(uint32_t previous = 0; previous < index; previous++) {
+            const LC32CodeSignatureBlobView *other =
+                &view->blobs[previous];
+            const uint32_t otherOffset =
+                (uint32_t)(other->bytes - signature);
+            if(type == other->type) {
+                LC32SetError(errorBuffer, errorBufferCapacity,
+                    "%s code signature contains duplicate blob type %u",
+                    description, type);
+                return false;
+            }
+            if((uint64_t)offset <
+                    (uint64_t)otherOffset + other->length &&
+                    (uint64_t)otherOffset <
+                        (uint64_t)offset + blobLength) {
+                LC32SetError(errorBuffer, errorBufferCapacity,
+                    "%s code-signature blobs overlap", description);
+                return false;
+            }
+        }
+        view->blobs[index] = (LC32CodeSignatureBlobView){
+            .type = type,
+            .magic = LC32ReadBigUInt32(
+                blob + offsetof(CS_GenericBlob, magic)),
+            .bytes = blob,
+            .length = blobLength,
+        };
+    }
+
+    view->bytes = signature;
+    view->length = length;
+    view->count = count;
+    return true;
+}
+
+static const LC32CodeSignatureBlobView *LC32FindCodeSignatureBlob(
+        const LC32CodeSignatureView *signature, uint32_t type) {
+    for(uint32_t index = 0; index < signature->count; index++) {
+        if(signature->blobs[index].type == type) {
+            return &signature->blobs[index];
+        }
+    }
+    return NULL;
+}
+
+typedef struct {
+    uint32_t version;
+    size_t headerSize;
+    uint32_t flags;
+    uint64_t signingLimit;
+    uint32_t hashOffset;
+    uint32_t identifierOffset;
+    uint32_t specialSlotCount;
+    uint32_t codeSlotCount;
+    uint32_t prefixEnd;
+    uint32_t scatterOffset;
+    uint32_t teamOffset;
+    uint32_t preEncryptOffset;
+    uint32_t linkageOffset;
+    uint32_t linkageSize;
+    uint8_t hashSize;
+    uint8_t hashType;
+    uint8_t pageSize;
+} LC32ParsedCodeDirectory;
+
+static uint8_t LC32ExpectedCodeDirectoryHashSize(uint8_t hashType) {
+    switch(hashType) {
+        case LC32_CS_HASH_SHA1:
+            return CC_SHA1_DIGEST_LENGTH;
+        case LC32_CS_HASH_SHA256:
+            return CC_SHA256_DIGEST_LENGTH;
+        case LC32_CS_HASH_SHA256_TRUNCATED:
+            return 20;
+        case LC32_CS_HASH_SHA384:
+            return CC_SHA384_DIGEST_LENGTH;
+        default:
+            return 0;
+    }
+}
+
+static bool LC32ParseCodeDirectory(
+        const LC32CodeSignatureBlobView *blob,
+        const char *description, LC32ParsedCodeDirectory *parsed,
+        char *errorBuffer, size_t errorBufferCapacity) {
+    memset(parsed, 0, sizeof(*parsed));
+    const size_t earliestHeaderSize =
+        offsetof(CS_CodeDirectory, scatterOffset);
+    if(blob == NULL || blob->magic != LC32_CS_MAGIC_CODE_DIRECTORY ||
+            blob->length < earliestHeaderSize) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "%s contains a malformed CodeDirectory", description);
+        return false;
+    }
+
+    const uint8_t *bytes = blob->bytes;
+    const uint32_t encodedLength = LC32ReadBigUInt32(
+        bytes + offsetof(CS_CodeDirectory, length));
+    const uint32_t version = LC32ReadBigUInt32(
+        bytes + offsetof(CS_CodeDirectory, version));
+    if(encodedLength != blob->length ||
+            version < LC32_CS_EARLIEST_CODE_DIRECTORY_VERSION ||
+            version > 0x20600) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "%s CodeDirectory uses an unsupported version or length",
+            description);
+        return false;
+    }
+    const size_t headerSize = LC32CodeDirectoryHeaderSize(version);
+    if(blob->length < headerSize) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "%s contains a truncated CodeDirectory", description);
+        return false;
+    }
+
+    const uint8_t hashType = bytes[offsetof(CS_CodeDirectory, hashType)];
+    const uint8_t hashSize = bytes[offsetof(CS_CodeDirectory, hashSize)];
+    if(hashSize == 0 ||
+            hashSize != LC32ExpectedCodeDirectoryHashSize(hashType)) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "%s CodeDirectory uses an unsupported hash format",
+            description);
+        return false;
+    }
+    const uint32_t hashOffset = LC32ReadBigUInt32(
+        bytes + offsetof(CS_CodeDirectory, hashOffset));
+    const uint32_t specialSlotCount = LC32ReadBigUInt32(
+        bytes + offsetof(CS_CodeDirectory, nSpecialSlots));
+    const uint32_t codeSlotCount = LC32ReadBigUInt32(
+        bytes + offsetof(CS_CodeDirectory, nCodeSlots));
+    uint64_t signingLimit = LC32ReadBigUInt32(
+        bytes + offsetof(CS_CodeDirectory, codeLimit));
+    if(version >= 0x20300) {
+        const uint64_t signingLimit64 = LC32ReadBigUInt64(
+            bytes + offsetof(CS_CodeDirectory, codeLimit64));
+        if(signingLimit64 != 0) signingLimit = signingLimit64;
+    }
+    const uint8_t pageSize =
+        bytes[offsetof(CS_CodeDirectory, pageSize)];
+    uint64_t expectedCodeSlotCount = signingLimit != 0;
+    if(pageSize != 0) {
+        if(pageSize >= 64 || signingLimit == 0) {
+            LC32SetError(errorBuffer, errorBufferCapacity,
+                "%s CodeDirectory has invalid page coverage",
+                description);
+            return false;
+        }
+        expectedCodeSlotCount = ((signingLimit - 1) >> pageSize) + 1;
+    }
+    if(expectedCodeSlotCount != codeSlotCount) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "%s CodeDirectory has inconsistent page coverage",
+            description);
+        return false;
+    }
+    const uint64_t specialHashBytes =
+        (uint64_t)specialSlotCount * hashSize;
+    const uint64_t codeHashBytes = (uint64_t)codeSlotCount * hashSize;
+    if(specialHashBytes > hashOffset || hashOffset > blob->length ||
+            codeHashBytes != blob->length - hashOffset) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "%s CodeDirectory has an invalid hash vector", description);
+        return false;
+    }
+    const uint32_t prefixEnd = hashOffset - (uint32_t)specialHashBytes;
+    if(prefixEnd < headerSize ||
+            LC32ReadBigUInt32(bytes +
+                offsetof(CS_CodeDirectory, spare2)) != 0 ||
+            (version >= 0x20300 && LC32ReadBigUInt32(bytes +
+                offsetof(CS_CodeDirectory, spare3)) != 0)) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "%s CodeDirectory has malformed fixed fields", description);
+        return false;
+    }
+
+    const uint32_t identifierOffset = LC32ReadBigUInt32(
+        bytes + offsetof(CS_CodeDirectory, identOffset));
+    if(identifierOffset < headerSize || identifierOffset >= prefixEnd ||
+            memchr(bytes + identifierOffset, '\0',
+                prefixEnd - identifierOffset) == NULL ||
+            bytes[identifierOffset] == '\0') {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "%s CodeDirectory has an invalid identifier", description);
+        return false;
+    }
+
+    uint32_t scatterOffset = 0;
+    if(version >= 0x20100) {
+        scatterOffset = LC32ReadBigUInt32(
+            bytes + offsetof(CS_CodeDirectory, scatterOffset));
+    }
+    if(scatterOffset != 0) {
+        const size_t scatterEntrySize = 24;
+        if(scatterOffset < headerSize || scatterOffset >= prefixEnd) {
+            LC32SetError(errorBuffer, errorBufferCapacity,
+                "%s CodeDirectory has an invalid scatter offset",
+                description);
+            return false;
+        }
+        bool foundTerminator = false;
+        uint32_t offset = scatterOffset;
+        while(LC32RangeFits(offset, scatterEntrySize, prefixEnd)) {
+            if(LC32ReadBigUInt32(bytes + offset) == 0) {
+                foundTerminator = true;
+                break;
+            }
+            offset += (uint32_t)scatterEntrySize;
+        }
+        if(!foundTerminator) {
+            LC32SetError(errorBuffer, errorBufferCapacity,
+                "%s CodeDirectory has an unterminated scatter vector",
+                description);
+            return false;
+        }
+    }
+
+    uint32_t teamOffset = 0;
+    if(version >= 0x20200) {
+        teamOffset = LC32ReadBigUInt32(
+            bytes + offsetof(CS_CodeDirectory, teamOffset));
+        if(teamOffset != 0 &&
+                (teamOffset < headerSize || teamOffset >= prefixEnd ||
+                 memchr(bytes + teamOffset, '\0',
+                    prefixEnd - teamOffset) == NULL ||
+                 bytes[teamOffset] == '\0')) {
+            LC32SetError(errorBuffer, errorBufferCapacity,
+                "%s CodeDirectory has an invalid team identifier",
+                description);
+            return false;
+        }
+    }
+
+    uint32_t preEncryptOffset = 0;
+    if(version >= 0x20500) {
+        preEncryptOffset = LC32ReadBigUInt32(
+            bytes + offsetof(CS_CodeDirectory, preEncryptOffset));
+        if(preEncryptOffset != 0 &&
+                (preEncryptOffset < headerSize ||
+                 !LC32RangeFits(preEncryptOffset,
+                    codeHashBytes, prefixEnd))) {
+            LC32SetError(errorBuffer, errorBufferCapacity,
+                "%s CodeDirectory has an invalid pre-encrypt hash vector",
+                description);
+            return false;
+        }
+    }
+
+    uint32_t linkageOffset = 0;
+    uint32_t linkageSize = 0;
+    if(version >= 0x20600) {
+        linkageOffset = LC32ReadBigUInt32(
+            bytes + offsetof(CS_CodeDirectory, linkageOffset));
+        linkageSize = LC32ReadBigUInt32(
+            bytes + offsetof(CS_CodeDirectory, linkageSize));
+        if((linkageOffset == 0) != (linkageSize == 0) ||
+                (linkageOffset != 0 &&
+                    (linkageOffset < headerSize ||
+                     !LC32RangeFits(
+                        linkageOffset, linkageSize, prefixEnd)))) {
+            LC32SetError(errorBuffer, errorBufferCapacity,
+                "%s CodeDirectory has invalid linkage data", description);
+            return false;
+        }
+    }
+
+    *parsed = (LC32ParsedCodeDirectory){
+        .version = version,
+        .headerSize = headerSize,
+        .flags = LC32ReadBigUInt32(
+            bytes + offsetof(CS_CodeDirectory, flags)),
+        .signingLimit = signingLimit,
+        .hashOffset = hashOffset,
+        .identifierOffset = identifierOffset,
+        .specialSlotCount = specialSlotCount,
+        .codeSlotCount = codeSlotCount,
+        .prefixEnd = prefixEnd,
+        .scatterOffset = scatterOffset,
+        .teamOffset = teamOffset,
+        .preEncryptOffset = preEncryptOffset,
+        .linkageOffset = linkageOffset,
+        .linkageSize = linkageSize,
+        .hashSize = hashSize,
+        .hashType = hashType,
+        .pageSize = pageSize,
+    };
+    return true;
+}
+
+static bool LC32HashCodeSignatureBlob(
+        const LC32CodeSignatureBlobView *blob,
+        uint8_t hashType, uint8_t hashSize, uint8_t *hashOut,
+        char *errorBuffer, size_t errorBufferCapacity) {
+    uint8_t digest[CC_SHA384_DIGEST_LENGTH] = {0};
+    if(blob == NULL || blob->bytes == NULL ||
+            hashSize != LC32ExpectedCodeDirectoryHashSize(hashType)) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "cannot hash a code-signature blob with this CodeDirectory format");
+        return false;
+    }
+    switch(hashType) {
+        case LC32_CS_HASH_SHA1:
+            (void)CC_SHA1(blob->bytes, (CC_LONG)blob->length, digest);
+            break;
+        case LC32_CS_HASH_SHA256:
+        case LC32_CS_HASH_SHA256_TRUNCATED:
+            (void)CC_SHA256(blob->bytes, (CC_LONG)blob->length, digest);
+            break;
+        case LC32_CS_HASH_SHA384:
+            (void)CC_SHA384(blob->bytes, (CC_LONG)blob->length, digest);
+            break;
+        default:
+            LC32SetError(errorBuffer, errorBufferCapacity,
+                "cannot hash a code-signature blob with an unknown digest");
+            return false;
+    }
+    memcpy(hashOut, digest, hashSize);
+    return true;
+}
+
+static bool LC32CodeDirectorySlotMatchesBlob(
+        const LC32CodeSignatureBlobView *codeDirectory,
+        uint32_t slot, const LC32CodeSignatureBlobView *component,
+        const char *description,
+        char *errorBuffer, size_t errorBufferCapacity) {
+    LC32ParsedCodeDirectory parsed = {0};
+    if(!LC32ParseCodeDirectory(codeDirectory, description, &parsed,
+            errorBuffer, errorBufferCapacity)) {
+        return false;
+    }
+    if(slot == 0 || slot > parsed.specialSlotCount) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "%s CodeDirectory does not cover special slot %u",
+            description, slot);
+        return false;
+    }
+    uint8_t expected[CC_SHA384_DIGEST_LENGTH] = {0};
+    if(!LC32HashCodeSignatureBlob(component,
+            parsed.hashType, parsed.hashSize, expected,
+            errorBuffer, errorBufferCapacity)) {
+        return false;
+    }
+    const uint8_t *actual = codeDirectory->bytes + parsed.hashOffset -
+        (uint64_t)slot * parsed.hashSize;
+    if(memcmp(actual, expected, parsed.hashSize) != 0) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "%s CodeDirectory special slot %u does not match its blob",
+            description, slot);
+        return false;
+    }
+    return true;
+}
+
+static bool LC32CodeDirectorySlotIsEmpty(
+        const LC32CodeSignatureBlobView *codeDirectory,
+        uint32_t slot, const char *description,
+        char *errorBuffer, size_t errorBufferCapacity) {
+    LC32ParsedCodeDirectory parsed = {0};
+    if(!LC32ParseCodeDirectory(codeDirectory, description, &parsed,
+            errorBuffer, errorBufferCapacity)) {
+        return false;
+    }
+    if(slot == 0) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "%s requested an invalid special slot", description);
+        return false;
+    }
+    if(slot > parsed.specialSlotCount) return true;
+
+    const uint8_t *digest = codeDirectory->bytes + parsed.hashOffset -
+        (uint64_t)slot * parsed.hashSize;
+    for(uint8_t index = 0; index < parsed.hashSize; index++) {
+        if(digest[index] != 0) {
+            LC32SetError(errorBuffer, errorBufferCapacity,
+                "%s CodeDirectory hashes an absent special slot %u",
+                description, slot);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool LC32CreateCodeSignatureDonor(
+        const uint8_t *signature, uint32_t capacity,
+        LC32CodeSignatureDonor *donor,
+        char *errorBuffer, size_t errorBufferCapacity) {
+    memset(donor, 0, sizeof(*donor));
+    LC32CodeSignatureView view = {0};
+    if(!LC32ParseCodeSignature(signature, capacity,
+            "signed arm64 shim", &view,
+            errorBuffer, errorBufferCapacity)) {
+        return false;
+    }
+    const LC32CodeSignatureBlobView *requirements =
+        LC32FindCodeSignatureBlob(&view, LC32_CS_SLOT_REQUIREMENTS);
+    const LC32CodeSignatureBlobView *entitlements =
+        LC32FindCodeSignatureBlob(&view, LC32_CS_SLOT_ENTITLEMENTS);
+    const LC32CodeSignatureBlobView *derEntitlements =
+        LC32FindCodeSignatureBlob(&view, LC32_CS_SLOT_DER_ENTITLEMENTS);
+    const LC32CodeSignatureBlobView *cmsSignature =
+        LC32FindCodeSignatureBlob(&view, LC32_CS_SLOT_CMS_SIGNATURE);
+    const bool requirementsAreValid = requirements == NULL ||
+        (requirements->magic == LC32_CS_MAGIC_REQUIREMENTS &&
+         requirements->length >= sizeof(CS_SuperBlob));
+    const bool entitlementsAreValid = entitlements != NULL &&
+        entitlements->magic == LC32_CS_MAGIC_EMBEDDED_ENTITLEMENTS &&
+        entitlements->length > sizeof(CS_GenericBlob);
+    const bool derEntitlementsAreValid = derEntitlements != NULL &&
+        derEntitlements->magic == LC32_CS_MAGIC_EMBEDDED_DER_ENTITLEMENTS &&
+        derEntitlements->length > sizeof(CS_GenericBlob);
+    const bool cmsSignatureIsValid = cmsSignature == NULL ||
+        (cmsSignature->magic == LC32_CS_MAGIC_BLOB_WRAPPER &&
+         cmsSignature->length == sizeof(CS_GenericBlob));
+    if(!requirementsAreValid || !entitlementsAreValid ||
+            !derEntitlementsAreValid || !cmsSignatureIsValid) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "signed arm64 shim has incomplete ad-hoc signature components "
+            "(requirements=%s, entitlements=%s, DER entitlements=%s, CMS=%s)",
+            requirementsAreValid ? "valid/absent" : "invalid",
+            entitlementsAreValid ? "valid" : "missing/invalid",
+            derEntitlementsAreValid ? "valid" : "missing/invalid",
+            cmsSignatureIsValid ? "valid/absent" : "invalid");
+        return false;
+    }
+
+    uint32_t codeDirectoryCount = 0;
+    for(uint32_t index = 0; index < view.count; index++) {
+        const LC32CodeSignatureBlobView *codeDirectory =
+            &view.blobs[index];
+        if(!LC32CodeSignatureTypeIsCodeDirectory(codeDirectory->type)) {
+            continue;
+        }
+        codeDirectoryCount++;
+        const bool requirementsMatch = requirements != NULL ?
+            LC32CodeDirectorySlotMatchesBlob(codeDirectory,
+                LC32_CS_SLOT_REQUIREMENTS, requirements,
+                "signed arm64 shim", errorBuffer,
+                errorBufferCapacity) :
+            LC32CodeDirectorySlotIsEmpty(codeDirectory,
+                LC32_CS_SLOT_REQUIREMENTS, "signed arm64 shim",
+                errorBuffer, errorBufferCapacity);
+        if(!requirementsMatch ||
+                !LC32CodeDirectorySlotMatchesBlob(codeDirectory,
+                    LC32_CS_SLOT_ENTITLEMENTS, entitlements,
+                    "signed arm64 shim", errorBuffer,
+                    errorBufferCapacity) ||
+                !LC32CodeDirectorySlotMatchesBlob(codeDirectory,
+                    LC32_CS_SLOT_DER_ENTITLEMENTS, derEntitlements,
+                    "signed arm64 shim", errorBuffer,
+                    errorBufferCapacity)) {
+            return false;
+        }
+    }
+    if(codeDirectoryCount == 0) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "signed arm64 shim signature contains no CodeDirectory");
+        return false;
+    }
+
+    if(requirements != NULL) donor->requirements = *requirements;
+    donor->entitlements = *entitlements;
+    donor->derEntitlements = *derEntitlements;
+    donor->cmsSignature = (LC32CodeSignatureBlobView){
+        .type = LC32_CS_SLOT_CMS_SIGNATURE,
+        .magic = LC32_CS_MAGIC_BLOB_WRAPPER,
+        .bytes = LC32EmptyCMSSignature,
+        .length = sizeof(LC32EmptyCMSSignature),
+    };
+    return true;
+}
+
+static bool LC32NormalizeSignedShimCodeDirectoryFlags(
+        uint8_t *signature, uint32_t capacity,
+        const char *teamIdentifier,
+        char *errorBuffer, size_t errorBufferCapacity) {
+    LC32CodeSignatureView view = {0};
+    if(!LC32ParseCodeSignature(signature, capacity,
+            "signed arm64 shim", &view,
+            errorBuffer, errorBufferCapacity)) {
+        return false;
+    }
+
+    const LC32CodeSignatureBlobView *cmsSignature =
+        LC32FindCodeSignatureBlob(&view, LC32_CS_SLOT_CMS_SIGNATURE);
+    if(cmsSignature != NULL &&
+            (cmsSignature->magic != LC32_CS_MAGIC_BLOB_WRAPPER ||
+             cmsSignature->length != sizeof(CS_GenericBlob))) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "cannot modify a non-ad-hoc arm64 shim CodeDirectory");
+        return false;
+    }
+
+    uint32_t codeDirectoryCount = 0;
+    for(uint32_t index = 0; index < view.count; index++) {
+        const LC32CodeSignatureBlobView *codeDirectory =
+            &view.blobs[index];
+        if(!LC32CodeSignatureTypeIsCodeDirectory(codeDirectory->type)) {
+            continue;
+        }
+        LC32ParsedCodeDirectory parsed = {0};
+        if(!LC32ParseCodeDirectory(codeDirectory, "signed arm64 shim",
+                &parsed, errorBuffer, errorBufferCapacity)) {
+            return false;
+        }
+        if(parsed.teamOffset == 0 || teamIdentifier == NULL ||
+                strcmp((const char *)codeDirectory->bytes +
+                    parsed.teamOffset, teamIdentifier) != 0) {
+            LC32SetError(errorBuffer, errorBufferCapacity,
+                "signed arm64 shim CodeDirectory has the wrong Team ID");
+            return false;
+        }
+
+        uint8_t *mutableCodeDirectory =
+            signature + (codeDirectory->bytes - view.bytes);
+        const uint32_t normalizedFlags =
+            LC32TransformedCodeDirectoryFlags(parsed.flags);
+        LC32WriteBigUInt32(mutableCodeDirectory +
+            offsetof(CS_CodeDirectory, flags), normalizedFlags);
+        if(LC32ReadBigUInt32(mutableCodeDirectory +
+                offsetof(CS_CodeDirectory, flags)) != normalizedFlags) {
+            LC32SetError(errorBuffer, errorBufferCapacity,
+                "could not normalize arm64 shim CodeDirectory flags");
+            return false;
+        }
+        codeDirectoryCount++;
+    }
+    if(codeDirectoryCount == 0) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "signed arm64 shim signature contains no CodeDirectory");
+        return false;
+    }
+    return true;
+}
+
+static void LC32RelocateCodeDirectoryOffset(
+        uint8_t *codeDirectory, size_t fieldOffset,
+        uint32_t oldOffset, uint32_t adjustment) {
+    if(oldOffset != 0) {
+        LC32WriteBigUInt32(codeDirectory + fieldOffset,
+            oldOffset + adjustment);
+    }
+}
+
+static bool LC32CreateTransformedCodeDirectory(
+        const LC32CodeSignatureBlobView *source,
+        const LC32CodeSignatureDonor *donor,
+        const char *teamIdentifier,
+        uint64_t sliceSize, uint32_t codeSignatureOffset,
+        uint8_t **bytesOut, uint32_t *lengthOut,
+        char *errorBuffer, size_t errorBufferCapacity) {
+    *bytesOut = NULL;
+    *lengthOut = 0;
+    LC32ParsedCodeDirectory parsed = {0};
+    if(!LC32ParseCodeDirectory(source, "encrypted ARM slice", &parsed,
+            errorBuffer, errorBufferCapacity)) {
+        return false;
+    }
+    /* The existing code hashes remain valid only if they describe a
+     * contiguous prefix ending before the allocation we are about to
+     * replace. Scatter vectors can map a slot to an arbitrary file offset,
+     * so reject them instead of trying to infer untouched coverage. */
+    if(parsed.scatterOffset != 0 ||
+            parsed.signingLimit > codeSignatureOffset ||
+            parsed.signingLimit > sliceSize) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "encrypted ARM CodeDirectory hashes the code-signature "
+            "allocation or uses scattered code slots");
+        return false;
+    }
+
+    const size_t teamIdentifierLength = strlen(teamIdentifier) + 1;
+    if(teamIdentifierLength < 2 ||
+            teamIdentifierLength > LC32_MAX_SIGNING_STRING_SIZE) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "signing Team ID is empty or too long");
+        return false;
+    }
+    const uint32_t newVersion = parsed.version < 0x20200 ?
+        0x20200 : parsed.version;
+    const size_t newHeaderSize = LC32CodeDirectoryHeaderSize(newVersion);
+    const uint32_t headerGrowth =
+        (uint32_t)(newHeaderSize - parsed.headerSize);
+    const uint32_t newSpecialSlotCount =
+        parsed.specialSlotCount < LC32_CS_SLOT_DER_ENTITLEMENTS ?
+            LC32_CS_SLOT_DER_ENTITLEMENTS : parsed.specialSlotCount;
+    const uint64_t specialSlotGrowth =
+        (uint64_t)(newSpecialSlotCount - parsed.specialSlotCount) *
+            parsed.hashSize;
+    uint64_t totalGrowth = 0;
+    if(!LC32AddUInt64(headerGrowth, teamIdentifierLength, &totalGrowth) ||
+            !LC32AddUInt64(totalGrowth,
+                specialSlotGrowth, &totalGrowth) ||
+            totalGrowth > UINT32_MAX ||
+            source->length > UINT32_MAX - totalGrowth) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "encrypted ARM CodeDirectory is too large to transform");
+        return false;
+    }
+    const uint32_t newLength = source->length + (uint32_t)totalGrowth;
+    const uint32_t newPrefixEnd = parsed.prefixEnd + headerGrowth;
+    const uint32_t teamOffset = newPrefixEnd;
+    const uint32_t copiedHashVectorOffset =
+        teamOffset + (uint32_t)teamIdentifierLength +
+            (uint32_t)specialSlotGrowth;
+    const uint32_t newHashOffset =
+        parsed.hashOffset + (uint32_t)totalGrowth;
+    const uint32_t transformedFlags =
+        LC32TransformedCodeDirectoryFlags(parsed.flags);
+
+    uint8_t *result = calloc(1, newLength);
+    if(result == NULL) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "could not allocate the transformed ARM CodeDirectory");
+        return false;
+    }
+    /* Insert the v0x20200 field, Team ID, and any older special slots before
+     * the existing hash vectors. The code-slot vector is copied byte-for-byte;
+     * the supported entitlement/requirements slots are replaced below. */
+    memcpy(result, source->bytes, parsed.headerSize);
+    memcpy(result + newHeaderSize,
+        source->bytes + parsed.headerSize,
+        parsed.prefixEnd - parsed.headerSize);
+    memcpy(result + teamOffset, teamIdentifier, teamIdentifierLength);
+    memcpy(result + copiedHashVectorOffset,
+        source->bytes + parsed.prefixEnd,
+        source->length - parsed.prefixEnd);
+
+    LC32WriteBigUInt32(result + offsetof(CS_CodeDirectory, length),
+        newLength);
+    LC32WriteBigUInt32(result + offsetof(CS_CodeDirectory, version),
+        newVersion);
+    LC32WriteBigUInt32(result + offsetof(CS_CodeDirectory, flags),
+        transformedFlags);
+    LC32WriteBigUInt32(result + offsetof(CS_CodeDirectory, hashOffset),
+        newHashOffset);
+    LC32WriteBigUInt32(result + offsetof(CS_CodeDirectory, nSpecialSlots),
+        newSpecialSlotCount);
+    LC32RelocateCodeDirectoryOffset(result,
+        offsetof(CS_CodeDirectory, identOffset),
+        parsed.identifierOffset, headerGrowth);
+    LC32RelocateCodeDirectoryOffset(result,
+        offsetof(CS_CodeDirectory, scatterOffset),
+        parsed.scatterOffset, headerGrowth);
+    LC32WriteBigUInt32(result + offsetof(CS_CodeDirectory, teamOffset),
+        teamOffset);
+    if(newVersion >= 0x20500) {
+        LC32RelocateCodeDirectoryOffset(result,
+            offsetof(CS_CodeDirectory, preEncryptOffset),
+            parsed.preEncryptOffset, headerGrowth);
+    }
+    if(newVersion >= 0x20600) {
+        LC32RelocateCodeDirectoryOffset(result,
+            offsetof(CS_CodeDirectory, linkageOffset),
+            parsed.linkageOffset, headerGrowth);
+    }
+    if(newVersion >= 0x20400) {
+        const uint64_t execSegFlags = LC32ReadBigUInt64(
+            result + offsetof(CS_CodeDirectory, execSegFlags));
+        LC32WriteBigUInt64(
+            result + offsetof(CS_CodeDirectory, execSegFlags),
+            execSegFlags & ~LC32_CS_EXECSEG_MAIN_BINARY);
+    }
+
+    const struct {
+        uint32_t slot;
+        const LC32CodeSignatureBlobView *blob;
+    } replacements[] = {
+        { LC32_CS_SLOT_REQUIREMENTS, &donor->requirements },
+        { LC32_CS_SLOT_ENTITLEMENTS, &donor->entitlements },
+        { LC32_CS_SLOT_DER_ENTITLEMENTS, &donor->derEntitlements },
+    };
+    for(size_t index = 0;
+            index < sizeof(replacements) / sizeof(replacements[0]);
+            index++) {
+        uint8_t *slotDigest = result + newHashOffset -
+            (uint64_t)replacements[index].slot * parsed.hashSize;
+        if(replacements[index].blob->bytes == NULL) {
+            memset(slotDigest, 0, parsed.hashSize);
+        } else {
+            uint8_t digest[CC_SHA384_DIGEST_LENGTH] = {0};
+            if(!LC32HashCodeSignatureBlob(replacements[index].blob,
+                    parsed.hashType, parsed.hashSize, digest,
+                    errorBuffer, errorBufferCapacity)) {
+                free(result);
+                return false;
+            }
+            memcpy(slotDigest, digest, parsed.hashSize);
+        }
+    }
+
+    LC32CodeSignatureBlobView resultView = {
+        .type = source->type,
+        .magic = LC32_CS_MAGIC_CODE_DIRECTORY,
+        .bytes = result,
+        .length = newLength,
+    };
+    LC32ParsedCodeDirectory resultParsed = {0};
+    const uint64_t codeHashBytes =
+        (uint64_t)parsed.codeSlotCount * parsed.hashSize;
+    if(!LC32ParseCodeDirectory(&resultView,
+            "transformed encrypted ARM slice", &resultParsed,
+            errorBuffer, errorBufferCapacity) ||
+            resultParsed.version < 0x20200 ||
+            resultParsed.flags != transformedFlags ||
+            resultParsed.teamOffset != teamOffset ||
+            strcmp((const char *)result + resultParsed.teamOffset,
+                teamIdentifier) != 0 ||
+            (resultParsed.version >= 0x20400 &&
+                (LC32ReadBigUInt64(result +
+                    offsetof(CS_CodeDirectory, execSegFlags)) &
+                        LC32_CS_EXECSEG_MAIN_BINARY) != 0) ||
+            memcmp(source->bytes + parsed.hashOffset,
+                result + resultParsed.hashOffset,
+                (size_t)codeHashBytes) != 0) {
+        if(errorBuffer != NULL && errorBufferCapacity != 0 &&
+                errorBuffer[0] == '\0') {
+            LC32SetError(errorBuffer, errorBufferCapacity,
+                "transformed ARM CodeDirectory failed verification");
+        }
+        free(result);
+        return false;
+    }
+    for(size_t index = 0;
+            index < sizeof(replacements) / sizeof(replacements[0]);
+            index++) {
+        const bool slotMatches = replacements[index].blob->bytes != NULL ?
+            LC32CodeDirectorySlotMatchesBlob(&resultView,
+                replacements[index].slot, replacements[index].blob,
+                "transformed encrypted ARM slice",
+                errorBuffer, errorBufferCapacity) :
+            LC32CodeDirectorySlotIsEmpty(&resultView,
+                replacements[index].slot,
+                "transformed encrypted ARM slice",
+                errorBuffer, errorBufferCapacity);
+        if(!slotMatches) {
+            free(result);
+            return false;
+        }
+    }
+
+    *bytesOut = result;
+    *lengthOut = newLength;
+    return true;
+}
+
+static int LC32CompareMutableCodeSignatureBlobs(
+        const void *leftPointer, const void *rightPointer) {
+    const LC32MutableCodeSignatureBlob *left = leftPointer;
+    const LC32MutableCodeSignatureBlob *right = rightPointer;
+    if(left->type < right->type) return -1;
+    if(left->type > right->type) return 1;
+    return 0;
+}
+
+static bool LC32AppendMutableCodeSignatureBlob(
+        LC32MutableCodeSignatureBlob *blobs, uint32_t *count,
+        uint32_t type, const uint8_t *bytes, uint32_t length,
+        uint8_t *ownedBytes,
+        char *errorBuffer, size_t errorBufferCapacity) {
+    if(*count >= LC32_MAX_CODE_SIGNATURE_BLOBS) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "transformed ARM code signature has too many blobs");
+        return false;
+    }
+    blobs[(*count)++] = (LC32MutableCodeSignatureBlob){
+        .type = type,
+        .bytes = bytes,
+        .length = length,
+        .ownedBytes = ownedBytes,
+    };
+    return true;
+}
+
+static bool LC32CreateTransformedEncryptedSignature(
+        int targetFD, const LC32MachOSlice *slice,
+        const LC32CodeSignatureDonor *donor,
+        const char *teamIdentifier,
+        uint8_t **signatureOut,
+        char *errorBuffer, size_t errorBufferCapacity) {
+    *signatureOut = NULL;
+    /* The encrypted pages cannot be changed. Repack only the existing
+     * LC_CODE_SIGNATURE allocation, keep its load command and slice size
+     * untouched, and zero any now-unused tail after the SuperBlob. */
+    if(!slice->encrypted || !slice->is32Bit ||
+            slice->cpuType != CPU_TYPE_ARM ||
+            !slice->hasCodeSignature ||
+            slice->codeSignatureSize < sizeof(CS_SuperBlob) ||
+            slice->codeSignatureSize > LC32_MAX_CODE_SIGNATURE_SIZE ||
+            !LC32RangeFits(slice->codeSignatureOffset,
+                slice->codeSignatureSize, slice->size)) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "encrypted ARM slice has no usable embedded code signature");
+        return false;
+    }
+
+    bool success = false;
+    uint8_t *sourceSignature = malloc(slice->codeSignatureSize);
+    uint8_t *transformedSignature = NULL;
+    LC32MutableCodeSignatureBlob
+        blobs[LC32_MAX_CODE_SIGNATURE_BLOBS] = {0};
+    uint32_t outputCount = 0;
+    uint64_t signatureFileOffset = 0;
+    if(sourceSignature == NULL ||
+            !LC32AddUInt64(slice->offset,
+                slice->codeSignatureOffset, &signatureFileOffset) ||
+            !LC32ReadAt(targetFD, sourceSignature,
+                slice->codeSignatureSize, signatureFileOffset)) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "could not read encrypted ARM code signature: %s",
+            sourceSignature == NULL ? "out of memory" : strerror(errno));
+        goto cleanup;
+    }
+
+    LC32CodeSignatureView sourceView = {0};
+    if(!LC32ParseCodeSignature(sourceSignature,
+            slice->codeSignatureSize, "encrypted ARM slice", &sourceView,
+            errorBuffer, errorBufferCapacity)) {
+        goto cleanup;
+    }
+
+    uint32_t codeDirectoryCount = 0;
+    for(uint32_t index = 0; index < sourceView.count; index++) {
+        const LC32CodeSignatureBlobView *sourceBlob =
+            &sourceView.blobs[index];
+        if(LC32CodeSignatureTypeIsCodeDirectory(sourceBlob->type)) {
+            uint8_t *codeDirectoryBytes = NULL;
+            uint32_t codeDirectoryLength = 0;
+            if(!LC32CreateTransformedCodeDirectory(
+                    sourceBlob, donor, teamIdentifier,
+                    slice->size, slice->codeSignatureOffset,
+                    &codeDirectoryBytes, &codeDirectoryLength,
+                    errorBuffer, errorBufferCapacity)) {
+                goto cleanup;
+            }
+            if(!LC32AppendMutableCodeSignatureBlob(
+                    blobs, &outputCount, sourceBlob->type,
+                    codeDirectoryBytes, codeDirectoryLength,
+                    codeDirectoryBytes,
+                    errorBuffer, errorBufferCapacity)) {
+                free(codeDirectoryBytes);
+                goto cleanup;
+            }
+            codeDirectoryCount++;
+        } else if(sourceBlob->type != LC32_CS_SLOT_REQUIREMENTS &&
+                sourceBlob->type != LC32_CS_SLOT_ENTITLEMENTS &&
+                sourceBlob->type != LC32_CS_SLOT_DER_ENTITLEMENTS &&
+                sourceBlob->type != LC32_CS_SLOT_CMS_SIGNATURE) {
+            if(!LC32AppendMutableCodeSignatureBlob(
+                    blobs, &outputCount, sourceBlob->type,
+                    sourceBlob->bytes, sourceBlob->length, NULL,
+                    errorBuffer, errorBufferCapacity)) {
+                goto cleanup;
+            }
+        }
+    }
+    if(codeDirectoryCount == 0) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "encrypted ARM signature contains no CodeDirectory");
+        goto cleanup;
+    }
+
+    const LC32CodeSignatureBlobView *donorBlobs[] = {
+        &donor->requirements,
+        &donor->entitlements,
+        &donor->derEntitlements,
+        &donor->cmsSignature,
+    };
+    for(size_t index = 0;
+            index < sizeof(donorBlobs) / sizeof(donorBlobs[0]); index++) {
+        const LC32CodeSignatureBlobView *blob = donorBlobs[index];
+        if(blob->bytes == NULL) continue;
+        if(!LC32AppendMutableCodeSignatureBlob(
+                blobs, &outputCount, blob->type,
+                blob->bytes, blob->length, NULL,
+                errorBuffer, errorBufferCapacity)) {
+            goto cleanup;
+        }
+    }
+    qsort(blobs, outputCount, sizeof(blobs[0]),
+        LC32CompareMutableCodeSignatureBlobs);
+
+    uint64_t packedLength = sizeof(CS_SuperBlob) +
+        (uint64_t)outputCount * sizeof(CS_BlobIndex);
+    for(uint32_t index = 0; index < outputCount; index++) {
+        if(!LC32AddUInt64(packedLength,
+                blobs[index].length, &packedLength)) {
+            LC32SetError(errorBuffer, errorBufferCapacity,
+                "transformed ARM code-signature length overflowed");
+            goto cleanup;
+        }
+    }
+    if(packedLength > slice->codeSignatureSize ||
+            packedLength > UINT32_MAX) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "encrypted ARM code-signature allocation is too small "
+            "for modern entitlements");
+        goto cleanup;
+    }
+
+    transformedSignature = calloc(1, slice->codeSignatureSize);
+    if(transformedSignature == NULL) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "could not allocate the transformed ARM code signature");
+        goto cleanup;
+    }
+    LC32WriteBigUInt32(transformedSignature +
+        offsetof(CS_SuperBlob, magic),
+        LC32_CS_MAGIC_EMBEDDED_SIGNATURE);
+    LC32WriteBigUInt32(transformedSignature +
+        offsetof(CS_SuperBlob, length), (uint32_t)packedLength);
+    LC32WriteBigUInt32(transformedSignature +
+        offsetof(CS_SuperBlob, count), outputCount);
+    uint32_t blobOffset = (uint32_t)(sizeof(CS_SuperBlob) +
+        (size_t)outputCount * sizeof(CS_BlobIndex));
+    for(uint32_t index = 0; index < outputCount; index++) {
+        uint8_t *encodedIndex = transformedSignature +
+            sizeof(CS_SuperBlob) + (size_t)index * sizeof(CS_BlobIndex);
+        LC32WriteBigUInt32(encodedIndex +
+            offsetof(CS_BlobIndex, type), blobs[index].type);
+        LC32WriteBigUInt32(encodedIndex +
+            offsetof(CS_BlobIndex, offset), blobOffset);
+        memcpy(transformedSignature + blobOffset,
+            blobs[index].bytes, blobs[index].length);
+        blobOffset += blobs[index].length;
+    }
+
+    LC32CodeSignatureView verificationView = {0};
+    if(!LC32ParseCodeSignature(transformedSignature,
+            slice->codeSignatureSize, "transformed encrypted ARM slice",
+            &verificationView, errorBuffer, errorBufferCapacity)) {
+        goto cleanup;
+    }
+    *signatureOut = transformedSignature;
+    transformedSignature = NULL;
+    success = true;
+
+cleanup:
+    for(uint32_t index = 0; index < outputCount; index++) {
+        free(blobs[index].ownedBytes);
+    }
+    free(transformedSignature);
+    free(sourceSignature);
+    return success;
 }
 
 static void LC32FreeCodeSignatureMetadata(
@@ -424,7 +1505,8 @@ static bool LC32ReadCodeSignatureMetadata(
                 blob[offsetof(CS_CodeDirectory, hashType)];
             const uint32_t version = LC32ReadBigUInt32(
                 blob + offsetof(CS_CodeDirectory, version));
-            if(version > 0x20600) {
+            if(version < LC32_CS_EARLIEST_CODE_DIRECTORY_VERSION ||
+                    version > 0x20600) {
                 LC32SetError(errorBuffer, errorBufferCapacity,
                     "CodeDirectory uses an unsupported version");
                 free(signature);
@@ -630,14 +1712,96 @@ static char *LC32CopyCFStringUTF8(
         return NULL;
     }
     char *string = malloc((size_t)maximumBytes + 1);
-    if(string == NULL || !CFStringGetCString((CFStringRef)value,
-            string, maximumBytes + 1, kCFStringEncodingUTF8)) {
+    if(string == NULL) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "could not encode %s as UTF-8", description);
+        return NULL;
+    }
+    CFIndex encodedByteCount = 0;
+    const CFIndex convertedCharacterCount = CFStringGetBytes(
+        (CFStringRef)value, CFRangeMake(0, length),
+        kCFStringEncodingUTF8, 0, false,
+        (UInt8 *)string, maximumBytes, &encodedByteCount);
+    if(convertedCharacterCount != length || encodedByteCount <= 0 ||
+            memchr(string, '\0', (size_t)encodedByteCount) != NULL) {
         free(string);
         LC32SetError(errorBuffer, errorBufferCapacity,
             "could not encode %s as UTF-8", description);
         return NULL;
     }
+    string[encodedByteCount] = '\0';
     return string;
+}
+
+static bool LC32CopyTeamIdentifierFromApplicationIdentifier(
+        CFDictionaryRef entitlements,
+        const char *bundleIdentifier, size_t bundleIdentifierLength,
+        char **teamIdentifierOut,
+        char *errorBuffer, size_t errorBufferCapacity) {
+    *teamIdentifierOut = NULL;
+    CFTypeRef value = CFDictionaryGetValue(
+        entitlements, LC32ApplicationIdentifierEntitlement);
+    if(value == NULL) return true;
+
+    /* This entitlement is optional input for a better fallback. A malformed
+     * value must not make an otherwise injectable legacy app fail. */
+    if(CFGetTypeID(value) != CFStringGetTypeID()) return true;
+    CFStringRef applicationIdentifierValue = (CFStringRef)value;
+    const CFIndex stringLength =
+        CFStringGetLength(applicationIdentifierValue);
+    const CFIndex maximumBytes = CFStringGetMaximumSizeForEncoding(
+        stringLength, kCFStringEncodingUTF8);
+    if(stringLength == 0 || maximumBytes < 0 ||
+            (uint64_t)maximumBytes + 1 >
+                LC32_MAX_SIGNING_STRING_SIZE) {
+        return true;
+    }
+    char *applicationIdentifier = malloc((size_t)maximumBytes + 1);
+    if(applicationIdentifier == NULL) {
+        LC32SetError(errorBuffer, errorBufferCapacity,
+            "could not copy the application-identifier entitlement");
+        return false;
+    }
+    CFIndex encodedByteCount = 0;
+    const CFIndex convertedCharacterCount = CFStringGetBytes(
+        applicationIdentifierValue,
+        CFRangeMake(0, stringLength),
+        kCFStringEncodingUTF8, 0, false,
+        (UInt8 *)applicationIdentifier, maximumBytes,
+        &encodedByteCount);
+    if(convertedCharacterCount != stringLength ||
+            encodedByteCount <= 0 ||
+            memchr(applicationIdentifier, '\0',
+                (size_t)encodedByteCount) != NULL) {
+        free(applicationIdentifier);
+        return true;
+    }
+    applicationIdentifier[encodedByteCount] = '\0';
+
+    const size_t applicationIdentifierLength =
+        (size_t)encodedByteCount;
+    if(applicationIdentifierLength > bundleIdentifierLength + 1) {
+        const size_t separatorIndex =
+            applicationIdentifierLength - bundleIdentifierLength - 1;
+        if(applicationIdentifier[separatorIndex] == '.' &&
+                memcmp(applicationIdentifier + separatorIndex + 1,
+                    bundleIdentifier, bundleIdentifierLength) == 0) {
+            char *teamIdentifier = malloc(separatorIndex + 1);
+            if(teamIdentifier == NULL) {
+                free(applicationIdentifier);
+                LC32SetError(errorBuffer, errorBufferCapacity,
+                    "could not copy the application-identifier prefix");
+                return false;
+            }
+            memcpy(teamIdentifier,
+                applicationIdentifier, separatorIndex);
+            teamIdentifier[separatorIndex] = '\0';
+            *teamIdentifierOut = teamIdentifier;
+        }
+    }
+
+    free(applicationIdentifier);
+    return true;
 }
 
 static bool LC32CreateSigningMetadata(
@@ -657,6 +1821,7 @@ static bool LC32CreateSigningMetadata(
     CFMutableDictionaryRef mergedEntitlements = NULL;
     CFStringRef bundleIdentifierString = NULL;
     char *targetIdentifier = NULL;
+    char *derivedTeamIdentifier = NULL;
     char *teamIdentifier = NULL;
     char *finalIdentifier = NULL;
     bool success = false;
@@ -738,14 +1903,40 @@ static bool LC32CreateSigningMetadata(
             mergedEntitlements, firstTargetEntitlements);
     }
 
-    CFTypeRef teamValue = CFDictionaryGetValue(
-        mergedEntitlements, LC32TeamIdentifierEntitlement);
+    CFTypeRef teamValue = firstTargetEntitlements == NULL ? NULL :
+        CFDictionaryGetValue(
+            firstTargetEntitlements, LC32TeamIdentifierEntitlement);
     if(teamValue == NULL) {
-        CFDictionarySetValue(mergedEntitlements,
-            LC32TeamIdentifierEntitlement,
-            CFSTR("T8ALTGMVXN"));
+        if(firstTargetEntitlements != NULL &&
+                !LC32CopyTeamIdentifierFromApplicationIdentifier(
+                    firstTargetEntitlements,
+                    bundleIdentifier, bundleIdentifierLength,
+                    &derivedTeamIdentifier,
+                    errorBuffer, errorBufferCapacity)) {
+            goto cleanup;
+        }
+        if(derivedTeamIdentifier != NULL) {
+            CFStringRef derivedTeamValue = CFStringCreateWithCString(
+                kCFAllocatorDefault, derivedTeamIdentifier,
+                kCFStringEncodingUTF8);
+            if(derivedTeamValue == NULL) {
+                LC32SetError(errorBuffer, errorBufferCapacity,
+                    "application-identifier prefix is not valid UTF-8");
+                goto cleanup;
+            }
+            CFDictionarySetValue(mergedEntitlements,
+                LC32TeamIdentifierEntitlement, derivedTeamValue);
+            CFRelease(derivedTeamValue);
+        } else {
+            CFDictionarySetValue(mergedEntitlements,
+                LC32TeamIdentifierEntitlement,
+                CFSTR("T8ALTGMVXN"));
+        }
         teamValue = CFDictionaryGetValue(
             mergedEntitlements, LC32TeamIdentifierEntitlement);
+    } else {
+        CFDictionarySetValue(mergedEntitlements,
+            LC32TeamIdentifierEntitlement, teamValue);
     }
     teamIdentifier = LC32CopyCFStringUTF8(teamValue,
         "com.apple.developer.team-identifier entitlement",
@@ -795,6 +1986,7 @@ static bool LC32CreateSigningMetadata(
 cleanup:
     free(finalIdentifier);
     free(teamIdentifier);
+    free(derivedTeamIdentifier);
     free(targetIdentifier);
     if(bundleIdentifierString != NULL) CFRelease(bundleIdentifierString);
     if(mergedEntitlements != NULL) CFRelease(mergedEntitlements);
@@ -867,9 +2059,13 @@ static bool LC32CreateSignedShimBytes(
         const char *identifier, const char *teamIdentifier,
         uint32_t requestedSDK,
         uint8_t **signedBytesOut, size_t *signedSizeOut,
+        uint32_t *signedSignatureOffsetOut,
+        uint32_t *signedSignatureSizeOut,
         char *errorBuffer, size_t errorBufferCapacity) {
     *signedBytesOut = NULL;
     *signedSizeOut = 0;
+    *signedSignatureOffsetOut = 0;
+    *signedSignatureSizeOut = 0;
 
     if(shimSlice->is32Bit || shimSlice->size == 0 ||
             shimSlice->size > LC32_MAX_SIGNED_SHIM_SIZE ||
@@ -1050,10 +2246,25 @@ static bool LC32CreateSignedShimBytes(
             signedBytes == NULL ? "out of memory" : strerror(errno));
         goto cleanup;
     }
+    if(!LC32RangeFits(signedSlice->codeSignatureOffset,
+                signedSlice->codeSignatureSize, signedSize) ||
+            !LC32NormalizeSignedShimCodeDirectoryFlags(
+                signedBytes + signedSlice->codeSignatureOffset,
+                signedSlice->codeSignatureSize, teamIdentifier,
+                errorBuffer, errorBufferCapacity)) {
+        if(errorBuffer != NULL && errorBufferCapacity != 0 &&
+                errorBuffer[0] == '\0') {
+            LC32SetError(errorBuffer, errorBufferCapacity,
+                "signed arm64 shim code signature is out of bounds");
+        }
+        goto cleanup;
+    }
 
     *signedBytesOut = signedBytes;
     signedBytes = NULL;
     *signedSizeOut = signedSize;
+    *signedSignatureOffsetOut = signedSlice->codeSignatureOffset;
+    *signedSignatureSizeOut = signedSlice->codeSignatureSize;
     success = true;
 
 cleanup:
@@ -1101,6 +2312,13 @@ static bool LC32CreateMachOImageFromFD(
 static bool LC32CopyOutputSliceToFD(
         const LC32OutputSlice *source, int destinationFD,
         uint64_t destinationOffset, void *buffer, size_t bufferSize) {
+    if(source->replacementBytes == NULL ?
+            source->replacementSize != 0 :
+            !LC32RangeFits(source->replacementOffset,
+                source->replacementSize, source->size)) {
+        errno = EINVAL;
+        return false;
+    }
     uint64_t completed = 0;
     while(completed < source->size) {
         const uint64_t remaining = source->size - completed;
@@ -1119,6 +2337,12 @@ static bool LC32CopyOutputSliceToFD(
         }
         completed += amount;
     }
+    if(source->replacementBytes != NULL &&
+            !LC32WriteAt(destinationFD, source->replacementBytes,
+                (size_t)source->replacementSize,
+                destinationOffset + source->replacementOffset)) {
+        return false;
+    }
     return true;
 }
 
@@ -1126,18 +2350,44 @@ static bool LC32OutputSliceMatchesFD(
         const LC32OutputSlice *source,
         int fd, uint64_t fdOffset,
         void *sourceBuffer, void *fileBuffer, size_t bufferSize) {
+    if(source->replacementBytes == NULL ?
+            source->replacementSize != 0 :
+            !LC32RangeFits(source->replacementOffset,
+                source->replacementSize, source->size)) {
+        return false;
+    }
     uint64_t completed = 0;
     while(completed < source->size) {
         const uint64_t remaining = source->size - completed;
         const size_t amount = remaining < bufferSize ?
             (size_t)remaining : bufferSize;
-        const void *sourceBytes = source->sourceBytes == NULL ?
-            sourceBuffer : source->sourceBytes + completed;
-        if((source->sourceBytes == NULL &&
-                !LC32ReadAt(source->sourceFD, sourceBuffer, amount,
-                    source->sourceOffset + completed)) ||
-                !LC32ReadAt(fd, fileBuffer, amount, fdOffset + completed) ||
-                memcmp(sourceBytes, fileBuffer, amount) != 0) {
+        if(source->sourceBytes == NULL) {
+            if(!LC32ReadAt(source->sourceFD, sourceBuffer, amount,
+                    source->sourceOffset + completed)) {
+                return false;
+            }
+        } else {
+            memcpy(sourceBuffer,
+                source->sourceBytes + completed, amount);
+        }
+        const uint64_t chunkEnd = completed + amount;
+        const uint64_t replacementEnd =
+            source->replacementOffset + source->replacementSize;
+        const uint64_t overlapStart = completed >
+            source->replacementOffset ?
+                completed : source->replacementOffset;
+        const uint64_t overlapEnd = chunkEnd < replacementEnd ?
+            chunkEnd : replacementEnd;
+        if(source->replacementBytes != NULL &&
+                overlapStart < overlapEnd) {
+            memcpy((uint8_t *)sourceBuffer +
+                    (overlapStart - completed),
+                source->replacementBytes +
+                    (overlapStart - source->replacementOffset),
+                (size_t)(overlapEnd - overlapStart));
+        }
+        if(!LC32ReadAt(fd, fileBuffer, amount, fdOffset + completed) ||
+                memcmp(sourceBuffer, fileBuffer, amount) != 0) {
             return false;
         }
         completed += amount;
@@ -1381,6 +2631,10 @@ LC32MachOInjectionResult LC32InjectArm64ExecutableSlice(
     uint8_t *outputHeader = NULL;
     uint8_t *signedShimBytes = NULL;
     size_t signedShimSize = 0;
+    uint32_t signedShimSignatureOffset = 0;
+    uint32_t signedShimSignatureSize = 0;
+    uint8_t *transformedTargetSignatures[LC32_MAX_MACH_O_SLICES] = {0};
+    LC32CodeSignatureDonor signatureDonor = {0};
     LC32MachOImage targetImage = {0};
     LC32MachOImage shimImage = {0};
     LC32MachOImage verificationImage = {0};
@@ -1453,6 +2707,7 @@ LC32MachOInjectionResult LC32InjectArm64ExecutableSlice(
     }
 
     bool hasARM32Executable = false;
+    bool hasEncryptedARM32Executable = false;
     bool targetSDKIsSet = false;
     uint32_t targetSDK = LC32_IOS_11_VERSION;
     for(uint32_t index = 0; index < targetSliceCount; index++) {
@@ -1470,12 +2725,6 @@ LC32MachOInjectionResult LC32InjectArm64ExecutableSlice(
                 "byte-swapped ARM executable slices are not supported");
             goto cleanup;
         }
-        if(slice->encrypted) {
-            LC32SetError(errorBuffer, errorBufferCapacity,
-                "ARM executable slice is encrypted; decrypt it before "
-                "installing with LiveExec32");
-            goto cleanup;
-        }
         const uint32_t sliceSDK =
             slice->hasVersionMinIPhoneOS &&
                 slice->versionMinIPhoneOSSDK >= LC32_IOS_11_VERSION ?
@@ -1488,6 +2737,7 @@ LC32MachOInjectionResult LC32InjectArm64ExecutableSlice(
         targetSDK = sliceSDK;
         targetSDKIsSet = true;
         hasARM32Executable = true;
+        hasEncryptedARM32Executable |= slice->encrypted;
     }
     if(!hasARM32Executable) {
         result = LC32MachOInjectionNotApplicable;
@@ -1576,8 +2826,34 @@ LC32MachOInjectionResult LC32InjectArm64ExecutableSlice(
         signingIdentifier, teamIdentifier,
         targetSDK,
         &signedShimBytes, &signedShimSize,
+        &signedShimSignatureOffset, &signedShimSignatureSize,
         errorBuffer, errorBufferCapacity)) {
         goto cleanup;
+    }
+    if(hasEncryptedARM32Executable &&
+            (!LC32RangeFits(signedShimSignatureOffset,
+                signedShimSignatureSize, signedShimSize) ||
+             !LC32CreateCodeSignatureDonor(
+                signedShimBytes + signedShimSignatureOffset,
+                signedShimSignatureSize, &signatureDonor,
+                errorBuffer, errorBufferCapacity))) {
+        if(errorBuffer != NULL && errorBufferCapacity != 0 &&
+                errorBuffer[0] == '\0') {
+            LC32SetError(errorBuffer, errorBufferCapacity,
+                "signed arm64 shim code signature is out of bounds");
+        }
+        goto cleanup;
+    }
+
+    for(uint32_t index = 0; index < targetSliceCount; index++) {
+        const LC32MachOSlice *slice = &targetImage.slices[index];
+        if(slice->encrypted &&
+                !LC32CreateTransformedEncryptedSignature(
+                    targetFD, slice, &signatureDonor, teamIdentifier,
+                    &transformedTargetSignatures[index],
+                    errorBuffer, errorBufferCapacity)) {
+            goto cleanup;
+        }
     }
 
     const uint32_t outputCount = targetSliceCount + 1;
@@ -1586,6 +2862,11 @@ LC32MachOInjectionResult LC32InjectArm64ExecutableSlice(
         outputSlices[index] = (LC32OutputSlice){
             .sourceFD = targetFD,
             .sourceOffset = source->offset,
+            .replacementBytes = transformedTargetSignatures[index],
+            .replacementOffset = source->encrypted ?
+                source->codeSignatureOffset : 0,
+            .replacementSize = source->encrypted ?
+                source->codeSignatureSize : 0,
             .size = source->size,
             .cpuType = source->cpuType,
             .cpuSubtype = source->cpuSubtype,
@@ -2000,6 +3281,10 @@ cleanup:
     free(outputHeader);
     free(comparisonBuffer);
     free(copyBuffer);
+    for(uint32_t index = 0;
+            index < LC32_MAX_MACH_O_SLICES; index++) {
+        free(transformedTargetSignatures[index]);
+    }
     free(signedShimBytes);
     free(replacementPath);
     free(stagingDirectoryPath);

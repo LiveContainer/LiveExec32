@@ -21,13 +21,17 @@
 #define LC32_TEST_SLICE_CAPACITY 4096u
 #define LC32_TEST_TIMEOUT_SECONDS 60u
 #define LC32_TEST_CODE_SIGNATURE_OFFSET 0x400u
+#define LC32_TEST_LARGE_CODE_SIGNATURE_OFFSET \
+    ((256u * 1024u) + LC32_TEST_CODE_SIGNATURE_OFFSET)
 #define LC32_TEST_ADHOC_FLAG 0x2u
 #define LC32_TEST_EMBEDDED_SIGNATURE_MAGIC 0xfade0cc0u
 #define LC32_TEST_CODE_DIRECTORY_MAGIC 0xfade0c02u
+#define LC32_TEST_REQUIREMENTS_MAGIC 0xfade0c01u
 #define LC32_TEST_ENTITLEMENTS_MAGIC 0xfade7171u
 #define LC32_TEST_DER_ENTITLEMENTS_MAGIC 0xfade7172u
 #define LC32_TEST_BLOB_WRAPPER_MAGIC 0xfade0b01u
 #define LC32_TEST_CODE_DIRECTORY_SLOT 0u
+#define LC32_TEST_REQUIREMENTS_SLOT 2u
 #define LC32_TEST_ENTITLEMENTS_SLOT 5u
 #define LC32_TEST_DER_ENTITLEMENTS_SLOT 7u
 #define LC32_TEST_CMS_SIGNATURE_SLOT 0x10000u
@@ -40,7 +44,11 @@
 #define LC32_TEST_SHIM_MINOS ((16u << 16) | (2u << 8))
 #define LC32_TEST_SHIM_SDK ((17u << 16) | (4u << 8))
 #define LC32_TEST_DEFAULT_TEAM_IDENTIFIER "T8ALTGMVXN"
+#define LC32_TEST_DERIVED_TEAM_IDENTIFIER "UY94678XHZ"
+#define LC32_TEST_EXPLICIT_TEAM_IDENTIFIER "EXPLICIT42"
 #define LC32_TEST_BUNDLE_IDENTIFIER "com.example.LiveExec32Target"
+#define LC32_TEST_APPLICATION_IDENTIFIER \
+    LC32_TEST_DERIVED_TEAM_IDENTIFIER "." LC32_TEST_BUNDLE_IDENTIFIER
 #define LC32_TEST_CODE_IDENTIFIER "legacy.target.signature.identifier"
 #define LC32_TEST_FALLBACK_CODE_IDENTIFIER \
     LC32_TEST_DEFAULT_TEAM_IDENTIFIER "." LC32_TEST_BUNDLE_IDENTIFIER
@@ -113,6 +121,30 @@ static const char LC32TestTargetEntitlements[] =
     "<key>com.example.merge-conflict</key><string>target</string>"
     "</dict></plist>\n";
 
+static const char LC32TestDerivedTeamEntitlements[] =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+        "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+    "<plist version=\"1.0\"><dict>"
+    "<key>application-identifier</key><string>"
+        LC32_TEST_APPLICATION_IDENTIFIER "</string>"
+    "<key>com.example.target-only</key><string>target</string>"
+    "<key>com.example.merge-conflict</key><string>target</string>"
+    "</dict></plist>\n";
+
+static const char LC32TestExplicitTeamEntitlements[] =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+        "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+    "<plist version=\"1.0\"><dict>"
+    "<key>application-identifier</key><string>"
+        LC32_TEST_APPLICATION_IDENTIFIER "</string>"
+    "<key>com.apple.developer.team-identifier</key><string>"
+        LC32_TEST_EXPLICIT_TEAM_IDENTIFIER "</string>"
+    "<key>com.example.target-only</key><string>target</string>"
+    "<key>com.example.merge-conflict</key><string>target</string>"
+    "</dict></plist>\n";
+
 static const char LC32TestShimEntitlements[] =
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
     "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
@@ -120,6 +152,8 @@ static const char LC32TestShimEntitlements[] =
     "<plist version=\"1.0\"><dict>"
     "<key>com.example.shim-only</key><true/>"
     "<key>com.example.merge-conflict</key><string>shim</string>"
+    "<key>com.apple.developer.team-identifier</key>"
+        "<string>" LC32_TEST_DEFAULT_TEAM_IDENTIFIER "</string>"
     "<key>com.apple.private.amfi.can-execute-cdhash</key><true/>"
     "</dict></plist>\n";
 
@@ -440,24 +474,85 @@ static size_t MakeSignedThinExecutable(
 }
 
 static size_t MakeEncryptedARMExecutable(
-        uint8_t bytes[LC32_TEST_SLICE_CAPACITY]) {
-    memset(bytes, 0, LC32_TEST_SLICE_CAPACITY);
-    const struct mach_header header = {
-        .magic = MH_MAGIC,
-        .cputype = CPU_TYPE_ARM,
-        .cpusubtype = CPU_SUBTYPE_ARM_V7,
-        .filetype = MH_EXECUTE,
-        .ncmds = 1,
-        .sizeofcmds = sizeof(struct encryption_info_command),
-    };
+        uint8_t bytes[LC32_TEST_SLICE_CAPACITY],
+        uint32_t codeDirectoryVersion) {
+    const size_t originalSize = MakeSignedThinExecutableWithVersionMin(
+        bytes, CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7, 0xe3,
+        LC32_TEST_CODE_IDENTIFIER, LC32TestDerivedTeamEntitlements,
+        LC32_TEST_IOS_8_VERSION, LC32_TEST_IOS_10_3_VERSION);
+    if(originalSize == 0) return 0;
+
+    struct mach_header *header = (struct mach_header *)bytes;
+    const size_t oldCommandsEnd = sizeof(*header) + header->sizeofcmds;
+    if(header->magic != MH_MAGIC || header->ncmds != 5 ||
+            oldCommandsEnd + sizeof(struct encryption_info_command) + 16 >
+                LC32_TEST_CODE_SIGNATURE_OFFSET) {
+        return 0;
+    }
+    memmove(bytes + oldCommandsEnd + sizeof(struct encryption_info_command),
+        bytes + oldCommandsEnd, 16);
     const struct encryption_info_command encryption = {
         .cmd = LC_ENCRYPTION_INFO,
         .cmdsize = sizeof(encryption),
+        .cryptoff = (uint32_t)(oldCommandsEnd + sizeof(encryption)),
+        .cryptsize = 16,
         .cryptid = 2,
     };
-    memcpy(bytes, &header, sizeof(header));
-    memcpy(bytes + sizeof(header), &encryption, sizeof(encryption));
-    return sizeof(header) + sizeof(encryption);
+    memcpy(bytes + oldCommandsEnd, &encryption, sizeof(encryption));
+    header->ncmds++;
+    header->sizeofcmds += sizeof(encryption);
+
+    const size_t entryPointOffset = sizeof(*header) +
+        2 * sizeof(struct segment_command);
+    struct entry_point_command *entryPoint =
+        (struct entry_point_command *)(bytes + entryPointOffset);
+    entryPoint->entryoff += sizeof(encryption);
+
+    struct segment_command *linkedit = (struct segment_command *)(
+        bytes + sizeof(*header) + sizeof(struct segment_command));
+    struct linkedit_data_command *signature =
+        (struct linkedit_data_command *)(bytes + entryPointOffset +
+            sizeof(struct entry_point_command));
+    const uint32_t signatureCapacity =
+        LC32_TEST_SLICE_CAPACITY - LC32_TEST_CODE_SIGNATURE_OFFSET;
+    if(strncmp(linkedit->segname, SEG_LINKEDIT,
+            sizeof(linkedit->segname)) != 0 ||
+            signature->cmd != LC_CODE_SIGNATURE) {
+        return 0;
+    }
+    linkedit->filesize = signatureCapacity;
+    signature->datasize = signatureCapacity;
+
+    uint8_t *superblob = bytes + LC32_TEST_CODE_SIGNATURE_OFFSET;
+    uint32_t encodedCodeDirectoryOffset = 0;
+    memcpy(&encodedCodeDirectoryOffset, superblob + 16, 4);
+    const uint32_t codeDirectoryOffset =
+        OSSwapBigToHostInt32(encodedCodeDirectoryOffset);
+    if(codeDirectoryOffset > signatureCapacity ||
+            sizeof(LC32TestLegacyCodeDirectory) >
+                signatureCapacity - codeDirectoryOffset) {
+        return 0;
+    }
+    uint8_t *codeDirectory = superblob + codeDirectoryOffset;
+    const uint32_t encodedVersion =
+        OSSwapHostToBigInt32(codeDirectoryVersion);
+    memcpy(codeDirectory + offsetof(
+        LC32TestLegacyCodeDirectory, version), &encodedVersion, 4);
+
+    uint32_t encodedHashOffset = 0;
+    memcpy(&encodedHashOffset, codeDirectory + offsetof(
+        LC32TestLegacyCodeDirectory, hashOffset), 4);
+    const uint32_t hashOffset =
+        OSSwapBigToHostInt32(encodedHashOffset);
+    if(hashOffset > signatureCapacity - codeDirectoryOffset ||
+            CC_SHA256_DIGEST_LENGTH >
+                signatureCapacity - codeDirectoryOffset - hashOffset) {
+        return 0;
+    }
+    uint8_t digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(bytes, LC32_TEST_CODE_SIGNATURE_OFFSET, digest);
+    memcpy(codeDirectory + hashOffset, digest, sizeof(digest));
+    return LC32_TEST_SLICE_CAPACITY;
 }
 
 static size_t MakeByteSwappedARMExecutable(
@@ -878,6 +973,74 @@ static bool SetFixtureCodeDirectoryUInt32(
     return true;
 }
 
+static bool SetFixtureCodeDirectoryUInt8(
+        uint8_t *sliceBytes, size_t sliceSize,
+        size_t fieldOffset, uint8_t value) {
+    LC32TestSliceView slice = {
+        .bytes = sliceBytes,
+        .size = sliceSize,
+    };
+    uint32_t signatureOffset = 0;
+    uint32_t signatureSize = 0;
+    LC32TestBlobView codeDirectoryBlob = {0};
+    if(!FindCodeSignature(
+            slice, &signatureOffset, &signatureSize) ||
+            !FindSuperblobBlob(sliceBytes + signatureOffset, signatureSize,
+                LC32_TEST_CODE_DIRECTORY_SLOT, &codeDirectoryBlob) ||
+            fieldOffset >= codeDirectoryBlob.size) {
+        return false;
+    }
+
+    ((uint8_t *)codeDirectoryBlob.bytes)[fieldOffset] = value;
+    return true;
+}
+
+static bool SetFixtureEncryptionRange(
+        uint8_t *sliceBytes, size_t sliceSize,
+        uint32_t cryptOffset, uint32_t cryptSize) {
+    if(sliceSize < sizeof(struct mach_header)) return false;
+    struct mach_header header = {0};
+    memcpy(&header, sliceBytes, sizeof(header));
+    if(header.magic != MH_MAGIC || header.ncmds == 0 ||
+            sizeof(header) > sliceSize ||
+            header.sizeofcmds > sliceSize - sizeof(header)) {
+        return false;
+    }
+
+    size_t commandOffset = sizeof(header);
+    const size_t commandsEnd = commandOffset + header.sizeofcmds;
+    for(uint32_t index = 0; index < header.ncmds; index++) {
+        if(commandOffset > commandsEnd ||
+                sizeof(struct load_command) >
+                    commandsEnd - commandOffset) {
+            return false;
+        }
+        struct load_command loadCommand = {0};
+        memcpy(&loadCommand, sliceBytes + commandOffset,
+            sizeof(loadCommand));
+        if(loadCommand.cmdsize < sizeof(loadCommand) ||
+                loadCommand.cmdsize > commandsEnd - commandOffset) {
+            return false;
+        }
+        if(loadCommand.cmd == LC_ENCRYPTION_INFO) {
+            if(loadCommand.cmdsize <
+                    sizeof(struct encryption_info_command)) {
+                return false;
+            }
+            struct encryption_info_command encryption = {0};
+            memcpy(&encryption, sliceBytes + commandOffset,
+                sizeof(encryption));
+            encryption.cryptoff = cryptOffset;
+            encryption.cryptsize = cryptSize;
+            memcpy(sliceBytes + commandOffset, &encryption,
+                sizeof(encryption));
+            return true;
+        }
+        commandOffset += loadCommand.cmdsize;
+    }
+    return false;
+}
+
 static bool RefreshFixtureCodeHash(uint8_t *sliceBytes, size_t sliceSize) {
     LC32TestSliceView slice = {
         .bytes = sliceBytes,
@@ -901,7 +1064,7 @@ static bool RefreshFixtureCodeHash(uint8_t *sliceBytes, size_t sliceSize) {
     const uint32_t codeSlotCount = BigToHost32(codeDirectory.nCodeSlots);
     if(codeDirectory.hashType != LC32_TEST_SHA256_TYPE ||
             codeDirectory.hashSize != CC_SHA256_DIGEST_LENGTH ||
-            codeSlotCount != 1 || codeLimit != signatureOffset ||
+            codeSlotCount != 1 || codeLimit > signatureOffset ||
             codeLimit > sliceSize || hashOffset > codeDirectoryBlob.size ||
             CC_SHA256_DIGEST_LENGTH > codeDirectoryBlob.size - hashOffset) {
         return false;
@@ -912,6 +1075,96 @@ static bool RefreshFixtureCodeHash(uint8_t *sliceBytes, size_t sliceSize) {
     memcpy((uint8_t *)codeDirectoryBlob.bytes + hashOffset,
         digest, sizeof(digest));
     return true;
+}
+
+static size_t ShrinkEncryptedFixtureSignatureAllocation(
+        uint8_t bytes[LC32_TEST_SLICE_CAPACITY]) {
+    uint32_t encodedSuperblobLength = 0;
+    memcpy(&encodedSuperblobLength,
+        bytes + LC32_TEST_CODE_SIGNATURE_OFFSET + 4, 4);
+    const uint32_t superblobLength =
+        OSSwapBigToHostInt32(encodedSuperblobLength);
+    if(superblobLength < 12 || superblobLength >
+            LC32_TEST_SLICE_CAPACITY -
+                LC32_TEST_CODE_SIGNATURE_OFFSET) {
+        return 0;
+    }
+
+    struct mach_header *header = (struct mach_header *)bytes;
+    const size_t entryPointOffset = sizeof(*header) +
+        2 * sizeof(struct segment_command);
+    struct segment_command *linkedit = (struct segment_command *)(
+        bytes + sizeof(*header) + sizeof(struct segment_command));
+    struct linkedit_data_command *signature =
+        (struct linkedit_data_command *)(bytes + entryPointOffset +
+            sizeof(struct entry_point_command));
+    if(header->magic != MH_MAGIC ||
+            strncmp(linkedit->segname, SEG_LINKEDIT,
+                sizeof(linkedit->segname)) != 0 ||
+            signature->cmd != LC_CODE_SIGNATURE) {
+        return 0;
+    }
+    linkedit->filesize = superblobLength;
+    signature->datasize = superblobLength;
+    const size_t size =
+        LC32_TEST_CODE_SIGNATURE_OFFSET + superblobLength;
+    return RefreshFixtureCodeHash(bytes, size) ? size : 0;
+}
+
+static uint8_t *CopyEncryptedFixtureWithRelocatedSignature(
+        const uint8_t *sourceBytes, size_t sourceSize,
+        uint32_t newSignatureOffset, size_t *resultSizeOut) {
+    *resultSizeOut = 0;
+    const LC32TestSliceView source = {
+        .bytes = sourceBytes,
+        .size = sourceSize,
+    };
+    uint32_t oldSignatureOffset = 0;
+    uint32_t signatureSize = 0;
+    if(!FindCodeSignature(source,
+            &oldSignatureOffset, &signatureSize) ||
+            newSignatureOffset <= oldSignatureOffset ||
+            oldSignatureOffset > sourceSize ||
+            signatureSize > sourceSize - oldSignatureOffset ||
+            newSignatureOffset > SIZE_MAX - signatureSize) {
+        return NULL;
+    }
+
+    const size_t resultSize =
+        (size_t)newSignatureOffset + signatureSize;
+    uint8_t *result = calloc(1, resultSize);
+    if(result == NULL) return NULL;
+    memcpy(result, sourceBytes, oldSignatureOffset);
+    memcpy(result + newSignatureOffset,
+        sourceBytes + oldSignatureOffset, signatureSize);
+
+    struct mach_header *header = (struct mach_header *)result;
+    const size_t entryPointOffset = sizeof(*header) +
+        2 * sizeof(struct segment_command);
+    struct segment_command *linkedit = (struct segment_command *)(
+        result + sizeof(*header) + sizeof(struct segment_command));
+    struct linkedit_data_command *signature =
+        (struct linkedit_data_command *)(result + entryPointOffset +
+            sizeof(struct entry_point_command));
+    if(header->magic != MH_MAGIC ||
+            strncmp(linkedit->segname, SEG_LINKEDIT,
+                sizeof(linkedit->segname)) != 0 ||
+            signature->cmd != LC_CODE_SIGNATURE ||
+            signature->dataoff != oldSignatureOffset ||
+            signature->datasize != signatureSize) {
+        free(result);
+        return NULL;
+    }
+    linkedit->fileoff = newSignatureOffset;
+    linkedit->filesize = signatureSize;
+    signature->dataoff = newSignatureOffset;
+    if(!RefreshFixtureCodeHash(result, resultSize)) {
+        free(result);
+        return NULL;
+    }
+
+    *resultSizeOut = resultSize;
+    return result;
 }
 
 static bool BytesAreZero(const uint8_t *bytes, size_t size) {
@@ -957,7 +1210,9 @@ static bool DictionaryBooleanEquals(
 }
 
 static bool MergedEntitlementsAreValid(
-        LC32TestBlobView blob, bool targetWasSigned) {
+        LC32TestBlobView blob, bool targetWasSigned,
+        const char *expectedTeamIdentifier,
+        const char *expectedApplicationIdentifier) {
     if(!BlobHasMagicAndLength(blob, LC32_TEST_ENTITLEMENTS_MAGIC) ||
             blob.size <= 8) {
         return false;
@@ -990,9 +1245,13 @@ static bool MergedEntitlementsAreValid(
             CFSTR("com.example.shim-only"), true) &&
         DictionaryBooleanEquals(dictionary,
             CFSTR("com.apple.private.amfi.can-execute-cdhash"), true) &&
+        (expectedApplicationIdentifier == NULL ||
+            DictionaryStringEquals(dictionary,
+                CFSTR("application-identifier"),
+                expectedApplicationIdentifier)) &&
         DictionaryStringEquals(dictionary,
             CFSTR("com.apple.developer.team-identifier"),
-            LC32_TEST_DEFAULT_TEAM_IDENTIFIER) &&
+            expectedTeamIdentifier) &&
         DictionaryStringEquals(dictionary,
             CFSTR("com.apple.private.security.container-required"),
             LC32_TEST_BUNDLE_IDENTIFIER);
@@ -1050,9 +1309,11 @@ static bool BuildVersionMatches(
     return foundBuildVersion && commandOffset == commandsEnd;
 }
 
-static bool InjectedSignatureIsValid(
+static bool InjectedSignatureIsValidWithTeam(
         LC32TestSliceView slice, const char *expectedIdentifier,
-        bool targetWasSigned, uint32_t expectedSDK) {
+        bool targetWasSigned, const char *expectedTeamIdentifier,
+        const char *expectedApplicationIdentifier,
+        uint32_t expectedSDK) {
     uint32_t signatureOffset = 0;
     uint32_t signatureSize = 0;
     if(!BuildVersionMatches(slice, expectedSDK) ||
@@ -1084,7 +1345,9 @@ static bool InjectedSignatureIsValid(
                 cmsBlob, LC32_TEST_BLOB_WRAPPER_MAGIC) ||
             cmsBlob.size != 8 ||
             !MergedEntitlementsAreValid(
-                entitlementsBlob, targetWasSigned)) {
+                entitlementsBlob, targetWasSigned,
+                expectedTeamIdentifier,
+                expectedApplicationIdentifier)) {
         return false;
     }
 
@@ -1177,7 +1440,7 @@ static bool InjectedSignatureIsValid(
     const char *teamEnd = memchr(teamIdentifier, '\0', teamCapacity);
     if(identifierEnd == NULL || teamEnd == NULL ||
             strcmp(identifier, expectedIdentifier) != 0 ||
-            strcmp(teamIdentifier, LC32_TEST_DEFAULT_TEAM_IDENTIFIER) != 0) {
+            strcmp(teamIdentifier, expectedTeamIdentifier) != 0) {
         return false;
     }
 
@@ -1234,6 +1497,233 @@ static bool InjectedSignatureIsValid(
         const uint8_t *actualHash = codeDirectoryBlob.bytes +
             codeDirectory.hashOffset + index * codeDirectory.hashSize;
         if(memcmp(actualHash, expectedHash, sizeof(expectedHash)) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool InjectedSignatureIsValid(
+        LC32TestSliceView slice, const char *expectedIdentifier,
+        bool targetWasSigned, uint32_t expectedSDK) {
+    return InjectedSignatureIsValidWithTeam(
+        slice, expectedIdentifier, targetWasSigned,
+        LC32_TEST_DEFAULT_TEAM_IDENTIFIER, NULL, expectedSDK);
+}
+
+static bool EncryptedSignatureUsesShimDonorsAndPreservesCodeHashes(
+        LC32TestSliceView original, LC32TestSliceView transformed,
+        LC32TestSliceView signedShim,
+        const char *expectedIdentifier,
+        const char *expectedTeamIdentifier,
+        uint32_t expectedOriginalVersion) {
+    uint32_t originalSignatureOffset = 0;
+    uint32_t originalSignatureSize = 0;
+    uint32_t transformedSignatureOffset = 0;
+    uint32_t transformedSignatureSize = 0;
+    uint32_t shimSignatureOffset = 0;
+    uint32_t shimSignatureSize = 0;
+    if(original.size != transformed.size ||
+            !FindCodeSignature(original,
+                &originalSignatureOffset, &originalSignatureSize) ||
+            !FindCodeSignature(transformed,
+                &transformedSignatureOffset, &transformedSignatureSize) ||
+            !FindCodeSignature(signedShim,
+                &shimSignatureOffset, &shimSignatureSize) ||
+            originalSignatureOffset != transformedSignatureOffset ||
+            originalSignatureSize != transformedSignatureSize ||
+            memcmp(original.bytes, transformed.bytes,
+                originalSignatureOffset) != 0 ||
+            memcmp(original.bytes + originalSignatureOffset +
+                    originalSignatureSize,
+                transformed.bytes + transformedSignatureOffset +
+                    transformedSignatureSize,
+                original.size - originalSignatureOffset -
+                    originalSignatureSize) != 0) {
+        return false;
+    }
+
+    const uint8_t *originalSuperblob =
+        original.bytes + originalSignatureOffset;
+    const uint8_t *transformedSuperblob =
+        transformed.bytes + transformedSignatureOffset;
+    const uint8_t *shimSuperblob = signedShim.bytes + shimSignatureOffset;
+    LC32TestBlobView originalCodeDirectory = {0};
+    LC32TestBlobView transformedCodeDirectory = {0};
+    LC32TestBlobView transformedRequirements = {0};
+    LC32TestBlobView transformedEntitlements = {0};
+    LC32TestBlobView transformedDEREntitlements = {0};
+    LC32TestBlobView transformedCMS = {0};
+    LC32TestBlobView shimRequirements = {0};
+    LC32TestBlobView shimEntitlements = {0};
+    LC32TestBlobView shimDEREntitlements = {0};
+    LC32TestBlobView shimCMS = {0};
+    if(!FindSuperblobBlob(originalSuperblob, originalSignatureSize,
+            LC32_TEST_CODE_DIRECTORY_SLOT, &originalCodeDirectory) ||
+            !FindSuperblobBlob(transformedSuperblob,
+                transformedSignatureSize,
+                LC32_TEST_CODE_DIRECTORY_SLOT,
+                &transformedCodeDirectory) ||
+            !FindSuperblobBlob(transformedSuperblob,
+                transformedSignatureSize,
+                LC32_TEST_REQUIREMENTS_SLOT,
+                &transformedRequirements) ||
+            !FindSuperblobBlob(transformedSuperblob,
+                transformedSignatureSize,
+                LC32_TEST_ENTITLEMENTS_SLOT,
+                &transformedEntitlements) ||
+            !FindSuperblobBlob(transformedSuperblob,
+                transformedSignatureSize,
+                LC32_TEST_DER_ENTITLEMENTS_SLOT,
+                &transformedDEREntitlements) ||
+            !FindSuperblobBlob(transformedSuperblob,
+                transformedSignatureSize,
+                LC32_TEST_CMS_SIGNATURE_SLOT, &transformedCMS) ||
+            !FindSuperblobBlob(shimSuperblob, shimSignatureSize,
+                LC32_TEST_REQUIREMENTS_SLOT, &shimRequirements) ||
+            !FindSuperblobBlob(shimSuperblob, shimSignatureSize,
+                LC32_TEST_ENTITLEMENTS_SLOT, &shimEntitlements) ||
+            !FindSuperblobBlob(shimSuperblob, shimSignatureSize,
+                LC32_TEST_DER_ENTITLEMENTS_SLOT,
+                &shimDEREntitlements) ||
+            !FindSuperblobBlob(shimSuperblob, shimSignatureSize,
+                LC32_TEST_CMS_SIGNATURE_SLOT, &shimCMS) ||
+            !BlobHasMagicAndLength(
+                transformedRequirements, LC32_TEST_REQUIREMENTS_MAGIC) ||
+            !BlobHasMagicAndLength(transformedEntitlements,
+                LC32_TEST_ENTITLEMENTS_MAGIC) ||
+            !BlobHasMagicAndLength(transformedDEREntitlements,
+                LC32_TEST_DER_ENTITLEMENTS_MAGIC) ||
+            !BlobHasMagicAndLength(
+                transformedCMS, LC32_TEST_BLOB_WRAPPER_MAGIC) ||
+            transformedCMS.size != 8 ||
+            transformedRequirements.size != shimRequirements.size ||
+            memcmp(transformedRequirements.bytes,
+                shimRequirements.bytes, shimRequirements.size) != 0 ||
+            transformedEntitlements.size != shimEntitlements.size ||
+            memcmp(transformedEntitlements.bytes,
+                shimEntitlements.bytes, shimEntitlements.size) != 0 ||
+            transformedDEREntitlements.size != shimDEREntitlements.size ||
+            memcmp(transformedDEREntitlements.bytes,
+                shimDEREntitlements.bytes,
+                shimDEREntitlements.size) != 0 ||
+            transformedCMS.size != shimCMS.size ||
+            memcmp(transformedCMS.bytes, shimCMS.bytes,
+                shimCMS.size) != 0) {
+        return false;
+    }
+
+    if(originalCodeDirectory.size <
+                sizeof(LC32TestLegacyCodeDirectory) ||
+            transformedCodeDirectory.size <
+                sizeof(LC32TestLegacyCodeDirectory)) {
+        return false;
+    }
+    LC32TestLegacyCodeDirectory originalDirectory = {0};
+    LC32TestLegacyCodeDirectory transformedDirectory = {0};
+    memcpy(&originalDirectory, originalCodeDirectory.bytes,
+        sizeof(originalDirectory));
+    memcpy(&transformedDirectory, transformedCodeDirectory.bytes,
+        sizeof(transformedDirectory));
+    const uint32_t originalVersion = BigToHost32(
+        originalDirectory.version);
+    const uint32_t originalHashOffset = BigToHost32(
+        originalDirectory.hashOffset);
+    const uint32_t originalCodeSlotCount = BigToHost32(
+        originalDirectory.nCodeSlots);
+    const uint32_t transformedVersion = BigToHost32(
+        transformedDirectory.version);
+    const uint32_t transformedFlags = BigToHost32(
+        transformedDirectory.flags);
+    const uint32_t transformedHashOffset = BigToHost32(
+        transformedDirectory.hashOffset);
+    const uint32_t transformedSpecialSlotCount = BigToHost32(
+        transformedDirectory.nSpecialSlots);
+    const uint32_t transformedCodeSlotCount = BigToHost32(
+        transformedDirectory.nCodeSlots);
+    const uint32_t transformedIdentifierOffset = BigToHost32(
+        transformedDirectory.identOffset);
+    const uint32_t transformedTeamOffset = BigToHost32(
+        transformedDirectory.teamOffset);
+    const uint8_t hashSize = transformedDirectory.hashSize;
+    const uint64_t codeHashBytes =
+        (uint64_t)transformedCodeSlotCount * hashSize;
+    if(originalVersion != expectedOriginalVersion ||
+            transformedVersion < 0x20200 ||
+            (transformedFlags & LC32_TEST_ADHOC_FLAG) == 0 ||
+            transformedSpecialSlotCount <
+                LC32_TEST_DER_ENTITLEMENTS_SLOT ||
+            originalDirectory.hashType != transformedDirectory.hashType ||
+            originalDirectory.hashSize != hashSize || hashSize == 0 ||
+            originalCodeSlotCount != transformedCodeSlotCount ||
+            originalHashOffset > originalCodeDirectory.size ||
+            codeHashBytes >
+                originalCodeDirectory.size - originalHashOffset ||
+            transformedHashOffset > transformedCodeDirectory.size ||
+            codeHashBytes >
+                transformedCodeDirectory.size - transformedHashOffset ||
+            memcmp(originalCodeDirectory.bytes + originalHashOffset,
+                transformedCodeDirectory.bytes + transformedHashOffset,
+                (size_t)codeHashBytes) != 0 ||
+            transformedIdentifierOffset >= transformedCodeDirectory.size ||
+            transformedTeamOffset >= transformedCodeDirectory.size ||
+            memchr(transformedCodeDirectory.bytes +
+                    transformedIdentifierOffset, '\0',
+                transformedCodeDirectory.size -
+                    transformedIdentifierOffset) == NULL ||
+            memchr(transformedCodeDirectory.bytes + transformedTeamOffset,
+                '\0', transformedCodeDirectory.size -
+                    transformedTeamOffset) == NULL ||
+            strcmp((const char *)transformedCodeDirectory.bytes +
+                    transformedIdentifierOffset,
+                expectedIdentifier) != 0 ||
+            strcmp((const char *)transformedCodeDirectory.bytes +
+                    transformedTeamOffset,
+                expectedTeamIdentifier) != 0) {
+        return false;
+    }
+
+    const struct {
+        uint32_t slot;
+        LC32TestBlobView blob;
+    } specialSlots[] = {
+        { LC32_TEST_REQUIREMENTS_SLOT, transformedRequirements },
+        { LC32_TEST_ENTITLEMENTS_SLOT, transformedEntitlements },
+        { LC32_TEST_DER_ENTITLEMENTS_SLOT,
+            transformedDEREntitlements },
+    };
+    for(size_t index = 0;
+            index < sizeof(specialSlots) / sizeof(specialSlots[0]);
+            index++) {
+        if(transformedDirectory.hashType != LC32_TEST_SHA256_TYPE ||
+                hashSize != CC_SHA256_DIGEST_LENGTH ||
+                specialSlots[index].blob.size > UINT32_MAX) {
+            return false;
+        }
+        uint8_t digest[CC_SHA256_DIGEST_LENGTH];
+        CC_SHA256(specialSlots[index].blob.bytes,
+            (CC_LONG)specialSlots[index].blob.size, digest);
+        const uint64_t slotBytes =
+            (uint64_t)specialSlots[index].slot * hashSize;
+        if(slotBytes > transformedHashOffset ||
+                memcmp(transformedCodeDirectory.bytes +
+                        transformedHashOffset - slotBytes,
+                    digest, sizeof(digest)) != 0) {
+            return false;
+        }
+    }
+
+    if(transformedVersion >= 0x20400) {
+        if(transformedCodeDirectory.size <
+                sizeof(LC32TestCodeDirectory)) {
+            return false;
+        }
+        uint64_t encodedExecSegFlags = 0;
+        memcpy(&encodedExecSegFlags, transformedCodeDirectory.bytes +
+            offsetof(LC32TestCodeDirectory, execSegFlags),
+            sizeof(encodedExecSegFlags));
+        if((BigToHost64(encodedExecSegFlags) &
+                LC32_TEST_EXECSEG_MAIN_BINARY) != 0) {
             return false;
         }
     }
@@ -1748,6 +2238,112 @@ static int TestUnsignedTargetUsesFallbackIdentifier(const char *directory) {
         Fail("unsigned target did not use the fallback signing metadata");
 }
 
+static int TestApplicationIdentifierDerivesTeamIdentifier(
+        const char *directory) {
+    char targetPath[1024];
+    char shimPath[1024];
+    if(!FormatTestPath(targetPath, sizeof(targetPath),
+            directory, "derived-team-target") ||
+            !FormatTestPath(shimPath, sizeof(shimPath),
+                directory, "derived-team-shim")) {
+        return Fail("could not format derived-team test paths");
+    }
+
+    uint8_t target[LC32_TEST_SLICE_CAPACITY];
+    uint8_t shim[LC32_TEST_SLICE_CAPACITY];
+    const size_t targetSize = MakeSignedThinExecutable(
+        target, CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7, 0x39,
+        LC32_TEST_CODE_IDENTIFIER, LC32TestDerivedTeamEntitlements);
+    const size_t shimSize = MakeSignedThinExecutable(
+        shim, CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, 0x69,
+        "com.kdt.LiveExec32", LC32TestShimEntitlements);
+    if(targetSize == 0 || shimSize == 0 ||
+            !WriteFile(targetPath, target, targetSize, 0755) ||
+            !WriteFile(shimPath, shim, shimSize, 0755)) {
+        return Fail("could not create derived-team test inputs");
+    }
+
+    char error[512] = {0};
+    if(LC32InjectArm64ExecutableSlice(
+            targetPath, shimPath, LC32_TEST_BUNDLE_IDENTIFIER,
+            error, sizeof(error)) != LC32MachOInjectionSucceeded) {
+        fprintf(stderr,
+            "FatMachOTests: derived-team injection failed: %s\n", error);
+        return 1;
+    }
+
+    size_t resultSize = 0;
+    uint8_t *result = ReadFile(targetPath, &resultSize);
+    LC32TestSliceView injectedShim = {0};
+    const bool valid = result != NULL &&
+        FatListsShimFirstWithTrailingData(result, resultSize, 2) &&
+        FatContainsExactSlice(result, resultSize,
+            CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7, target, targetSize) &&
+        FindFatSlice(result, resultSize,
+            CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, &injectedShim) &&
+        InjectedSignatureIsValidWithTeam(injectedShim,
+            LC32_TEST_CODE_IDENTIFIER, true,
+            LC32_TEST_DERIVED_TEAM_IDENTIFIER,
+            LC32_TEST_APPLICATION_IDENTIFIER,
+            LC32_TEST_IOS_11_VERSION);
+    free(result);
+    return valid ? 0 :
+        Fail("application-identifier did not provide the signing team");
+}
+
+static int TestExplicitTeamIdentifierOverridesOtherSources(
+        const char *directory) {
+    char targetPath[1024];
+    char shimPath[1024];
+    if(!FormatTestPath(targetPath, sizeof(targetPath),
+            directory, "explicit-team-target") ||
+            !FormatTestPath(shimPath, sizeof(shimPath),
+                directory, "explicit-team-shim")) {
+        return Fail("could not format explicit-team test paths");
+    }
+
+    uint8_t target[LC32_TEST_SLICE_CAPACITY];
+    uint8_t shim[LC32_TEST_SLICE_CAPACITY];
+    const size_t targetSize = MakeSignedThinExecutable(
+        target, CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7, 0x3a,
+        LC32_TEST_CODE_IDENTIFIER, LC32TestExplicitTeamEntitlements);
+    const size_t shimSize = MakeSignedThinExecutable(
+        shim, CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, 0x6a,
+        "com.kdt.LiveExec32", LC32TestShimEntitlements);
+    if(targetSize == 0 || shimSize == 0 ||
+            !WriteFile(targetPath, target, targetSize, 0755) ||
+            !WriteFile(shimPath, shim, shimSize, 0755)) {
+        return Fail("could not create explicit-team test inputs");
+    }
+
+    char error[512] = {0};
+    if(LC32InjectArm64ExecutableSlice(
+            targetPath, shimPath, LC32_TEST_BUNDLE_IDENTIFIER,
+            error, sizeof(error)) != LC32MachOInjectionSucceeded) {
+        fprintf(stderr,
+            "FatMachOTests: explicit-team injection failed: %s\n", error);
+        return 1;
+    }
+
+    size_t resultSize = 0;
+    uint8_t *result = ReadFile(targetPath, &resultSize);
+    LC32TestSliceView injectedShim = {0};
+    const bool valid = result != NULL &&
+        FatListsShimFirstWithTrailingData(result, resultSize, 2) &&
+        FatContainsExactSlice(result, resultSize,
+            CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7, target, targetSize) &&
+        FindFatSlice(result, resultSize,
+            CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, &injectedShim) &&
+        InjectedSignatureIsValidWithTeam(injectedShim,
+            LC32_TEST_CODE_IDENTIFIER, true,
+            LC32_TEST_EXPLICIT_TEAM_IDENTIFIER,
+            LC32_TEST_APPLICATION_IDENTIFIER,
+            LC32_TEST_IOS_11_VERSION);
+    free(result);
+    return valid ? 0 :
+        Fail("explicit target Team ID did not override other sources");
+}
+
 static int TestEmptyBundleIdentifierIsUnchanged(const char *directory) {
     char targetPath[1024];
     char shimPath[1024];
@@ -1786,7 +2382,8 @@ static int TestEmptyBundleIdentifierIsUnchanged(const char *directory) {
         Fail("empty bundle identifier was accepted or modified target");
 }
 
-static int TestEncryptedTargetIsUnchanged(const char *directory) {
+static int TestEncryptedTargetSignatureIsModernized(
+        const char *directory, uint32_t originalCodeDirectoryVersion) {
     char targetPath[1024];
     char shimPath[1024];
     if(!FormatTestPath(targetPath, sizeof(targetPath),
@@ -1798,29 +2395,242 @@ static int TestEncryptedTargetIsUnchanged(const char *directory) {
 
     uint8_t target[LC32_TEST_SLICE_CAPACITY];
     uint8_t shim[LC32_TEST_SLICE_CAPACITY];
-    const size_t targetSize = MakeEncryptedARMExecutable(target);
-    const size_t shimSize = MakeThinExecutable(
-        shim, CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, 0xe6);
-    if(!WriteFile(targetPath, target, targetSize, 0755) ||
+    const size_t targetSize = MakeEncryptedARMExecutable(
+        target, originalCodeDirectoryVersion);
+    const size_t shimSize = MakeSignedThinExecutable(
+        shim, CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, 0xe6,
+        "com.kdt.LiveExec32", LC32TestShimEntitlements);
+    if(targetSize == 0 || shimSize == 0 ||
+            !WriteFile(targetPath, target, targetSize, 0755) ||
             !WriteFile(shimPath, shim, shimSize, 0755)) {
         return Fail("could not create encrypted test inputs");
     }
 
-    char error[512];
+    char error[512] = {0};
     if(LC32InjectArm64ExecutableSlice(
             targetPath, shimPath, LC32_TEST_BUNDLE_IDENTIFIER,
             error, sizeof(error)) !=
-                LC32MachOInjectionFailed ||
-            strstr(error, "encrypted") == NULL) {
-        return Fail("encrypted target was not rejected clearly");
+                LC32MachOInjectionSucceeded) {
+        fprintf(stderr,
+            "FatMachOTests: encrypted injection failed: %s\n", error);
+        return 1;
     }
 
     size_t resultSize = 0;
     uint8_t *result = ReadFile(targetPath, &resultSize);
-    const bool unchanged = result != NULL && resultSize == targetSize &&
+    LC32TestSliceView injectedTarget = {0};
+    LC32TestSliceView injectedShim = {0};
+    const LC32TestSliceView originalTarget = {
+        .bytes = target,
+        .size = targetSize,
+    };
+    const bool transformed = result != NULL &&
+        FatListsShimFirstWithTrailingData(result, resultSize, 2) &&
+        FindFatSlice(result, resultSize,
+            CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7, &injectedTarget) &&
+        FindFatSlice(result, resultSize,
+            CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, &injectedShim) &&
+        InjectedSignatureIsValidWithTeam(injectedShim,
+            LC32_TEST_CODE_IDENTIFIER, true,
+            LC32_TEST_DERIVED_TEAM_IDENTIFIER,
+            LC32_TEST_APPLICATION_IDENTIFIER,
+            LC32_TEST_IOS_11_VERSION) &&
+        EncryptedSignatureUsesShimDonorsAndPreservesCodeHashes(
+            originalTarget, injectedTarget, injectedShim,
+            LC32_TEST_CODE_IDENTIFIER,
+            LC32_TEST_DERIVED_TEAM_IDENTIFIER,
+            originalCodeDirectoryVersion);
+    free(result);
+    return transformed ? 0 :
+        Fail("encrypted target signature was not modernized safely");
+}
+
+static int TestEncryptedSignatureWithoutCapacityIsUnchanged(
+        const char *directory) {
+    char targetPath[1024];
+    char shimPath[1024];
+    if(!FormatTestPath(targetPath, sizeof(targetPath),
+            directory, "encrypted-small-signature-target") ||
+            !FormatTestPath(shimPath, sizeof(shimPath),
+                directory, "encrypted-small-signature-shim")) {
+        return Fail("could not format small-signature test paths");
+    }
+
+    uint8_t target[LC32_TEST_SLICE_CAPACITY];
+    uint8_t shim[LC32_TEST_SLICE_CAPACITY];
+    if(MakeEncryptedARMExecutable(target, 0x20100) == 0) {
+        return Fail("could not create the encrypted fixture");
+    }
+    const size_t targetSize =
+        ShrinkEncryptedFixtureSignatureAllocation(target);
+    const size_t shimSize = MakeSignedThinExecutable(
+        shim, CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, 0xe7,
+        "com.kdt.LiveExec32", LC32TestShimEntitlements);
+    if(targetSize == 0 || shimSize == 0 ||
+            !WriteFile(targetPath, target, targetSize, 0755) ||
+            !WriteFile(shimPath, shim, shimSize, 0755)) {
+        return Fail("could not create small-signature test inputs");
+    }
+
+    char error[512] = {0};
+    const LC32MachOInjectionResult injectionResult =
+        LC32InjectArm64ExecutableSlice(
+            targetPath, shimPath, LC32_TEST_BUNDLE_IDENTIFIER,
+            error, sizeof(error));
+    size_t resultSize = 0;
+    uint8_t *result = ReadFile(targetPath, &resultSize);
+    const bool unchanged =
+        injectionResult == LC32MachOInjectionFailed &&
+        strstr(error, "allocation is too small") != NULL &&
+        result != NULL && resultSize == targetSize &&
         memcmp(result, target, targetSize) == 0;
     free(result);
-    return unchanged ? 0 : Fail("encrypted target was modified");
+    return unchanged ? 0 :
+        Fail("undersized encrypted signature was modified or accepted");
+}
+
+static int TestUnsafeEncryptedSignatureLayoutsAreUnchanged(
+        const char *directory) {
+    char targetPath[1024];
+    char shimPath[1024];
+    if(!FormatTestPath(targetPath, sizeof(targetPath),
+            directory, "unsafe-encrypted-target") ||
+            !FormatTestPath(shimPath, sizeof(shimPath),
+                directory, "unsafe-encrypted-shim")) {
+        return Fail("could not format unsafe encrypted test paths");
+    }
+
+    uint8_t shim[LC32_TEST_SLICE_CAPACITY];
+    const size_t shimSize = MakeSignedThinExecutable(
+        shim, CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, 0xe8,
+        "com.kdt.LiveExec32", LC32TestShimEntitlements);
+    if(shimSize == 0 || !WriteFile(shimPath, shim, shimSize, 0755)) {
+        return Fail("could not create unsafe encrypted test shim");
+    }
+
+    static const char *const descriptions[] = {
+        "overlapping encrypted and code-signature ranges",
+        "code hash coverage extending into the signature",
+        "inconsistent CodeDirectory page coverage",
+    };
+    for(size_t index = 0;
+            index < sizeof(descriptions) / sizeof(descriptions[0]);
+            index++) {
+        uint8_t target[LC32_TEST_SLICE_CAPACITY];
+        const size_t targetSize =
+            MakeEncryptedARMExecutable(target, 0x20100);
+        bool mutated = targetSize != 0;
+        switch(index) {
+            case 0:
+                mutated = mutated && SetFixtureEncryptionRange(
+                    target, targetSize,
+                    LC32_TEST_CODE_SIGNATURE_OFFSET, 16);
+                break;
+            case 1:
+                mutated = mutated && SetFixtureCodeDirectoryUInt32(
+                    target, targetSize,
+                    offsetof(LC32TestLegacyCodeDirectory, codeLimit),
+                    LC32_TEST_CODE_SIGNATURE_OFFSET + 1);
+                break;
+            case 2:
+                mutated = mutated && SetFixtureCodeDirectoryUInt8(
+                    target, targetSize,
+                    offsetof(LC32TestLegacyCodeDirectory, pageSize), 9);
+                break;
+            default:
+                mutated = false;
+                break;
+        }
+        if(!mutated ||
+                !WriteFile(targetPath, target, targetSize, 0755)) {
+            return Fail("could not create unsafe encrypted fixture");
+        }
+
+        char error[512] = {0};
+        const LC32MachOInjectionResult injectionResult =
+            LC32InjectArm64ExecutableSlice(
+                targetPath, shimPath, LC32_TEST_BUNDLE_IDENTIFIER,
+                error, sizeof(error));
+        size_t resultSize = 0;
+        uint8_t *result = ReadFile(targetPath, &resultSize);
+        const bool unchanged =
+            injectionResult == LC32MachOInjectionFailed &&
+            error[0] != '\0' && result != NULL &&
+            resultSize == targetSize &&
+            memcmp(result, target, targetSize) == 0;
+        free(result);
+        if(!unchanged) {
+            fprintf(stderr, "FatMachOTests: accepted or modified %s\n",
+                descriptions[index]);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int TestEncryptedSignatureBeyondCopyChunk(
+        const char *directory) {
+    char targetPath[1024];
+    char shimPath[1024];
+    if(!FormatTestPath(targetPath, sizeof(targetPath),
+            directory, "large-signature-target") ||
+            !FormatTestPath(shimPath, sizeof(shimPath),
+                directory, "large-signature-shim")) {
+        return Fail("could not format large-signature test paths");
+    }
+
+    uint8_t smallTarget[LC32_TEST_SLICE_CAPACITY];
+    uint8_t shim[LC32_TEST_SLICE_CAPACITY];
+    const size_t smallTargetSize =
+        MakeEncryptedARMExecutable(smallTarget, 0x20100);
+    size_t targetSize = 0;
+    uint8_t *target = smallTargetSize == 0 ? NULL :
+        CopyEncryptedFixtureWithRelocatedSignature(
+            smallTarget, smallTargetSize,
+            LC32_TEST_LARGE_CODE_SIGNATURE_OFFSET, &targetSize);
+    const size_t shimSize = MakeSignedThinExecutable(
+        shim, CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, 0xe9,
+        "com.kdt.LiveExec32", LC32TestShimEntitlements);
+    if(target == NULL || shimSize == 0 ||
+            !WriteFile(targetPath, target, targetSize, 0755) ||
+            !WriteFile(shimPath, shim, shimSize, 0755)) {
+        free(target);
+        return Fail("could not create large-signature test inputs");
+    }
+
+    char error[512] = {0};
+    if(LC32InjectArm64ExecutableSlice(
+            targetPath, shimPath, LC32_TEST_BUNDLE_IDENTIFIER,
+            error, sizeof(error)) != LC32MachOInjectionSucceeded) {
+        fprintf(stderr,
+            "FatMachOTests: large-signature injection failed: %s\n",
+            error);
+        free(target);
+        return 1;
+    }
+
+    size_t resultSize = 0;
+    uint8_t *result = ReadFile(targetPath, &resultSize);
+    LC32TestSliceView injectedTarget = {0};
+    LC32TestSliceView injectedShim = {0};
+    const LC32TestSliceView originalTarget = {
+        .bytes = target,
+        .size = targetSize,
+    };
+    const bool transformed = result != NULL &&
+        FatListsShimFirstWithTrailingData(result, resultSize, 2) &&
+        FindFatSlice(result, resultSize,
+            CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7, &injectedTarget) &&
+        FindFatSlice(result, resultSize,
+            CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, &injectedShim) &&
+        EncryptedSignatureUsesShimDonorsAndPreservesCodeHashes(
+            originalTarget, injectedTarget, injectedShim,
+            LC32_TEST_CODE_IDENTIFIER,
+            LC32_TEST_DERIVED_TEAM_IDENTIFIER, 0x20100);
+    free(result);
+    free(target);
+    return transformed ? 0 :
+        Fail("large-offset encrypted signature was not rewritten safely");
 }
 
 static int TestByteSwappedTargetIsUnchanged(const char *directory) {
@@ -2106,8 +2916,14 @@ static void CleanupTestDirectory(const char *directory) {
         "bad-signature-target", "bad-signature-shim",
         "versioned-codedirectory-target", "versioned-codedirectory-shim",
         "unsigned-target", "unsigned-target-shim",
+        "derived-team-target", "derived-team-shim",
+        "explicit-team-target", "explicit-team-shim",
         "empty-bundle-target", "empty-bundle-shim",
         "encrypted-target", "encrypted-shim",
+        "encrypted-small-signature-target",
+        "encrypted-small-signature-shim",
+        "unsafe-encrypted-target", "unsafe-encrypted-shim",
+        "large-signature-target", "large-signature-shim",
         "byte-swapped-target", "byte-swapped-shim",
         "parser-failure-target", "parser-failure-shim",
         "five-slice-target", "five-slice-shim",
@@ -2145,9 +2961,15 @@ int main(void) {
     const int missingSignatureResult = versionedCodeDirectoryResult == 0 ?
         TestUnsignedTargetUsesFallbackIdentifier(temporaryDirectory) :
             versionedCodeDirectoryResult;
-    const int emptyBundleResult = missingSignatureResult == 0 ?
+    const int derivedTeamResult = missingSignatureResult == 0 ?
+        TestApplicationIdentifierDerivesTeamIdentifier(
+            temporaryDirectory) : missingSignatureResult;
+    const int explicitTeamResult = derivedTeamResult == 0 ?
+        TestExplicitTeamIdentifierOverridesOtherSources(
+            temporaryDirectory) : derivedTeamResult;
+    const int emptyBundleResult = explicitTeamResult == 0 ?
         TestEmptyBundleIdentifierIsUnchanged(temporaryDirectory) :
-            missingSignatureResult;
+            explicitTeamResult;
     const int parserResult = emptyBundleResult == 0 ?
         TestParserFailuresAreGenericAndUnchanged(temporaryDirectory) :
             emptyBundleResult;
@@ -2156,13 +2978,25 @@ int main(void) {
     const int byteSwappedResult = sliceLimitResult == 0 ?
         TestByteSwappedTargetIsUnchanged(temporaryDirectory) :
             sliceLimitResult;
-    const int encryptedResult = byteSwappedResult == 0 ?
-        TestEncryptedTargetIsUnchanged(temporaryDirectory) :
-            byteSwappedResult;
+    const int earliestEncryptedResult = byteSwappedResult == 0 ?
+        TestEncryptedTargetSignatureIsModernized(
+            temporaryDirectory, 0x20001) : byteSwappedResult;
+    const int encryptedResult = earliestEncryptedResult == 0 ?
+        TestEncryptedTargetSignatureIsModernized(
+            temporaryDirectory, 0x20100) : earliestEncryptedResult;
+    const int encryptedCapacityResult = encryptedResult == 0 ?
+        TestEncryptedSignatureWithoutCapacityIsUnchanged(
+            temporaryDirectory) : encryptedResult;
+    const int unsafeEncryptedResult = encryptedCapacityResult == 0 ?
+        TestUnsafeEncryptedSignatureLayoutsAreUnchanged(
+            temporaryDirectory) : encryptedCapacityResult;
+    const int largeSignatureResult = unsafeEncryptedResult == 0 ?
+        TestEncryptedSignatureBeyondCopyChunk(
+            temporaryDirectory) : unsafeEncryptedResult;
     CleanupTestDirectory(temporaryDirectory);
     (void)alarm(0);
-    if(encryptedResult == 0) {
+    if(largeSignatureResult == 0) {
         printf("FatMachOTests: all tests passed\n");
     }
-    return encryptedResult;
+    return largeSignatureResult;
 }

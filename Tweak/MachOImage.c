@@ -57,6 +57,14 @@ static bool LC32MachORangeContains(
             innerOffset - outerOffset, innerSize, outerSize);
 }
 
+static bool LC32MachORangesOverlap(
+        uint64_t firstOffset, uint64_t firstSize,
+        uint64_t secondOffset, uint64_t secondSize) {
+    return firstSize != 0 && secondSize != 0 &&
+        firstOffset < secondOffset + secondSize &&
+        secondOffset < firstOffset + firstSize;
+}
+
 static bool LC32MachOReadAt(
         int fd, void *buffer, size_t size, uint64_t offset) {
     if((buffer == NULL && size != 0) || offset > (uint64_t)INT64_MAX ||
@@ -348,6 +356,9 @@ static bool LC32MachOValidateEncryption(
             !LC32MachORangeFits(cryptOffset, cryptSize, sliceSize))) {
         return false;
     }
+    slice->encryptionOffset = cryptOffset;
+    slice->encryptionSize = cryptSize;
+    slice->encryptionIdentifier = cryptIdentifier;
     slice->encrypted = cryptIdentifier != 0;
     return true;
 }
@@ -715,6 +726,14 @@ static bool LC32MachOParseSlice(
                 slice->codeSignatureOffset, slice->codeSignatureSize))) {
         LC32MachOSetError(errorBuffer, errorBufferCapacity,
             "Mach-O code signature is outside its unique __LINKEDIT segment");
+        return false;
+    }
+    if(slice->encrypted && slice->hasCodeSignature &&
+            LC32MachORangesOverlap(
+                slice->encryptionOffset, slice->encryptionSize,
+                slice->codeSignatureOffset, slice->codeSignatureSize)) {
+        LC32MachOSetError(errorBuffer, errorBufferCapacity,
+            "Mach-O encrypted and code-signature ranges overlap");
         return false;
     }
     return true;

@@ -36,6 +36,10 @@ typedef struct {
     uint32_t codeSignatureSize;
     uint32_t codeSignatureCommandOffset;
 
+    uint32_t encryptionOffset;
+    uint32_t encryptionSize;
+    uint32_t encryptionIdentifier;
+
     uint32_t buildVersionCommandOffset;
     uint32_t buildVersionPlatform;
     uint32_t buildVersionMinOS;
