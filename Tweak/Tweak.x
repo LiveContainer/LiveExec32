@@ -11,6 +11,7 @@
 #import "FatMachO.h"
 
 @interface MIExecutableBundle (LiveExec32Injector)
+@property (nonatomic, readonly) NSURL *bundleURL;
 @property (nonatomic, readonly) NSURL *executableURL;
 - (BOOL)_validateWithError:
     (NSError *__autoreleasing *)error;
@@ -37,8 +38,11 @@ static NSError *LC32InjectorError(
 
 - (BOOL)_validateWithError:
         (NSError *__autoreleasing *)error {
+    NSString *pkgPath = [self.bundleURL.path stringByAppendingPathComponent:@"PkgInfo"];
+    BOOL isPlaceholder = ![NSFileManager.defaultManager fileExistsAtPath:pkgPath];
     BOOL isValid = %orig;
-    if(self.bundleType != MIBundleTypeUserApp || !isValid) return isValid;
+    if(isPlaceholder || self.bundleType != MIBundleTypeUserApp || !isValid)
+        return isValid;
 
     LC32MachOInjectionResult injectionResult =
         LC32MachOInjectionNotApplicable;
