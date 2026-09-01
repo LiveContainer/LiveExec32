@@ -18,6 +18,13 @@ static BOOL LC32TransformNear(CGAffineTransform first,
         LC32CGFloatNear(first.ty, second.ty);
 }
 
+static BOOL LC32RectNear(CGRect first, CGRect second) {
+    return LC32CGFloatNear(first.origin.x, second.origin.x) &&
+        LC32CGFloatNear(first.origin.y, second.origin.y) &&
+        LC32CGFloatNear(first.size.width, second.size.width) &&
+        LC32CGFloatNear(first.size.height, second.size.height);
+}
+
 static NSUInteger LC32SizeThatFitsCallCount;
 static CGSize LC32SizeThatFitsInput;
 static NSUInteger LC32LeftViewRectCallCount;
@@ -73,6 +80,18 @@ int main(void) {
         initWithFrame:CGRectMake(17, 29, 80, 60)];
     UIView *destination = [[UIView alloc]
         initWithFrame:CGRectMake(101, 211, 70, 50)];
+    const BOOL initializerHFAPassed =
+        LC32RectNear(source.frame, CGRectMake(17, 29, 80, 60)) &&
+        LC32RectNear(destination.frame, CGRectMake(101, 211, 70, 50));
+    printf("guest-host-aggregate-hfa-initializer: %s\n",
+        initializerHFAPassed ? "PASS" : "FAIL");
+
+    source.alpha = 0.375f;
+    const BOOL scalarFloatingPassed =
+        LC32CGFloatNear(source.alpha, 0.375f);
+    printf("guest-host-scalar-floating-argument: %s\n",
+        scalarFloatingPassed ? "PASS" : "FAIL");
+
     [root addSubview:source];
     [root addSubview:destination];
     const CGPoint converted = [source
@@ -152,6 +171,7 @@ int main(void) {
     [destination release];
     [root release];
     [pool drain];
-    return hfaObjectPassed && indirectPassed && callbackPassed &&
+    return initializerHFAPassed && scalarFloatingPassed &&
+        hfaObjectPassed && indirectPassed && callbackPassed &&
         rectCallbackPassed && pointCallbackPassed ? 0 : 1;
 }

@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <array>
+#include <cstddef>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -37,6 +38,48 @@ extern "C" void objc_destroyWeak(LC32NativeWeakSlot *location);
 extern "C" id objc_initWeakOrNil(LC32NativeWeakSlot *location, id object);
 extern "C" id objc_loadWeakRetained(LC32NativeWeakSlot *location);
 extern "C" id objc_storeWeakOrNil(LC32NativeWeakSlot *location, id object);
+
+struct LC32HostMessageTwoDoubles {
+    double d0, d1;
+};
+
+struct LC32HostMessageTwoU64 {
+    u64 x0, x1;
+};
+
+struct LC32HostMessageFourDoubles {
+    double d0, d1, d2, d3;
+};
+
+struct alignas(16) LC32HostMessageInvocation {
+    u64 invokeSuper;
+    u64 target;
+    u64 selector;
+    u64 integerArguments[9];
+    u64 floatingArguments[8];
+};
+
+static_assert(offsetof(LC32HostMessageInvocation, invokeSuper) == 0);
+static_assert(offsetof(LC32HostMessageInvocation, target) == 8);
+static_assert(offsetof(LC32HostMessageInvocation, selector) == 16);
+static_assert(offsetof(LC32HostMessageInvocation, integerArguments) == 24);
+static_assert(offsetof(LC32HostMessageInvocation, floatingArguments) == 96);
+static_assert(sizeof(LC32HostMessageInvocation) == 160);
+
+extern "C" u64 LC32InvokeHostMessageInteger(
+    const LC32HostMessageInvocation *invocation);
+extern "C" float LC32InvokeHostMessageFloat(
+    const LC32HostMessageInvocation *invocation);
+extern "C" double LC32InvokeHostMessageDouble(
+    const LC32HostMessageInvocation *invocation);
+extern "C" LC32HostMessageTwoDoubles LC32InvokeHostMessageTwoDoubles(
+    const LC32HostMessageInvocation *invocation);
+extern "C" LC32HostMessageTwoU64 LC32InvokeHostMessageTwoU64(
+    const LC32HostMessageInvocation *invocation);
+extern "C" LC32HostMessageFourDoubles LC32InvokeHostMessageFourDoubles(
+    const LC32HostMessageInvocation *invocation);
+extern "C" LC32_SixDoubles LC32InvokeHostMessageSixDoubles(
+    const LC32HostMessageInvocation *invocation);
 
 static id LC32RetainOwnedHostObject(id object);
 
@@ -3030,23 +3073,6 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
         memcpy(floatingArguments, args, sizeof(floatingArguments));
     }
 
-    typedef u64(*objc_msgSendFunc)(u64 x0, u64 x1, u64 x2, u64 x3, u64 x4, u64 x5, u64 x6, u64 x7, ...);
-    typedef float(*objc_msgSendFloatFunc)(u64 x0, u64 x1, u64 x2, u64 x3, u64 x4, u64 x5, u64 x6, u64 x7, ...);
-    typedef double(*objc_msgSendDoubleFunc)(u64 x0, u64 x1, u64 x2, u64 x3, u64 x4, u64 x5, u64 x6, u64 x7, ...);
-    struct LC32_TwoDoubles {
-        double d0, d1;
-    };
-    struct LC32_TwoU64 {
-        u64 x0, x1;
-    };
-    struct LC32_FourDoubles {
-        double d0, d1, d2, d3;
-    };
-    typedef LC32_TwoDoubles(*objc_msgSendTwoDoublesFunc)(u64 x0, u64 x1, u64 x2, u64 x3, u64 x4, u64 x5, u64 x6, u64 x7, ...);
-    typedef LC32_TwoU64(*objc_msgSendTwoU64Func)(u64 x0, u64 x1, u64 x2, u64 x3, u64 x4, u64 x5, u64 x6, u64 x7, ...);
-    typedef LC32_FourDoubles(*objc_msgSendFourDoublesFunc)(u64 x0, u64 x1, u64 x2, u64 x3, u64 x4, u64 x5, u64 x6, u64 x7, ...);
-    typedef LC32_SixDoubles(*objc_msgSendSixDoublesFunc)(u64 x0, u64 x1, u64 x2, u64 x3, u64 x4, u64 x5, u64 x6, u64 x7, ...);
-
     enum class HostReturnKind {
         Integer,
         Float,
@@ -3074,18 +3100,21 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
         }
     }
 
-    auto floatingArgument = [&](size_t index) {
-        double value;
-        memcpy(&value, &floatingArguments[index], sizeof(value));
-        return value;
+    auto makeHostMessageInvocation = [&](bool invokeSuper, u64 target) {
+        LC32HostMessageInvocation invocation = {};
+        invocation.invokeSuper = invokeSuper;
+        invocation.target = target;
+        invocation.selector = host_cmd;
+        memcpy(invocation.integerArguments, integerArguments,
+               sizeof(integerArguments));
+        memcpy(invocation.floatingArguments, floatingArguments,
+               sizeof(floatingArguments));
+        return invocation;
     };
 
-    auto invokeScalar = [&](void *function, u64 target) -> u64 {
-        LC32SetDoubleRegisters(
-            floatingArgument(0), floatingArgument(1),
-            floatingArgument(2), floatingArgument(3),
-            floatingArgument(4), floatingArgument(5),
-            floatingArgument(6), floatingArgument(7));
+    auto invokeScalar = [&](bool invokeSuper, u64 target) -> u64 {
+        const LC32HostMessageInvocation invocation =
+            makeHostMessageInvocation(invokeSuper, target);
         LC32GuestHostCallQuiescence quiescence;
         const bool trackInitializerOwnership =
             LC32SelectorIsInInitializerFamily(selector) &&
@@ -3095,29 +3124,16 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
         double floatingResult;
         switch(returnKind) {
             case HostReturnKind::Float:
-                floatingResult = ((objc_msgSendFloatFunc)function)(target,
-                    host_cmd, integerArguments[0], integerArguments[1],
-                    integerArguments[2], integerArguments[3],
-                    integerArguments[4], integerArguments[5],
-                    integerArguments[6], integerArguments[7],
-                    integerArguments[8]);
+                floatingResult =
+                    LC32InvokeHostMessageFloat(&invocation);
                 break;
             case HostReturnKind::Double:
-                floatingResult = ((objc_msgSendDoubleFunc)function)(target,
-                    host_cmd, integerArguments[0], integerArguments[1],
-                    integerArguments[2], integerArguments[3],
-                    integerArguments[4], integerArguments[5],
-                    integerArguments[6], integerArguments[7],
-                    integerArguments[8]);
+                floatingResult =
+                    LC32InvokeHostMessageDouble(&invocation);
                 break;
             case HostReturnKind::Integer: {
                 const u64 result =
-                    ((objc_msgSendFunc)function)(target, host_cmd,
-                    integerArguments[0], integerArguments[1],
-                    integerArguments[2], integerArguments[3],
-                    integerArguments[4], integerArguments[5],
-                    integerArguments[6], integerArguments[7],
-                    integerArguments[8]);
+                    LC32InvokeHostMessageInteger(&invocation);
                 const int initializerOwnershipDelta =
                     initializerScope.ownershipDelta();
                 if(result && initializerOwnershipDelta == -1) {
@@ -3146,55 +3162,37 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
         return resultBits;
     };
 
-    auto invokeStruct = [&](void *function, u64 target) {
-        LC32SetDoubleRegisters(
-            floatingArgument(0), floatingArgument(1),
-            floatingArgument(2), floatingArgument(3),
-            floatingArgument(4), floatingArgument(5),
-            floatingArgument(6), floatingArgument(7));
+    auto invokeStruct = [&](bool invokeSuper, u64 target) {
+        const LC32HostMessageInvocation invocation =
+            makeHostMessageInvocation(invokeSuper, target);
         if(returnsNSRange) {
-            if(structLen != sizeof(LC32_TwoU64)) {
+            if(structLen != sizeof(LC32HostMessageTwoU64)) {
                 printf("LC32: invalid NSRange return size %u for selector %s\n",
                        structLen, sel_getName(selector));
                 return;
             }
             LC32GuestHostCallQuiescence quiescence;
-            const LC32_TwoU64 result =
-                ((objc_msgSendTwoU64Func)function)(target,
-                    host_cmd, integerArguments[0], integerArguments[1],
-                    integerArguments[2], integerArguments[3],
-                    integerArguments[4], integerArguments[5],
-                    integerArguments[6], integerArguments[7],
-                    integerArguments[8]);
+            const LC32HostMessageTwoU64 result =
+                LC32InvokeHostMessageTwoU64(&invocation);
             quiescence.finish();
             (void)Dynarmic_mem_1write(structPtr, sizeof(result),
                 (char *)&result);
             return;
         }
         switch(structLen) {
-            case sizeof(LC32_TwoDoubles): {
+            case sizeof(LC32HostMessageTwoDoubles): {
                 LC32GuestHostCallQuiescence quiescence;
-                const LC32_TwoDoubles result =
-                    ((objc_msgSendTwoDoublesFunc)function)(target,
-                        host_cmd, integerArguments[0], integerArguments[1],
-                        integerArguments[2], integerArguments[3],
-                        integerArguments[4], integerArguments[5],
-                        integerArguments[6], integerArguments[7],
-                        integerArguments[8]);
+                const LC32HostMessageTwoDoubles result =
+                    LC32InvokeHostMessageTwoDoubles(&invocation);
                 quiescence.finish();
                 (void)Dynarmic_mem_1write(structPtr, sizeof(result),
                     (char *)&result);
                 break;
             }
-            case sizeof(LC32_FourDoubles): {
+            case sizeof(LC32HostMessageFourDoubles): {
                 LC32GuestHostCallQuiescence quiescence;
-                const LC32_FourDoubles result =
-                    ((objc_msgSendFourDoublesFunc)function)(target,
-                        host_cmd, integerArguments[0], integerArguments[1],
-                        integerArguments[2], integerArguments[3],
-                        integerArguments[4], integerArguments[5],
-                        integerArguments[6], integerArguments[7],
-                        integerArguments[8]);
+                const LC32HostMessageFourDoubles result =
+                    LC32InvokeHostMessageFourDoubles(&invocation);
                 quiescence.finish();
                 (void)Dynarmic_mem_1write(structPtr, sizeof(result),
                     (char *)&result);
@@ -3203,12 +3201,7 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
             case sizeof(LC32_SixDoubles): {
                 LC32GuestHostCallQuiescence quiescence;
                 const LC32_SixDoubles result =
-                    ((objc_msgSendSixDoublesFunc)function)(target,
-                        host_cmd, integerArguments[0], integerArguments[1],
-                        integerArguments[2], integerArguments[3],
-                        integerArguments[4], integerArguments[5],
-                        integerArguments[6], integerArguments[7],
-                        integerArguments[8]);
+                    LC32InvokeHostMessageSixDoubles(&invocation);
                 quiescence.finish();
                 (void)Dynarmic_mem_1write(structPtr, sizeof(result),
                     (char *)&result);
@@ -3263,19 +3256,19 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
             dispatchClass
         };
         if(structPtr) {
-            invokeStruct((void *)objc_msgSendSuper, (u64)&superInfo);
-            return finishIndirectArguments(0);
-        } else {
-            return finishScalarResult(invokeScalar(
-                (void *)objc_msgSendSuper, (u64)&superInfo));
-        }
-    } else {
-        if(structPtr) {
-            invokeStruct((void *)objc_msgSend, host_self);
+            invokeStruct(true, (u64)&superInfo);
             return finishIndirectArguments(0);
         } else {
             return finishScalarResult(
-                invokeScalar((void *)objc_msgSend, host_self));
+                invokeScalar(true, (u64)&superInfo));
+        }
+    } else {
+        if(structPtr) {
+            invokeStruct(false, host_self);
+            return finishIndirectArguments(0);
+        } else {
+            return finishScalarResult(
+                invokeScalar(false, host_self));
         }
     }
 }
