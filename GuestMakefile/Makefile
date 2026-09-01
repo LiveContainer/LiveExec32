@@ -2,6 +2,9 @@ ARCHS := armv7s
 TARGET := iphone:clang:16.5:10.3
 FINALPACKAGE = 1
 STRIP = 0
+# Theos otherwise pairs STRIP=0 with -O0. Preserve symbols without shipping
+# every guest shim and forwarding path as an unoptimized debug build.
+OPTFLAG = -O2
 .DEFAULT_GOAL := all
 GO_EASY_ON_ME = 1
 

@@ -448,6 +448,7 @@ void *GuestPageTablePointer(
     u64 guestPageAddress, const t_memory_page page);
 char *get_memory_page_with_permissions(
     u64 vaddr, int requiredPermissions);
+void InvalidateGuestMemoryLookupCaches();
 bool GuestAddressRangeIsValid32(u64 address, u64 size);
 kern_return_t CopyGuestVmMemory(
     u32 source, u32 destination, u32 size);

@@ -1,14 +1,19 @@
+LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash
 LC32_HOST_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),\
-  $(if $(strip $(filter-out check-guest-bootstrap,$(MAKECMDGOALS))),,1),)
+  $(if $(strip $(filter-out $(LC32_HOST_TEST_GOALS),$(MAKECMDGOALS))),,1),)
 
 HOST_CXX ?= xcrun --sdk macosx clang++
 HOST_CXXFLAGS ?= -std=c++17 -Wall -Wextra -Werror -pedantic
 HOST_TEST_OUTPUT_DIR ?= $(CURDIR)/.theos/host-tests
 GUEST_BOOTSTRAP_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/guest-bootstrap-host
+MEMORY_HASH_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/memory-hash-host
 
-.PHONY: check-guest-bootstrap
+.PHONY: check-guest-bootstrap check-memory-hash
 check-guest-bootstrap: $(GUEST_BOOTSTRAP_HOST_TEST)
 	"$(GUEST_BOOTSTRAP_HOST_TEST)"
+
+check-memory-hash: $(MEMORY_HASH_HOST_TEST)
+	"$(MEMORY_HASH_HOST_TEST)"
 
 $(GUEST_BOOTSTRAP_HOST_TEST): guest_bootstrap_host.cpp \
   ../HostFrameworks/LC32/guest_bootstrap.cpp \
@@ -18,6 +23,14 @@ $(GUEST_BOOTSTRAP_HOST_TEST): guest_bootstrap_host.cpp \
 		-I"$(abspath ../HostFrameworks/LC32)" \
 		guest_bootstrap_host.cpp \
 		../HostFrameworks/LC32/guest_bootstrap.cpp -o "$@"
+
+$(MEMORY_HASH_HOST_TEST): guest_memory_hash_host.cpp \
+  ../HostFrameworks/LC32/guest_memory_hash.h \
+  ../HostFrameworks/LC32/khash.h
+	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
+	$(HOST_CXX) $(HOST_CXXFLAGS) \
+		-I"$(abspath ../HostFrameworks/LC32)" \
+		guest_memory_hash_host.cpp -o "$@"
 
 # Keep this host-native regression test usable on a clean checkout without
 # requiring Theos or bootstrapping the iOS 10.3 guest SDK. Mixed/default goals

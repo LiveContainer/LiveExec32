@@ -677,6 +677,34 @@ void LogGuestMemoryWatchWriteLocked(
 }
 #endif
 
+namespace {
+
+struct GuestMemoryLookupCache {
+    khash_t(memory) *memory = nullptr;
+    u64 generation = 0;
+    u64 guestPageAddress = UINT64_MAX;
+    char *hostPageAddress = nullptr;
+    int permissions = 0;
+};
+
+/*
+ * Strictly permissioned pages are intentionally absent from Dynarmic's
+ * process-wide page table, so repeated scalar and exclusive accesses reach
+ * kh_get_memory. Keep the last resolved 4 KiB guest page per host thread.
+ * Every lookup and mapping mutation is serialized by guestVmMutex; the
+ * generation prevents a cached host pointer from surviving an intervening
+ * unmap, remap, or protection change after that mutex is released.
+ */
+std::atomic<u64> guestMemoryLookupGeneration{1};
+thread_local GuestMemoryLookupCache guestMemoryLookupCache;
+
+}  // namespace
+
+void InvalidateGuestMemoryLookupCaches() {
+    guestMemoryLookupGeneration.fetch_add(
+        1, std::memory_order_relaxed);
+}
+
 char *get_memory_page_with_permissions(
         u64 vaddr, int requiredPermissions) {
     std::lock_guard<std::recursive_mutex> lock(
@@ -686,6 +714,19 @@ char *get_memory_page_with_permissions(
         return nullptr;
     }
     const u64 base = vaddr & ~DYN_PAGE_MASK;
+    const u64 generation =
+        guestMemoryLookupGeneration.load(
+            std::memory_order_relaxed);
+    GuestMemoryLookupCache &cache =
+        guestMemoryLookupCache;
+    if (cache.memory == memory &&
+            cache.generation == generation &&
+            cache.guestPageAddress == base &&
+            cache.hostPageAddress != nullptr) {
+        return (cache.permissions & requiredPermissions) ==
+                requiredPermissions
+            ? cache.hostPageAddress : nullptr;
+    }
     const khiter_t iterator =
         kh_get(memory, memory, base);
     if (iterator == kh_end(memory)) {
@@ -693,12 +734,20 @@ char *get_memory_page_with_permissions(
     }
     const t_memory_page page =
         kh_value(memory, iterator);
-    if (page == nullptr ||
-            (page->perms & requiredPermissions) !=
-                requiredPermissions) {
+    if (page == nullptr || page->addr == nullptr) {
         return nullptr;
     }
-    return static_cast<char *>(page->addr);
+    cache = {
+        .memory = memory,
+        .generation = generation,
+        .guestPageAddress = base,
+        .hostPageAddress =
+            static_cast<char *>(page->addr),
+        .permissions = page->perms,
+    };
+    return (cache.permissions & requiredPermissions) ==
+            requiredPermissions
+        ? cache.hostPageAddress : nullptr;
 }
 
 bool GuestAddressRangeIsValid32(

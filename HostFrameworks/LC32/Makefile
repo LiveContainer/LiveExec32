@@ -3,6 +3,9 @@ TARGET := iphone:clang:latest:15.0
 FINALPACKAGE = 1
 GO_EASY_ON_ME := 1
 STRIP = 0
+# Theos otherwise pairs STRIP=0 with -O0. Keep symbols for device traces while
+# compiling the emulator and bridge hot paths as release code.
+OPTFLAG = -O2
 # The root app signs the embedded copy after its optional Catalyst rewrite.
 TARGET_CODESIGN =
 

@@ -3,12 +3,17 @@
 #include <errno.h>
 #include <libroot.h>
 #include <limits.h>
+#include <mach-o/loader.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+#ifdef LC32_JAILBREAK_PACKAGE
+extern uint32_t dyld_get_active_platform(void);
+#endif
 
 /* Lets future injector versions distinguish and migrate copied launchers. */
 __attribute__((used, section("__TEXT,__lc32shim")))
@@ -78,6 +83,28 @@ static void *LoadFramework(const char *name, int flags) {
     return framework;
 }
 
+static void ConfigureDynarmicCodeMemoryMode(void) {
+#ifdef LC32_JAILBREAK_PACKAGE
+    /*
+     * Configure this before loading LiveExec32Shared: Dynarmic also owns a
+     * small code block constructed while the framework is initialized.
+     *
+     * A single-mapped iOS JIT cache changes the protection of the entire
+     * cache before and after every newly translated block.  Separate RW and
+     * RX aliases avoid those costly mprotect transitions on older devices.
+     * Preserve Dynarmic's normal mapping policy for Catalyst and Simulator,
+     * and respect an inherited explicit setting while debugging.
+     */
+    if(dyld_get_active_platform() == PLATFORM_IOS &&
+            getenv("DYNARMIC_DUAL_MAPPED") == NULL &&
+            setenv("DYNARMIC_DUAL_MAPPED", "1", 0) != 0) {
+        fprintf(stderr,
+            "LC32: could not enable dual-mapped JIT code memory: %s\n",
+            strerror(errno));
+    }
+#endif
+}
+
 static bool ConfigureInjectedEnvironment(
         char installedLauncherPath[PATH_MAX]) {
     char guestHome[PATH_MAX];
@@ -139,6 +166,8 @@ int main(int argc, char *argv[], char *envp[]) {
         fprintf(stderr, "LC32: invalid application arguments\n");
         return 1;
     }
+
+    ConfigureDynarmicCodeMemoryMode();
 
     const char *executableName = strrchr(argv[0], '/');
     executableName = executableName == NULL ?

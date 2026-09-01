@@ -22,6 +22,9 @@ endif
 APPLICATION_NAME = LiveExec32
 
 LiveExec32_FILES = App/main.c
+ifeq ($(_THEOS_PACKAGE_FORMAT),deb)
+LiveExec32_CFLAGS = -DLC32_JAILBREAK_PACKAGE=1
+endif
 # LoadFrameworkFromSearchPaths appends <name>.framework/<name> to these
 # framework roots. LoadFramework falls back to the libroot-resolved path for
 # jailbreak prefixes other than the common /var/jb layout.

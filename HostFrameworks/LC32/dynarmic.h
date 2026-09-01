@@ -33,6 +33,8 @@ extern "C" {
 #define ALIGN_DYN_SIZE(len) (((DYN_PAGE_SIZE-1)&len) ? ((len+DYN_PAGE_SIZE) & ~(DYN_PAGE_SIZE-1)):len)
 #define ALIGN_SIZE(len) (((PAGE_SIZE-1)&len) ? ((len+PAGE_SIZE) & ~(PAGE_SIZE-1)):len)
 
+#include "guest_memory_hash.h"
+
 #define DYLD_PROCESS_INFO_NOTIFY_LOAD_ID 0x1000
 #define DYLD_PROCESS_INFO_NOTIFY_UNLOAD_ID 0x2000
 #define DYLD_PROCESS_INFO_NOTIFY_MAIN_ID 0x3000
@@ -120,7 +122,8 @@ typedef struct memory_backing {
     int hostProtection;
 } *t_memory_backing;
 
-KHASH_MAP_INIT_INT64(memory, t_memory_page)
+KHASH_INIT(memory, khint64_t, t_memory_page, 1,
+    LC32GuestPageAddressHash, kh_int64_hash_equal)
 
 using Vector = std::array<std::uint64_t, 2>;
 

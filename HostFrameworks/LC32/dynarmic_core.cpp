@@ -85,6 +85,7 @@ bool Dynarmic_nativeInitialize() {
         abort();
         return 0;
     }
+    InvalidateGuestMemoryLookupCaches();
     int ret = kh_resize(memory, sharedHandle.memory, 0x1000);
     if(ret == -1) {
         fprintf(stderr, "kh_resize memory failed\n");
@@ -265,6 +266,7 @@ void Dynarmic_nativeDestroy() {
             guestVmMutex);
         khash_t(memory) *memory = sharedHandle.memory;
         if (memory != nullptr) {
+            InvalidateGuestMemoryLookupCaches();
             for (khiter_t k = kh_begin(memory);
                     k < kh_end(memory); ++k) {
                 if (kh_exist(memory, k)) {
@@ -484,6 +486,7 @@ int Dynarmic_munmap(u64 address, u64 size) {
     }
 #endif
 
+    InvalidateGuestMemoryLookupCaches();
     for(u64 vaddr = address; vaddr < end;
             vaddr += DYN_PAGE_SIZE) {
         u64 idx = vaddr >> DYN_PAGE_BITS;
@@ -741,6 +744,7 @@ u32 Dynarmic_direct_mmap(
         return UINT32_MAX;
     }
     address = static_cast<u32>(reservedAddress);
+    InvalidateGuestMemoryLookupCaches();
 
     const u64 end = reservedAddress + size;
     for(u64 vaddr = reservedAddress; vaddr < end;
@@ -883,6 +887,7 @@ u32 Dynarmic_mmap(
 #endif
 
     const u64 end = reservedAddress + size;
+    InvalidateGuestMemoryLookupCaches();
     for(u64 vaddr = reservedAddress; vaddr < end;
             vaddr += DYN_PAGE_SIZE) {
         u64 idx = vaddr >> DYN_PAGE_BITS;
@@ -1015,6 +1020,7 @@ int Dynarmic_mprotect(u64 address, u64 size, int perms) {
      * then enters a callback and waits on guestVmMutex until the operation is
      * committed or rolled back.
      */
+    InvalidateGuestMemoryLookupCaches();
     for (const ProtectedPage &protectedPage :
             pages) {
         const u64 index =

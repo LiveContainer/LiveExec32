@@ -13,6 +13,7 @@
 #include <new>
 #include <pthread.h>
 #include <stdarg.h>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -4713,26 +4714,92 @@ u32 guest_protocol_getName(u32 guest_protocol) {
     return Dynarmic_current_user_callbacks()->MemoryRead32(guest_protocol + sizeof(u32[1]));
 }
 
+namespace {
+
+struct LC32GuestSelectorRegistry {
+    std::mutex mutex;
+    std::unordered_map<SEL, u32> selectors;
+};
+
+struct LC32GuestClassRegistry {
+    std::mutex mutex;
+    std::unordered_map<std::string, u32> classes;
+};
+
+static LC32GuestSelectorRegistry& LC32GuestSelectorRegistryInstance() {
+    /* Guest and host selectors are permanent for the process.  Keep this
+     * registry alive through shutdown as well: native thread teardown can
+     * still release bridged objects after LC32RunGuest has returned. */
+    static auto *registry = new LC32GuestSelectorRegistry;
+    return *registry;
+}
+
+static LC32GuestClassRegistry& LC32GuestClassRegistryInstance() {
+    /* Objective-C class objects, like selectors, are never deallocated. */
+    static auto *registry = new LC32GuestClassRegistry;
+    return *registry;
+}
+
+}  // namespace
+
 u32 guest_sel_registerName(const char *host_name) {
     if(!host_name || !Dynarmic_guest_thread_is_registered()) return 0;
+
+    const SEL hostSelector = sel_registerName(host_name);
+    LC32GuestSelectorRegistry &registry =
+        LC32GuestSelectorRegistryInstance();
+    {
+        std::lock_guard<std::mutex> lock(registry.mutex);
+        const auto iterator = registry.selectors.find(hostSelector);
+        if(iterator != registry.selectors.end()) return iterator->second;
+    }
+
     static std::atomic<u32> cache{0};
     const u32 guestPtr = LC32CachedGuestSymbol(cache, "sel_registerName");
     if(!guestPtr) return 0;
     DynarmicGuestStackString guest_name(host_name);
     u32 args[] = {guest_name.guestPtr};
-    return LC32InvokeGuestC(guestPtr, false, sizeof(args)/sizeof(*args), args);
+    const u32 guestSelector = LC32InvokeGuestC(
+        guestPtr, false, sizeof(args)/sizeof(*args), args);
+    if(!guestSelector) return 0;
+
+    /* Never hold the registry across guest execution: registering a selector
+     * can synchronously re-enter the bridge.  Concurrent registration of the
+     * same name is harmless and must resolve to the same permanent selector. */
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    const auto result = registry.selectors.emplace(
+        hostSelector, guestSelector);
+    return result.first->second;
 }
 
 //if(!guestPtr) guestPtr = guest_dlsym("LC32TestHostToGuestCall");
 //u32 args[] = {0x40404040, 0x41414141, 0x42424242, 0x43434343, 0x44444444, 0x45454545, 0x46464646, 0x47474747};
 u32 guest_objc_getClass(const char *name) {
-    if(!threadHandle.jit) return 0;
+    if(!name || !threadHandle.jit) return 0;
+
+    LC32GuestClassRegistry &registry =
+        LC32GuestClassRegistryInstance();
+    {
+        std::lock_guard<std::mutex> lock(registry.mutex);
+        const auto iterator = registry.classes.find(name);
+        if(iterator != registry.classes.end()) return iterator->second;
+    }
+
     static std::atomic<u32> cache{0};
     const u32 guestPtr = LC32CachedGuestSymbol(cache, "objc_getClass");
+    if(!guestPtr) return 0;
 
     DynarmicGuestStackString guest_name(name);
     u32 args[] = {guest_name.guestPtr};
-    return LC32InvokeGuestC(guestPtr, false, sizeof(args)/sizeof(*args), args);
+    const u32 guestClass = LC32InvokeGuestC(
+        guestPtr, false, sizeof(args)/sizeof(*args), args);
+    if(!guestClass) return 0;
+
+    /* Cache only successful lookups. A class which is absent now may still be
+     * registered later by a guest image or dynamic resolver. */
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    const auto result = registry.classes.emplace(name, guestClass);
+    return result.first->second;
 }
 
 Class guest_objc_getClass_retHostClass(const char *name) {
