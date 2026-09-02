@@ -4080,14 +4080,46 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
             errno = 0;
             const int result = fcntl(
                 fildes, cmd, &hostSignatures);
-            if(result == -1) {
-                const int savedErrno = errno;
-                return return_with_carry_direct(
-                    savedErrno == 0 ? EIO : savedErrno, true);
+            const int savedErrno = errno;
+            struct stat fileStatus = {};
+            const bool hostRegistrationComplete =
+                result == 0 && fstat(fildes, &fileStatus) == 0 &&
+                hostSignatures.fs_file_start >=
+                    fileStatus.st_size;
+            if(!hostRegistrationComplete) {
+                /*
+                 * Guest code is never executed on the host CPU: Dynarmic
+                 * translates it, and Dynarmic_mmap deliberately strips
+                 * host PROT_EXEC, so the kernel never enforces a code
+                 * signature on guest-mapped images. Only LC32MapFile
+                 * mappings (the FairPlay main executable) need a genuine
+                 * host-side registration, and those are registered there
+                 * directly rather than through this guest syscall.
+                 *
+                 * The guest dyld nevertheless halts with "code signature
+                 * invalid" as soon as this fcntl fails or reports a
+                 * signature that does not cover the whole image, which
+                 * rejects the locally built shim frameworks whose ad-hoc
+                 * signatures the host kernel or interposition refuses to
+                 * attach. Report full-file coverage to the guest instead
+                 * so dyld proceeds with mapping the emulated image.
+                 */
+                if(fstat(fildes, &fileStatus) == -1) {
+                    const int statErrno = errno;
+                    return return_with_carry_direct(
+                        statErrno == 0 ? EIO : statErrno, true);
+                }
+                if(result == -1) {
+                    printf("LC32: host rejected code signature "
+                        "registration for fd %d (%s); reporting "
+                        "full coverage to guest\n",
+                        fildes, strerror(savedErrno));
+                }
+                guestSignatures.fileStart = fileStatus.st_size;
+            } else {
+                guestSignatures.fileStart =
+                    hostSignatures.fs_file_start;
             }
-
-            guestSignatures.fileStart =
-                hostSignatures.fs_file_start;
             /* XNU exposes only the returned coverage through the off_t
              * field; the pointer and size remain input-only. */
             if(!write_guest_memory_with_permissions(
@@ -4095,7 +4127,8 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
                     sizeof(guestSignatures.fileStart), PROT_WRITE)) {
                 return return_with_carry_direct(EFAULT, true);
             }
-            return return_with_carry_direct(result, false);
+            return return_with_carry_direct(
+                hostRegistrationComplete ? result : 0, false);
         }
         case F_CHECK_LV:
             return 0;
