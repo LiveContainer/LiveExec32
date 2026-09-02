@@ -14,6 +14,14 @@ static Boolean LC32CFStringValidRange(CFRange range) {
            (uint64_t)range.location + (uint64_t)range.length <= INT32_MAX;
 }
 
+static Boolean LC32CFStringRangeFitsString(CFStringRef string,
+                                            CFRange range) {
+    if(!string || !LC32CFStringValidRange(range)) return false;
+    const CFIndex stringLength = CFStringGetLength(string);
+    return range.location <= stringLength &&
+           range.length <= stringLength - range.location;
+}
+
 CFStringRef CFStringCreateCopy(CFAllocatorRef allocator,
                                CFStringRef string) {
     (void)allocator;
@@ -216,6 +224,72 @@ void CFStringLowercase(CFMutableStringRef string, CFLocaleRef locale) {
     if(!string) return;
     LC32_CF_CALL(LC32CoreFoundationOpStringLowercase,
         LC32_CF_HOST(string), LC32_CF_HOST(locale));
+}
+
+void CFStringFold(CFMutableStringRef string,
+                  CFStringCompareFlags flags,
+                  CFLocaleRef locale) {
+    if(!string) return;
+    const CFStringCompareFlags foldingFlags = flags &
+        (kCFCompareCaseInsensitive | kCFCompareDiacriticInsensitive |
+         kCFCompareWidthInsensitive);
+    NSString *folded = [(NSString *)string
+        stringByFoldingWithOptions:(NSStringCompareOptions)foldingFlags
+                            locale:(NSLocale *)locale];
+    if(folded) [(NSMutableString *)string setString:folded];
+}
+
+void CFStringNormalize(CFMutableStringRef string,
+                       CFStringNormalizationForm form) {
+    if(!string) return;
+
+    NSString *normalized = nil;
+    switch(form) {
+        case kCFStringNormalizationFormD:
+            normalized = [(NSString *)string
+                decomposedStringWithCanonicalMapping];
+            break;
+        case kCFStringNormalizationFormKD:
+            normalized = [(NSString *)string
+                decomposedStringWithCompatibilityMapping];
+            break;
+        case kCFStringNormalizationFormC:
+            normalized = [(NSString *)string
+                precomposedStringWithCanonicalMapping];
+            break;
+        case kCFStringNormalizationFormKC:
+            normalized = [(NSString *)string
+                precomposedStringWithCompatibilityMapping];
+            break;
+        default:
+            return;
+    }
+    if(normalized) [(NSMutableString *)string setString:normalized];
+}
+
+Boolean CFStringTransform(CFMutableStringRef string, CFRange *range,
+                          CFStringRef transform, Boolean reverse) {
+    if(!string || !transform) return false;
+
+    const CFRange inputRange = range
+        ? *range : CFRangeMake(0, CFStringGetLength(string));
+    if(!LC32CFStringRangeFitsString(string, inputRange)) return false;
+
+    NSString *input = [(NSString *)string substringWithRange:NSMakeRange(
+        (NSUInteger)inputRange.location, (NSUInteger)inputRange.length)];
+    NSString *transformed = [input
+        stringByApplyingTransform:(NSStringTransform)transform
+                          reverse:reverse];
+    if(!transformed || [transformed length] > INT32_MAX) return false;
+
+    [(NSMutableString *)string replaceCharactersInRange:NSMakeRange(
+        (NSUInteger)inputRange.location, (NSUInteger)inputRange.length)
+                                               withString:transformed];
+    if(range) {
+        range->location = inputRange.location;
+        range->length = (CFIndex)[transformed length];
+    }
+    return true;
 }
 
 void CFStringAppendFormatAndArguments(CFMutableStringRef string,

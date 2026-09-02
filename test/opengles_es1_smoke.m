@@ -68,6 +68,130 @@ typedef struct {
     uint32_t after;
 } Int1Output;
 
+static void test_promoted_oes_aliases(void) {
+    glBlendEquationOES(GL_FUNC_ADD_OES);
+    glBlendEquationSeparateOES(GL_FUNC_ADD_OES, GL_FUNC_ADD_OES);
+    glBlendFuncSeparateOES(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+                           GL_ONE, GL_ZERO);
+
+    GLint blendEquationRGB = 0;
+    GLint blendEquationAlpha = 0;
+    GLint blendSourceRGB = 0;
+    GLint blendDestinationRGB = 0;
+    GLint blendSourceAlpha = 0;
+    GLint blendDestinationAlpha = 0;
+    glGetIntegerv(GL_BLEND_EQUATION_RGB_OES, &blendEquationRGB);
+    glGetIntegerv(GL_BLEND_EQUATION_ALPHA_OES, &blendEquationAlpha);
+    glGetIntegerv(GL_BLEND_SRC_RGB_OES, &blendSourceRGB);
+    glGetIntegerv(GL_BLEND_DST_RGB_OES, &blendDestinationRGB);
+    glGetIntegerv(GL_BLEND_SRC_ALPHA_OES, &blendSourceAlpha);
+    glGetIntegerv(GL_BLEND_DST_ALPHA_OES, &blendDestinationAlpha);
+    ES1_CHECK(blendEquationRGB == GL_FUNC_ADD_OES &&
+              blendEquationAlpha == GL_FUNC_ADD_OES &&
+              blendSourceRGB == GL_SRC_ALPHA &&
+              blendDestinationRGB == GL_ONE_MINUS_SRC_ALPHA &&
+              blendSourceAlpha == GL_ONE &&
+              blendDestinationAlpha == GL_ZERO,
+              "ES1-OES-promoted-blend-state");
+    es1_gl_ok("ES1-OES-promoted-blend-error");
+
+    GLuint renderbuffer = 0;
+    glGenRenderbuffersOES(1, &renderbuffer);
+    ES1_CHECK(renderbuffer != 0,
+              "ES1-OES-renderbuffer-name-copyback");
+    glBindRenderbufferOES(GL_RENDERBUFFER_OES, renderbuffer);
+
+    GLint boundRenderbuffer = 0;
+    glGetIntegerv(GL_RENDERBUFFER_BINDING_OES, &boundRenderbuffer);
+    ES1_CHECK((GLuint)boundRenderbuffer == renderbuffer,
+              "ES1-OES-renderbuffer-binding");
+    ES1_CHECK(glIsRenderbufferOES(renderbuffer) == GL_TRUE,
+              "ES1-OES-renderbuffer-recognition");
+
+    glRenderbufferStorageOES(GL_RENDERBUFFER_OES, GL_RGBA4_OES, 16, 8);
+    GLint renderbufferWidth = 0;
+    GLint renderbufferHeight = 0;
+    glGetRenderbufferParameterivOES(GL_RENDERBUFFER_OES,
+                                    GL_RENDERBUFFER_WIDTH_OES,
+                                    &renderbufferWidth);
+    glGetRenderbufferParameterivOES(GL_RENDERBUFFER_OES,
+                                    GL_RENDERBUFFER_HEIGHT_OES,
+                                    &renderbufferHeight);
+    ES1_CHECK(renderbufferWidth == 16 && renderbufferHeight == 8,
+              "ES1-OES-renderbuffer-storage-parameters");
+
+    GLuint framebuffer = 0;
+    glGenFramebuffersOES(1, &framebuffer);
+    ES1_CHECK(framebuffer != 0,
+              "ES1-OES-framebuffer-name-copyback");
+    glBindFramebufferOES(GL_FRAMEBUFFER_OES, framebuffer);
+
+    GLint boundFramebuffer = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING_OES, &boundFramebuffer);
+    ES1_CHECK((GLuint)boundFramebuffer == framebuffer,
+              "ES1-OES-framebuffer-binding");
+    ES1_CHECK(glIsFramebufferOES(framebuffer) == GL_TRUE,
+              "ES1-OES-framebuffer-recognition");
+
+    glFramebufferRenderbufferOES(GL_FRAMEBUFFER_OES,
+                                 GL_COLOR_ATTACHMENT0_OES,
+                                 GL_RENDERBUFFER_OES, renderbuffer);
+    ES1_CHECK(glCheckFramebufferStatusOES(GL_FRAMEBUFFER_OES) ==
+                  GL_FRAMEBUFFER_COMPLETE_OES,
+              "ES1-OES-renderbuffer-framebuffer-complete");
+
+    GLint attachmentType = 0;
+    GLint attachmentName = 0;
+    glGetFramebufferAttachmentParameterivOES(
+        GL_FRAMEBUFFER_OES, GL_COLOR_ATTACHMENT0_OES,
+        GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE_OES, &attachmentType);
+    glGetFramebufferAttachmentParameterivOES(
+        GL_FRAMEBUFFER_OES, GL_COLOR_ATTACHMENT0_OES,
+        GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME_OES, &attachmentName);
+    ES1_CHECK(attachmentType == GL_RENDERBUFFER_OES &&
+              (GLuint)attachmentName == renderbuffer,
+              "ES1-OES-renderbuffer-attachment-query");
+
+    GLuint texture = 0;
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glGenerateMipmapOES(GL_TEXTURE_2D);
+    glFramebufferTexture2DOES(GL_FRAMEBUFFER_OES,
+                              GL_COLOR_ATTACHMENT0_OES,
+                              GL_TEXTURE_2D, texture, 0);
+    ES1_CHECK(glCheckFramebufferStatusOES(GL_FRAMEBUFFER_OES) ==
+                  GL_FRAMEBUFFER_COMPLETE_OES,
+              "ES1-OES-texture-framebuffer-complete");
+
+    attachmentType = 0;
+    attachmentName = 0;
+    glGetFramebufferAttachmentParameterivOES(
+        GL_FRAMEBUFFER_OES, GL_COLOR_ATTACHMENT0_OES,
+        GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE_OES, &attachmentType);
+    glGetFramebufferAttachmentParameterivOES(
+        GL_FRAMEBUFFER_OES, GL_COLOR_ATTACHMENT0_OES,
+        GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME_OES, &attachmentName);
+    ES1_CHECK(attachmentType == GL_TEXTURE &&
+              (GLuint)attachmentName == texture,
+              "ES1-OES-texture-attachment-query");
+    es1_gl_ok("ES1-OES-framebuffer-alias-error");
+
+    glBindFramebufferOES(GL_FRAMEBUFFER_OES, 0);
+    glDeleteFramebuffersOES(1, &framebuffer);
+    ES1_CHECK(glIsFramebufferOES(framebuffer) == GL_FALSE,
+              "ES1-OES-deleted-framebuffer-rejection");
+    glBindRenderbufferOES(GL_RENDERBUFFER_OES, 0);
+    glDeleteRenderbuffersOES(1, &renderbuffer);
+    ES1_CHECK(glIsRenderbufferOES(renderbuffer) == GL_FALSE,
+              "ES1-OES-deleted-renderbuffer-rejection");
+    if(texture) glDeleteTextures(1, &texture);
+    es1_gl_ok("ES1-OES-framebuffer-alias-cleanup-error");
+}
+
 int run_opengles_es1_smoke(void) {
     @autoreleasepool {
         EAGLContext *context =
@@ -321,6 +445,8 @@ int run_opengles_es1_smoke(void) {
         ES1_CHECK(vertexPointer == (void *)(uintptr_t)4,
                   "ES1-client-pointer-VBO-offset-roundtrip");
         es1_gl_ok("ES1-client-pointer-roundtrip-error");
+
+        test_promoted_oes_aliases();
 
         if(vertexBuffer) glDeleteBuffers(1, &vertexBuffer);
         if(texture) glDeleteTextures(1, &texture);

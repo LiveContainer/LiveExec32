@@ -113,6 +113,7 @@ $(eval $(call lc32_guest_test,lc32-audio-session,audio_session.c,AudioToolbox Co
 $(eval $(call lc32_guest_test,lc32-audio-unit-output,audio_unit_output.c,AudioToolbox CoreFoundation LC32))
 
 # Foundation, CoreFoundation, and bridge behavior.
+$(eval $(call lc32_guest_test,lc32-addressbook-compat,addressbook_compat.m,AddressBook Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-arc-proxy-lifetime,arc_proxy_lifetime.m arc_proxy_lifetime_support.m,Foundation UIKit LC32))
 $(eval $(call lc32_guest_test,lc32-block-bridge,block_bridge.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-cfdictionary-callbacks,cfdictionary_callbacks.m,Foundation CoreFoundation LC32))
@@ -127,7 +128,9 @@ $(eval $(call lc32_guest_test,lc32-corefoundation-run-loop,corefoundation_run_lo
 $(eval $(call lc32_guest_test,lc32-corefoundation-run-loop-source,corefoundation_run_loop_source.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-run-loop-timer,corefoundation_run_loop_timer.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-socket,corefoundation_socket.m,Foundation CoreFoundation))
+$(eval $(call lc32_guest_test,lc32-corefoundation-stream-host,corefoundation_stream_host.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-string-character-set,corefoundation_string_character_set.m,Foundation CoreFoundation))
+$(eval $(call lc32_guest_test,lc32-corefoundation-string-transform,corefoundation_string_transform.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-time-zone,corefoundation_time_zone.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-url-propertylist,corefoundation_url_propertylist.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-url-common,corefoundation_url_common.m,Foundation CoreFoundation))
@@ -153,14 +156,15 @@ $(eval $(call lc32_guest_test,lc32-thread-modes,thread_modes.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-thread-perform,thread_perform.m,Foundation))
 
 # Graphics and text.
-$(eval $(call lc32_guest_test,lc32-coregraphics-bitmap,coregraphics_bitmap.c,CoreGraphics LC32))
+$(eval $(call lc32_guest_test,lc32-coregraphics-bitmap,coregraphics_bitmap.c,CoreGraphics CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-coregraphics-fill-color,coregraphics_fill_color.c,CoreGraphics LC32))
 $(eval $(call lc32_guest_test,lc32-coregraphics-geometry,coregraphics_geometry.c,CoreGraphics))
 $(eval $(call lc32_guest_test,lc32-coregraphics-gradient,coregraphics_gradient.c,CoreGraphics CoreFoundation LC32))
+$(eval $(call lc32_guest_test,lc32-quartzcore-transform,quartzcore_transform.c,QuartzCore CoreGraphics))
 $(eval $(call lc32_guest_test,lc32-coretext-bridge,coretext_bridge.m,CoreText CoreGraphics CoreFoundation Foundation))
 $(eval $(call lc32_guest_test,lc32-coretext-font-descriptor,coretext_font_descriptor.c,CoreText CoreFoundation Foundation))
 $(eval $(call lc32_guest_test,lc32-openal-smoke,openal_smoke.c,OpenAL))
-$(eval $(call lc32_guest_test,lc32-opengles-smoke,opengles_smoke.m opengles_es1_smoke.m opengles_es3_smoke.m,Foundation OpenGLES))
+$(eval $(call lc32_guest_test,lc32-opengles-smoke,opengles_smoke.m opengles_es1_smoke.m opengles_es3_smoke.m,Foundation OpenGLES QuartzCore))
 
 # UIKit and aggregate-argument bridges.
 $(eval $(call lc32_guest_test,lc32-guest-fp-return,guest_fp_return.m,Foundation UIKit LC32))
@@ -168,14 +172,17 @@ $(eval $(call lc32_guest_test,lc32-guest-host-aggregate-arguments,guest_host_agg
 $(eval $(call lc32_guest_test,lc32-scalar-pointer-bridge,scalar_pointer_bridge.m,Foundation UIKit CoreGraphics LC32))
 $(eval $(call lc32_guest_test,lc32-text-input-traits,text_input_traits.m,Foundation UIKit LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-appearance,uikit_appearance.m,Foundation UIKit LC32))
+$(eval $(call lc32_guest_test,lc32-uikit-accessibility,uikit_accessibility.m,Foundation UIKit LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-image-context,uikit_image_context.m,Foundation UIKit CoreGraphics LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-legacy-string-sizing,uikit_legacy_string_sizing.m,Foundation UIKit CoreGraphics LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-legacy-window-root,uikit_legacy_window_root.m,Foundation UIKit CoreGraphics LC32))
+$(eval $(call lc32_guest_test,lc32-uikit-view-load-reentrancy,uikit_view_load_reentrancy.m,Foundation UIKit CoreGraphics LC32))
 
 # Security.
 $(eval $(call lc32_guest_test,lc32-security-secitem,security_secitem.m,Foundation Security LC32))
 
 # Per-target and per-source language modes from the old build wrappers.
+lc32-addressbook-compat_CFLAGS := -Wno-deprecated-declarations
 lc32-arc-proxy-lifetime_CFLAGS := -fobjc-arc -fblocks \
 	-I$(abspath ../include)
 arc_proxy_lifetime_support.m_CFLAGS := -fno-objc-arc
@@ -195,7 +202,9 @@ lc32-corefoundation-run-loop_CFLAGS := -fno-objc-arc
 lc32-corefoundation-run-loop-source_CFLAGS := -fno-objc-arc
 lc32-corefoundation-run-loop-timer_CFLAGS := -fno-objc-arc
 lc32-corefoundation-socket_CFLAGS := -fno-objc-arc
+lc32-corefoundation-stream-host_CFLAGS := -fno-objc-arc
 lc32-corefoundation-string-character-set_CFLAGS := -fno-objc-arc
+lc32-corefoundation-string-transform_CFLAGS := -fno-objc-arc
 lc32-corefoundation-time-zone_CFLAGS := -fno-objc-arc
 lc32-corefoundation-url-propertylist_CFLAGS := -fno-objc-arc
 lc32-corefoundation-url-common_CFLAGS := -fno-objc-arc
@@ -235,7 +244,7 @@ ABI_TESTS := \
   lc32-vm-allocate-collision lc32-vm-copy
 AUDIO_TESTS := $(filter lc32-audio-%,$(TOOL_NAME))
 COREFOUNDATION_TESTS := $(filter lc32-corefoundation-%,$(TOOL_NAME))
-GRAPHICS_TESTS := $(filter lc32-coregraphics-% lc32-coretext-% lc32-openal-% lc32-opengles-%,$(TOOL_NAME))
+GRAPHICS_TESTS := $(filter lc32-coregraphics-% lc32-quartzcore-% lc32-coretext-% lc32-openal-% lc32-opengles-%,$(TOOL_NAME))
 THREADING_TESTS := lc32-native-pthread-smoke lc32-ownership-publication-race lc32-thread-modes lc32-thread-perform
 UIKIT_TESTS := $(filter lc32-uikit-%,$(TOOL_NAME)) lc32-guest-fp-return lc32-guest-host-aggregate-arguments lc32-scalar-pointer-bridge lc32-text-input-traits
 
@@ -278,6 +287,7 @@ SHORT_TESTS := $(patsubst lc32-%,%,$(TOOL_NAME))
 .PHONY: build list frameworks clean-outputs \
   abi audio corefoundation graphics threading uikit \
   check-symbols check-openal check-opengles check-security check-coretext \
+  check-graphics-symbols \
   check-messenger $(SHORT_TESTS)
 
 # Theos' per-instance convenience targets bypass the top-level `all` target,
@@ -306,7 +316,12 @@ check-security: lc32-security-secitem
 check-coretext: lc32-coretext-font-descriptor
 	./coretext_font_descriptor_symbols.sh \
 		"$(GUEST_FRAMEWORK_DIR)/CoreText.framework/CoreText"
-check-symbols: check-openal check-opengles check-security check-coretext
+check-graphics-symbols: lc32-coregraphics-bitmap lc32-quartzcore-transform \
+  lc32-uikit-accessibility
+	GUEST_FRAMEWORK_DIR="$(GUEST_FRAMEWORK_DIR)" \
+		./graphics_compat_symbols.sh
+check-symbols: check-openal check-opengles check-security check-coretext \
+  check-graphics-symbols
 
 check-messenger:
 	@test -n "$(MESSENGER)" || { \

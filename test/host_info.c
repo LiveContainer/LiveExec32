@@ -1,6 +1,7 @@
 #include <mach/host_info.h>
 #include <mach/mach.h>
 #include <mach/machine.h>
+#include <mach/vm_statistics.h>
 
 #include <limits.h>
 #include <stdio.h>
@@ -120,6 +121,19 @@ static int test_basic_full_counts(
     return 1;
 }
 
+static int test_statistics_flavor(
+        mach_port_t host, host_flavor_t flavor,
+        mach_msg_type_number_t expectedCount) {
+    integer_t words[kHostInfoMaxCount];
+    fill_canaries(words, kHostInfoMaxCount);
+
+    mach_msg_type_number_t count = expectedCount;
+    const kern_return_t result = host_statistics(
+        host, flavor, words, &count);
+    return result == KERN_SUCCESS && count == expectedCount &&
+        canaries_unchanged(words, count, kHostInfoMaxCount);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -142,9 +156,33 @@ int main(void) {
         basic.logical_cpu >= 1 && basic.logical_cpu_max >= 1 &&
         basic.memory_size != 0 && basic.max_mem >= basic.memory_size;
 
+    integer_t vmWords[kHostInfoMaxCount];
+    fill_canaries(vmWords, kHostInfoMaxCount);
+    mach_msg_type_number_t vmCount = HOST_VM_INFO_COUNT;
+    kern_return_t result = host_statistics(
+        host, HOST_VM_INFO, vmWords, &vmCount);
+    const vm_statistics_t vm = (vm_statistics_t)vmWords;
+    const int vmStatisticsPassed = result == KERN_SUCCESS &&
+        vmCount == HOST_VM_INFO_COUNT && vm->wire_count != 0 &&
+        canaries_unchanged(vmWords, vmCount, kHostInfoMaxCount);
+    const int loadStatisticsPassed = test_statistics_flavor(
+        host, HOST_LOAD_INFO, HOST_LOAD_INFO_COUNT);
+    const int cpuStatisticsPassed = test_statistics_flavor(
+        host, HOST_CPU_LOAD_INFO, HOST_CPU_LOAD_INFO_COUNT);
+
+    integer_t unknownStatistics[kHostInfoMaxCount];
+    fill_canaries(unknownStatistics, kHostInfoMaxCount);
+    mach_msg_type_number_t unknownStatisticsCount = kHostInfoMaxCount;
+    result = host_statistics(
+        host, INT_MAX, unknownStatistics, &unknownStatisticsCount);
+    const int unknownStatisticsPassed = result != KERN_SUCCESS &&
+        unknownStatisticsCount == kHostInfoMaxCount &&
+        canaries_unchanged(
+            unknownStatistics, 0, kHostInfoMaxCount);
+
     host_priority_info_data_t priority = {};
     mach_msg_type_number_t priorityCount = HOST_PRIORITY_INFO_COUNT;
-    kern_return_t result = host_info(
+    result = host_info(
         host, HOST_PRIORITY_INFO, (host_info_t)&priority,
         &priorityCount);
     const int priorityPassed =
@@ -168,6 +206,10 @@ int main(void) {
         report("basic-full-count", basicFullPassed) &&
         report("basic-architecture", basicArchitecturePassed) &&
         report("basic-resources", basicResourcesPassed) &&
+        report("statistics-vm", vmStatisticsPassed) &&
+        report("statistics-load", loadStatisticsPassed) &&
+        report("statistics-cpu", cpuStatisticsPassed) &&
+        report("statistics-unknown-flavor", unknownStatisticsPassed) &&
         report("priority", priorityPassed) &&
         report("unknown-flavor", unknownPassed) &&
         report("deallocate", deallocatePassed);

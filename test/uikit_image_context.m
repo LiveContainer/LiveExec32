@@ -6,6 +6,7 @@ int main(void) {
     @autoreleasepool {
         UIGraphicsBeginImageContextWithOptions(
             CGSizeMake(4.0f, 3.0f), YES, 2.0f);
+        UIRectFill(CGRectMake(0.0f, 0.0f, 4.0f, 3.0f));
         UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
         UIGraphicsEndImageContext();
 

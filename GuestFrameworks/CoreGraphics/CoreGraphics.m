@@ -162,6 +162,30 @@ CGDataProviderRef CGDataProviderCreateWithFilename(const char *filename) {
         LC32_CG_U32((uintptr_t)filename), LC32_CG_U32(length));
 }
 
+CGDataProviderRef CGDataProviderCreateWithCFData(CFDataRef data) {
+    return data ? (CGDataProviderRef)LC32_CG_CALL(
+        LC32CoreGraphicsOpDataProviderCreateWithCFData,
+        LC32_CG_HOST(data)) : NULL;
+}
+
+CGImageRef CGImageCreate(size_t width, size_t height,
+        size_t bitsPerComponent, size_t bitsPerPixel, size_t bytesPerRow,
+        CGColorSpaceRef space, CGBitmapInfo bitmapInfo,
+        CGDataProviderRef provider, const CGFloat *decode,
+        bool shouldInterpolate, CGColorRenderingIntent intent) {
+    if(!width || !height || !bitsPerComponent || !bitsPerPixel ||
+       !bytesPerRow || !provider) {
+        return NULL;
+    }
+    return (CGImageRef)LC32_CG_CALL(LC32CoreGraphicsOpImageCreate,
+        LC32_CG_U32(width), LC32_CG_U32(height),
+        LC32_CG_U32(bitsPerComponent), LC32_CG_U32(bitsPerPixel),
+        LC32_CG_U32(bytesPerRow), LC32_CG_HOST(space),
+        LC32_CG_U32(bitmapInfo), LC32_CG_HOST(provider),
+        LC32_CG_U32((uintptr_t)decode),
+        LC32_CG_U32(shouldInterpolate), LC32_CG_U32(intent));
+}
+
 void CGDataProviderRelease(CGDataProviderRef provider) {
     if(!provider) return;
     CFRelease(provider);
@@ -329,6 +353,14 @@ void CGContextAddLineToPoint(CGContextRef context, CGFloat x, CGFloat y) {
         LC32_CG_HOST(context), LC32_CG_F32(x), LC32_CG_F32(y));
 }
 
+void CGContextAddLines(CGContextRef context, const CGPoint *points,
+                       size_t count) {
+    if(context && points && count && count <= UINT32_MAX) LC32_CG_CALL(
+        LC32CoreGraphicsOpContextAddLines,
+        LC32_CG_HOST(context), LC32_CG_U32((uintptr_t)points),
+        LC32_CG_U32(count));
+}
+
 void CGContextAddArc(CGContextRef context, CGFloat x, CGFloat y,
                      CGFloat radius, CGFloat startAngle, CGFloat endAngle,
                      int clockwise) {
@@ -487,6 +519,12 @@ void CGContextSetGrayFillColor(CGContextRef context, CGFloat gray,
         LC32_CG_HOST(context), LC32_CG_F32(gray), LC32_CG_F32(alpha));
 }
 
+void CGContextSetGrayStrokeColor(CGContextRef context, CGFloat gray,
+                                 CGFloat alpha) {
+    if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextSetGrayStrokeColor,
+        LC32_CG_HOST(context), LC32_CG_F32(gray), LC32_CG_F32(alpha));
+}
+
 void CGContextSetRGBFillColor(CGContextRef context, CGFloat red,
                               CGFloat green, CGFloat blue, CGFloat alpha) {
     if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextSetRGBFillColor,
@@ -509,6 +547,12 @@ void CGContextSetShadowWithColor(CGContextRef context, CGSize offset,
         LC32_CG_HOST(color));
 }
 
+void CGContextSetShadow(CGContextRef context, CGSize offset, CGFloat blur) {
+    if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextSetShadow,
+        LC32_CG_HOST(context), LC32_CG_F32(offset.width),
+        LC32_CG_F32(offset.height), LC32_CG_F32(blur));
+}
+
 void CGContextSetBlendMode(CGContextRef context, CGBlendMode mode) {
     if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextSetBlendMode,
         LC32_CG_HOST(context), LC32_CG_U32(mode));
@@ -526,6 +570,11 @@ void CGContextSetLineCap(CGContextRef context, CGLineCap cap) {
         LC32_CG_HOST(context), LC32_CG_U32(cap));
 }
 
+void CGContextSetLineJoin(CGContextRef context, CGLineJoin join) {
+    if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextSetLineJoin,
+        LC32_CG_HOST(context), LC32_CG_U32(join));
+}
+
 void CGContextSetLineWidth(CGContextRef context, CGFloat width) {
     if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextSetLineWidth,
         LC32_CG_HOST(context), LC32_CG_F32(width));
@@ -540,6 +589,15 @@ void CGContextSetShouldAntialias(CGContextRef context, bool shouldAntialias) {
 void CGContextSetTextPosition(CGContextRef context, CGFloat x, CGFloat y) {
     if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextSetTextPosition,
         LC32_CG_HOST(context), LC32_CG_F32(x), LC32_CG_F32(y));
+}
+
+void CGContextSetTextMatrix(CGContextRef context,
+                            CGAffineTransform transform) {
+    if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextSetTextMatrix,
+        LC32_CG_HOST(context), LC32_CG_F32(transform.a),
+        LC32_CG_F32(transform.b), LC32_CG_F32(transform.c),
+        LC32_CG_F32(transform.d), LC32_CG_F32(transform.tx),
+        LC32_CG_F32(transform.ty));
 }
 
 size_t CGImageGetHeight(CGImageRef image) {
@@ -559,6 +617,11 @@ CGImageRef CGImageCreateWithImageInRect(CGImageRef image, CGRect rect) {
         LC32_CG_HOST(image), LC32_CG_F32(rect.origin.x),
         LC32_CG_F32(rect.origin.y), LC32_CG_F32(rect.size.width),
         LC32_CG_F32(rect.size.height));
+}
+
+CGImageRef CGImageCreateCopy(CGImageRef image) {
+    return image ? (CGImageRef)LC32_CG_CALL(
+        LC32CoreGraphicsOpImageCreateCopy, LC32_CG_HOST(image)) : NULL;
 }
 
 CGImageRef CGImageCreateWithMask(CGImageRef image, CGImageRef mask) {
@@ -600,6 +663,12 @@ size_t CGImageGetBytesPerRow(CGImageRef image) {
 CGColorSpaceRef CGImageGetColorSpace(CGImageRef image) {
     return image ? (CGColorSpaceRef)LC32_CG_CALL(
         LC32CoreGraphicsOpImageGetColorSpace, LC32_CG_HOST(image)) : NULL;
+}
+
+CGDataProviderRef CGImageGetDataProvider(CGImageRef image) {
+    return image ? (CGDataProviderRef)LC32_CG_CALL(
+        LC32CoreGraphicsOpImageGetDataProvider,
+        LC32_CG_HOST(image)) : NULL;
 }
 
 #pragma mark CGPath
@@ -698,6 +767,14 @@ void CGPathAddRect(CGMutablePathRef path,
 CGPathRef CGPathCreateCopy(CGPathRef path) {
     return path ? (CGPathRef)LC32_CG_CALL(
         LC32CoreGraphicsOpPathCreateCopy, LC32_CG_HOST(path)) : NULL;
+}
+
+CGRect CGPathGetBoundingBox(CGPathRef path) {
+    if(!path) return CGRectNull;
+    CGRect result = CGRectNull;
+    return LC32_CG_CALL(LC32CoreGraphicsOpPathGetBoundingBox,
+        LC32_CG_HOST(path), LC32_CG_U32((uintptr_t)&result))
+        ? result : CGRectNull;
 }
 
 void CGPathRelease(CGPathRef cg_nullable path) {

@@ -2,6 +2,7 @@
 #import <OpenGLES/EAGL.h>
 #import <OpenGLES/ES2/gl.h>
 #import <OpenGLES/ES2/glext.h>
+#import <QuartzCore/CAEAGLLayer.h>
 
 #include <stdint.h>
 #include <stdio.h>
@@ -566,6 +567,32 @@ int main(void) {
         CHECK([EAGLContext setCurrentContext:context], "set-current-context");
         CHECK([EAGLContext currentContext] != nil,
               "current-context-roundtrip");
+
+        GLuint drawableRenderbuffer = 0;
+        glGenRenderbuffers(1, &drawableRenderbuffer);
+        glBindRenderbuffer(GL_RENDERBUFFER, drawableRenderbuffer);
+        CAEAGLLayer *drawableLayer = [CAEAGLLayer layer];
+        drawableLayer.bounds = CGRectMake(0.0, 0.0, 64.0, 64.0);
+        drawableLayer.drawableProperties = @{
+            kEAGLDrawablePropertyColorFormat: kEAGLColorFormatRGBA8,
+            kEAGLDrawablePropertyRetainedBacking: @YES,
+        };
+        CHECK([context renderbufferStorage:GL_RENDERBUFFER
+                                      fromDrawable:drawableLayer],
+              "legacy-drawable-properties-storage");
+        GLint drawableWidth = 0;
+        GLint drawableHeight = 0;
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER,
+                                     GL_RENDERBUFFER_WIDTH,
+                                     &drawableWidth);
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER,
+                                     GL_RENDERBUFFER_HEIGHT,
+                                     &drawableHeight);
+        CHECK(drawableWidth == 64 && drawableHeight == 64,
+              "legacy-drawable-properties-dimensions");
+        glDeleteRenderbuffers(1, &drawableRenderbuffer);
+        CHECK(glGetError() == GL_NO_ERROR,
+              "legacy-drawable-properties-error");
 
         const GLenum stringNames[] = {
             GL_VENDOR, GL_RENDERER, GL_VERSION, GL_EXTENSIONS,

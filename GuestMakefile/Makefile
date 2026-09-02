@@ -139,6 +139,9 @@ UIKit_LDFLAGS = \
   -compatibility_version 1.0.0 \
   -current_version 1.0.0
 
+# Compatibility policy creators deliberately return NULL when unavailable.
+Security_CFLAGS = -Wno-nonnull
+
 # These SDK headers require ARC for weak Objective-C properties.
 MapKit_CFLAGS = -fobjc-arc
 StoreKit_CFLAGS = -fobjc-arc

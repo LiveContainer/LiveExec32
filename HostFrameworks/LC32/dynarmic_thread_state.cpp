@@ -1267,6 +1267,95 @@ kern_return_t CopyGuestThreadState(
     return KERN_SUCCESS;
 }
 
+kern_return_t CopyGuestThreadInfo(
+        mach_port_t target, thread_flavor_t flavor,
+        mach_msg_type_number_t capacity, integer_t *info,
+        mach_msg_type_number_t *count) {
+    if (!MACH_PORT_VALID(target) || info == nullptr || count == nullptr ||
+            capacity > THREAD_INFO_MAX) {
+        return KERN_INVALID_ARGUMENT;
+    }
+
+    const auto copyLogicalInfo = [=](
+            u64 threadSelfId, u32 pthreadAddress,
+            bool runnable) -> kern_return_t {
+        if (flavor == THREAD_BASIC_INFO) {
+            if (capacity < THREAD_BASIC_INFO_COUNT) {
+                return KERN_INVALID_ARGUMENT;
+            }
+            thread_basic_info_data_t basic = {};
+            basic.policy = POLICY_TIMESHARE;
+            basic.run_state = runnable
+                ? TH_STATE_RUNNING
+                : TH_STATE_WAITING;
+            memcpy(info, &basic, sizeof(basic));
+            *count = THREAD_BASIC_INFO_COUNT;
+            return KERN_SUCCESS;
+        }
+        if (flavor == THREAD_IDENTIFIER_INFO) {
+            if (capacity < THREAD_IDENTIFIER_INFO_COUNT) {
+                return KERN_INVALID_ARGUMENT;
+            }
+            thread_identifier_info_data_t identifier = {};
+            identifier.thread_id = threadSelfId;
+            identifier.thread_handle = pthreadAddress;
+            memcpy(info, &identifier, sizeof(identifier));
+            *count = THREAD_IDENTIFIER_INFO_COUNT;
+            return KERN_SUCCESS;
+        }
+        return KERN_INVALID_ARGUMENT;
+    };
+
+    EnsureGuestThreadRegistry();
+    const mach_port_t cooperativeMainPort =
+        !NativeGuestThreadsEnabled()
+        ? pthread_mach_thread_np(pthread_self())
+        : MACH_PORT_NULL;
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestThreadMutex);
+        for (const GuestThreadContext &thread : guestThreads) {
+            if (!thread.alive) {
+                continue;
+            }
+            const bool targetMatches =
+                thread.threadPort == target ||
+                (thread.debuggerId == 1 &&
+                 !MACH_PORT_VALID(thread.threadPort) &&
+                 target == cooperativeMainPort);
+            if (!targetMatches) {
+                continue;
+            }
+
+            /*
+             * Report guest-local metadata even when a native runtime backs
+             * this logical pthread. NativeGuestJit::hostMachThread changes
+             * on the owner pthread without this registry mutex, and charging
+             * emulator runtime to guest threads would expose host scheduling
+             * details (or multiply usage for cooperative pthreads). A zero
+             * runtime snapshot preserves the guest identity and scheduler
+             * state without racing the native runtime lifecycle.
+             */
+            return copyLogicalInfo(
+                thread.threadSelfId, thread.pthreadAddress,
+                thread.runnable);
+        }
+    }
+
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestWorkqueueMutex);
+        if (guestWorkqueueUpcallActive &&
+                MACH_PORT_VALID(guestWorkqueueThreadPort) &&
+                target == guestWorkqueueThreadPort) {
+            return copyLogicalInfo(
+                guestWorkqueueThreadSelfId,
+                guestWorkqueuePthread, true);
+        }
+    }
+    return KERN_INVALID_ARGUMENT;
+}
+
 bool ParkCurrentGuestThread(
         GuestThreadWaitKind kind, u32 address, u32 wakeResult,
         GuestRwlockWaitType rwlockWaitType,

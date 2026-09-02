@@ -355,6 +355,10 @@ kern_return_t CopyGuestThreadState(
     mach_port_t target, thread_state_flavor_t flavor,
     mach_msg_type_number_t capacity, u32 *state,
     mach_msg_type_number_t *count);
+kern_return_t CopyGuestThreadInfo(
+    mach_port_t target, thread_flavor_t flavor,
+    mach_msg_type_number_t capacity, integer_t *info,
+    mach_msg_type_number_t *count);
 
 template <typename Function>
 auto InvokeNativeGuestHostCall(Function &&function)

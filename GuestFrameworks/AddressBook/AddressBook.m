@@ -48,6 +48,9 @@ static const CFStringRef LC32ABMultiValueValueKey = CFSTR("value");
 static const CFStringRef LC32ABMultiValueLabelKey = CFSTR("label");
 static const CFStringRef LC32ABPersonImageDataKey =
     CFSTR("LC32AddressBookImageData");
+static const CFStringRef LC32ABRecordIDKey =
+    CFSTR("LC32AddressBookRecordID");
+static ABRecordID LC32ABNextRecordID = 1;
 
 static CFNumberRef LC32ABPropertyKey(ABPropertyID property) {
     int32_t value = property;
@@ -57,6 +60,29 @@ static CFNumberRef LC32ABPropertyKey(ABPropertyID property) {
 ABAddressBookRef ABAddressBookCreate(void) {
     return (ABAddressBookRef)CFArrayCreateMutable(kCFAllocatorDefault, 0,
         &kCFTypeArrayCallBacks);
+}
+
+CFStringRef ABAddressBookCopyLocalizedLabel(CFStringRef label) {
+    /* The isolated store has no Contacts localization bundle. Preserve the
+     * label text with the API's Create ownership contract. */
+    return label ? CFStringCreateCopy(kCFAllocatorDefault, label) : NULL;
+}
+
+void ABAddressBookRegisterExternalChangeCallback(
+        ABAddressBookRef addressBook, ABExternalChangeCallback callback,
+        void *context) {
+    (void)addressBook;
+    (void)callback;
+    (void)context;
+    /* No other process can mutate this process-local address book. */
+}
+
+void ABAddressBookUnregisterExternalChangeCallback(
+        ABAddressBookRef addressBook, ABExternalChangeCallback callback,
+        void *context) {
+    (void)addressBook;
+    (void)callback;
+    (void)context;
 }
 
 bool ABAddressBookAddRecord(ABAddressBookRef addressBook, ABRecordRef record,
@@ -81,8 +107,28 @@ CFArrayRef ABAddressBookCopyArrayOfAllPeople(
 }
 
 ABRecordRef ABPersonCreate(void) {
-    return (ABRecordRef)CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
+    CFMutableDictionaryRef person = CFDictionaryCreateMutable(
+        kCFAllocatorDefault, 0,
         &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    if(!person) return NULL;
+
+    ABRecordID recordID = __atomic_fetch_add(
+        &LC32ABNextRecordID, 1, __ATOMIC_RELAXED);
+    CFNumberRef recordIDNumber = CFNumberCreate(
+        kCFAllocatorDefault, kCFNumberSInt32Type, &recordID);
+    if(recordIDNumber) {
+        CFDictionarySetValue(person, LC32ABRecordIDKey, recordIDNumber);
+        CFRelease(recordIDNumber);
+    }
+    return (ABRecordRef)person;
+}
+
+ABPersonCompositeNameFormat ABPersonGetCompositeNameFormat(void) {
+    return kABPersonCompositeNameFormatFirstNameFirst;
+}
+
+ABPersonSortOrdering ABPersonGetSortOrdering(void) {
+    return kABPersonSortByFirstName;
 }
 
 bool ABPersonSetImageData(ABRecordRef person, CFDataRef imageData,
@@ -97,6 +143,53 @@ bool ABPersonSetImageData(ABRecordRef person, CFDataRef imageData,
 ABRecordType ABRecordGetRecordType(ABRecordRef record) {
     (void)record;
     return kABPersonType;
+}
+
+ABRecordID ABRecordGetRecordID(ABRecordRef record) {
+    if(!record) return kABRecordInvalidID;
+    CFNumberRef number = (CFNumberRef)CFDictionaryGetValue(
+        (CFDictionaryRef)record, LC32ABRecordIDKey);
+    ABRecordID recordID = kABRecordInvalidID;
+    if(number) CFNumberGetValue(
+        number, kCFNumberSInt32Type, &recordID);
+    return recordID;
+}
+
+static void LC32ABAppendNameProperty(CFMutableStringRef name,
+                                     ABRecordRef record,
+                                     ABPropertyID property) {
+    CFTypeRef value = ABRecordCopyValue(record, property);
+    if(!value) return;
+    if(CFGetTypeID(value) == CFStringGetTypeID() &&
+            CFStringGetLength((CFStringRef)value) != 0) {
+        if(CFStringGetLength(name) != 0) CFStringAppend(name, CFSTR(" "));
+        CFStringAppend(name, (CFStringRef)value);
+    }
+    CFRelease(value);
+}
+
+CFStringRef ABRecordCopyCompositeName(ABRecordRef record) {
+    if(!record) return NULL;
+    CFMutableStringRef name = CFStringCreateMutable(
+        kCFAllocatorDefault, 0);
+    if(!name) return NULL;
+
+    LC32ABAppendNameProperty(name, record, kABPersonPrefixProperty);
+    LC32ABAppendNameProperty(name, record, kABPersonFirstNameProperty);
+    LC32ABAppendNameProperty(name, record, kABPersonMiddleNameProperty);
+    LC32ABAppendNameProperty(name, record, kABPersonLastNameProperty);
+    LC32ABAppendNameProperty(name, record, kABPersonSuffixProperty);
+    if(CFStringGetLength(name) == 0)
+        LC32ABAppendNameProperty(
+            name, record, kABPersonOrganizationProperty);
+    if(CFStringGetLength(name) == 0)
+        LC32ABAppendNameProperty(name, record, kABPersonNicknameProperty);
+
+    if(CFStringGetLength(name) == 0) {
+        CFRelease(name);
+        return NULL;
+    }
+    return name;
 }
 
 bool ABRecordSetValue(ABRecordRef record, ABPropertyID property,

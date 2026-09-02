@@ -76,6 +76,12 @@ const CFStringRef kCFErrorFilePathKey = CFSTR("NSFilePath");
 const CFCalendarIdentifier kCFGregorianCalendar = CFSTR("gregorian");
 const CFLocaleKey kCFLocaleCountryCode = CFSTR("kCFLocaleCountryCodeKey");
 
+/* Match the legacy CoreFoundation constants' actual NSString payloads. */
+const CFStringRef kCFStringTransformStripCombiningMarks =
+    CFSTR(")kCFStringTransformStripCombiningMarks");
+const CFStringRef kCFStringTransformToLatin =
+    CFSTR(")kCFStringTransformToLatin");
+
 const CFStringRef kCFPreferencesAnyApplication =
     CFSTR("kCFPreferencesAnyApplication");
 const CFStringRef kCFPreferencesCurrentApplication =

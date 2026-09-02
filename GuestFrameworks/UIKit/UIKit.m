@@ -118,6 +118,8 @@ NSRunLoopMode const UITrackingRunLoopMode = @"UITrackingRunLoopMode";
 static pthread_once_t LC32LegacyAdMobOnce = PTHREAD_ONCE_INIT;
 static pthread_once_t LC32VoiceOverOnce = PTHREAD_ONCE_INIT;
 static uint64_t LC32HostUIAccessibilityIsVoiceOverRunning;
+static pthread_once_t LC32AccessibilityPostOnce = PTHREAD_ONCE_INIT;
+static uint64_t LC32HostUIAccessibilityPostNotification;
 static pthread_once_t LC32GuidedAccessOnce = PTHREAD_ONCE_INIT;
 static uint64_t LC32HostUIAccessibilityIsGuidedAccessEnabled;
 static pthread_once_t LC32LegacyIPadCanvasOnce = PTHREAD_ONCE_INIT;
@@ -180,6 +182,26 @@ BOOL UIAccessibilityIsVoiceOverRunning(void) {
     if(!LC32HostUIAccessibilityIsVoiceOverRunning) return NO;
     return (BOOL)LC32InvokeHostCRet32(
         LC32HostUIAccessibilityIsVoiceOverRunning);
+}
+
+static void LC32ResolveAccessibilityPostFunction(void) {
+    LC32HostUIAccessibilityPostNotification =
+        LC32Dlsym("LC32_UIKit_UIAccessibilityPostNotification", YES);
+}
+
+void UIAccessibilityPostNotification(
+        UIAccessibilityNotifications notification, id argument) {
+    pthread_once(&LC32AccessibilityPostOnce,
+        LC32ResolveAccessibilityPostFunction);
+    if(!LC32HostUIAccessibilityPostNotification) return;
+    /* The payload is an Objective-C object, so translate its guest proxy
+     * before forwarding instead of exposing the ARM32 pointer to UIKit.
+     * Spell the host pointer as two words: SVC 1002 forwards only r2/r3
+     * directly, then gives the wrapper the guest stack pointer. */
+    const uint64_t hostArgument = [argument host_self];
+    (void)LC32InvokeHostCRet32(LC32HostUIAccessibilityPostNotification,
+        (uint32_t)notification, (uint32_t)hostArgument,
+        (uint32_t)(hostArgument >> 32));
 }
 
 static void LC32ResolveGuidedAccessFunction(void) {
@@ -428,6 +450,11 @@ CGContextRef UIGraphicsGetCurrentContext(void) {
     return LC32UIKitGetCurrentContext
         ? (CGContextRef)LC32InvokeHostCRet32(LC32UIKitGetCurrentContext)
         : NULL;
+}
+
+void UIRectFill(CGRect rect) {
+    CGContextRef context = UIGraphicsGetCurrentContext();
+    if(context) CGContextFillRect(context, rect);
 }
 
 UIImage *UIGraphicsGetImageFromCurrentImageContext(void) {

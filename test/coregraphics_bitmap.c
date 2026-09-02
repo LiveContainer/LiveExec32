@@ -22,7 +22,23 @@ int main(void) {
     uint8_t pixels[4 * 4 * 4] = {};
     uint8_t maskPixels[4 * 4] = {};
 
+    const UInt8 providerBytes[] = {0x10, 0x20, 0x30, 0x40};
+    CFDataRef providerData = CFDataCreate(
+        kCFAllocatorDefault, providerBytes, sizeof(providerBytes));
+    CGDataProviderRef provider = providerData
+        ? CGDataProviderCreateWithCFData(providerData) : NULL;
+    failures += report("data-provider-cfdata-owned", provider != NULL);
+
     CGColorSpaceRef rgb = CGColorSpaceCreateDeviceRGB();
+    const CGFloat imageDecode[] = {0, 1, 0, 1, 0, 1};
+    CGImageRef providerImage = rgb && provider ? CGImageCreate(
+        1, 1, 8, 32, 4, rgb,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big,
+        provider, imageDecode, false, kCGRenderingIntentDefault) : NULL;
+    failures += report("image-create-provider-decode", providerImage &&
+        CGImageGetWidth(providerImage) == 1 &&
+        CGImageGetHeight(providerImage) == 1 &&
+        CGImageGetDataProvider(providerImage) != NULL);
     const CGFloat redComponents[] = {1.0f, 0.0f, 0.0f, 0.75f};
     CGColorRef red = rgb ? CGColorCreate(rgb, redComponents) : NULL;
     const CGFloat *roundTrip = red ? CGColorGetComponents(red) : NULL;
@@ -54,6 +70,21 @@ int main(void) {
         failures += report("bitmap-clear-sync",
             !buffer_has_nonzero_byte(pixels, sizeof(pixels)));
 
+        const CGPoint linePoints[] = {
+            CGPointMake(0, 0), CGPointMake(3, 0), CGPointMake(3, 3),
+        };
+        CGContextBeginPath(context);
+        CGContextAddLines(context, linePoints,
+            sizeof(linePoints) / sizeof(linePoints[0]));
+        CGContextSetGrayStrokeColor(context, 1.0f, 1.0f);
+        CGContextSetLineJoin(context, kCGLineJoinBevel);
+        CGContextSetLineWidth(context, 1.0f);
+        CGContextSetShadow(context, CGSizeMake(0, 0), 0);
+        CGContextStrokePath(context);
+        failures += report("context-lines-stroke-sync",
+            buffer_has_nonzero_byte(pixels, sizeof(pixels)));
+        CGContextClearRect(context, CGRectMake(0, 0, 4, 4));
+
         CGMutablePathRef path = CGPathCreateMutable();
         CGAffineTransform translation =
             CGAffineTransformMakeTranslation(1.0f, 1.0f);
@@ -68,6 +99,17 @@ int main(void) {
         failures += report("path-copy-transform-contains",
             copiedPath && CGPathContainsPoint(copiedPath, NULL,
                 CGPointMake(1.5f, 1.5f), false));
+
+        CGMutablePathRef boundingPath = CGPathCreateMutable();
+        if(boundingPath) CGPathAddRect(
+            boundingPath, NULL, CGRectMake(2, 3, 4, 5));
+        const CGRect boundingBox = boundingPath
+            ? CGPathGetBoundingBox(boundingPath) : CGRectNull;
+        failures += report("path-bounding-box",
+            boundingPath && fabsf((float)(boundingBox.origin.x - 2)) < 0.001f &&
+            fabsf((float)(boundingBox.origin.y - 3)) < 0.001f &&
+            fabsf((float)(boundingBox.size.width - 4)) < 0.001f &&
+            fabsf((float)(boundingBox.size.height - 5)) < 0.001f);
 
         CGContextBeginPath(context);
         CGContextAddPath(context, copiedPath);
@@ -88,6 +130,8 @@ int main(void) {
         CGContextStrokePath(context);
         CGContextStrokeRect(context, CGRectMake(0, 0, 3, 3));
         CGContextSetTextPosition(context, 1, 2);
+        CGContextSetTextMatrix(context,
+            CGAffineTransformMake(1, 0, 0, 1, 2, 3));
         CGContextScaleCTM(context, 1, 1);
         CGContextTranslateCTM(context, 0, 0);
         CGContextConcatCTM(context, CGAffineTransformIdentity);
@@ -100,6 +144,12 @@ int main(void) {
             CGImageGetColorSpace(image) != NULL &&
             CGColorSpaceGetModel(CGImageGetColorSpace(image)) ==
                 kCGColorSpaceModelRGB);
+
+        CGImageRef copiedImage = image ? CGImageCreateCopy(image) : NULL;
+        failures += report("image-copy-provider", copiedImage &&
+            CGImageGetWidth(copiedImage) == 4 &&
+            CGImageGetHeight(copiedImage) == 4 &&
+            CGImageGetDataProvider(copiedImage) != NULL);
 
         CGImageRef cropped = image ? CGImageCreateWithImageInRect(
             image, CGRectMake(1, 1, 2, 2)) : NULL;
@@ -124,13 +174,18 @@ int main(void) {
         if(maskContext) CGContextRelease(maskContext);
         if(gray) CGColorSpaceRelease(gray);
         if(cropped) CGImageRelease(cropped);
+        if(copiedImage) CGImageRelease(copiedImage);
         if(image) CGImageRelease(image);
+        if(boundingPath) CGPathRelease(boundingPath);
         if(copiedPath) CGPathRelease(copiedPath);
         if(path) CGPathRelease(path);
         CGContextRelease(context);
     }
 
     if(red) CGColorRelease(red);
+    if(providerImage) CGImageRelease(providerImage);
     if(rgb) CGColorSpaceRelease(rgb);
+    if(provider) CGDataProviderRelease(provider);
+    if(providerData) CFRelease(providerData);
     return failures == 0 ? 0 : 1;
 }

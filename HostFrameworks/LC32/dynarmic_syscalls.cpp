@@ -911,6 +911,99 @@ guest_mach_msg_trap(u32 guest_msg,
             Mess->Out.msgh_body.msgh_descriptor_count = 1;
             break;
         }
+        case 216: {
+            /*
+             * host_statistics uses the same variable-length CountInOut wire
+             * convention as host_info, but it occupies a separate MIG slot.
+             * Keep the iOS 10 ARM32 layout explicit instead of overlaying the
+             * current host SDK's generated request/reply union.
+             */
+            struct __attribute__((packed, aligned(4)))
+                    HostStatisticsRequest32 {
+                mach_msg_header_t Head;
+                NDR_record_t NDR;
+                host_flavor_t flavor;
+                mach_msg_type_number_t host_info_outCnt;
+            };
+            struct __attribute__((packed, aligned(4)))
+                    HostStatisticsReply32 {
+                mach_msg_header_t Head;
+                NDR_record_t NDR;
+                kern_return_t RetCode;
+                mach_msg_type_number_t host_info_outCnt;
+                integer_t host_info_out[68];
+            };
+            static_assert(sizeof(HostStatisticsRequest32) == 40,
+                "unexpected ARM32 host_statistics request layout");
+            static_assert(offsetof(HostStatisticsReply32, host_info_out) ==
+                    40,
+                "unexpected ARM32 host_statistics reply payload offset");
+            static_assert(sizeof(HostStatisticsReply32) == 312,
+                "unexpected ARM32 host_statistics reply layout");
+
+            const auto writeError = [&](kern_return_t errorCode) {
+                if (rcv_size < sizeof(mig_reply_error_t)) {
+                    host_header->msgh_size = sizeof(mig_reply_error_t);
+                    result = MACH_RCV_TOO_LARGE;
+                    return;
+                }
+                auto *error = reinterpret_cast<mig_reply_error_t *>(
+                    host_header);
+                host_header->msgh_size = sizeof(*error);
+                error->NDR = NDR_record;
+                error->RetCode = errorCode;
+            };
+
+            if (send_size != sizeof(HostStatisticsRequest32)) {
+                writeError(MIG_BAD_ARGUMENTS);
+                break;
+            }
+
+            const auto request =
+                *reinterpret_cast<const HostStatisticsRequest32 *>(
+                    host_header);
+            constexpr mach_msg_type_number_t MaxHostStatisticsCount = 68;
+            if (request.host_info_outCnt > MaxHostStatisticsCount) {
+                writeError(MIG_ARRAY_TOO_LARGE);
+                break;
+            }
+
+            std::array<integer_t, MaxHostStatisticsCount> statistics = {};
+            mach_msg_type_number_t count = request.host_info_outCnt;
+            const kern_return_t kr = host_statistics(
+                request.Head.msgh_request_port, request.flavor,
+                statistics.data(), &count);
+            if (kr != KERN_SUCCESS) {
+                writeError(kr);
+                break;
+            }
+            if (count > MaxHostStatisticsCount ||
+                    count > request.host_info_outCnt) {
+                writeError(MIG_ARRAY_TOO_LARGE);
+                break;
+            }
+
+            const mach_msg_size_t replySize =
+                offsetof(HostStatisticsReply32, host_info_out) +
+                sizeof(statistics[0]) * count;
+            if (rcv_size < replySize) {
+                host_header->msgh_size = replySize;
+                result = MACH_RCV_TOO_LARGE;
+                break;
+            }
+
+            auto *reply = reinterpret_cast<HostStatisticsReply32 *>(
+                host_header);
+            reply->NDR = NDR_record;
+            reply->RetCode = KERN_SUCCESS;
+            reply->host_info_outCnt = count;
+            if (count != 0) {
+                memcpy(reply->host_info_out, statistics.data(),
+                    sizeof(statistics[0]) * count);
+            }
+            host_header->msgh_size = replySize;
+            break;
+        }
         case 217: {
             MACH_MSG_UNION(host_request_notification, Mess);
             host_header->msgh_size = sizeof(Mess->Out);
@@ -1485,6 +1578,100 @@ guest_mach_msg_trap(u32 guest_msg,
             reply->NDR = NDR_record;
             reply->RetCode = KERN_SUCCESS;
             reply->old_stateCnt = stateCount;
+            host_header->msgh_size = replySize;
+            break;
+        }
+        case 3612: { // thread_info
+            /*
+             * iOS 10 thread_info has a 40-byte simple request and a
+             * variable CountInOut reply. Keep that ARM32 MIG layout
+             * explicit: the current SDK's generated structures are a host
+             * implementation detail and synthetic ports must first be
+             * resolved to registered guest-thread metadata.
+             */
+            struct __attribute__((packed, aligned(4)))
+                    ThreadInfoRequest32 {
+                mach_msg_header_t Head;
+                NDR_record_t NDR;
+                thread_flavor_t flavor;
+                mach_msg_type_number_t thread_info_outCnt;
+            };
+            struct __attribute__((packed, aligned(4)))
+                    ThreadInfoReply32 {
+                mach_msg_header_t Head;
+                NDR_record_t NDR;
+                kern_return_t RetCode;
+                mach_msg_type_number_t thread_info_outCnt;
+                integer_t thread_info_out[THREAD_INFO_MAX];
+            };
+            static_assert(sizeof(ThreadInfoRequest32) == 40,
+                "unexpected ARM32 thread_info request layout");
+            static_assert(offsetof(
+                    ThreadInfoReply32, thread_info_out) == 40,
+                "unexpected ARM32 thread_info reply payload offset");
+            static_assert(sizeof(ThreadInfoReply32) == 168,
+                "unexpected ARM32 thread_info reply layout");
+
+            const auto writeError = [&](kern_return_t errorCode) {
+                if (rcv_size < sizeof(mig_reply_error_t)) {
+                    host_header->msgh_size = sizeof(mig_reply_error_t);
+                    result = MACH_RCV_TOO_LARGE;
+                    return;
+                }
+                auto *error = reinterpret_cast<mig_reply_error_t *>(
+                    host_header);
+                host_header->msgh_size = sizeof(*error);
+                error->NDR = NDR_record;
+                error->RetCode = errorCode;
+            };
+
+            if (send_size != sizeof(ThreadInfoRequest32)) {
+                writeError(MIG_BAD_ARGUMENTS);
+                break;
+            }
+
+            const auto request =
+                *reinterpret_cast<const ThreadInfoRequest32 *>(
+                    host_header);
+            if (request.thread_info_outCnt > THREAD_INFO_MAX) {
+                writeError(MIG_ARRAY_TOO_LARGE);
+                break;
+            }
+
+            std::array<integer_t, THREAD_INFO_MAX> info = {};
+            mach_msg_type_number_t count =
+                request.thread_info_outCnt;
+            const kern_return_t kr = CopyGuestThreadInfo(
+                request.Head.msgh_request_port, request.flavor,
+                request.thread_info_outCnt, info.data(), &count);
+            if (kr != KERN_SUCCESS) {
+                writeError(kr);
+                break;
+            }
+            if (count > THREAD_INFO_MAX ||
+                    count > request.thread_info_outCnt) {
+                writeError(MIG_ARRAY_TOO_LARGE);
+                break;
+            }
+
+            const mach_msg_size_t replySize =
+                offsetof(ThreadInfoReply32, thread_info_out) +
+                sizeof(info[0]) * count;
+            if (rcv_size < replySize) {
+                host_header->msgh_size = replySize;
+                result = MACH_RCV_TOO_LARGE;
+                break;
+            }
+
+            auto *reply = reinterpret_cast<ThreadInfoReply32 *>(
+                host_header);
+            reply->NDR = NDR_record;
+            reply->RetCode = KERN_SUCCESS;
+            reply->thread_info_outCnt = count;
+            if (count != 0) {
+                memcpy(reply->thread_info_out, info.data(),
+                    sizeof(info[0]) * count);
+            }
             host_header->msgh_size = replySize;
             break;
         }

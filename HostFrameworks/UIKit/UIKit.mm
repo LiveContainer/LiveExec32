@@ -16,6 +16,10 @@ typedef NS_ENUM(NSUInteger, LC32LegacyIPadGeometryMode) {
     /* Applications using UIWindow.rootViewController expect UIKit to resize
      * the controller hierarchy into the requested interface orientation. */
     LC32LegacyIPadGeometryModeReflowRootController,
+    /* Some 568-point phone applications deliberately retain a 480x320 game
+     * canvas. Keep that canvas fixed inside a full-size native scene root so
+     * UIKit cannot apply its obsolete portrait-window quarter-turn to it. */
+    LC32LegacyIPadGeometryModePreservePhoneLandscapeCanvas,
 };
 
 @interface LC32LegacyIPadContainerController : UIViewController {
@@ -30,6 +34,7 @@ typedef NS_ENUM(NSUInteger, LC32LegacyIPadGeometryMode) {
     NSUInteger _guestContentGeneration;
 }
 @property(nonatomic, readonly) UIViewController *guestContentController;
+@property(nonatomic, readonly) LC32LegacyIPadGeometryMode geometryMode;
 - (instancetype)initWithGuestContentController:
     (UIViewController *)controller
                           geometryMode:(LC32LegacyIPadGeometryMode)mode;
@@ -64,19 +69,45 @@ namespace {
 
 const void *LC32LegacyOrientationMaskKey =
     &LC32LegacyOrientationMaskKey;
+const void *LC32GuestSupportedOrientationsIMPKey =
+    &LC32GuestSupportedOrientationsIMPKey;
+const void *LC32GuestPreferredOrientationIMPKey =
+    &LC32GuestPreferredOrientationIMPKey;
+const void *LC32SettledLegacyOrientationKey =
+    &LC32SettledLegacyOrientationKey;
 
 struct LC32GuestUIKitPolicy {
     UIInterfaceOrientationMask declaredOrientations;
     UIInterfaceOrientation preferredOrientation;
     bool statusBarHidden;
+    bool constrainsControllerOrientations;
+    bool usesLegacyInitialOrientation;
 };
 
 const LC32GuestUIKitPolicy& LC32GuestInterfacePolicy(void);
+UIInterfaceOrientation LC32FirstOrientationInMask(
+    UIInterfaceOrientationMask mask);
 id LC32ObjectProperty(id object, const char *name);
 
 std::atomic<NSInteger> LC32LegacyRequestedOrientation{
     UIInterfaceOrientationUnknown};
 thread_local bool LC32SuppressGuestOrientationQuery = false;
+thread_local bool LC32AllowGuestOrientationQuery = false;
+
+class LC32GuestOrientationQueryScope {
+public:
+    LC32GuestOrientationQueryScope()
+        : previous_(LC32AllowGuestOrientationQuery) {
+        LC32AllowGuestOrientationQuery = true;
+    }
+
+    ~LC32GuestOrientationQueryScope() {
+        LC32AllowGuestOrientationQuery = previous_;
+    }
+
+private:
+    bool previous_;
+};
 
 /*
  * Do not replace these calls with ordinary Objective-C messages. A view can
@@ -94,6 +125,15 @@ CGRect LC32NativeViewBounds(UIView *view) {
     return view ? getter(view, @selector(bounds)) : CGRectZero;
 }
 
+CGAffineTransform LC32NativeViewTransform(UIView *view) {
+    using Getter = CGAffineTransform (*)(id, SEL);
+    static Getter getter = reinterpret_cast<Getter>(
+        class_getMethodImplementation(UIView.class,
+                                      @selector(transform)));
+    return view ? getter(view, @selector(transform))
+                : CGAffineTransformIdentity;
+}
+
 void LC32NativeSetViewBounds(UIView *view, CGRect bounds) {
     using Setter = void (*)(id, SEL, CGRect);
     static Setter setter = reinterpret_cast<Setter>(
@@ -106,6 +146,15 @@ void LC32NativeSetViewCenter(UIView *view, CGPoint center) {
     static Setter setter = reinterpret_cast<Setter>(
         class_getMethodImplementation(UIView.class, @selector(setCenter:)));
     if(view) setter(view, @selector(setCenter:), center);
+}
+
+void LC32NativeSetViewTransform(
+        UIView *view, CGAffineTransform transform) {
+    using Setter = void (*)(id, SEL, CGAffineTransform);
+    static Setter setter = reinterpret_cast<Setter>(
+        class_getMethodImplementation(UIView.class,
+                                      @selector(setTransform:)));
+    if(view) setter(view, @selector(setTransform:), transform);
 }
 
 void LC32NativeSetViewAutoresizingMask(
@@ -181,10 +230,26 @@ UIInterfaceOrientationMask LC32MaskForInterfaceOrientation(
     }
 }
 
+UIInterfaceOrientationMask LC32ConstrainGuestOrientationMask(
+        UIInterfaceOrientationMask mask) {
+    const LC32GuestUIKitPolicy &policy = LC32GuestInterfacePolicy();
+    if(!mask) return policy.declaredOrientations;
+    if(!policy.constrainsControllerOrientations) return mask;
+
+    /* A real supported-orientations array is an outer constraint on every
+     * controller. UIInterfaceOrientation is only an initial-side hint and is
+     * handled later, where the active window scene is known. */
+    const UIInterfaceOrientationMask constrained =
+        mask & policy.declaredOrientations;
+    return constrained ? constrained : policy.declaredOrientations;
+}
+
 const LC32GuestUIKitPolicy& LC32GuestInterfacePolicy(void) {
     static LC32GuestUIKitPolicy policy = {
         UIInterfaceOrientationMaskPortrait,
         UIInterfaceOrientationPortrait,
+        false,
+        false,
         false,
     };
     /* UIKit can query native controller policy while the shim dylib is
@@ -215,6 +280,8 @@ const LC32GuestUIKitPolicy& LC32GuestInterfacePolicy(void) {
         if(![orientationNames isKindOfClass:NSArray.class]) {
             orientationNames = info[@"UISupportedInterfaceOrientations"];
         }
+        const bool hasSupportedOrientationArray =
+            [orientationNames isKindOfClass:NSArray.class];
 
         UIInterfaceOrientationMask declared = 0;
         for(id value in orientationNames) {
@@ -225,19 +292,141 @@ const LC32GuestUIKitPolicy& LC32GuestInterfacePolicy(void) {
 
         const UIInterfaceOrientation preferred =
             LC32InterfaceOrientationFromName(info[@"UIInterfaceOrientation"]);
-        if(!declared) {
-            declared = LC32MaskForInterfaceOrientation(preferred);
+        const UIInterfaceOrientationMask preferredMask =
+            LC32MaskForInterfaceOrientation(preferred);
+        const bool usesLegacyInitialOrientation =
+            !hasSupportedOrientationArray && preferredMask;
+        if(!declared && usesLegacyInitialOrientation) {
+            declared = preferredMask;
         }
         if(!declared) declared = UIInterfaceOrientationMaskPortrait;
 
         policy.declaredOrientations = declared;
         policy.preferredOrientation =
-            LC32MaskForInterfaceOrientation(preferred) & declared
+            preferredMask & declared
             ? preferred
             : UIInterfaceOrientationUnknown;
         policy.statusBarHidden = [info[@"UIStatusBarHidden"] boolValue];
+        policy.constrainsControllerOrientations =
+            hasSupportedOrientationArray;
+        policy.usesLegacyInitialOrientation =
+            usesLegacyInitialOrientation;
     });
     return policy;
+}
+
+void LC32CacheSettledLegacyOrientation(
+        id object, UIInterfaceOrientation orientation) {
+    if(!object || !LC32GuestInterfacePolicy().usesLegacyInitialOrientation ||
+            !LC32MaskForInterfaceOrientation(orientation)) {
+        return;
+    }
+    objc_setAssociatedObject(object, LC32SettledLegacyOrientationKey,
+        @((NSInteger)orientation), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+UIInterfaceOrientation LC32SettledLegacyOrientation(
+        id object, UIInterfaceOrientationMask mask) {
+    if(!LC32GuestInterfacePolicy().usesLegacyInitialOrientation) {
+        return UIInterfaceOrientationUnknown;
+    }
+    NSNumber *cached = object ? objc_getAssociatedObject(
+        object, LC32SettledLegacyOrientationKey) : nil;
+    const UIInterfaceOrientation settled = cached
+        ? (UIInterfaceOrientation)cached.integerValue
+        : UIInterfaceOrientationUnknown;
+    return LC32MaskForInterfaceOrientation(settled) & mask
+        ? settled : UIInterfaceOrientationUnknown;
+}
+
+IMP LC32GuestOrientationImplementation(id object, const void *key) {
+    for(Class cls = object_getClass(object); cls;
+            cls = class_getSuperclass(cls)) {
+        NSNumber *value = objc_getAssociatedObject((id)cls, key);
+        if(value) return reinterpret_cast<IMP>(
+            static_cast<uintptr_t>(value.unsignedLongLongValue));
+        if(cls == UIViewController.class) break;
+    }
+    return nullptr;
+}
+
+UIInterfaceOrientationMask LC32GuestSupportedInterfaceOrientations(
+        UIViewController *controller, SEL selector) {
+    NSNumber *cached = objc_getAssociatedObject(
+        controller, LC32LegacyOrientationMaskKey);
+    if(LC32SuppressGuestOrientationQuery ||
+            !LC32AllowGuestOrientationQuery ||
+            !Dynarmic_guest_thread_is_registered()) {
+        return cached
+            ? (UIInterfaceOrientationMask)cached.unsignedLongLongValue
+            : LC32GuestInterfacePolicy().declaredOrientations;
+    }
+
+    using SupportedOrientations =
+        UIInterfaceOrientationMask (*)(id, SEL);
+    SupportedOrientations original =
+        reinterpret_cast<SupportedOrientations>(
+            LC32GuestOrientationImplementation(
+                controller, LC32GuestSupportedOrientationsIMPKey));
+    UIInterfaceOrientationMask mask = original
+        ? original(controller, selector) : 0;
+    mask = LC32ConstrainGuestOrientationMask(mask);
+    objc_setAssociatedObject(controller, LC32LegacyOrientationMaskKey,
+        @(mask), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return mask;
+}
+
+UIInterfaceOrientationMask LC32ControllerSupportedInterfaceOrientations(
+        UIViewController *controller) {
+    using SupportedOrientations =
+        UIInterfaceOrientationMask (*)(id, SEL);
+    UIInterfaceOrientationMask mask = controller
+        ? reinterpret_cast<SupportedOrientations>(objc_msgSend)(
+            controller, @selector(supportedInterfaceOrientations))
+        : 0;
+    mask = LC32ConstrainGuestOrientationMask(mask);
+    if(controller) {
+        objc_setAssociatedObject(controller, LC32LegacyOrientationMaskKey,
+            @(mask), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return mask;
+}
+
+UIInterfaceOrientation LC32GuestPreferredInterfaceOrientation(
+        UIViewController *controller, SEL selector) {
+    using PreferredOrientation = UIInterfaceOrientation (*)(id, SEL);
+    PreferredOrientation original =
+        reinterpret_cast<PreferredOrientation>(
+            LC32GuestOrientationImplementation(
+                controller, LC32GuestPreferredOrientationIMPKey));
+    const UIInterfaceOrientation guestPreferred =
+        original && LC32AllowGuestOrientationQuery &&
+                !LC32SuppressGuestOrientationQuery &&
+                Dynarmic_guest_thread_is_registered()
+            ? original(controller, selector)
+            : UIInterfaceOrientationUnknown;
+
+    const UIInterfaceOrientationMask mask =
+        LC32ControllerSupportedInterfaceOrientations(controller);
+    const UIInterfaceOrientation requested = (UIInterfaceOrientation)
+        LC32LegacyRequestedOrientation.load(std::memory_order_relaxed);
+    if(LC32MaskForInterfaceOrientation(requested) & mask) {
+        return requested;
+    }
+    const UIInterfaceOrientation settled =
+        LC32SettledLegacyOrientation(controller, mask);
+    if(settled != UIInterfaceOrientationUnknown) {
+        return settled;
+    }
+    if(LC32MaskForInterfaceOrientation(guestPreferred) & mask) {
+        return guestPreferred;
+    }
+    const UIInterfaceOrientation bundlePreferred =
+        LC32GuestInterfacePolicy().preferredOrientation;
+    if(LC32MaskForInterfaceOrientation(bundlePreferred) & mask) {
+        return bundlePreferred;
+    }
+    return LC32FirstOrientationInMask(mask);
 }
 
 Method LC32ClassOwnMethod(Class cls, SEL selector) {
@@ -252,6 +441,60 @@ Method LC32ClassOwnMethod(Class cls, SEL selector) {
     }
     free(methods);
     return result;
+}
+
+struct LC32GuestLoadViewFrame {
+    __unsafe_unretained UIViewController *controller;
+    LC32GuestLoadViewFrame *previous;
+};
+
+thread_local LC32GuestLoadViewFrame *LC32GuestLoadViewFrames = nullptr;
+
+bool LC32GuestLoadViewIsActive(UIViewController *controller) {
+    for(LC32GuestLoadViewFrame *frame = LC32GuestLoadViewFrames;
+            frame; frame = frame->previous) {
+        if(frame->controller == controller) return true;
+    }
+    return false;
+}
+
+class LC32GuestLoadViewScope {
+public:
+    explicit LC32GuestLoadViewScope(UIViewController *controller)
+        : frame{controller, LC32GuestLoadViewFrames} {
+        LC32GuestLoadViewFrames = &frame;
+    }
+
+    ~LC32GuestLoadViewScope() {
+        LC32GuestLoadViewFrames = frame.previous;
+    }
+
+private:
+    LC32GuestLoadViewFrame frame;
+};
+
+void LC32GuestLoadView(UIViewController *controller, SEL selector) {
+    if(LC32GuestLoadViewIsActive(controller)) {
+        /* LC32InvokeHostSelector normally intercepts the reentrant -view read
+         * before native UIKit reaches this callback. Keep a no-op backstop for
+         * any other same-controller native load path; installing a generic
+         * UIView here would make the legacy override believe loading finished. */
+        return;
+    }
+
+    LC32GuestLoadViewScope scope(controller);
+    (void)LC32InvokeGuestSelector(
+        controller, selector, 0, 0, 0, 0, 0, 0);
+}
+
+bool LC32NativeViewIfLoaded(UIViewController *controller, UIView **view) {
+    if(!view) return false;
+    using Getter = UIView *(*)(id, SEL);
+    static Getter getter = reinterpret_cast<Getter>(
+        class_getMethodImplementation(
+            UIViewController.class, @selector(viewIfLoaded)));
+    *view = controller ? getter(controller, @selector(viewIfLoaded)) : nil;
+    return true;
 }
 
 bool LC32ClassIsUIViewController(Class cls) {
@@ -294,6 +537,7 @@ UIInterfaceOrientation LC32FirstOrientationInMask(
 UIInterfaceOrientationMask LC32LegacySupportedInterfaceOrientations(
         UIViewController *controller, SEL) {
     if(LC32SuppressGuestOrientationQuery ||
+            !LC32AllowGuestOrientationQuery ||
             !Dynarmic_guest_thread_is_registered()) {
         NSNumber *cached = objc_getAssociatedObject(
             controller, LC32LegacyOrientationMaskKey);
@@ -318,7 +562,7 @@ UIInterfaceOrientationMask LC32LegacySupportedInterfaceOrientations(
             mask |= LC32MaskForInterfaceOrientation(orientation);
         }
     }
-    if(!mask) mask = LC32GuestInterfacePolicy().declaredOrientations;
+    mask = LC32ConstrainGuestOrientationMask(mask);
     objc_setAssociatedObject(controller, LC32LegacyOrientationMaskKey,
         @(mask), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     return mask;
@@ -327,10 +571,13 @@ UIInterfaceOrientationMask LC32LegacySupportedInterfaceOrientations(
 UIInterfaceOrientation LC32LegacyPreferredInterfaceOrientation(
         UIViewController *controller, SEL) {
     const UIInterfaceOrientationMask mask =
-        LC32LegacySupportedInterfaceOrientations(controller, nullptr);
+        LC32ControllerSupportedInterfaceOrientations(controller);
     const UIInterfaceOrientation requested = (UIInterfaceOrientation)
         LC32LegacyRequestedOrientation.load(std::memory_order_relaxed);
     if(LC32MaskForInterfaceOrientation(requested) & mask) return requested;
+    const UIInterfaceOrientation settled =
+        LC32SettledLegacyOrientation(controller, mask);
+    if(settled != UIInterfaceOrientationUnknown) return settled;
     const UIInterfaceOrientation declared =
         LC32GuestInterfacePolicy().preferredOrientation;
     if(LC32MaskForInterfaceOrientation(declared) & mask) return declared;
@@ -353,11 +600,15 @@ bool LC32ObjectUsesGuestClass(id object);
 UIViewController *LC32NativeWindowRootViewController(UIWindow *window);
 void LC32NativeSetWindowRootViewController(
     UIWindow *window, UIViewController *controller);
+void LC32NativeSetWindowFrame(UIWindow *window, CGRect frame);
 UIViewController *LC32GuestWindowRootViewController(UIWindow *window);
 void LC32InstallGuestWindowRootViewController(
     UIWindow *window, UIViewController *controller,
     LC32LegacyIPadGeometryMode geometryMode);
-UIInterfaceOrientation LC32LegacyTargetOrientation(void);
+UIInterfaceOrientation LC32LegacyTargetOrientation(
+    UIViewController *controller);
+bool LC32WindowNeedsLegacyPhoneCanvas(
+    UIWindow *window, UIViewController *controller);
 
 LC32LegacyIPadContainerController *LC32LegacyContainerForWindow(
         UIWindow *window) {
@@ -427,6 +678,15 @@ void LC32NativeSetWindowRootViewController(
         &superInfo, @selector(setRootViewController:), controller);
 }
 
+void LC32NativeSetWindowFrame(UIWindow *window, CGRect frame) {
+    Class dispatchClass = LC32NativeWindowDispatchClass(window);
+    if(!window || !dispatchClass) return;
+    using SetFrame = void (*)(id, SEL, CGRect);
+    SetFrame setter = reinterpret_cast<SetFrame>(
+        class_getMethodImplementation(dispatchClass, @selector(setFrame:)));
+    setter(window, @selector(setFrame:), frame);
+}
+
 bool LC32WindowNeedsLegacyIPadContainer(UIWindow *window) {
     if(!window || !LC32GuestIsIPadOnly()) return false;
     const CGRect hostBounds = LC32WindowSceneBounds(window);
@@ -435,11 +695,16 @@ bool LC32WindowNeedsLegacyIPadContainer(UIWindow *window) {
     return shortEdge > 0 && shortEdge < 600;
 }
 
-UIInterfaceOrientation LC32LegacyTargetOrientation(void) {
+UIInterfaceOrientation LC32LegacyTargetOrientation(
+        UIViewController *controller) {
     const UIInterfaceOrientation requested = (UIInterfaceOrientation)
         LC32LegacyRequestedOrientation.load(std::memory_order_relaxed);
     if(LC32MaskForInterfaceOrientation(requested)) return requested;
     const LC32GuestUIKitPolicy &policy = LC32GuestInterfacePolicy();
+    const UIInterfaceOrientation settled =
+        LC32SettledLegacyOrientation(
+            controller, UIInterfaceOrientationMaskAll);
+    if(settled != UIInterfaceOrientationUnknown) return settled;
     if(LC32MaskForInterfaceOrientation(policy.preferredOrientation)) {
         return policy.preferredOrientation;
     }
@@ -462,8 +727,11 @@ void LC32InstallGuestWindowRootViewController(
     if(!window || !window.guest_selfOrNull) return;
     LC32LegacyIPadContainerController *container =
         LC32LegacyContainerForWindow(window);
-    const bool needsContainer =
-        controller && LC32WindowNeedsLegacyIPadContainer(window);
+    const bool needsPhoneCanvas = geometryMode ==
+            LC32LegacyIPadGeometryModePreservePhoneLandscapeCanvas &&
+        LC32WindowNeedsLegacyPhoneCanvas(window, controller);
+    const bool needsContainer = controller &&
+        (LC32WindowNeedsLegacyIPadContainer(window) || needsPhoneCanvas);
 
     if(!needsContainer) {
         /* nil uninstalls the compatibility root. If the scene no longer
@@ -523,6 +791,43 @@ CGRect LC32WindowSceneBounds(UIWindow *window) {
     return (window.screen ?: UIScreen.mainScreen).bounds;
 }
 
+bool LC32WindowNeedsLegacyPhoneCanvas(
+        UIWindow *window, UIViewController *controller) {
+    const LC32GuestUIKitPolicy &policy = LC32GuestInterfacePolicy();
+    if(!window || !window.guest_selfOrNull || !controller ||
+            !LC32ObjectUsesGuestClass(controller) || LC32GuestIsIPadOnly() ||
+            !policy.usesLegacyInitialOrientation ||
+            !UIInterfaceOrientationIsLandscape(
+                policy.preferredOrientation)) {
+        return false;
+    }
+
+    UIView *contentView = nil;
+    if(!LC32NativeViewIfLoaded(controller, &contentView) || !contentView) {
+        return false;
+    }
+    const CGRect sceneBounds = LC32WindowSceneBounds(window);
+    const CGRect contentBounds = LC32NativeViewBounds(contentView);
+    const CGFloat sceneShort = MIN(sceneBounds.size.width,
+                                   sceneBounds.size.height);
+    const CGFloat sceneLong = MAX(sceneBounds.size.width,
+                                  sceneBounds.size.height);
+    const CGFloat contentShort = MIN(contentBounds.size.width,
+                                     contentBounds.size.height);
+    const CGFloat contentLong = MAX(contentBounds.size.width,
+                                    contentBounds.size.height);
+    constexpr CGFloat epsilon = 0.5;
+
+    /* This is the specific phone-Classic split observed in 568-point apps:
+     * UIKit owns a 568x320 scene while the game deliberately keeps the old
+     * 480x320 drawable. Avoid treating an arbitrary undersized modern root
+     * controller as a compatibility canvas. */
+    return fabs(sceneShort - 320) < epsilon &&
+           fabs(sceneLong - 568) < epsilon &&
+           fabs(contentShort - 320) < epsilon &&
+           fabs(contentLong - 480) < epsilon;
+}
+
 bool LC32UsesClassicFullScreenViewport(UIWindow *window) {
     UIScreen *screen = window.screen ?: UIScreen.mainScreen;
     const CGRect screenBounds = screen.bounds;
@@ -576,24 +881,52 @@ UIInterfaceOrientation LC32WindowSceneOrientation(
     UIInterfaceOrientation orientation = UIInterfaceOrientationUnknown;
     if(@available(iOS 26.0, *)) {
         orientation = scene.effectiveGeometry.interfaceOrientation;
-    } else {
-        orientation = scene.interfaceOrientation;
     }
     if(orientation == UIInterfaceOrientationUnknown) {
-        orientation = sceneBounds.size.width > sceneBounds.size.height
-            ? UIInterfaceOrientationLandscapeLeft
-            : UIInterfaceOrientationPortrait;
+        orientation = scene.interfaceOrientation;
     }
+    if(LC32MaskForInterfaceOrientation(orientation)) {
+        if([window isKeyWindow]) {
+            LC32CacheSettledLegacyOrientation(window, orientation);
+        }
+    } else {
+        orientation = LC32SettledLegacyOrientation(
+            window, UIInterfaceOrientationMaskAll);
+    }
+    (void)sceneBounds;
     return orientation;
 }
 
 void LC32ScaleLegacyIPadWindow(UIWindow *window) {
     /* UIKit owns keyboard, alert, and text-effects windows in the same
      * process. Virtualize only a UIWindow paired with a guest object. */
-    if(!window || !window.guest_selfOrNull || !LC32GuestIsIPadOnly()) return;
+    if(!window || !window.guest_selfOrNull) return;
 
     LC32LegacyIPadContainerController *container =
         LC32LegacyContainerForWindow(window);
+    if(container && container.geometryMode ==
+            LC32LegacyIPadGeometryModePreservePhoneLandscapeCanvas) {
+        CGRect sceneBounds = window.windowScene.coordinateSpace.bounds;
+        if(!(sceneBounds.size.width > 0) ||
+                !(sceneBounds.size.height > 0)) {
+            sceneBounds = LC32WindowSceneBounds(window);
+        }
+        const UIInterfaceOrientation orientation =
+            LC32WindowSceneOrientation(window, sceneBounds);
+        if(UIInterfaceOrientationIsLandscape(orientation) &&
+                sceneBounds.size.width < sceneBounds.size.height) {
+            sceneBounds.size = CGSizeMake(
+                sceneBounds.size.height, sceneBounds.size.width);
+        }
+        LC32NativeSetWindowFrame(window, sceneBounds);
+        const CGRect viewport = LC32LegacyViewportInView(
+            window, container.view);
+        [container fitGuestContentForViewport:viewport
+            hostOrientation:orientation];
+        return;
+    }
+    if(!LC32GuestIsIPadOnly()) return;
+
     if(container && !LC32WindowNeedsLegacyIPadContainer(window)) {
         /* Scene resizing can leave classic mode at runtime. Unwrap promptly
          * instead of retaining a scaled compatibility hierarchy in a native
@@ -631,6 +964,17 @@ void LC32ScaleLegacyIPadWindow(UIWindow *window) {
 
 bool LC32ObjectUsesGuestClass(id object) {
     return object && [(id)object_getClass(object) isGuestClass];
+}
+
+bool LC32TransformNearlyEquals(
+        CGAffineTransform left, CGAffineTransform right) {
+    constexpr CGFloat epsilon = 0.0001;
+    return fabs(left.a - right.a) < epsilon &&
+           fabs(left.b - right.b) < epsilon &&
+           fabs(left.c - right.c) < epsilon &&
+           fabs(left.d - right.d) < epsilon &&
+           fabs(left.tx - right.tx) < epsilon &&
+           fabs(left.ty - right.ty) < epsilon;
 }
 
 UIViewController *LC32ActiveOrientationController(
@@ -686,6 +1030,7 @@ UIInterfaceOrientationMask LC32SupportedOrientationsForController(
     }
     using SupportedOrientations =
         UIInterfaceOrientationMask (*)(id, SEL);
+    LC32GuestOrientationQueryScope queryScope;
     UIInterfaceOrientationMask mask =
         reinterpret_cast<SupportedOrientations>(objc_msgSend)(
             controller, @selector(supportedInterfaceOrientations));
@@ -713,10 +1058,50 @@ void LC32ApplyLegacyWindowPolicy(UIWindow *window) {
         LC32GuestWindowRootViewController(window);
     UIViewController *orientationController =
         LC32ActiveOrientationController(guestRootController);
+
+    const LC32GuestUIKitPolicy &policy = LC32GuestInterfacePolicy();
+    UIWindowScene *scene = window.windowScene;
+    const CGRect sceneBounds = scene
+        ? LC32WindowSceneBounds(window) : CGRectZero;
+    const UIInterfaceOrientation current = scene
+        ? LC32WindowSceneOrientation(window, sceneBounds)
+        : UIInterfaceOrientationUnknown;
+    const UIInterfaceOrientationMask currentMask =
+        LC32MaskForInterfaceOrientation(current);
+    UIInterfaceOrientation requested = (UIInterfaceOrientation)
+        LC32LegacyRequestedOrientation.load(std::memory_order_relaxed);
+    UIInterfaceOrientationMask requestedMask =
+        LC32MaskForInterfaceOrientation(requested);
+    const UIInterfaceOrientationMask legacyAxis =
+        UIInterfaceOrientationIsLandscape(policy.preferredOrientation)
+            ? UIInterfaceOrientationMaskLandscape
+            : UIInterfaceOrientationMaskPortrait |
+              UIInterfaceOrientationMaskPortraitUpsideDown;
+    const bool observesLegacyLaunchAxis =
+        policy.usesLegacyInitialOrientation && !requestedMask &&
+        (currentMask & legacyAxis);
+
     UIInterfaceOrientationMask orientations =
         LC32SupportedOrientationsForController(orientationController);
     if(!orientations) {
-        orientations = LC32GuestInterfacePolicy().declaredOrientations;
+        orientations = policy.declaredOrientations;
+    }
+    if(observesLegacyLaunchAxis && (orientations & legacyAxis)) {
+        /* UIInterfaceOrientation selected an initial side, not a permanent
+         * supported-orientation mask. If this active controller still uses
+         * the same axis, retain the scene's settled side alongside its raw
+         * policy. This prevents a late 180-degree flip without affecting a
+         * later controller which deliberately switches axes. */
+        LC32CacheSettledLegacyOrientation(window, current);
+        LC32CacheSettledLegacyOrientation(rootController, current);
+        LC32CacheSettledLegacyOrientation(guestRootController, current);
+        LC32CacheSettledLegacyOrientation(orientationController, current);
+        orientations |= currentMask;
+    }
+    if(orientationController) {
+        objc_setAssociatedObject(orientationController,
+            LC32LegacyOrientationMaskKey, @(orientations),
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 
     if(@available(iOS 16.0, *)) {
@@ -724,27 +1109,23 @@ void LC32ApplyLegacyWindowPolicy(UIWindow *window) {
     }
     [rootController setNeedsStatusBarAppearanceUpdate];
 
-    UIWindowScene *scene = window.windowScene;
     if(!scene) return;
-    const CGRect sceneBounds = LC32WindowSceneBounds(window);
-    const UIInterfaceOrientation current =
-        LC32WindowSceneOrientation(window, sceneBounds);
-    UIInterfaceOrientation requested = (UIInterfaceOrientation)
-        LC32LegacyRequestedOrientation.load(std::memory_order_relaxed);
-    UIInterfaceOrientationMask requestedMask =
-        LC32MaskForInterfaceOrientation(requested);
+    /* Before makeKeyAndVisible, a scene can report a provisional landscape
+     * side. Let UIKit settle it before applying a legacy initial-orientation
+     * hint; an explicit guest status-bar request remains authoritative. */
+    if(policy.usesLegacyInitialOrientation && ![window isKeyWindow] &&
+            !requestedMask) {
+        return;
+    }
     UIInterfaceOrientationMask geometryOrientations =
         requestedMask & orientations ? requestedMask : orientations;
     /* A legacy controller which accepts exactly one orientation is a more
-     * precise launch policy than a permissive Info.plist. Publish it before
-     * the first post-makeKey scale, even if the old UIApplication setter has
-     * not run yet. */
+     * precise local policy than a permissive Info.plist. Do not publish this
+     * inference into the process-wide explicit-request state. */
     if(!requestedMask && geometryOrientations &&
             !(geometryOrientations & (geometryOrientations - 1))) {
         requested = LC32FirstOrientationInMask(geometryOrientations);
         requestedMask = LC32MaskForInterfaceOrientation(requested);
-        LC32LegacyRequestedOrientation.store(
-            requested, std::memory_order_relaxed);
         geometryOrientations = requestedMask;
     }
     if(LC32MaskForInterfaceOrientation(current) & geometryOrientations) {
@@ -829,12 +1210,13 @@ void LC32AdoptLegacyRootViewController(UIWindow *window) {
     UIViewController *existing =
         LC32NativeWindowRootViewController(window);
     if(existing) {
-        if(LC32WindowNeedsLegacyIPadContainer(window) &&
-                ![existing isKindOfClass:
-                    LC32LegacyIPadContainerController.class] &&
+        if(![existing isKindOfClass:
+                LC32LegacyIPadContainerController.class] &&
                 LC32ObjectUsesGuestClass(existing)) {
-            LC32InstallGuestWindowRootViewController(window, existing,
-                LC32LegacyIPadGeometryModePreservePortraitCanvas);
+            if(LC32WindowNeedsLegacyIPadContainer(window)) {
+                LC32InstallGuestWindowRootViewController(window, existing,
+                    LC32LegacyIPadGeometryModePreservePortraitCanvas);
+            }
         }
         LC32ApplyLegacyWindowPolicy(window);
         LC32ScaleLegacyIPadWindow(window);
@@ -896,7 +1278,71 @@ void LC32AdoptLegacyRootViewControllers(void) {
     }
 }
 
+void LC32AdoptLegacyPhoneCanvases(UIApplication *application) {
+    if(!application) return;
+    for(UIScene *scene in application.connectedScenes) {
+        if(![scene isKindOfClass:UIWindowScene.class]) continue;
+        for(UIWindow *window in ((UIWindowScene *)scene).windows) {
+            if(!window.guest_selfOrNull || ![window isKeyWindow]) {
+                continue;
+            }
+            LC32LegacyIPadContainerController *container =
+                LC32LegacyContainerForWindow(window);
+            if(container) {
+                if(container.geometryMode ==
+                        LC32LegacyIPadGeometryModePreservePhoneLandscapeCanvas) {
+                    LC32ScaleLegacyIPadWindow(window);
+                }
+                continue;
+            }
+            UIViewController *guestController =
+                LC32GuestWindowRootViewController(window);
+            if(!LC32WindowNeedsLegacyPhoneCanvas(
+                    window, guestController)) {
+                continue;
+            }
+
+            /* UIKit asserts if a controller is reparented while it is still
+             * completing the application's initial appearance transition.
+             * This function runs one turn after didBecomeActive, when that
+             * transition is complete. The native container then owns future
+             * scene layout while the guest retains its 480x320 drawable. */
+            LC32InstallGuestWindowRootViewController(
+                window, guestController,
+                LC32LegacyIPadGeometryModePreservePhoneLandscapeCanvas);
+            LC32ApplyLegacyWindowPolicy(window);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                LC32ScaleLegacyIPadWindow(window);
+                /* Replacing a live root controller can enqueue one more
+                 * UIWindow layout pass after this block. Reassert only the
+                 * native scene frame once more; the child canvas is managed
+                 * by the compatibility container itself. */
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    LC32ScaleLegacyIPadWindow(window);
+                });
+            });
+            fprintf(stderr,
+                "LC32: isolated legacy 480x320 phone canvas in 568x320 scene\n");
+        }
+    }
+}
+
 } // namespace
+
+extern "C" bool LC32UIKitGetViewDuringGuestLoad(
+        id object, id *view) {
+    if(![object isKindOfClass:UIViewController.class] ||
+            !LC32GuestLoadViewIsActive((UIViewController *)object)) {
+        return false;
+    }
+
+    UIView *loadedView = nil;
+    if(!LC32NativeViewIfLoaded((UIViewController *)object, &loadedView)) {
+        return false;
+    }
+    if(view) *view = loadedView;
+    return true;
+}
 
 @implementation LC32LegacyWindowRootController
 
@@ -920,7 +1366,7 @@ void LC32AdoptLegacyRootViewControllers(void) {
 - (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
     const UIInterfaceOrientationMask mask =
         [self supportedInterfaceOrientations];
-    const UIInterfaceOrientation target = LC32LegacyTargetOrientation();
+    const UIInterfaceOrientation target = LC32LegacyTargetOrientation(self);
     return LC32MaskForInterfaceOrientation(target) & mask
         ? target : LC32FirstOrientationInMask(mask);
 }
@@ -938,6 +1384,7 @@ void LC32AdoptLegacyRootViewControllers(void) {
 @implementation LC32LegacyIPadContainerController
 
 @synthesize guestContentController = _guestContentController;
+@synthesize geometryMode = _geometryMode;
 
 - (instancetype)initWithGuestContentController:
         (UIViewController *)controller
@@ -1013,7 +1460,29 @@ void LC32AdoptLegacyRootViewControllers(void) {
                                   canonicalBounds.size.height);
     const CGFloat longEdge = MAX(canonicalBounds.size.width,
                                  canonicalBounds.size.height);
-    if(!isfinite(shortEdge) || !isfinite(longEdge) ||
+    if(_geometryMode ==
+            LC32LegacyIPadGeometryModePreservePhoneLandscapeCanvas) {
+        const CGAffineTransform transform =
+            LC32NativeViewTransform(contentView);
+        const CGAffineTransform landscapeLeftTransform =
+            CGAffineTransformMake(0, 1, -1, 0, 0, 0);
+        const CGAffineTransform landscapeRightTransform =
+            CGAffineTransformMake(0, -1, 1, 0, 0, 0);
+        if(LC32TransformNearlyEquals(
+                transform, landscapeLeftTransform) ||
+                LC32TransformNearlyEquals(
+                    transform, landscapeRightTransform)) {
+            /* UIKit can already have applied the obsolete root-window turn
+             * if this is the post-key fallback. It is redundant once the
+             * landscape canvas is a child of the native scene container. */
+            LC32NativeSetViewTransform(
+                contentView, CGAffineTransformIdentity);
+        }
+        if(!isfinite(shortEdge) || !isfinite(longEdge) ||
+                shortEdge <= 0 || longEdge <= 0) {
+            canonicalBounds = CGRectMake(0, 0, 480, 320);
+        }
+    } else if(!isfinite(shortEdge) || !isfinite(longEdge) ||
             shortEdge < 700 || longEdge < 900) {
         canonicalBounds = CGRectMake(0, 0, 768, 1024);
     }
@@ -1054,7 +1523,8 @@ void LC32AdoptLegacyRootViewControllers(void) {
 
     _fittingGuestContent = YES;
     (void)orientation;
-    const UIInterfaceOrientation target = LC32LegacyTargetOrientation();
+    const UIInterfaceOrientation target =
+        LC32LegacyTargetOrientation(_guestContentController);
     CGRect canonicalBounds = _canonicalGuestBounds;
     if(!(canonicalBounds.size.width > 0) ||
             !(canonicalBounds.size.height > 0)) {
@@ -1063,7 +1533,13 @@ void LC32AdoptLegacyRootViewControllers(void) {
 
     CGSize logicalSize = canonicalBounds.size;
     CGFloat compositorAngle = 0;
-    if(_geometryMode == LC32LegacyIPadGeometryModeReflowRootController) {
+    if(_geometryMode ==
+            LC32LegacyIPadGeometryModePreservePhoneLandscapeCanvas) {
+        /* The drawable is already landscape. The native container occupies
+         * the whole scene; keep the old canvas at 1x and center it instead of
+         * stretching it or recreating a portrait compositor turn. */
+    } else if(_geometryMode ==
+            LC32LegacyIPadGeometryModeReflowRootController) {
         /* The bridged rootViewController setter is the observable lifecycle
          * boundary between old resize-aware apps and pre-controller window
          * composition. In this mode UIKit historically resized the hierarchy
@@ -1100,10 +1576,14 @@ void LC32AdoptLegacyRootViewControllers(void) {
         CGRectMake(0, 0, logicalSize.width, logicalSize.height), rotation);
     const CGFloat transformedWidth = fabs(transformedBounds.size.width);
     const CGFloat transformedHeight = fabs(transformedBounds.size.height);
-    const CGFloat scale = transformedWidth > 0 && transformedHeight > 0
+    CGFloat scale = transformedWidth > 0 && transformedHeight > 0
         ? MIN(viewportSize.width / transformedWidth,
               viewportSize.height / transformedHeight)
         : 0;
+    if(_geometryMode ==
+            LC32LegacyIPadGeometryModePreservePhoneLandscapeCanvas) {
+        scale = MIN((CGFloat)1, scale);
+    }
     if(scale > 0 && isfinite(scale)) {
         const CGRect desiredContentBounds = CGRectMake(
             canonicalBounds.origin.x, canonicalBounds.origin.y,
@@ -1172,7 +1652,8 @@ void LC32AdoptLegacyRootViewControllers(void) {
 - (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
     const UIInterfaceOrientationMask mask =
         [self supportedInterfaceOrientations];
-    const UIInterfaceOrientation target = LC32LegacyTargetOrientation();
+    const UIInterfaceOrientation target =
+        LC32LegacyTargetOrientation(_guestContentController);
     return LC32MaskForInterfaceOrientation(target) & mask
         ? target : LC32FirstOrientationInMask(mask);
 }
@@ -1193,7 +1674,8 @@ void LC32AdoptLegacyRootViewControllers(void) {
         (id<UIViewControllerTransitionCoordinator>)coordinator {
     [super viewWillTransitionToSize:size
          withTransitionCoordinator:coordinator];
-    UIInterfaceOrientation targetOrientation = LC32LegacyTargetOrientation();
+    UIInterfaceOrientation targetOrientation =
+        LC32LegacyTargetOrientation(_guestContentController);
     CGRect targetViewport = self.view.bounds;
     UIWindow *window = self.view.window;
     if(window.windowScene) {
@@ -1227,6 +1709,16 @@ void LC32AdoptLegacyRootViewControllers(void) {
 extern "C" void LC32UIKitPrepareGuestClass(Class cls) {
     if(!cls || !LC32ClassIsUIViewController(cls)) return;
 
+    /* Preserve native and inherited -loadView implementations. A synthesized
+     * class's own void trampoline is the only method which needs the legacy
+     * reentrancy guard; method_setImplementation retains its guest encoding. */
+    Method guestLoadView = LC32ClassOwnMethod(cls, @selector(loadView));
+    if(guestLoadView && method_getImplementation(guestLoadView) ==
+            (IMP)&LC32InvokeGuestSelector) {
+        method_setImplementation(
+            guestLoadView, (IMP)&LC32GuestLoadView);
+    }
+
     auto addNativeAdapter = ^(SEL selector, IMP implementation) {
         Method declaration = class_getInstanceMethod(
             UIViewController.class, selector);
@@ -1238,6 +1730,40 @@ extern "C" void LC32UIKitPrepareGuestClass(Class cls) {
     const bool hasLegacyRotation =
         LC32GuestClassHierarchyDefinesSelector(
             cls, @selector(shouldAutorotateToInterfaceOrientation:));
+
+    /* Guest implementations of the modern methods are ordinary JIT-backed
+     * trampolines. Wrap class-owned methods so native UIKit callbacks can use
+     * a cached result without entering ARM32 code, and so the application-wide
+     * Info.plist policy remains the outer constraint. Keep the original IMPs
+     * for guest-thread queries made from LC32ApplyLegacyWindowPolicy. */
+    Method guestSupportedOrientations = LC32ClassOwnMethod(
+        cls, @selector(supportedInterfaceOrientations));
+    if(guestSupportedOrientations && method_getImplementation(
+            guestSupportedOrientations) !=
+            (IMP)&LC32GuestSupportedInterfaceOrientations) {
+        objc_setAssociatedObject((id)cls,
+            LC32GuestSupportedOrientationsIMPKey,
+            @(reinterpret_cast<uintptr_t>(method_getImplementation(
+                guestSupportedOrientations))),
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        method_setImplementation(guestSupportedOrientations,
+            (IMP)&LC32GuestSupportedInterfaceOrientations);
+    }
+
+    Method guestPreferredOrientation = LC32ClassOwnMethod(
+        cls, @selector(preferredInterfaceOrientationForPresentation));
+    if(guestPreferredOrientation && method_getImplementation(
+            guestPreferredOrientation) !=
+            (IMP)&LC32GuestPreferredInterfaceOrientation) {
+        objc_setAssociatedObject((id)cls,
+            LC32GuestPreferredOrientationIMPKey,
+            @(reinterpret_cast<uintptr_t>(method_getImplementation(
+                guestPreferredOrientation))),
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        method_setImplementation(guestPreferredOrientation,
+            (IMP)&LC32GuestPreferredInterfaceOrientation);
+    }
+
     if(hasLegacyRotation) {
         addNativeAdapter(@selector(supportedInterfaceOrientations),
             (IMP)&LC32LegacySupportedInterfaceOrientations);
@@ -1291,6 +1817,7 @@ extern "C" u32 LC32UIKitHandleLegacyStatusBarOrientation(
 
 @interface UIWindow (LC32LegacyRootViewController)
 - (void)lc32_makeKeyAndVisible;
++ (void)lc32_applicationDidBecomeActive:(NSNotification *)notification;
 @end
 
 @implementation UIWindow (LC32LegacyRootViewController)
@@ -1303,6 +1830,20 @@ extern "C" u32 LC32UIKitHandleLegacyStatusBarOrientation(
     if(original && compatibility) {
         method_exchangeImplementations(original, compatibility);
     }
+    [NSNotificationCenter.defaultCenter addObserver:self
+        selector:@selector(lc32_applicationDidBecomeActive:)
+        name:UIApplicationDidBecomeActiveNotification
+        object:nil];
+}
+
++ (void)lc32_applicationDidBecomeActive:(NSNotification *)notification {
+    UIApplication *application =
+        [notification.object isKindOfClass:UIApplication.class]
+            ? (UIApplication *)notification.object
+            : UIApplication.sharedApplication;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        LC32AdoptLegacyPhoneCanvases(application);
+    });
 }
 
 - (void)lc32_makeKeyAndVisible {
@@ -1313,6 +1854,9 @@ extern "C" u32 LC32UIKitHandleLegacyStatusBarOrientation(
      * changing guest-visible UIWindow bounds. */
     LC32ApplyLegacyWindowPolicy(self);
     LC32ScaleLegacyIPadWindow(self);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        LC32ScaleLegacyIPadWindow(self);
+    });
 }
 
 @end
@@ -1381,6 +1925,16 @@ static int LC32RunDebuggerAwareMainRunLoop(void) {
 }
 
 __BEGIN_DECLS
+
+void LC32_UIKit_UIAccessibilityPostNotification(
+        u32 notificationValue, u32 argumentLow, u32 sp) {
+    const u32 argumentHigh =
+        Dynarmic_current_user_callbacks()->MemoryRead32(sp);
+    id argument = reinterpret_cast<id>(static_cast<uintptr_t>(
+        argumentLow | (static_cast<u64>(argumentHigh) << 32)));
+    UIAccessibilityPostNotification(
+        (UIAccessibilityNotifications)notificationValue, argument);
+}
 
 int LC32_UIKit_UIApplicationMain(u32 r2, u32 r3, u32 sp) {
     int argc = r2;

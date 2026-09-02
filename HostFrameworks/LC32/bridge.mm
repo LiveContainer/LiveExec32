@@ -2434,6 +2434,16 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
      * tracing before the dispatch path has rejected it.
     */
     LC32OperationTraceRawSelector(receiver, selector, args[0]);
+    if(returnGuestObject && selector == @selector(view)) {
+        id loadedView = nil;
+        if(LC32UIKitGetViewDuringGuestLoad(receiver, &loadedView)) {
+            /* Asking for self.view from inside a guest -loadView must observe
+             * the view currently installed by that override, without starting
+             * UIViewController's native lazy loader a second time. */
+            return loadedView
+                ? LC32GuestObjectForBorrowedHostResult(loadedView) : 0;
+        }
+    }
     Class dispatchClass = object_getClass(receiver);
     const bool invokeSuper = [(id)dispatchClass isGuestClass];
     if(invokeSuper && !class_isMetaClass(dispatchClass)) {

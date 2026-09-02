@@ -3172,6 +3172,38 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             return WriteGuestCreatedObject(
                 guestWriteStream, writeStream);
         }
+        case LC32CoreFoundationOpStreamCreatePairWithSocketToHost: {
+            if(!RequireSlots(call, 4)) return 0;
+            CFStringRef host = SlotHostObject<CFStringRef>(call, 0);
+            const UInt32 port = SlotU32(call, 1);
+            const u32 guestReadStream = SlotU32(call, 2);
+            const u32 guestWriteStream = SlotU32(call, 3);
+            if(!host || (!guestReadStream && !guestWriteStream) ||
+               (guestReadStream && guestWriteStream &&
+                    guestReadStream == guestWriteStream)) {
+                return 0;
+            }
+            if((guestReadStream &&
+                    !WriteGuestValue(guestReadStream, static_cast<u32>(0))) ||
+               (guestWriteStream &&
+                    !WriteGuestValue(guestWriteStream, static_cast<u32>(0)))) {
+                return 0;
+            }
+
+            CFReadStreamRef readStream = nullptr;
+            CFWriteStreamRef writeStream = nullptr;
+            CFStreamCreatePairWithSocketToHost(
+                kCFAllocatorDefault, host, port,
+                guestReadStream ? &readStream : nullptr,
+                guestWriteStream ? &writeStream : nullptr);
+
+            if(!WriteGuestCreatedObject(guestReadStream, readStream)) {
+                if(writeStream) CFRelease(writeStream);
+                return 0;
+            }
+            return WriteGuestCreatedObject(
+                guestWriteStream, writeStream);
+        }
         case LC32CoreFoundationOpGetTypeID: {
             if(!RequireSlots(call, 1)) return 0;
             CFTypeRef object = SlotHostObject<CFTypeRef>(call, 0);

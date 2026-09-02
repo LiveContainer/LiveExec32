@@ -101,6 +101,16 @@ typedef enum : uint32_t {
     LC32CoreGraphicsOpContextSetRGBStrokeColor = 83,
     LC32CoreGraphicsOpContextSetShadowWithColor = 84,
     LC32CoreGraphicsOpContextStrokeEllipseInRect = 85,
+    LC32CoreGraphicsOpDataProviderCreateWithCFData = 86,
+    LC32CoreGraphicsOpImageCreateCopy = 87,
+    LC32CoreGraphicsOpImageGetDataProvider = 88,
+    LC32CoreGraphicsOpContextSetShadow = 89,
+    LC32CoreGraphicsOpContextSetGrayStrokeColor = 90,
+    LC32CoreGraphicsOpContextAddLines = 91,
+    LC32CoreGraphicsOpContextSetLineJoin = 92,
+    LC32CoreGraphicsOpContextSetTextMatrix = 93,
+    LC32CoreGraphicsOpPathGetBoundingBox = 94,
+    LC32CoreGraphicsOpImageCreate = 95,
 } LC32CoreGraphicsOpcode;
 
 #endif

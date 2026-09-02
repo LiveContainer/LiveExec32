@@ -19,6 +19,7 @@ constexpr size_t kMaximumBitmapBytes = 256u * 1024u * 1024u;
 constexpr size_t kMaximumColorComponents = 1024;
 constexpr size_t kMaximumGradientStops = 4096;
 constexpr size_t kMaximumGradientComponentsPerStop = 64;
+constexpr size_t kMaximumPathPoints = 1024u * 1024u;
 
 struct BitmapBacking {
     CGContextRef context = nullptr;
@@ -181,6 +182,50 @@ bool ReadGuestGradientLocations(u32 guestAddress, size_t count,
         previous = location;
     }
     return true;
+}
+
+bool ReadGuestPoints(u32 guestAddress, size_t count,
+                     std::vector<CGPoint> &hostPoints) {
+    hostPoints.clear();
+    if(!guestAddress || !count || count > kMaximumPathPoints) {
+        return false;
+    }
+
+    const size_t componentCount = count * 2;
+    const size_t byteCount = componentCount * sizeof(float);
+    if(static_cast<uint64_t>(guestAddress) + byteCount >
+            static_cast<uint64_t>(UINT32_MAX) + 1) {
+        return false;
+    }
+
+    std::vector<float> guestValues(componentCount);
+    if(Dynarmic_mem_1read(guestAddress, byteCount,
+            reinterpret_cast<char *>(guestValues.data())) != 0) {
+        return false;
+    }
+
+    hostPoints.resize(count);
+    for(size_t index = 0; index < count; ++index) {
+        hostPoints[index] = CGPointMake(
+            static_cast<CGFloat>(guestValues[index * 2]),
+            static_cast<CGFloat>(guestValues[index * 2 + 1]));
+    }
+    return true;
+}
+
+bool WriteGuestRect(u32 guestAddress, CGRect rect) {
+    if(!guestAddress || static_cast<uint64_t>(guestAddress) +
+            4 * sizeof(float) > static_cast<uint64_t>(UINT32_MAX) + 1) {
+        return false;
+    }
+    float guestRect[] = {
+        static_cast<float>(rect.origin.x),
+        static_cast<float>(rect.origin.y),
+        static_cast<float>(rect.size.width),
+        static_cast<float>(rect.size.height),
+    };
+    return Dynarmic_mem_1write(guestAddress, sizeof(guestRect),
+        reinterpret_cast<char *>(guestRect)) == 0;
 }
 
 CGRect SlotRect(const LC32CoreGraphicsCall &call, size_t first) {
@@ -496,6 +541,73 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             if(!provider) return 0;
             return LC32GuestObjectForOwnedHostObject(provider);
         }
+        case LC32CoreGraphicsOpDataProviderCreateWithCFData: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CFDataRef data = SlotHostObject<CFDataRef>(call, 0);
+            if(!data || CFGetTypeID(data) != CFDataGetTypeID()) return 0;
+            CGDataProviderRef provider =
+                CGDataProviderCreateWithCFData(data);
+            return provider
+                ? LC32GuestObjectForOwnedHostObject(provider) : 0;
+        }
+        case LC32CoreGraphicsOpImageCreate: {
+            if(!RequireCoreGraphicsSlots(call, 11)) return 0;
+            const size_t width = SlotU32(call, 0);
+            const size_t height = SlotU32(call, 1);
+            const size_t bitsPerComponent = SlotU32(call, 2);
+            const size_t bitsPerPixel = SlotU32(call, 3);
+            const size_t bytesPerRow = SlotU32(call, 4);
+            CGColorSpaceRef space =
+                SlotHostObject<CGColorSpaceRef>(call, 5);
+            CGDataProviderRef provider =
+                SlotHostObject<CGDataProviderRef>(call, 7);
+            const u32 guestDecode = SlotU32(call, 8);
+            const u32 shouldInterpolate = SlotU32(call, 9);
+            const u32 intentValue = SlotU32(call, 10);
+
+            if(!width || !height || !bitsPerComponent || !bitsPerPixel ||
+               !bytesPerRow || !provider || shouldInterpolate > 1 ||
+               intentValue > kCGRenderingIntentSaturation ||
+               CFGetTypeID(provider) != CGDataProviderGetTypeID() ||
+               (space && CFGetTypeID(space) != CGColorSpaceGetTypeID())) {
+                return 0;
+            }
+
+            /* Keep pathological guest metadata from making CoreGraphics
+             * reserve an unbounded image. The row must contain every pixel,
+             * and the represented backing remains within the same limit as
+             * the bitmap-context bridge. */
+            if(width > (SIZE_MAX - 7) / bitsPerPixel) return 0;
+            const size_t minimumBytesPerRow =
+                (width * bitsPerPixel + 7) / 8;
+            if(bytesPerRow < minimumBytesPerRow ||
+               bytesPerRow > kMaximumBitmapBytes / height) {
+                return 0;
+            }
+
+            std::vector<CGFloat> decodeValues;
+            const CGFloat *decode = nullptr;
+            if(guestDecode) {
+                if(!space) return 0;
+                const size_t componentCount =
+                    CGColorSpaceGetNumberOfComponents(space);
+                if(!componentCount ||
+                   componentCount > kMaximumColorComponents ||
+                   componentCount > SIZE_MAX / 2 ||
+                   !ReadGuestCGFloatArray(guestDecode,
+                       componentCount * 2, false,
+                       decodeValues, decode)) {
+                    return 0;
+                }
+            }
+
+            CGImageRef image = CGImageCreate(width, height,
+                bitsPerComponent, bitsPerPixel, bytesPerRow, space,
+                static_cast<CGBitmapInfo>(SlotU32(call, 6)), provider,
+                decode, shouldInterpolate != 0,
+                static_cast<CGColorRenderingIntent>(intentValue));
+            return image ? LC32GuestObjectForOwnedHostObject(image) : 0;
+        }
         case LC32CoreGraphicsOpImageCreateWithJPEGDataProvider:
         case LC32CoreGraphicsOpImageCreateWithPNGDataProvider: {
             if(!RequireCoreGraphicsSlots(call, 4)) return 0;
@@ -763,6 +875,7 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
         case LC32CoreGraphicsOpContextAddLineToPoint:
         case LC32CoreGraphicsOpContextScaleCTM:
         case LC32CoreGraphicsOpContextSetGrayFillColor:
+        case LC32CoreGraphicsOpContextSetGrayStrokeColor:
         case LC32CoreGraphicsOpContextSetTextPosition: {
             if(!RequireCoreGraphicsSlots(call, 3)) return 0;
             CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
@@ -782,12 +895,26 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
                 case LC32CoreGraphicsOpContextSetGrayFillColor:
                     CGContextSetGrayFillColor(context, first, second);
                     break;
+                case LC32CoreGraphicsOpContextSetGrayStrokeColor:
+                    CGContextSetGrayStrokeColor(context, first, second);
+                    break;
                 case LC32CoreGraphicsOpContextSetTextPosition:
                     CGContextSetTextPosition(context, first, second);
                     break;
                 default:
                     break;
             }
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextAddLines: {
+            if(!RequireCoreGraphicsSlots(call, 3)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            std::vector<CGPoint> points;
+            if(!context || !ReadGuestPoints(SlotU32(call, 1),
+                    SlotU32(call, 2), points)) {
+                return 0;
+            }
+            CGContextAddLines(context, points.data(), points.size());
             return 1;
         }
         case LC32CoreGraphicsOpContextRotateCTM: {
@@ -969,6 +1096,15 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
                 SlotCGFloat(call, 3), color);
             return 1;
         }
+        case LC32CoreGraphicsOpContextSetShadow: {
+            if(!RequireCoreGraphicsSlots(call, 4)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            if(!context) return 0;
+            CGContextSetShadow(context,
+                CGSizeMake(SlotCGFloat(call, 1), SlotCGFloat(call, 2)),
+                SlotCGFloat(call, 3));
+            return 1;
+        }
         case LC32CoreGraphicsOpContextSetFillColor: {
             if(!RequireCoreGraphicsSlots(call, 2)) return 0;
             CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
@@ -1029,6 +1165,14 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             CGContextSetLineCap(context, static_cast<CGLineCap>(cap));
             return 1;
         }
+        case LC32CoreGraphicsOpContextSetLineJoin: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            const u32 join = SlotU32(call, 1);
+            if(!context || join > kCGLineJoinBevel) return 0;
+            CGContextSetLineJoin(context, static_cast<CGLineJoin>(join));
+            return 1;
+        }
         case LC32CoreGraphicsOpContextSetLineWidth: {
             if(!RequireCoreGraphicsSlots(call, 2)) return 0;
             CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
@@ -1042,6 +1186,16 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             const u32 shouldAntialias = SlotU32(call, 1);
             if(!context || shouldAntialias > 1) return 0;
             CGContextSetShouldAntialias(context, shouldAntialias != 0);
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextSetTextMatrix: {
+            if(!RequireCoreGraphicsSlots(call, 7)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            if(!context) return 0;
+            CGContextSetTextMatrix(context, CGAffineTransformMake(
+                SlotCGFloat(call, 1), SlotCGFloat(call, 2),
+                SlotCGFloat(call, 3), SlotCGFloat(call, 4),
+                SlotCGFloat(call, 5), SlotCGFloat(call, 6)));
             return 1;
         }
         case LC32CoreGraphicsOpImageCreateWithImageInRect: {
@@ -1058,6 +1212,13 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             CGImageRef mask = SlotHostObject<CGImageRef>(call, 1);
             if(!image || !mask) return 0;
             CGImageRef result = CGImageCreateWithMask(image, mask);
+            return result ? LC32GuestObjectForOwnedHostObject(result) : 0;
+        }
+        case LC32CoreGraphicsOpImageCreateCopy: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGImageRef image = SlotHostObject<CGImageRef>(call, 0);
+            if(!image) return 0;
+            CGImageRef result = CGImageCreateCopy(image);
             return result ? LC32GuestObjectForOwnedHostObject(result) : 0;
         }
         case LC32CoreGraphicsOpImageGetAlphaInfo: {
@@ -1082,6 +1243,13 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             CGColorSpaceRef space = image
                 ? CGImageGetColorSpace(image) : nullptr;
             return space ? [(id)space guest_self] : 0;
+        }
+        case LC32CoreGraphicsOpImageGetDataProvider: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGImageRef image = SlotHostObject<CGImageRef>(call, 0);
+            CGDataProviderRef provider = image
+                ? CGImageGetDataProvider(image) : nullptr;
+            return provider ? [(id)provider guest_self] : 0;
         }
         case LC32CoreGraphicsOpPathAddArcToPoint:
         case LC32CoreGraphicsOpPathAddCurveToPoint:
@@ -1161,30 +1329,13 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
         case LC32CoreGraphicsOpContextStrokeLineSegments: {
             if(!RequireCoreGraphicsSlots(call, 3)) return 0;
             CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
-            const u32 guestPoints = SlotU32(call, 1);
-            const u32 count = SlotU32(call, 2);
-            if(!context || !guestPoints || !count ||
-               count > kMaximumBitmapBytes / (2 * sizeof(float))) {
+            std::vector<CGPoint> points;
+            if(!context || !ReadGuestPoints(SlotU32(call, 1),
+                    SlotU32(call, 2), points)) {
                 return 0;
             }
-
-            const size_t byteCount = (size_t)count * 2 * sizeof(float);
-            if(static_cast<uint64_t>(guestPoints) + byteCount >
-                    static_cast<uint64_t>(UINT32_MAX) + 1) {
-                return 0;
-            }
-            std::vector<float> guestValues(count * 2);
-            if(Dynarmic_mem_1read(guestPoints, byteCount,
-                    reinterpret_cast<char *>(guestValues.data())) != 0) {
-                return 0;
-            }
-            std::vector<CGPoint> points(count);
-            for(size_t index = 0; index < count; ++index) {
-                points[index] = CGPointMake(
-                    static_cast<CGFloat>(guestValues[index * 2]),
-                    static_cast<CGFloat>(guestValues[index * 2 + 1]));
-            }
-            CGContextStrokeLineSegments(context, points.data(), count);
+            CGContextStrokeLineSegments(
+                context, points.data(), points.size());
             SyncBitmapBacking(context, FindBitmapBacking(context));
             return 1;
         }
@@ -1204,6 +1355,12 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             if(!path) return 0;
             CGPathRef result = CGPathCreateCopy(path);
             return result ? LC32GuestObjectForOwnedHostObject(result) : 0;
+        }
+        case LC32CoreGraphicsOpPathGetBoundingBox: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGPathRef path = SlotHostObject<CGPathRef>(call, 0);
+            return path && WriteGuestRect(
+                SlotU32(call, 1), CGPathGetBoundingBox(path));
         }
     }
     return 0;

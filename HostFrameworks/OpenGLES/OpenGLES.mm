@@ -1031,6 +1031,11 @@ bool CurrentContextIsES3() {
     return context.API == kEAGLRenderingAPIOpenGLES3;
 }
 
+bool CurrentContextIsES1() {
+    EAGLContext *context = EAGLContext.currentContext;
+    return context.API == kEAGLRenderingAPIOpenGLES1;
+}
+
 uintptr_t CurrentGLSharegroupKey() {
     EAGLContext *context = EAGLContext.currentContext;
     EAGLSharegroup *sharegroup = context.sharegroup;
@@ -2223,14 +2228,24 @@ size_t VertexAttribElementCount(GLenum pname) {
             const BOOL retainedBackingKey =
                 [key isEqual:kEAGLDrawablePropertyRetainedBacking] ||
                 [key isEqual:@"EAGLDrawablePropertyRetainedBacking"];
-            if(retainedBackingKey && ![value boolValue]) {
-                /*
-                 * Recent Simulator OpenGLES rejects the retained-backing key
-                 * even when its value is the native @NO singleton. Omitting
-                 * a false value is exactly equivalent and remains valid on
-                 * older hosts.
-                 */
-                continue;
+            if(retainedBackingKey) {
+                if(@available(iOS 26.0, *)) {
+                    /*
+                     * iOS 26 rejects layer-backed storage whenever the
+                     * retained-backing property is present, including the
+                     * historically valid @YES value. Retained backing is an
+                     * optional hint, so omit it on that runtime.
+                     */
+                    continue;
+                }
+                if(![value boolValue]) {
+                    /*
+                     * Recent Simulator OpenGLES rejects the retained-backing
+                     * key even when its value is the native @NO singleton.
+                     * Omitting a false value is exactly equivalent.
+                     */
+                    continue;
+                }
             }
 
             id normalizedKey = key;
@@ -2260,8 +2275,8 @@ size_t VertexAttribElementCount(GLenum pname) {
     if(!result && requestedRGB565 && drawableLayer) {
         /*
          * Recent Simulator OpenGLES builds no longer allocate RGB565 layer
-         * storage even though the legacy constant remains exported.  Old
-         * games commonly request it to save memory.  Preserve RGB565 where
+         * storage even though the legacy constant remains exported. Old
+         * games commonly request it to save memory. Preserve RGB565 where
          * the host still supports it, but promote a rejected request to the
          * universally supported RGBA8 format so the renderbuffer is usable.
          */
@@ -2351,8 +2366,20 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
             REQUIRE(3); glBindBufferBase(U(0), U(1), U(2)); return 0;
         case LC32OpenGLESOpBindBufferRange:
             REQUIRE(5); glBindBufferRange(U(0), U(1), U(2), I(3), I(4)); return 0;
-        case LC32OpenGLESOpBindFramebuffer: REQUIRE(2); glBindFramebuffer(U(0), U(1)); return 0;
-        case LC32OpenGLESOpBindRenderbuffer: REQUIRE(2); glBindRenderbuffer(U(0), U(1)); return 0;
+        case LC32OpenGLESOpBindFramebuffer:
+            REQUIRE(2);
+            if(CurrentContextIsES1())
+                glBindFramebufferOES(U(0), U(1));
+            else
+                glBindFramebuffer(U(0), U(1));
+            return 0;
+        case LC32OpenGLESOpBindRenderbuffer:
+            REQUIRE(2);
+            if(CurrentContextIsES1())
+                glBindRenderbufferOES(U(0), U(1));
+            else
+                glBindRenderbuffer(U(0), U(1));
+            return 0;
         case LC32OpenGLESOpBindTexture: REQUIRE(2); glBindTexture(U(0), U(1)); return 0;
         case LC32OpenGLESOpBindProgramPipelineEXT:
             REQUIRE(1); glBindProgramPipelineEXT(U(0)); return 0;
@@ -2371,16 +2398,38 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
             }
             return 0;
         case LC32OpenGLESOpBlendColor: REQUIRE(4); glBlendColor(F(0), F(1), F(2), F(3)); return 0;
-        case LC32OpenGLESOpBlendEquation: REQUIRE(1); glBlendEquation(U(0)); return 0;
-        case LC32OpenGLESOpBlendEquationSeparate: REQUIRE(2); glBlendEquationSeparate(U(0), U(1)); return 0;
+        case LC32OpenGLESOpBlendEquation:
+            REQUIRE(1);
+            if(CurrentContextIsES1())
+                glBlendEquationOES(U(0));
+            else
+                glBlendEquation(U(0));
+            return 0;
+        case LC32OpenGLESOpBlendEquationSeparate:
+            REQUIRE(2);
+            if(CurrentContextIsES1())
+                glBlendEquationSeparateOES(U(0), U(1));
+            else
+                glBlendEquationSeparate(U(0), U(1));
+            return 0;
         case LC32OpenGLESOpBlendFunc: REQUIRE(2); glBlendFunc(U(0), U(1)); return 0;
-        case LC32OpenGLESOpBlendFuncSeparate: REQUIRE(4); glBlendFuncSeparate(U(0), U(1), U(2), U(3)); return 0;
+        case LC32OpenGLESOpBlendFuncSeparate:
+            REQUIRE(4);
+            if(CurrentContextIsES1())
+                glBlendFuncSeparateOES(U(0), U(1), U(2), U(3));
+            else
+                glBlendFuncSeparate(U(0), U(1), U(2), U(3));
+            return 0;
         case LC32OpenGLESOpBlitFramebuffer:
             REQUIRE(10);
             glBlitFramebuffer(I(0), I(1), I(2), I(3), I(4), I(5), I(6),
                 I(7), U(8), U(9));
             return 0;
-        case LC32OpenGLESOpCheckFramebufferStatus: REQUIRE(1); return glCheckFramebufferStatus(U(0));
+        case LC32OpenGLESOpCheckFramebufferStatus:
+            REQUIRE(1);
+            return CurrentContextIsES1()
+                ? glCheckFramebufferStatusOES(U(0))
+                : glCheckFramebufferStatus(U(0));
         case LC32OpenGLESOpClientWaitSyncAPPLE: {
             REQUIRE(3);
             GLsync sync = LookupSync(U(0));
@@ -2428,9 +2477,27 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
                     }
                 });
         case LC32OpenGLESOpDeleteFramebuffers:
-            return DispatchObjectInputArray(call, [](GLsizei n, const GLuint *v) { glDeleteFramebuffers(n, v); });
+            if(CurrentContextIsES1()) {
+                return DispatchObjectInputArray(call,
+                    [](GLsizei n, const GLuint *v) {
+                        glDeleteFramebuffersOES(n, v);
+                    });
+            }
+            return DispatchObjectInputArray(call,
+                [](GLsizei n, const GLuint *v) {
+                    glDeleteFramebuffers(n, v);
+                });
         case LC32OpenGLESOpDeleteRenderbuffers:
-            return DispatchObjectInputArray(call, [](GLsizei n, const GLuint *v) { glDeleteRenderbuffers(n, v); });
+            if(CurrentContextIsES1()) {
+                return DispatchObjectInputArray(call,
+                    [](GLsizei n, const GLuint *v) {
+                        glDeleteRenderbuffersOES(n, v);
+                    });
+            }
+            return DispatchObjectInputArray(call,
+                [](GLsizei n, const GLuint *v) {
+                    glDeleteRenderbuffers(n, v);
+                });
         case LC32OpenGLESOpDeleteTextures:
             return DispatchObjectInputArray(call, [](GLsizei n, const GLuint *v) { glDeleteTextures(n, v); });
         case LC32OpenGLESOpDeleteProgramPipelinesEXT:
@@ -2542,8 +2609,23 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
             return token;
         }
         case LC32OpenGLESOpFlush: REQUIRE(0); glFlush(); return 0;
-        case LC32OpenGLESOpFramebufferRenderbuffer: REQUIRE(4); glFramebufferRenderbuffer(U(0), U(1), U(2), U(3)); return 0;
-        case LC32OpenGLESOpFramebufferTexture2D: REQUIRE(5); glFramebufferTexture2D(U(0), U(1), U(2), U(3), I(4)); return 0;
+        case LC32OpenGLESOpFramebufferRenderbuffer:
+            REQUIRE(4);
+            if(CurrentContextIsES1())
+                glFramebufferRenderbufferOES(
+                    U(0), U(1), U(2), U(3));
+            else
+                glFramebufferRenderbuffer(U(0), U(1), U(2), U(3));
+            return 0;
+        case LC32OpenGLESOpFramebufferTexture2D:
+            REQUIRE(5);
+            if(CurrentContextIsES1())
+                glFramebufferTexture2DOES(
+                    U(0), U(1), U(2), U(3), I(4));
+            else
+                glFramebufferTexture2D(
+                    U(0), U(1), U(2), U(3), I(4));
+            return 0;
         case LC32OpenGLESOpFramebufferTextureLayer:
             REQUIRE(5); glFramebufferTextureLayer(U(0), U(1), U(2), I(3),
                 I(4)); return 0;
@@ -2551,9 +2633,23 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
         case LC32OpenGLESOpGenBuffers:
             return DispatchObjectOutputArray(call, [](GLsizei n, GLuint *v) { glGenBuffers(n, v); });
         case LC32OpenGLESOpGenFramebuffers:
-            return DispatchObjectOutputArray(call, [](GLsizei n, GLuint *v) { glGenFramebuffers(n, v); });
+            if(CurrentContextIsES1()) {
+                return DispatchObjectOutputArray(call,
+                    [](GLsizei n, GLuint *v) {
+                        glGenFramebuffersOES(n, v);
+                    });
+            }
+            return DispatchObjectOutputArray(call,
+                [](GLsizei n, GLuint *v) { glGenFramebuffers(n, v); });
         case LC32OpenGLESOpGenRenderbuffers:
-            return DispatchObjectOutputArray(call, [](GLsizei n, GLuint *v) { glGenRenderbuffers(n, v); });
+            if(CurrentContextIsES1()) {
+                return DispatchObjectOutputArray(call,
+                    [](GLsizei n, GLuint *v) {
+                        glGenRenderbuffersOES(n, v);
+                    });
+            }
+            return DispatchObjectOutputArray(call,
+                [](GLsizei n, GLuint *v) { glGenRenderbuffers(n, v); });
         case LC32OpenGLESOpGenTextures:
             return DispatchObjectOutputArray(call, [](GLsizei n, GLuint *v) { glGenTextures(n, v); });
         case LC32OpenGLESOpGenProgramPipelinesEXT:
@@ -2570,13 +2666,25 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
                 [](GLsizei n, GLuint *v) { glGenTransformFeedbacks(n, v); });
         case LC32OpenGLESOpGenVertexArraysOES:
             return DispatchObjectOutputArray(call, [](GLsizei n, GLuint *v) { glGenVertexArraysOES(n, v); });
-        case LC32OpenGLESOpGenerateMipmap: REQUIRE(1); glGenerateMipmap(U(0)); return 0;
+        case LC32OpenGLESOpGenerateMipmap:
+            REQUIRE(1);
+            if(CurrentContextIsES1())
+                glGenerateMipmapOES(U(0));
+            else
+                glGenerateMipmap(U(0));
+            return 0;
         case LC32OpenGLESOpHint: REQUIRE(2); glHint(U(0), U(1)); return 0;
         case LC32OpenGLESOpIsBuffer: REQUIRE(1); return glIsBuffer(U(0));
         case LC32OpenGLESOpIsEnabled: REQUIRE(1); return glIsEnabled(U(0));
-        case LC32OpenGLESOpIsFramebuffer: REQUIRE(1); return glIsFramebuffer(U(0));
+        case LC32OpenGLESOpIsFramebuffer:
+            REQUIRE(1);
+            return CurrentContextIsES1()
+                ? glIsFramebufferOES(U(0)) : glIsFramebuffer(U(0));
         case LC32OpenGLESOpIsProgram: REQUIRE(1); return glIsProgram(U(0));
-        case LC32OpenGLESOpIsRenderbuffer: REQUIRE(1); return glIsRenderbuffer(U(0));
+        case LC32OpenGLESOpIsRenderbuffer:
+            REQUIRE(1);
+            return CurrentContextIsES1()
+                ? glIsRenderbufferOES(U(0)) : glIsRenderbuffer(U(0));
         case LC32OpenGLESOpIsShader: REQUIRE(1); return glIsShader(U(0));
         case LC32OpenGLESOpIsTexture: REQUIRE(1); return glIsTexture(U(0));
         case LC32OpenGLESOpIsProgramPipelineEXT:
@@ -2631,7 +2739,13 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
         case LC32OpenGLESOpReadBuffer:
             REQUIRE(1); glReadBuffer(U(0)); return 0;
         case LC32OpenGLESOpReleaseShaderCompiler: REQUIRE(0); glReleaseShaderCompiler(); return 0;
-        case LC32OpenGLESOpRenderbufferStorage: REQUIRE(4); glRenderbufferStorage(U(0), U(1), I(2), I(3)); return 0;
+        case LC32OpenGLESOpRenderbufferStorage:
+            REQUIRE(4);
+            if(CurrentContextIsES1())
+                glRenderbufferStorageOES(U(0), U(1), I(2), I(3));
+            else
+                glRenderbufferStorage(U(0), U(1), I(2), I(3));
+            return 0;
         case LC32OpenGLESOpRenderbufferStorageMultisampleAPPLE: REQUIRE(5); glRenderbufferStorageMultisampleAPPLE(U(0), I(1), U(2), I(3), I(4)); return 0;
         case LC32OpenGLESOpResolveMultisampleFramebufferAPPLE: REQUIRE(0); glResolveMultisampleFramebufferAPPLE(); return 0;
         case LC32OpenGLESOpResumeTransformFeedback:
@@ -3220,6 +3334,8 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
             GLint value = 0;
             if(opcode == LC32OpenGLESOpGetBufferParameteriv)
                 glGetBufferParameteriv(U(0), U(1), &value);
+            else if(CurrentContextIsES1())
+                glGetRenderbufferParameterivOES(U(0), U(1), &value);
             else
                 glGetRenderbufferParameteriv(U(0), U(1), &value);
             WriteGuestArray(U(2), &value, 1);
@@ -3247,7 +3363,13 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
         case LC32OpenGLESOpGetFramebufferAttachmentParameteriv: {
             REQUIRE(4);
             GLint value = 0;
-            glGetFramebufferAttachmentParameteriv(U(0), U(1), U(2), &value);
+            if(CurrentContextIsES1()) {
+                glGetFramebufferAttachmentParameterivOES(
+                    U(0), U(1), U(2), &value);
+            } else {
+                glGetFramebufferAttachmentParameteriv(
+                    U(0), U(1), U(2), &value);
+            }
             WriteGuestArray(U(3), &value, 1);
             return 0;
         }

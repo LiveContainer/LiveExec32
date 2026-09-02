@@ -2,6 +2,7 @@
 #import <Foundation/Foundation.h>
 
 #include <stdio.h>
+#include <string.h>
 
 _Static_assert(sizeof(CFRange) == 8,
                "the guest CFRange ABI must remain two 32-bit words");
@@ -38,6 +39,25 @@ static BOOL arrayEqualsValues(CFArrayRef array, const void **values,
             return NO;
     }
     return YES;
+}
+
+static void testAllocators(void) {
+    void *defaultBytes = CFAllocatorAllocate(
+        kCFAllocatorDefault, 32, 0);
+    check("allocator-default-allocate", defaultBytes != NULL);
+    if(defaultBytes) {
+        memset(defaultBytes, 0xa5, 32);
+        CFAllocatorDeallocate(kCFAllocatorDefault, defaultBytes);
+    }
+
+    void *systemBytes = CFAllocatorAllocate(
+        kCFAllocatorSystemDefault, 16, 0);
+    check("allocator-system-allocate", systemBytes != NULL);
+    CFAllocatorDeallocate(kCFAllocatorSystemDefault, systemBytes);
+
+    check("allocator-null-rejects-allocation",
+        CFAllocatorAllocate(kCFAllocatorNull, 16, 0) == NULL);
+    CFAllocatorDeallocate(kCFAllocatorNull, NULL);
 }
 
 static void testArrays(void) {
@@ -228,6 +248,7 @@ static void testNumbersAndOwnership(void) {
 int main(void) {
     NSAutoreleasePool *pool = [NSAutoreleasePool new];
 
+    testAllocators();
     testArrays();
     testDictionaries();
     testSets();

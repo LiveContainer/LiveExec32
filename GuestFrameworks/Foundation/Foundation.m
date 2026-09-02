@@ -67,6 +67,12 @@ NSString * const NSURLErrorFailingURLStringErrorKey =
     @"NSErrorFailingURLStringKey";
 NSString * const NSGregorianCalendar = @"gregorian";
 const NSLocaleKey NSLocaleIdentifier = @"kCFLocaleIdentifierKey";
+const NSLocaleKey NSLocaleCurrencySymbol = @"kCFLocaleCurrencySymbolKey";
+NSString * const NSFontAttributeName = @"NSFont";
+const NSStreamPropertyKey NSStreamDataWrittenToMemoryStreamKey =
+    @"kCFStreamPropertyDataWritten";
+const NSStreamPropertyKey NSStreamFileCurrentOffsetKey =
+    @"kCFStreamPropertyFileCurrentOffset";
 NSString * const NSURLAuthenticationMethodServerTrust =
     @"NSURLAuthenticationMethodServerTrust";
 const NSKeyValueChangeKey NSKeyValueChangeKindKey = @"kind";

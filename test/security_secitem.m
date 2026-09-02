@@ -7,6 +7,26 @@
 
 enum { LC32ErrSecMissingEntitlement = -34018 };
 
+typedef enum {
+    kSecECCurveNone = -1,
+    kSecECCurveSecp256r1 = 23,
+    kSecECCurveSecp384r1 = 24,
+    kSecECCurveSecp521r1 = 25,
+} SecECNamedCurve;
+
+extern SecCertificateRef SecCertificateCreateWithBytes(
+    CFAllocatorRef allocator, const UInt8 *bytes, CFIndex length);
+extern const UInt8 *SecCertificateGetBytePtr(
+    SecCertificateRef certificate);
+extern CFIndex SecCertificateGetLength(SecCertificateRef certificate);
+extern CFDataRef SecECKeyCopyPublicBits(SecKeyRef key);
+extern SecECNamedCurve SecECKeyGetNamedCurve(SecKeyRef key);
+extern CFDataRef SecKeyCopyExponent(SecKeyRef key);
+extern CFDataRef SecKeyCopyModulus(SecKeyRef key);
+extern CFIndex SecKeyGetAlgorithmId(SecKeyRef key);
+extern OSStatus SecTrustSetSignedCertificateTimestamps(
+    SecTrustRef trust, CFArrayRef sctArray);
+
 static int report(const char *name, BOOL passed, OSStatus status) {
     printf("%s: %s (%d)\n", name, passed ? "PASS" : "FAIL",
         (int)status);
@@ -19,12 +39,116 @@ int main(void) {
 
     @autoreleasepool {
         const BOOL constantsValid =
+            CFEqual(kSecAttrAccessibleAfterFirstUnlock, CFSTR("ck")) &&
+            CFEqual(kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+                    CFSTR("cku")) &&
+            CFEqual(kSecAttrAccessibleAlways, CFSTR("dk")) &&
+            CFEqual(kSecAttrAccessibleAlwaysThisDeviceOnly,
+                    CFSTR("dku")) &&
+            CFEqual(kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
+                    CFSTR("akpu")) &&
             CFEqual(kSecAttrAccessGroup, CFSTR("agrp")) &&
+            CFEqual(kSecAttrAccessibleWhenUnlocked, CFSTR("ak")) &&
+            CFEqual(kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+                    CFSTR("aku")) &&
+            CFEqual(kSecAttrApplicationLabel, CFSTR("klbl")) &&
+            CFEqual(kSecAttrCanDecrypt, CFSTR("decr")) &&
+            CFEqual(kSecAttrCanDerive, CFSTR("drve")) &&
+            CFEqual(kSecAttrCanEncrypt, CFSTR("encr")) &&
+            CFEqual(kSecAttrCanSign, CFSTR("sign")) &&
+            CFEqual(kSecAttrCanUnwrap, CFSTR("unwp")) &&
+            CFEqual(kSecAttrCanVerify, CFSTR("vrfy")) &&
+            CFEqual(kSecAttrCanWrap, CFSTR("wrap")) &&
+            CFEqual(kSecAttrComment, CFSTR("icmt")) &&
+            CFEqual(kSecAttrCreationDate, CFSTR("cdat")) &&
+            CFEqual(kSecAttrDescription, CFSTR("desc")) &&
+            CFEqual(kSecAttrEffectiveKeySize, CFSTR("esiz")) &&
+            CFEqual(kSecAttrIsPermanent, CFSTR("perm")) &&
+            CFEqual(kSecAttrKeyClassPrivate, CFSTR("1")) &&
+            CFEqual(kSecAttrKeyClassSymmetric, CFSTR("2")) &&
+            CFEqual(kSecAttrKeySizeInBits, CFSTR("bsiz")) &&
+            CFEqual(kSecAttrLabel, CFSTR("labl")) &&
+            CFEqual(kSecAttrModificationDate, CFSTR("mdat")) &&
+            CFEqual(kSecAttrSynchronizable, CFSTR("sync")) &&
+            CFEqual(kSecAttrSynchronizableAny, CFSTR("syna")) &&
+            CFEqual(kSecClassCertificate, CFSTR("cert")) &&
+            CFEqual(kSecClassIdentity, CFSTR("idnt")) &&
+            CFEqual(kSecClassInternetPassword, CFSTR("inet")) &&
+            CFEqual(kSecMatchLimitAll, CFSTR("m_LimitAll")) &&
             CFEqual(kSecValuePersistentRef,
                     CFSTR("v_PersistentRef")) &&
             CFEqual(kSecValueRef, CFSTR("v_Ref")) &&
-            CFEqual(kSecReturnAttributes, CFSTR("r_Attributes"));
+            CFEqual(kSecReturnAttributes, CFSTR("r_Attributes")) &&
+            CFEqual(kSecUseNoAuthenticationUI, CFSTR("u_NoAuthUI")) &&
+            CFEqual(kSecUseOperationPrompt, CFSTR("u_OpPrompt")) &&
+            CFEqual(kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA1,
+                    CFSTR("algid:sign:RSA:digest-PKCS1v15:SHA1")) &&
+            CFEqual(kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA256,
+                    CFSTR("algid:sign:RSA:digest-PKCS1v15:SHA256")) &&
+            CFEqual(kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA384,
+                    CFSTR("algid:sign:RSA:digest-PKCS1v15:SHA384")) &&
+            CFEqual(kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA512,
+                    CFSTR("algid:sign:RSA:digest-PKCS1v15:SHA512"));
         passed &= report("security-constants", constantsValid, noErr);
+
+        SecCertificateRef copiedCertificate =
+            (SecCertificateRef)(uintptr_t)1;
+        SecKeyRef copiedPrivateKey = (SecKeyRef)(uintptr_t)1;
+        CFErrorRef signatureError = (CFErrorRef)(uintptr_t)1;
+        size_t plainTextLength = 1;
+        size_t signatureLength = 1;
+
+        const SecCertificateRef createdCertificate =
+            SecCertificateCreateWithBytes(NULL, NULL, 0);
+        const UInt8 *certificateBytes = SecCertificateGetBytePtr(NULL);
+        const CFIndex certificateLength = SecCertificateGetLength(NULL);
+        const CFTypeID certificateType = SecCertificateGetTypeID();
+        const CFDataRef publicBits = SecECKeyCopyPublicBits(NULL);
+        const SecECNamedCurve namedCurve = SecECKeyGetNamedCurve(NULL);
+        const OSStatus copyCertificateStatus =
+            SecIdentityCopyCertificate(NULL, &copiedCertificate);
+        const OSStatus copyPrivateKeyStatus =
+            SecIdentityCopyPrivateKey(NULL, &copiedPrivateKey);
+        const CFTypeID identityType = SecIdentityGetTypeID();
+        const CFDataRef exponent = SecKeyCopyExponent(NULL);
+        const CFDataRef modulus = SecKeyCopyModulus(NULL);
+        const CFDataRef signature = SecKeyCreateSignature(
+            NULL, kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA256,
+            NULL, &signatureError);
+        const OSStatus decryptStatus = SecKeyDecrypt(
+            NULL, kSecPaddingNone, NULL, 0, NULL, &plainTextLength);
+        const CFIndex algorithmID = SecKeyGetAlgorithmId(NULL);
+        const OSStatus signStatus = SecKeyRawSign(
+            NULL, kSecPaddingNone, NULL, 0, NULL, &signatureLength);
+        const SecPolicyRef sslPolicy = SecPolicyCreateSSL(false, NULL);
+        const CFTypeID policyType = SecPolicyGetTypeID();
+        const OSStatus evaluateAsyncStatus = SecTrustEvaluateAsync(
+            NULL, NULL, (SecTrustCallback)NULL);
+        const CFTypeID trustType = SecTrustGetTypeID();
+        const OSStatus ocspStatus = SecTrustSetOCSPResponse(NULL, NULL);
+        const OSStatus sctStatus =
+            SecTrustSetSignedCertificateTimestamps(NULL, NULL);
+
+        const BOOL failureStubsValid =
+            createdCertificate == NULL &&
+            certificateBytes == NULL && certificateLength == 0 &&
+            certificateType == 0 && publicBits == NULL &&
+            namedCurve == kSecECCurveNone &&
+            copyCertificateStatus == errSecUnimplemented &&
+            copiedCertificate == NULL &&
+            copyPrivateKeyStatus == errSecUnimplemented &&
+            copiedPrivateKey == NULL && identityType == 0 &&
+            exponent == NULL && modulus == NULL && signature == NULL &&
+            signatureError == NULL &&
+            decryptStatus == errSecUnimplemented &&
+            plainTextLength == 0 && algorithmID == 0 &&
+            signStatus == errSecUnimplemented && signatureLength == 0 &&
+            sslPolicy == NULL && policyType == 0 &&
+            evaluateAsyncStatus == errSecUnimplemented &&
+            trustType == 0 && ocspStatus == errSecUnimplemented &&
+            sctStatus == errSecUnimplemented;
+        passed &= report("security-failure-stubs", failureStubsValid,
+            noErr);
 
         CFTypeRef invalidResult = (CFTypeRef)(uintptr_t)1;
         const OSStatus invalidStatus =

@@ -30,6 +30,17 @@ CATransform3D CATransform3DMakeScale(CGFloat sx, CGFloat sy, CGFloat sz) {
     return result;
 }
 
+CATransform3D CATransform3DMakeAffineTransform(CGAffineTransform transform) {
+    CATransform3D result = CATransform3DIdentity;
+    result.m11 = transform.a;
+    result.m12 = transform.b;
+    result.m21 = transform.c;
+    result.m22 = transform.d;
+    result.m41 = transform.tx;
+    result.m42 = transform.ty;
+    return result;
+}
+
 CATransform3D CATransform3DMakeRotation(CGFloat angle, CGFloat x, CGFloat y, CGFloat z) {
     // If the vector has length zero, this function returns the identity transform
     if (x == 0.0 && y == 0.0 && z == 0.0) {

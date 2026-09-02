@@ -254,3 +254,19 @@ void CFStreamCreatePairWithSocket(CFAllocatorRef allocator,
         LC32_CF_U32((uintptr_t)readStream),
         LC32_CF_U32((uintptr_t)writeStream));
 }
+
+void CFStreamCreatePairWithSocketToHost(CFAllocatorRef allocator,
+                                        CFStringRef host, UInt32 port,
+                                        CFReadStreamRef *readStream,
+                                        CFWriteStreamRef *writeStream) {
+    (void)allocator;
+    if(readStream) *readStream = NULL;
+    if(writeStream) *writeStream = NULL;
+    if(!host || (!readStream && !writeStream)) return;
+
+    LC32_CF_CALL(
+        LC32CoreFoundationOpStreamCreatePairWithSocketToHost,
+        LC32_CF_HOST(host), LC32_CF_U32(port),
+        LC32_CF_U32((uintptr_t)readStream),
+        LC32_CF_U32((uintptr_t)writeStream));
+}

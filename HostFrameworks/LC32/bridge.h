@@ -109,5 +109,6 @@ BOOL host_hook_getClass(const char *name, Class *outClass);
 // Lets framework bridges add native compatibility entry points after all
 // guest methods have been mirrored but before the class is registered.
 void LC32UIKitPrepareGuestClass(Class cls);
+bool LC32UIKitGetViewDuringGuestLoad(id controller, id *view);
 
 __END_DECLS

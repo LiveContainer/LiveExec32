@@ -53,6 +53,7 @@ static void set_error(struct worker_state *state, int error) {
 }
 
 static int sample_all_guest_threads(void) {
+    fprintf(stderr, "native pthread smoke: task_threads begin\n");
     thread_act_array_t threads = NULL;
     mach_msg_type_number_t thread_count = 0;
     kern_return_t result = task_threads(
@@ -60,16 +61,64 @@ static int sample_all_guest_threads(void) {
     if (result != KERN_SUCCESS || thread_count < WORKERS + 1) {
         return 2000 + result;
     }
+    fprintf(stderr, "native pthread smoke: sampling %u threads\n",
+        thread_count);
 
     int error = 0;
     for (mach_msg_type_number_t index = 0;
             index < thread_count; ++index) {
+        thread_basic_info_data_t basic = {0};
+        mach_msg_type_number_t basic_count =
+            THREAD_BASIC_INFO_COUNT;
+        result = thread_info(
+            threads[index], THREAD_BASIC_INFO,
+            (thread_info_t)&basic, &basic_count);
+        fprintf(stderr,
+            "native pthread smoke: thread %u basic result=%d count=%u\n",
+            index, result, basic_count);
+        if (result != KERN_SUCCESS ||
+                basic_count != THREAD_BASIC_INFO_COUNT ||
+                basic.user_time.seconds < 0 ||
+                basic.user_time.microseconds < 0 ||
+                basic.user_time.microseconds >= 1000000 ||
+                basic.system_time.seconds < 0 ||
+                basic.system_time.microseconds < 0 ||
+                basic.system_time.microseconds >= 1000000 ||
+                basic.cpu_usage < 0 ||
+                basic.cpu_usage > TH_USAGE_SCALE ||
+                basic.run_state < TH_STATE_RUNNING ||
+                basic.run_state > TH_STATE_HALTED) {
+            error = 2050 + result;
+            break;
+        }
+
+        thread_identifier_info_data_t identifier = {0};
+        mach_msg_type_number_t identifier_count =
+            THREAD_IDENTIFIER_INFO_COUNT;
+        result = thread_info(
+            threads[index], THREAD_IDENTIFIER_INFO,
+            (thread_info_t)&identifier, &identifier_count);
+        fprintf(stderr,
+            "native pthread smoke: thread %u identifier result=%d "
+            "count=%u\n",
+            index, result, identifier_count);
+        if (result != KERN_SUCCESS ||
+                identifier_count !=
+                    THREAD_IDENTIFIER_INFO_COUNT ||
+                identifier.thread_id == 0) {
+            error = 2075 + result;
+            break;
+        }
+
         arm_thread_state_t state = {0};
         mach_msg_type_number_t state_count =
             ARM_THREAD_STATE_COUNT;
         result = thread_get_state(
             threads[index], ARM_THREAD_STATE,
             (thread_state_t)&state, &state_count);
+        fprintf(stderr,
+            "native pthread smoke: thread %u state result=%d count=%u\n",
+            index, result, state_count);
         if (result != KERN_SUCCESS ||
                 state_count != ARM_THREAD_STATE_COUNT ||
                 state.__sp == 0 || state.__pc == 0) {
@@ -99,6 +148,8 @@ static void *worker(void *opaque) {
         pthread_threadid_np(NULL, &state->thread_id));
     state->mach_thread =
         pthread_mach_thread_np(state->self);
+    fprintf(stderr, "native pthread smoke: worker %d initialized\n",
+        state->index);
 
     set_error(state, pthread_mutex_lock(&lock));
     ++started;
@@ -189,6 +240,7 @@ int main(void) {
             return 40 + error;
         }
     }
+    fprintf(stderr, "native pthread smoke: workers parked\n");
 
     /* Exercise state capture while both foreign guest JITs are parked in a
      * host-side pthread condition wait. */
