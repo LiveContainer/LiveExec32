@@ -4267,14 +4267,31 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
             errno = 0;
             const int result = fcntl(
                 fildes, cmd, &hostSignatures);
-            if(result == -1) {
+
+            /* Guest images are translated by Dynarmic and are never mapped
+             * executable by the host. The host kernel can therefore reject
+             * an otherwise usable guest signature (notably an ad-hoc one),
+             * but dyld still requires this command to report complete file
+             * coverage. Validate the descriptor with fstat, then synthesize
+             * complete coverage when the host rejected or under-reported the
+             * registration. The strict FairPlay registration used while
+             * loading the main image is handled separately in LC32MapFile. */
+            struct stat fileStatus = {};
+            if(fstat(fildes, &fileStatus) == -1) {
                 const int savedErrno = errno;
                 return return_with_carry_direct(
                     savedErrno == 0 ? EIO : savedErrno, true);
             }
+            if(fileStatus.st_size < 0) {
+                return return_with_carry_direct(EIO, true);
+            }
 
-            guestSignatures.fileStart =
-                hostSignatures.fs_file_start;
+            const bool hostRegistrationIsComplete =
+                result == 0 &&
+                hostSignatures.fs_file_start >= fileStatus.st_size;
+            guestSignatures.fileStart = hostRegistrationIsComplete
+                ? hostSignatures.fs_file_start
+                : fileStatus.st_size;
             /* XNU exposes only the returned coverage through the off_t
              * field; the pointer and size remain input-only. */
             if(!write_guest_memory_with_permissions(
@@ -4282,7 +4299,7 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
                     sizeof(guestSignatures.fileStart), PROT_WRITE)) {
                 return return_with_carry_direct(EFAULT, true);
             }
-            return return_with_carry_direct(result, false);
+            return return_with_carry_direct(0, false);
         }
         case F_CHECK_LV:
             return 0;
