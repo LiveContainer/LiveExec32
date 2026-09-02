@@ -257,6 +257,23 @@ for framework_name in $framework_names; do
     framework_count=$((framework_count + 1))
 done
 
+# Guest C libraries are plain dylibs installed straight into /usr/lib of the
+# guest root. The restore ramdisk does not ship libiconv.2.dylib, so the
+# locally built one is required by any app linking -liconv.
+libiconv_binary="$REPO_ROOT/GuestLibraries/libiconv/.theos/obj/armv7s/libiconv.2.dylib"
+if [ ! -f "$libiconv_binary" ]; then
+    echo "Missing built library: $libiconv_binary" >&2
+    exit 1
+fi
+libiconv_id=$(otool -D "$libiconv_binary" | tail -n 1)
+if [ "$libiconv_id" != "/usr/lib/libiconv.2.dylib" ]; then
+    echo "Unexpected install name for libiconv.2: $libiconv_id" >&2
+    echo "Expected: /usr/lib/libiconv.2.dylib" >&2
+    exit 1
+fi
+install -d -m 0755 "$RAMDISK_ROOT/usr/lib"
+install -m 0755 "$libiconv_binary" "$RAMDISK_ROOT/usr/lib/libiconv.2.dylib"
+
 avfaudio_link="$RAMDISK_ROOT/System/Library/Frameworks/AVFoundation.framework/libAVFAudio.dylib"
 avfaudio_target=Frameworks/AVFAudio.framework/AVFAudio
 avfaudio_compat_bundle="$RAMDISK_ROOT/System/Library/Frameworks/AVFoundation.framework/Frameworks/AVFAudio.framework"
@@ -275,4 +292,4 @@ else
     ln -s "$avfaudio_target" "$avfaudio_link"
 fi
 
-echo "Installed and verified $framework_count guest frameworks in $RAMDISK_ROOT"
+echo "Installed and verified $framework_count guest frameworks and libiconv.2 in $RAMDISK_ROOT"

@@ -191,3 +191,25 @@ ifeq ($(_THEOS_CURRENT_OPERATION), compile)
   _THEOS_INTERNAL_LDFLAGS := $(subst -lobjc,,$(_THEOS_INTERNAL_LDFLAGS))
 endif
 endif
+
+# Guest C libraries live outside the framework fan-out (they install as bare
+# dylibs, not bundles). Build them from the top-level invocation so
+# pack-ramdisk.sh can install the products into the guest /usr/lib.
+GUEST_LIBRARY_PROJECTS := $(abspath ../GuestLibraries/libiconv)
+
+.PHONY: lc32-guest-libraries lc32-guest-libraries-clean
+lc32-guest-libraries:
+	@set -e; \
+	for project in $(GUEST_LIBRARY_PROJECTS); do \
+		$(MAKE) --no-print-directory -C "$$project" all; \
+	done
+lc32-guest-libraries-clean:
+	@set -e; \
+	for project in $(GUEST_LIBRARY_PROJECTS); do \
+		$(MAKE) --no-print-directory -C "$$project" clean; \
+	done
+
+ifeq ($(THEOS_CURRENT_INSTANCE),)
+before-all:: lc32-guest-libraries
+internal-clean:: lc32-guest-libraries-clean
+endif
