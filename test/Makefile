@@ -174,6 +174,7 @@ $(eval $(call lc32_guest_test,lc32-text-input-traits,text_input_traits.m,Foundat
 $(eval $(call lc32_guest_test,lc32-uikit-appearance,uikit_appearance.m,Foundation UIKit LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-accessibility,uikit_accessibility.m,Foundation UIKit LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-image-context,uikit_image_context.m,Foundation UIKit CoreGraphics LC32))
+$(eval $(call lc32_guest_test,lc32-uikit-legacy-device,uikit_legacy_device.m,Foundation UIKit LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-legacy-string-sizing,uikit_legacy_string_sizing.m,Foundation UIKit CoreGraphics LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-legacy-window-root,uikit_legacy_window_root.m,Foundation UIKit CoreGraphics LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-view-load-reentrancy,uikit_view_load_reentrancy.m,Foundation UIKit CoreGraphics LC32))
