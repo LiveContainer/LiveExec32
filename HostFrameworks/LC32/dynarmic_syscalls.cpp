@@ -4238,9 +4238,8 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
                 return_with_carry_direct(EINTR, true));
         case F_ADDFILESIGS_RETURN:
         {
-            /* fsignatures_t contains native-sized pointer and size fields.
-             * Decode dyld's 32-bit ABI explicitly; fs_blob_start is a file
-             * offset for F_ADDFILESIGS_RETURN, not a guest pointer. */
+            /* Decode dyld's 32-bit ABI so an incomplete guest structure is
+             * rejected even though its signature inputs are not forwarded. */
             struct GuestFSignatures {
                 int64_t fileStart;
                 u32 blobStart;
@@ -4254,28 +4253,18 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
                 return return_with_carry_direct(EFAULT, true);
             }
 
-            fsignatures_t hostSignatures = {};
-            hostSignatures.fs_file_start = guestSignatures.fileStart;
-            hostSignatures.fs_blob_start =
-                reinterpret_cast<void *>(
-                    static_cast<uintptr_t>(
-                        guestSignatures.blobStart));
-            hostSignatures.fs_blob_size = guestSignatures.blobSize;
-            /* Use the public entry point here rather than a raw syscall.
-             * Jailbreaks interpose fcntl to trust and, on TXM systems,
-             * normalize the signature before asking XNU to attach it. */
-            errno = 0;
-            const int result = fcntl(
-                fildes, cmd, &hostSignatures);
-
             /* Guest images are translated by Dynarmic and are never mapped
-             * executable by the host. The host kernel can therefore reject
-             * an otherwise usable guest signature (notably an ad-hoc one),
-             * but dyld still requires this command to report complete file
-             * coverage. Validate the descriptor with fstat, then synthesize
-             * complete coverage when the host rejected or under-reported the
-             * registration. The strict FairPlay registration used while
-             * loading the main image is handled separately in LC32MapFile. */
+             * executable by the host, so attaching their signatures to the
+             * native process has no benefit. It can also associate another
+             * platform-main-binary signature with the host pmap and panic the
+             * kernel when its address-space layout differs. The one signature
+             * registration needed by FairPlay is performed separately for the
+             * main ARM32 image in LC32MapFile before mremap_encrypted.
+             *
+             * dyld still expects successful F_ADDFILESIGS_RETURN coverage.
+             * Validate the descriptor, report the entire file as covered, and
+             * leave the host kernel untouched. The returned off_t is the first
+             * field in both the 32-bit and native fsignatures_t layouts. */
             struct stat fileStatus = {};
             if(fstat(fildes, &fileStatus) == -1) {
                 const int savedErrno = errno;
@@ -4286,14 +4275,7 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
                 return return_with_carry_direct(EIO, true);
             }
 
-            const bool hostRegistrationIsComplete =
-                result == 0 &&
-                hostSignatures.fs_file_start >= fileStatus.st_size;
-            guestSignatures.fileStart = hostRegistrationIsComplete
-                ? hostSignatures.fs_file_start
-                : fileStatus.st_size;
-            /* XNU exposes only the returned coverage through the off_t
-             * field; the pointer and size remain input-only. */
+            guestSignatures.fileStart = fileStatus.st_size;
             if(!write_guest_memory_with_permissions(
                     guest_r2, &guestSignatures.fileStart,
                     sizeof(guestSignatures.fileStart), PROT_WRITE)) {
