@@ -802,7 +802,23 @@ const CGSize CGSizeZero = {0,0};
  * These are value-only operations.  Computing them in ARM32 keeps CGFloat as
  * float and avoids both a host transition and the incompatible ARM64 struct
  * return ABI.
+ *
+ * The 10.3 SDK maps a few public spellings to private static-inline helpers.
+ * Undefine those mappings here so the guest framework still exports the
+ * public ABI symbols found in CoreGraphics.tbd.
  */
+#undef CGAffineTransformMake
+#undef CGPointApplyAffineTransform
+#undef CGPointEqualToPoint
+#undef CGSizeApplyAffineTransform
+#undef CGSizeEqualToSize
+
+CGAffineTransform CGAffineTransformMake(
+        CGFloat a, CGFloat b, CGFloat c, CGFloat d,
+        CGFloat tx, CGFloat ty) {
+    return (CGAffineTransform){a, b, c, d, tx, ty};
+}
+
 CGAffineTransform CGAffineTransformMakeTranslation(CGFloat tx, CGFloat ty) {
     return (CGAffineTransform){1, 0, 0, 1, tx, ty};
 }
@@ -826,6 +842,30 @@ bool CGAffineTransformIsIdentity(CGAffineTransform transform) {
     return transform.a == 1 && transform.b == 0 &&
         transform.c == 0 && transform.d == 1 &&
         transform.tx == 0 && transform.ty == 0;
+}
+
+bool CGAffineTransformEqualToTransform(
+        CGAffineTransform first, CGAffineTransform second) {
+    return first.a == second.a && first.b == second.b &&
+        first.c == second.c && first.d == second.d &&
+        first.tx == second.tx && first.ty == second.ty;
+}
+
+CGAffineTransform CGAffineTransformInvert(CGAffineTransform transform) {
+    const CGFloat determinant =
+        transform.a * transform.d - transform.c * transform.b;
+    if(determinant == 0) return transform;
+    const CGFloat inverse = 1.0f / determinant;
+    return (CGAffineTransform){
+        transform.d * inverse,
+        -transform.b * inverse,
+        -transform.c * inverse,
+        transform.a * inverse,
+        (transform.c * transform.ty -
+            transform.d * transform.tx) * inverse,
+        (transform.b * transform.tx -
+            transform.a * transform.ty) * inverse,
+    };
 }
 
 CGAffineTransform CGAffineTransformConcat(CGAffineTransform first,
@@ -882,6 +922,28 @@ CGAffineTransform CGAffineTransformRotate(
         CGAffineTransformMakeRotation(angle), transform);
 }
 
+CGPoint CGPointApplyAffineTransform(
+        CGPoint point, CGAffineTransform transform) {
+    return CGPointMake(
+        point.x * transform.a + point.y * transform.c + transform.tx,
+        point.x * transform.b + point.y * transform.d + transform.ty);
+}
+
+bool CGPointEqualToPoint(CGPoint first, CGPoint second) {
+    return first.x == second.x && first.y == second.y;
+}
+
+CGSize CGSizeApplyAffineTransform(
+        CGSize size, CGAffineTransform transform) {
+    return CGSizeMake(
+        size.width * transform.a + size.height * transform.c,
+        size.width * transform.b + size.height * transform.d);
+}
+
+bool CGSizeEqualToSize(CGSize first, CGSize second) {
+    return first.width == second.width && first.height == second.height;
+}
+
 // We don't call host functions if possible to avoid performance cost.
 static CGRect LC32CGRectStandardized(CGRect rect) {
     if(rect.size.width < 0) {
@@ -893,6 +955,10 @@ static CGRect LC32CGRectStandardized(CGRect rect) {
         rect.size.height = -rect.size.height;
     }
     return rect;
+}
+
+CGRect CGRectStandardize(CGRect rect) {
+    return LC32CGRectStandardized(rect);
 }
 
 CGFloat CGRectGetMinX(CGRect rect) {

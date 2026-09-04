@@ -1936,6 +1936,108 @@ void LC32_UIKit_UIAccessibilityPostNotification(
         (UIAccessibilityNotifications)notificationValue, argument);
 }
 
+static float LC32UIKitFloatFromBits(u32 bits) {
+    float value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static id LC32UIKitObjectFromWords(u32 low, u32 high) {
+    return reinterpret_cast<id>(static_cast<uintptr_t>(
+        low | (static_cast<u64>(high) << 32)));
+}
+
+u32 LC32_UIKit_UIAccessibilityConvertFrameToScreenCoordinates(
+        u32 guestResult, u32 xBits, u32 sp) {
+    if(!guestResult || guestResult > UINT32_MAX - 15) return 0;
+
+    const u32 yBits =
+        Dynarmic_current_user_callbacks()->MemoryRead32(sp);
+    const u32 widthBits =
+        Dynarmic_current_user_callbacks()->MemoryRead32(sp + 4);
+    const u32 heightBits =
+        Dynarmic_current_user_callbacks()->MemoryRead32(sp + 8);
+    UIView *view = LC32UIKitObjectFromWords(
+        Dynarmic_current_user_callbacks()->MemoryRead32(sp + 12),
+        Dynarmic_current_user_callbacks()->MemoryRead32(sp + 16));
+    if(!view) return 0;
+
+    const CGRect result = UIAccessibilityConvertFrameToScreenCoordinates(
+        CGRectMake(LC32UIKitFloatFromBits(xBits),
+            LC32UIKitFloatFromBits(yBits),
+            LC32UIKitFloatFromBits(widthBits),
+            LC32UIKitFloatFromBits(heightBits)),
+        view);
+    const struct {
+        float x;
+        float y;
+        float width;
+        float height;
+    } guestRect = {
+        static_cast<float>(result.origin.x),
+        static_cast<float>(result.origin.y),
+        static_cast<float>(result.size.width),
+        static_cast<float>(result.size.height),
+    };
+    return Dynarmic_mem_1write(guestResult, sizeof(guestRect),
+        const_cast<char *>(reinterpret_cast<const char *>(&guestRect))) == 0;
+}
+
+u32 LC32_UIKit_UIAccessibilityConvertPathToScreenCoordinates(
+        u32 pathLow, u32 pathHigh, u32 sp) {
+    UIBezierPath *path = LC32UIKitObjectFromWords(pathLow, pathHigh);
+    UIView *view = LC32UIKitObjectFromWords(
+        Dynarmic_current_user_callbacks()->MemoryRead32(sp),
+        Dynarmic_current_user_callbacks()->MemoryRead32(sp + 4));
+    if(!path || !view) return 0;
+    UIBezierPath *result =
+        UIAccessibilityConvertPathToScreenCoordinates(path, view);
+    return result ? result.guest_self : 0;
+}
+
+u32 LC32_UIKit_UIAccessibilityFocusedElement(
+        u32 identifierLow, u32 identifierHigh, u32) {
+    NSString *identifier =
+        LC32UIKitObjectFromWords(identifierLow, identifierHigh);
+    id element = UIAccessibilityFocusedElement(identifier);
+    return element ? [element guest_self] : 0;
+}
+
+void LC32_UIKit_UIAccessibilityZoomFocusChanged(
+        u32 type, u32 xBits, u32 sp) {
+    const u32 yBits =
+        Dynarmic_current_user_callbacks()->MemoryRead32(sp);
+    const u32 widthBits =
+        Dynarmic_current_user_callbacks()->MemoryRead32(sp + 4);
+    const u32 heightBits =
+        Dynarmic_current_user_callbacks()->MemoryRead32(sp + 8);
+    UIView *view = LC32UIKitObjectFromWords(
+        Dynarmic_current_user_callbacks()->MemoryRead32(sp + 12),
+        Dynarmic_current_user_callbacks()->MemoryRead32(sp + 16));
+    if(!view) return;
+    UIAccessibilityZoomFocusChanged((UIAccessibilityZoomType)type,
+        CGRectMake(LC32UIKitFloatFromBits(xBits),
+            LC32UIKitFloatFromBits(yBits),
+            LC32UIKitFloatFromBits(widthBits),
+            LC32UIKitFloatFromBits(heightBits)),
+        view);
+}
+
+u32 LC32_UIKit_UIGuidedAccessRestrictionStateForIdentifier(
+        u32 identifierLow, u32 identifierHigh, u32) {
+    NSString *identifier =
+        LC32UIKitObjectFromWords(identifierLow, identifierHigh);
+    return identifier
+        ? (u32)UIGuidedAccessRestrictionStateForIdentifier(identifier)
+        : (u32)UIGuidedAccessRestrictionStateAllow;
+}
+
+u32 LC32_UIKit_UIVideoAtPathIsCompatibleWithSavedPhotosAlbum(
+        u32 pathLow, u32 pathHigh, u32) {
+    NSString *path = LC32UIKitObjectFromWords(pathLow, pathHigh);
+    return path && UIVideoAtPathIsCompatibleWithSavedPhotosAlbum(path);
+}
+
 int LC32_UIKit_UIApplicationMain(u32 r2, u32 r3, u32 sp) {
     int argc = r2;
     u32 guest_argv = r3;

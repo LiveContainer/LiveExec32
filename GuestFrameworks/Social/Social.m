@@ -7,3 +7,6 @@
  */
 NSString * const SLServiceTypeFacebook = @"com.apple.social.facebook";
 NSString * const SLServiceTypeTwitter = @"com.apple.social.twitter";
+NSString * const SLServiceTypeSinaWeibo = @"com.apple.social.sinaweibo";
+NSString * const SLServiceTypeTencentWeibo = @"com.apple.social.tencentweibo";
+NSString * const SLServiceTypeLinkedIn = @"com.apple.social.linkedin";

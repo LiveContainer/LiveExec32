@@ -1,0 +1,24 @@
+#import <MetalKit/MetalKit.h>
+
+#define LC32_METALKIT_STRING(symbol) \
+    NSString *const LC32_METALKIT_##symbol \
+        __asm__("_" #symbol) = @#symbol;
+
+LC32_METALKIT_STRING(MTKModelErrorDomain)
+LC32_METALKIT_STRING(MTKModelErrorKey)
+LC32_METALKIT_STRING(MTKTextureLoaderCubeLayoutVertical)
+LC32_METALKIT_STRING(MTKTextureLoaderErrorDomain)
+LC32_METALKIT_STRING(MTKTextureLoaderErrorKey)
+LC32_METALKIT_STRING(MTKTextureLoaderOptionAllocateMipmaps)
+LC32_METALKIT_STRING(MTKTextureLoaderOptionCubeLayout)
+LC32_METALKIT_STRING(MTKTextureLoaderOptionGenerateMipmaps)
+LC32_METALKIT_STRING(MTKTextureLoaderOptionOrigin)
+LC32_METALKIT_STRING(MTKTextureLoaderOptionSRGB)
+LC32_METALKIT_STRING(MTKTextureLoaderOptionTextureCPUCacheMode)
+LC32_METALKIT_STRING(MTKTextureLoaderOptionTextureStorageMode)
+LC32_METALKIT_STRING(MTKTextureLoaderOptionTextureUsage)
+LC32_METALKIT_STRING(MTKTextureLoaderOriginBottomLeft)
+LC32_METALKIT_STRING(MTKTextureLoaderOriginFlippedVertically)
+LC32_METALKIT_STRING(MTKTextureLoaderOriginTopLeft)
+
+#undef LC32_METALKIT_STRING

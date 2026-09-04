@@ -147,6 +147,24 @@ const CFDictionaryKeyCallBacks kCFCopyStringDictionaryKeyCallBacks = {
     LC32CFObjectHash,
 };
 
+const CFBagCallBacks kCFTypeBagCallBacks = {
+    0,
+    __CFTypeCollectionRetain,
+    __CFTypeCollectionRelease,
+    (CFBagCopyDescriptionCallBack)CFCopyDescription,
+    (CFBagEqualCallBack)CFEqual,
+    LC32CFObjectHash,
+};
+
+const CFBagCallBacks kCFCopyStringBagCallBacks = {
+    0,
+    LC32CFCopyString,
+    __CFTypeCollectionRelease,
+    (CFBagCopyDescriptionCallBack)CFCopyDescription,
+    (CFBagEqualCallBack)CFEqual,
+    LC32CFObjectHash,
+};
+
 const CFSetCallBacks kCFTypeSetCallBacks = {
     0,
     __CFTypeCollectionRetain,
@@ -154,6 +172,29 @@ const CFSetCallBacks kCFTypeSetCallBacks = {
     (CFSetCopyDescriptionCallBack)CFCopyDescription,
     (CFSetEqualCallBack)CFEqual,
     LC32CFObjectHash,
+};
+
+const CFSetCallBacks kCFCopyStringSetCallBacks = {
+    0,
+    LC32CFCopyString,
+    __CFTypeCollectionRelease,
+    (CFSetCopyDescriptionCallBack)CFCopyDescription,
+    (CFSetEqualCallBack)CFEqual,
+    LC32CFObjectHash,
+};
+
+static CFComparisonResult LC32CFStringBinaryHeapCompare(
+        const void *left, const void *right, void *context) {
+    (void)context;
+    return CFStringCompare((CFStringRef)left, (CFStringRef)right, 0);
+}
+
+const CFBinaryHeapCallBacks kCFStringBinaryHeapCallBacks = {
+    0,
+    __CFTypeCollectionRetain,
+    __CFTypeCollectionRelease,
+    CFCopyDescription,
+    LC32CFStringBinaryHeapCompare,
 };
 
 /*

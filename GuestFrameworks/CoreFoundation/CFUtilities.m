@@ -1,10 +1,15 @@
 #import <CoreFoundation/CoreFoundation+LC32.h>
 
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 const CFRunLoopMode kCFRunLoopCommonModes = CFSTR("kCFRunLoopCommonModes");
+
+CFRange __CFRangeMake(CFIndex location, CFIndex length) {
+    return (CFRange){.location = location, .length = length};
+}
 
 typedef union {
     CFUUIDBytes bytes;
@@ -78,9 +83,46 @@ CFAbsoluteTime CFAbsoluteTimeGetCurrent(void) {
     return [NSDate timeIntervalSinceReferenceDate];
 }
 
+CFURLRef CFCopyHomeDirectoryURL(void) {
+    NSString *homeDirectory = NSHomeDirectory();
+    if(!homeDirectory) return NULL;
+    return (CFURLRef)[[NSURL fileURLWithPath:homeDirectory
+                                isDirectory:YES] copy];
+}
+
+static void LC32CFShowObject(CFTypeRef object) {
+    NSString *description = object ? [(id)object description] : @"(null)";
+    const char *utf8 = description.UTF8String;
+    fputs(utf8 ? utf8 : "(unprintable)", stderr);
+    fputc('\n', stderr);
+}
+
+void CFShow(CFTypeRef object) {
+    LC32CFShowObject(object);
+}
+
+void CFShowStr(CFStringRef string) {
+    LC32CFShowObject(string);
+}
+
 CFBundleRef CFBundleGetMainBundle(void) {
     return (CFBundleRef)LC32_CF_CALL0(
         LC32CoreFoundationOpBundleGetMainBundle);
+}
+
+CFArrayRef CFBundleGetAllBundles(void) {
+    return (CFArrayRef)LC32_CF_CALL0(
+        LC32CoreFoundationOpBundleGetAllBundles);
+}
+
+CFArrayRef CFBundleCreateBundlesFromDirectory(
+        CFAllocatorRef allocator, CFURLRef directoryURL,
+        CFStringRef bundleType) {
+    (void)allocator;
+    if(!directoryURL) return NULL;
+    return (CFArrayRef)LC32_CF_CALL(
+        LC32CoreFoundationOpBundleCreateBundlesFromDirectory,
+        LC32_CF_HOST(directoryURL), LC32_CF_HOST(bundleType));
 }
 
 CFDictionaryRef CFBundleGetInfoDictionary(CFBundleRef bundle) {
@@ -163,6 +205,33 @@ CFArrayRef CFBundleCopyBundleLocalizations(CFBundleRef bundle) {
                   : NULL;
 }
 
+void CFBundleGetPackageInfo(CFBundleRef bundle, UInt32 *packageType,
+                            UInt32 *packageCreator) {
+    if(!bundle) {
+        if(packageType) *packageType = 0;
+        if(packageCreator) *packageCreator = 0;
+        return;
+    }
+    LC32_CF_CALL(LC32CoreFoundationOpBundleGetPackageInfo,
+        LC32_CF_HOST(bundle), LC32_CF_U32((uintptr_t)packageType),
+        LC32_CF_U32((uintptr_t)packageCreator));
+}
+
+CFDictionaryRef CFBundleCopyInfoDictionaryInDirectory(CFURLRef bundleURL) {
+    return bundleURL ? (CFDictionaryRef)LC32_CF_CALL(
+        LC32CoreFoundationOpBundleCopyInfoDictionaryInDirectory,
+        LC32_CF_HOST(bundleURL)) : NULL;
+}
+
+Boolean CFBundleGetPackageInfoInDirectory(
+        CFURLRef bundleURL, UInt32 *packageType, UInt32 *packageCreator) {
+    if(!bundleURL) return false;
+    return LC32_CF_CALL(
+        LC32CoreFoundationOpBundleGetPackageInfoInDirectory,
+        LC32_CF_HOST(bundleURL), LC32_CF_U32((uintptr_t)packageType),
+        LC32_CF_U32((uintptr_t)packageCreator)) != 0;
+}
+
 CFArrayRef CFBundleCopyPreferredLocalizationsFromArray(
         CFArrayRef localizations) {
     return localizations ? (CFArrayRef)[[NSBundle
@@ -205,6 +274,44 @@ CFArrayRef CFBundleCopyResourceURLsOfTypeForLocalization(
         URLsForResourcesWithExtension:(NSString *)resourceType
         subdirectory:(NSString *)subdirectoryName
         localization:(NSString *)localizationName] copy];
+}
+
+CFURLRef CFBundleCopyResourceURLInDirectory(
+        CFURLRef bundleURL, CFStringRef resourceName,
+        CFStringRef resourceType, CFStringRef subdirectoryName) {
+    if(!bundleURL || !resourceName) return NULL;
+    return (CFURLRef)LC32_CF_CALL(
+        LC32CoreFoundationOpBundleCopyResourceURLInDirectory,
+        LC32_CF_HOST(bundleURL), LC32_CF_HOST(resourceName),
+        LC32_CF_HOST(resourceType), LC32_CF_HOST(subdirectoryName));
+}
+
+CFArrayRef CFBundleCopyResourceURLsOfTypeInDirectory(
+        CFURLRef bundleURL, CFStringRef resourceType,
+        CFStringRef subdirectoryName) {
+    if(!bundleURL) return NULL;
+    return (CFArrayRef)LC32_CF_CALL(
+        LC32CoreFoundationOpBundleCopyResourceURLsOfTypeInDirectory,
+        LC32_CF_HOST(bundleURL), LC32_CF_HOST(resourceType),
+        LC32_CF_HOST(subdirectoryName));
+}
+
+CFDictionaryRef CFBundleCopyInfoDictionaryForURL(CFURLRef url) {
+    return url ? (CFDictionaryRef)LC32_CF_CALL(
+        LC32CoreFoundationOpBundleCopyInfoDictionaryForURL,
+        LC32_CF_HOST(url)) : NULL;
+}
+
+CFArrayRef CFBundleCopyLocalizationsForURL(CFURLRef url) {
+    return url ? (CFArrayRef)LC32_CF_CALL(
+        LC32CoreFoundationOpBundleCopyLocalizationsForURL,
+        LC32_CF_HOST(url)) : NULL;
+}
+
+CFArrayRef CFBundleCopyExecutableArchitecturesForURL(CFURLRef url) {
+    return url ? (CFArrayRef)LC32_CF_CALL(
+        LC32CoreFoundationOpBundleCopyExecutableArchitecturesForURL,
+        LC32_CF_HOST(url)) : NULL;
 }
 
 Boolean CFBundlePreflightExecutable(CFBundleRef bundle, CFErrorRef *error) {
@@ -528,4 +635,26 @@ void CFNotificationCenterAddObserver(
      * modern weak-observer implementation.
      */
     (void)trampoline;
+}
+
+void CFNotificationCenterPostNotification(
+        CFNotificationCenterRef center, CFNotificationName name,
+        const void *object, CFDictionaryRef userInfo,
+        Boolean deliverImmediately) {
+    (void)deliverImmediately;
+    if(!name) return;
+    if(!center) center = CFNotificationCenterGetLocalCenter();
+    [(NSNotificationCenter *)center
+        postNotificationName:(NSString *)name
+                      object:(id)object
+                    userInfo:(NSDictionary *)userInfo];
+}
+
+void CFNotificationCenterPostNotificationWithOptions(
+        CFNotificationCenterRef center, CFNotificationName name,
+        const void *object, CFDictionaryRef userInfo,
+        CFOptionFlags options) {
+    CFNotificationCenterPostNotification(
+        center, name, object, userInfo,
+        (options & kCFNotificationDeliverImmediately) != 0);
 }

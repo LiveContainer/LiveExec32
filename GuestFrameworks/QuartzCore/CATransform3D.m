@@ -41,6 +41,22 @@ CATransform3D CATransform3DMakeAffineTransform(CGAffineTransform transform) {
     return result;
 }
 
+bool CATransform3DIsAffine(CATransform3D transform) {
+    return transform.m13 == 0 && transform.m14 == 0 &&
+        transform.m23 == 0 && transform.m24 == 0 &&
+        transform.m31 == 0 && transform.m32 == 0 &&
+        transform.m33 == 1 && transform.m34 == 0 &&
+        transform.m43 == 0 && transform.m44 == 1;
+}
+
+CGAffineTransform CATransform3DGetAffineTransform(
+        CATransform3D transform) {
+    return CGAffineTransformMake(
+        transform.m11, transform.m12,
+        transform.m21, transform.m22,
+        transform.m41, transform.m42);
+}
+
 CATransform3D CATransform3DMakeRotation(CGFloat angle, CGFloat x, CGFloat y, CGFloat z) {
     // If the vector has length zero, this function returns the identity transform
     if (x == 0.0 && y == 0.0 && z == 0.0) {

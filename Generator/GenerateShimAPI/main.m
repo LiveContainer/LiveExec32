@@ -1031,6 +1031,15 @@ static BOOL LC32MethodHasIndirectObjectBuffer(NSString *className,
         // skip alloc
         self.skippedFilteredMethods++;
         return;
+    } else if(!method.isInstanceMethod && !strcmp(selectorName, "load")) {
+        /*
+         * The native dyld invokes +load while loading the host framework.
+         * Forwarding it from the guest is both redundant and unsafe: guest
+         * libobjc may call +load before this image's C constructors have had
+         * a chance to load an optional native framework.
+         */
+        self.skippedFilteredMethods++;
+        return;
     } else if(!strcmp(selectorName, "dealloc") ||
               !strcmp(selectorName, "autorelease") ||
               !strcmp(selectorName, "release") ||

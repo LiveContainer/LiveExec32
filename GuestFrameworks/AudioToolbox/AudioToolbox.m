@@ -18,14 +18,6 @@
 #include <stdio.h>
 #endif
 
-/* Deprecated AudioSession route dictionary values retained for old apps. */
-const CFStringRef kAudioSessionInputRoute_BuiltInMic =
-    CFSTR("MicrophoneBuiltIn");
-const CFStringRef kAudioSession_AudioRouteKey_Inputs =
-    CFSTR("RouteDetailedDescription_Inputs");
-const CFStringRef kAudioSession_AudioRouteKey_Type =
-    CFSTR("RouteDetailedDescription_PortType");
-
 static pthread_once_t LC32AudioToolboxDispatcherOnce = PTHREAD_ONCE_INIT;
 static uint64_t LC32AudioToolboxDispatcherAddress;
 

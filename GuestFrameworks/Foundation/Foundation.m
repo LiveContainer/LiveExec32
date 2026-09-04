@@ -1,6 +1,7 @@
 #import <Foundation/Foundation+LC32.h>
 #import <CoreFoundation/CoreFoundation.h>
 
+#include <malloc/malloc.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -237,6 +238,12 @@ NSString *NSStringFromProtocol(Protocol *protocol) {
     return name ? [NSString stringWithUTF8String:name] : nil;
 }
 
+Protocol *NSProtocolFromString(NSString *name) {
+    if(!name) return NULL;
+    const char *utf8Name = name.UTF8String;
+    return utf8Name ? objc_getProtocol(utf8Name) : NULL;
+}
+
 id NSAllocateObject(Class aClass, NSUInteger extraBytes, NSZone *zone) {
     (void)zone;
     return aClass ? class_createInstance(aClass, extraBytes) : nil;
@@ -244,14 +251,59 @@ id NSAllocateObject(Class aClass, NSUInteger extraBytes, NSZone *zone) {
 
 static uintptr_t LC32DefaultMallocZoneStorage;
 
+static malloc_zone_t *LC32MallocZone(NSZone *zone) {
+    return !zone || zone == NSDefaultMallocZone()
+        ? malloc_default_zone()
+        : (malloc_zone_t *)zone;
+}
+
 NSZone *NSDefaultMallocZone(void) {
-    /* Preserve the legacy non-null identity; allocation itself ignores it. */
+    /* Preserve Foundation's legacy opaque default-zone identity. */
     return (NSZone *)&LC32DefaultMallocZoneStorage;
 }
 
+NSZone *NSCreateZone(NSUInteger startSize, NSUInteger granularity,
+                     BOOL canFree) {
+    (void)granularity;
+    (void)canFree;
+    return (NSZone *)malloc_create_zone((vm_size_t)startSize, 0);
+}
+
+void NSRecycleZone(NSZone *zone) {
+    if(!zone || zone == NSDefaultMallocZone()) return;
+    malloc_destroy_zone((malloc_zone_t *)zone);
+}
+
+void NSSetZoneName(NSZone *zone, NSString *name) {
+    malloc_set_zone_name(LC32MallocZone(zone), name.UTF8String);
+}
+
+NSString *NSZoneName(NSZone *zone) {
+    const char *name = malloc_get_zone_name(LC32MallocZone(zone));
+    return name ? [NSString stringWithUTF8String:name] : nil;
+}
+
 NSZone *NSZoneFromPointer(void *pointer) {
-    (void)pointer;
-    return NSDefaultMallocZone();
+    malloc_zone_t *zone = pointer ? malloc_zone_from_ptr(pointer) : NULL;
+    return !zone || zone == malloc_default_zone()
+        ? NSDefaultMallocZone()
+        : (NSZone *)zone;
+}
+
+void *NSZoneMalloc(NSZone *zone, NSUInteger size) {
+    return malloc_zone_malloc(LC32MallocZone(zone), size);
+}
+
+void *NSZoneCalloc(NSZone *zone, NSUInteger count, NSUInteger size) {
+    return malloc_zone_calloc(LC32MallocZone(zone), count, size);
+}
+
+void *NSZoneRealloc(NSZone *zone, void *pointer, NSUInteger size) {
+    return malloc_zone_realloc(LC32MallocZone(zone), pointer, size);
+}
+
+void NSZoneFree(NSZone *zone, void *pointer) {
+    malloc_zone_free(LC32MallocZone(zone), pointer);
 }
 
 NSString *NSTemporaryDirectory() {

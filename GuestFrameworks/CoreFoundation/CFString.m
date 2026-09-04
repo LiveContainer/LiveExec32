@@ -100,6 +100,23 @@ CFStringRef CFStringCreateWithBytesNoCopy(
                                    isExternalRepresentation);
 }
 
+CFStringRef CFStringCreateWithPascalString(
+        CFAllocatorRef allocator, ConstStr255Param pascalString,
+        CFStringEncoding encoding) {
+    if(!pascalString) return NULL;
+    return CFStringCreateWithBytes(allocator, pascalString + 1,
+        pascalString[0], encoding, false);
+}
+
+CFStringRef CFStringCreateWithPascalStringNoCopy(
+        CFAllocatorRef allocator, ConstStr255Param pascalString,
+        CFStringEncoding encoding, CFAllocatorRef contentsDeallocator) {
+    /* Guest memory cannot be retained or deallocated by native CF. */
+    (void)contentsDeallocator;
+    return CFStringCreateWithPascalString(
+        allocator, pascalString, encoding);
+}
+
 CFStringRef CFStringCreateWithCharacters(CFAllocatorRef allocator,
                                          const UniChar *characters,
                                          CFIndex numCharacters) {
@@ -208,6 +225,17 @@ void CFStringAppendCString(CFMutableStringRef string, const char *cString,
     LC32_CF_CALL(LC32CoreFoundationOpStringAppendCString,
         LC32_CF_HOST(string), LC32_CF_U32((uintptr_t)cString),
         LC32_CF_U32(encoding));
+}
+
+void CFStringAppendPascalString(CFMutableStringRef string,
+                                ConstStr255Param pascalString,
+                                CFStringEncoding encoding) {
+    if(!string || !pascalString) return;
+    CFStringRef appendedString = CFStringCreateWithPascalString(
+        kCFAllocatorDefault, pascalString, encoding);
+    if(!appendedString) return;
+    CFStringAppend(string, appendedString);
+    CFRelease(appendedString);
 }
 
 void CFStringAppendCharacters(CFMutableStringRef string,
@@ -333,6 +361,21 @@ CFComparisonResult CFStringCompareWithOptions(
         LC32_CF_U32(rangeToCompare.length), LC32_CF_U32(compareOptions));
 }
 
+CFComparisonResult CFStringCompareWithOptionsAndLocale(
+        CFStringRef string1, CFStringRef string2, CFRange rangeToCompare,
+        CFStringCompareFlags compareOptions, CFLocaleRef locale) {
+    if(!string1 || !string2 ||
+       !LC32CFStringRangeFitsString(string1, rangeToCompare)) {
+        return kCFCompareEqualTo;
+    }
+    return (CFComparisonResult)[(NSString *)string1
+        compare:(NSString *)string2
+        options:(NSStringCompareOptions)compareOptions
+          range:NSMakeRange((NSUInteger)rangeToCompare.location,
+                            (NSUInteger)rangeToCompare.length)
+         locale:(NSLocale *)locale];
+}
+
 Boolean CFStringHasPrefix(CFStringRef string, CFStringRef prefix) {
     return [(NSString *)string hasPrefix:(NSString *)prefix];
 }
@@ -349,6 +392,12 @@ CFStringEncoding CFStringGetFastestEncoding(CFStringRef string) {
     if(!string) return kCFStringEncodingInvalidId;
     return CFStringConvertNSStringEncodingToEncoding(
         [(NSString *)string fastestEncoding]);
+}
+
+CFStringEncoding CFStringGetSmallestEncoding(CFStringRef string) {
+    return string ? (CFStringEncoding)LC32_CF_CALL(
+        LC32CoreFoundationOpStringGetSmallestEncoding,
+        LC32_CF_HOST(string)) : kCFStringEncodingInvalidId;
 }
 
 UniChar CFStringGetCharacterAtIndex(CFStringRef string, CFIndex index) {
@@ -446,6 +495,29 @@ CFIndex CFStringGetBytes(CFStringRef string, CFRange range,
         LC32_CF_U32((uintptr_t)usedBufferLength));
 }
 
+Boolean CFStringGetPascalString(CFStringRef string, StringPtr buffer,
+                                CFIndex bufferSize,
+                                CFStringEncoding encoding) {
+    if(!string || !buffer || bufferSize <= 0) return false;
+
+    const CFRange range = CFRangeMake(0, CFStringGetLength(string));
+    CFIndex byteCount = 0;
+    const CFIndex converted = CFStringGetBytes(string, range, encoding, 0,
+        false, NULL, 0, &byteCount);
+    if(converted != range.length || byteCount < 0 || byteCount > 255 ||
+       byteCount >= bufferSize) {
+        return false;
+    }
+
+    CFIndex written = 0;
+    if(CFStringGetBytes(string, range, encoding, 0, false, buffer + 1,
+            byteCount, &written) != range.length || written != byteCount) {
+        return false;
+    }
+    buffer[0] = (UInt8)written;
+    return true;
+}
+
 CFStringRef CFStringCreateFromExternalRepresentation(
         CFAllocatorRef allocator, CFDataRef data,
         CFStringEncoding encoding) {
@@ -477,6 +549,30 @@ Boolean CFStringFindWithOptions(
         LC32_CF_U32(rangeToSearch.location),
         LC32_CF_U32(rangeToSearch.length), LC32_CF_U32(searchOptions),
         LC32_CF_U32((uintptr_t)result)) != 0;
+}
+
+Boolean CFStringFindWithOptionsAndLocale(
+        CFStringRef string, CFStringRef stringToFind,
+        CFRange rangeToSearch, CFStringCompareFlags searchOptions,
+        CFLocaleRef locale, CFRange *result) {
+    if(result) *result = CFRangeMake(kCFNotFound, 0);
+    if(!string || !stringToFind || !CFStringGetLength(stringToFind) ||
+       !LC32CFStringRangeFitsString(string, rangeToSearch)) {
+        return false;
+    }
+
+    const NSRange found = [(NSString *)string
+        rangeOfString:(NSString *)stringToFind
+              options:(NSStringCompareOptions)searchOptions
+                range:NSMakeRange((NSUInteger)rangeToSearch.location,
+                                  (NSUInteger)rangeToSearch.length)
+               locale:(NSLocale *)locale];
+    if(found.location == NSNotFound) return false;
+    if(result) {
+        result->location = (CFIndex)found.location;
+        result->length = (CFIndex)found.length;
+    }
+    return true;
 }
 
 CFRange CFStringFind(CFStringRef string, CFStringRef stringToFind,
@@ -534,6 +630,44 @@ CFRange CFStringGetRangeOfComposedCharactersAtIndex(
     return CFRangeMake((CFIndex)range.location, (CFIndex)range.length);
 }
 
+void CFStringGetLineBounds(CFStringRef string, CFRange range,
+                           CFIndex *lineBeginIndex,
+                           CFIndex *lineEndIndex,
+                           CFIndex *contentsEndIndex) {
+    if(!LC32CFStringRangeFitsString(string, range)) return;
+
+    NSUInteger begin = 0;
+    NSUInteger end = 0;
+    NSUInteger contentsEnd = 0;
+    [(NSString *)string getLineStart:&begin end:&end
+                         contentsEnd:&contentsEnd
+                            forRange:NSMakeRange(
+                                (NSUInteger)range.location,
+                                (NSUInteger)range.length)];
+    if(lineBeginIndex) *lineBeginIndex = (CFIndex)begin;
+    if(lineEndIndex) *lineEndIndex = (CFIndex)end;
+    if(contentsEndIndex) *contentsEndIndex = (CFIndex)contentsEnd;
+}
+
+void CFStringGetParagraphBounds(CFStringRef string, CFRange range,
+                                CFIndex *paragraphBeginIndex,
+                                CFIndex *paragraphEndIndex,
+                                CFIndex *contentsEndIndex) {
+    if(!LC32CFStringRangeFitsString(string, range)) return;
+
+    NSUInteger begin = 0;
+    NSUInteger end = 0;
+    NSUInteger contentsEnd = 0;
+    [(NSString *)string getParagraphStart:&begin end:&end
+                              contentsEnd:&contentsEnd
+                                 forRange:NSMakeRange(
+                                     (NSUInteger)range.location,
+                                     (NSUInteger)range.length)];
+    if(paragraphBeginIndex) *paragraphBeginIndex = (CFIndex)begin;
+    if(paragraphEndIndex) *paragraphEndIndex = (CFIndex)end;
+    if(contentsEndIndex) *contentsEndIndex = (CFIndex)contentsEnd;
+}
+
 void CFStringCapitalize(CFMutableStringRef string, CFLocaleRef locale) {
     if(!string) return;
     NSString *capitalized = locale
@@ -554,6 +688,46 @@ void CFStringTrimWhitespace(CFMutableStringRef string) {
         LC32_CF_HOST(string));
 }
 
+void CFStringPad(CFMutableStringRef string, CFStringRef padding,
+                 CFIndex length, CFIndex indexIntoPadding) {
+    if(!string || !padding || length < 0 || indexIntoPadding < 0) return;
+    LC32_CF_CALL(LC32CoreFoundationOpStringPad,
+        LC32_CF_HOST(string), LC32_CF_HOST(padding),
+        LC32_CF_U32(length), LC32_CF_U32(indexIntoPadding));
+}
+
+void CFStringTrim(CFMutableStringRef string, CFStringRef trimString) {
+    if(!string || !trimString) return;
+    LC32_CF_CALL(LC32CoreFoundationOpStringTrim,
+        LC32_CF_HOST(string), LC32_CF_HOST(trimString));
+}
+
+CFStringEncoding CFStringGetMostCompatibleMacStringEncoding(
+        CFStringEncoding encoding) {
+    return (CFStringEncoding)LC32_CF_CALL(
+        LC32CoreFoundationOpStringGetMostCompatibleMacStringEncoding,
+        LC32_CF_U32(encoding));
+}
+
+Boolean CFStringIsHyphenationAvailableForLocale(CFLocaleRef locale) {
+    return locale && LC32_CF_CALL(
+        LC32CoreFoundationOpStringIsHyphenationAvailableForLocale,
+        LC32_CF_HOST(locale));
+}
+
+CFIndex CFStringGetHyphenationLocationBeforeIndex(
+        CFStringRef string, CFIndex location, CFRange limitRange,
+        CFOptionFlags options, CFLocaleRef locale, UTF32Char *character) {
+    if(!string || !locale || location < 0 || limitRange.location < 0 ||
+       limitRange.length < 0) return kCFNotFound;
+    return (CFIndex)(int32_t)LC32_CF_CALL(
+        LC32CoreFoundationOpStringGetHyphenationLocationBeforeIndex,
+        LC32_CF_HOST(string), LC32_CF_U32(location),
+        LC32_CF_U32(limitRange.location), LC32_CF_U32(limitRange.length),
+        LC32_CF_U32(options), LC32_CF_HOST(locale),
+        LC32_CF_U32((uintptr_t)character));
+}
+
 unsigned long CFStringConvertEncodingToNSStringEncoding(
         CFStringEncoding encoding) {
     return (unsigned long)LC32_CF_CALL(
@@ -566,6 +740,37 @@ CFStringEncoding CFStringConvertNSStringEncodingToEncoding(
     return (CFStringEncoding)LC32_CF_CALL(
         LC32CoreFoundationOpStringConvertNSStringEncodingToEncoding,
         LC32_CF_U32(encoding));
+}
+
+CFStringEncoding CFStringGetSystemEncoding(void) {
+    return (CFStringEncoding)LC32_CF_CALL0(
+        LC32CoreFoundationOpStringGetSystemEncoding);
+}
+
+Boolean CFStringIsEncodingAvailable(CFStringEncoding encoding) {
+    return LC32_CF_CALL(
+        LC32CoreFoundationOpStringIsEncodingAvailable,
+        LC32_CF_U32(encoding)) != 0;
+}
+
+CFStringRef CFStringGetNameOfEncoding(CFStringEncoding encoding) {
+    return (CFStringRef)LC32_CF_CALL(
+        LC32CoreFoundationOpStringGetNameOfEncoding,
+        LC32_CF_U32(encoding));
+}
+
+UInt32 CFStringConvertEncodingToWindowsCodepage(
+        CFStringEncoding encoding) {
+    return (UInt32)LC32_CF_CALL(
+        LC32CoreFoundationOpStringConvertEncodingToWindowsCodepage,
+        LC32_CF_U32(encoding));
+}
+
+CFStringEncoding CFStringConvertWindowsCodepageToEncoding(
+        UInt32 codepage) {
+    return (CFStringEncoding)LC32_CF_CALL(
+        LC32CoreFoundationOpStringConvertWindowsCodepageToEncoding,
+        LC32_CF_U32(codepage));
 }
 
 CFStringEncoding CFStringConvertIANACharSetNameToEncoding(

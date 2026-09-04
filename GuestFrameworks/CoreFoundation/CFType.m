@@ -57,6 +57,46 @@ CFTypeID CFStringGetTypeID(void) {
     return LC32KnownTypeID(LC32CoreFoundationTypeString);
 }
 
+CFTypeID CFAttributedStringGetTypeID(void) {
+    return LC32KnownTypeID(LC32CoreFoundationTypeAttributedString);
+}
+
+CFTypeID CFBitVectorGetTypeID(void) {
+    return LC32KnownTypeID(LC32CoreFoundationTypeBitVector);
+}
+
+CFTypeID CFBundleGetTypeID(void) {
+    return LC32KnownTypeID(LC32CoreFoundationTypeBundle);
+}
+
+CFTypeID CFNotificationCenterGetTypeID(void) {
+    return LC32KnownTypeID(LC32CoreFoundationTypeNotificationCenter);
+}
+
+CFTypeID CFReadStreamGetTypeID(void) {
+    return LC32KnownTypeID(LC32CoreFoundationTypeReadStream);
+}
+
+CFTypeID CFWriteStreamGetTypeID(void) {
+    return LC32KnownTypeID(LC32CoreFoundationTypeWriteStream);
+}
+
+CFTypeID CFRunLoopGetTypeID(void) {
+    return LC32KnownTypeID(LC32CoreFoundationTypeRunLoop);
+}
+
+CFTypeID CFRunLoopSourceGetTypeID(void) {
+    return LC32KnownTypeID(LC32CoreFoundationTypeRunLoopSource);
+}
+
+CFTypeID CFRunLoopTimerGetTypeID(void) {
+    return LC32KnownTypeID(LC32CoreFoundationTypeRunLoopTimer);
+}
+
+CFTypeID CFSocketGetTypeID(void) {
+    return LC32KnownTypeID(LC32CoreFoundationTypeSocket);
+}
+
 CFHashCode CFHash(CFTypeRef object) {
     return object ? (CFHashCode)[(id)object hash] : 0;
 }

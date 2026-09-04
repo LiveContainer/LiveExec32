@@ -7,6 +7,48 @@ enum {
     LC32CFStreamMaximumTransferLength = 64 * 1024 * 1024,
 };
 
+CFReadStreamRef CFReadStreamCreateWithFile(
+        CFAllocatorRef allocator, CFURLRef fileURL) {
+    (void)allocator;
+    return fileURL ? (CFReadStreamRef)LC32_CF_CALL(
+        LC32CoreFoundationOpReadStreamCreateWithFile,
+        LC32_CF_HOST(fileURL)) : NULL;
+}
+
+CFWriteStreamRef CFWriteStreamCreateWithFile(
+        CFAllocatorRef allocator, CFURLRef fileURL) {
+    (void)allocator;
+    return fileURL ? (CFWriteStreamRef)LC32_CF_CALL(
+        LC32CoreFoundationOpWriteStreamCreateWithFile,
+        LC32_CF_HOST(fileURL)) : NULL;
+}
+
+CFWriteStreamRef CFWriteStreamCreateWithAllocatedBuffers(
+        CFAllocatorRef allocator, CFAllocatorRef bufferAllocator) {
+    (void)allocator;
+    /* Guest custom allocators contain ARM callbacks and cannot be handed to
+     * native CF. The null allocator cannot provide the requested buffers. */
+    if(bufferAllocator == kCFAllocatorNull) return NULL;
+    return (CFWriteStreamRef)LC32_CF_CALL0(
+        LC32CoreFoundationOpWriteStreamCreateWithAllocatedBuffers);
+}
+
+void CFStreamCreateBoundPair(CFAllocatorRef allocator,
+                             CFReadStreamRef *readStream,
+                             CFWriteStreamRef *writeStream,
+                             CFIndex transferBufferSize) {
+    (void)allocator;
+    if(readStream) *readStream = NULL;
+    if(writeStream) *writeStream = NULL;
+    if(transferBufferSize < 0 || transferBufferSize > INT32_MAX ||
+       (!readStream && !writeStream)) return;
+    LC32_CF_CALL(
+        LC32CoreFoundationOpStreamCreateBoundPair,
+        LC32_CF_U32((uintptr_t)readStream),
+        LC32_CF_U32((uintptr_t)writeStream),
+        LC32_CF_U32(transferBufferSize));
+}
+
 Boolean CFReadStreamOpen(CFReadStreamRef stream) {
     return stream && LC32_CF_CALL(
         LC32CoreFoundationOpReadStreamOpen, LC32_CF_HOST(stream));

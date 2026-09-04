@@ -8,6 +8,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -46,6 +47,8 @@ static BOOL LC32OperationTraceIsEnabled;
 static uint64_t LC32OperationTraceSequence;
 static pthread_once_t LC32AutoreleaseSchedulerOnce = PTHREAD_ONCE_INIT;
 static uint64_t LC32AutoreleaseScheduler;
+static pthread_once_t LC32HostFrameworkLoaderOnce = PTHREAD_ONCE_INIT;
+static uint64_t LC32HostFrameworkLoader;
 
 static void LC32InitializeObjCTrace(void) {
     const char *value = getenv("LC32_OBJC_TRACE");
@@ -62,6 +65,56 @@ static void LC32InitializeOperationTrace(void) {
 static void LC32InitializeAutoreleaseScheduler(void) {
     LC32AutoreleaseScheduler =
         LC32Dlsym("LC32ScheduleGuestAutorelease", YES);
+}
+
+static void LC32ResolveHostFrameworkLoader(void) {
+    LC32HostFrameworkLoader = LC32Dlsym(
+        "LC32LoadNativeFramework", YES);
+}
+
+BOOL LC32LoadHostFramework(const char *frameworkName) {
+    if(!frameworkName || !frameworkName[0]) {
+        fprintf(stderr, "LC32: invalid empty native framework name\n");
+        return NO;
+    }
+
+    pthread_once(&LC32HostFrameworkLoaderOnce,
+        LC32ResolveHostFrameworkLoader);
+    if(!LC32HostFrameworkLoader) {
+        fprintf(stderr,
+            "LC32: native framework loader is unavailable for %s\n",
+            frameworkName);
+        return NO;
+    }
+    return LC32InvokeHostCRet32(
+        LC32HostFrameworkLoader, frameworkName) != 0;
+}
+
+BOOL LC32BindHostObjectConstant(id guestConstant, const char *symbolName) {
+    if(!guestConstant || !symbolName || !symbolName[0]) return NO;
+    const uint64_t hostConstant = LC32Dlsym(symbolName, NO);
+    if(!hostConstant) {
+        const size_t symbolLength = strlen(symbolName);
+        if(symbolLength > UINT32_MAX) {
+            fprintf(stderr,
+                "LC32: native object constant name is too long: %s\n",
+                symbolName);
+            return NO;
+        }
+
+        LC32ConstantStringProxy *proxy =
+            (LC32ConstantStringProxy *)(void *)guestConstant;
+        proxy->flags = 0x7c8;
+        proxy->bytes = symbolName;
+        proxy->length = (uint32_t)symbolLength;
+        fprintf(stderr,
+            "LC32: native object constant is unavailable; using its "
+            "symbol name as a string fallback: %s\n",
+            symbolName);
+        return NO;
+    }
+    [guestConstant bindHostSelf:hostConstant];
+    return YES;
 }
 
 BOOL LC32ObjCTraceEnabled(void) {

@@ -43,6 +43,7 @@ u32 LC32CopyHostCString(u64 host_cstring, u32 guest_output, size_t capacity);
 u32 LC32CopyHostStringUTF8(u64 host_object, u32 guest_output, size_t capacity);
 u32 LC32CopyHostStringBytes(u64 host_object, u32 encoding,
                             u32 guest_output, u32 capacity);
+u32 LC32LoadNativeFramework(u32 guest_framework_name);
 u64 LC32HostStringRangeOfString(
     const LC32FoundationStringRangeRequest *request);
 u32 LC32CopyHostDataBytes(u64 host_object, u32 guest_output, u32 length,

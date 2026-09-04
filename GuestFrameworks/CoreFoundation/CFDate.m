@@ -45,6 +45,24 @@ CFComparisonResult CFDateCompare(CFDateRef date, CFDateRef otherDate,
         LC32_CF_HOST(date), LC32_CF_HOST(otherDate));
 }
 
+SInt32 CFAbsoluteTimeGetDayOfWeek(CFAbsoluteTime at, CFTimeZoneRef tz) {
+    return (SInt32)LC32_CF_CALL(
+        LC32CoreFoundationOpAbsoluteTimeGetDayOfWeek,
+        LC32CFDoubleBits(at), LC32_CF_HOST(tz));
+}
+
+SInt32 CFAbsoluteTimeGetDayOfYear(CFAbsoluteTime at, CFTimeZoneRef tz) {
+    return (SInt32)LC32_CF_CALL(
+        LC32CoreFoundationOpAbsoluteTimeGetDayOfYear,
+        LC32CFDoubleBits(at), LC32_CF_HOST(tz));
+}
+
+SInt32 CFAbsoluteTimeGetWeekOfYear(CFAbsoluteTime at, CFTimeZoneRef tz) {
+    return (SInt32)LC32_CF_CALL(
+        LC32CoreFoundationOpAbsoluteTimeGetWeekOfYear,
+        LC32CFDoubleBits(at), LC32_CF_HOST(tz));
+}
+
 CFDateFormatterRef CFDateFormatterCreate(CFAllocatorRef allocator,
         CFLocaleRef locale, CFDateFormatterStyle dateStyle,
         CFDateFormatterStyle timeStyle) {
@@ -53,6 +71,14 @@ CFDateFormatterRef CFDateFormatterCreate(CFAllocatorRef allocator,
         LC32CoreFoundationOpDateFormatterCreate,
         LC32_CF_HOST(locale), LC32_CF_U32(dateStyle),
         LC32_CF_U32(timeStyle));
+}
+
+CFDateFormatterRef CFDateFormatterCreateISO8601Formatter(
+        CFAllocatorRef allocator, CFISO8601DateFormatOptions formatOptions) {
+    (void)allocator;
+    return (CFDateFormatterRef)LC32_CF_CALL(
+        LC32CoreFoundationOpDateFormatterCreateISO8601Formatter,
+        LC32_CF_U32(formatOptions));
 }
 
 CFTypeID CFDateFormatterGetTypeID(void) {
@@ -144,3 +170,182 @@ CFStringRef CFDateFormatterCreateDateFormatFromTemplate(
         dateFormatFromTemplate:(NSString *)templateString
         options:(NSUInteger)options locale:(NSLocale *)locale] copy];
 }
+
+#define LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(KEY, GETTER, SETTER) \
+    if(CFEqual(propertyName, KEY)) { \
+        [nativeFormatter SETTER:(id)value]; \
+        return; \
+    }
+
+void CFDateFormatterSetProperty(CFDateFormatterRef formatter,
+                                CFDateFormatterKey propertyName,
+                                CFTypeRef value) {
+    if(!formatter || !propertyName || !value) return;
+    NSDateFormatter *nativeFormatter = (NSDateFormatter *)formatter;
+
+    if(CFEqual(propertyName, kCFDateFormatterIsLenient)) {
+        nativeFormatter.lenient = [(NSNumber *)value boolValue];
+        return;
+    }
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterTimeZone, timeZone, setTimeZone)
+    if(CFEqual(propertyName, kCFDateFormatterCalendarName)) {
+        NSCalendar *calendar = [[NSCalendar alloc]
+            initWithCalendarIdentifier:(NSString *)value];
+        if(calendar) nativeFormatter.calendar = calendar;
+        [calendar release];
+        return;
+    }
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterDefaultFormat, dateFormat, setDateFormat)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterTwoDigitStartDate, twoDigitStartDate,
+        setTwoDigitStartDate)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterDefaultDate, defaultDate, setDefaultDate)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterCalendar, calendar, setCalendar)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterEraSymbols, eraSymbols, setEraSymbols)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterMonthSymbols, monthSymbols, setMonthSymbols)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterShortMonthSymbols, shortMonthSymbols,
+        setShortMonthSymbols)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterWeekdaySymbols, weekdaySymbols, setWeekdaySymbols)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterShortWeekdaySymbols, shortWeekdaySymbols,
+        setShortWeekdaySymbols)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterAMSymbol, AMSymbol, setAMSymbol)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterPMSymbol, PMSymbol, setPMSymbol)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterLongEraSymbols, longEraSymbols, setLongEraSymbols)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterVeryShortMonthSymbols, veryShortMonthSymbols,
+        setVeryShortMonthSymbols)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterStandaloneMonthSymbols, standaloneMonthSymbols,
+        setStandaloneMonthSymbols)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterShortStandaloneMonthSymbols,
+        shortStandaloneMonthSymbols, setShortStandaloneMonthSymbols)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterVeryShortStandaloneMonthSymbols,
+        veryShortStandaloneMonthSymbols, setVeryShortStandaloneMonthSymbols)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterVeryShortWeekdaySymbols, veryShortWeekdaySymbols,
+        setVeryShortWeekdaySymbols)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterStandaloneWeekdaySymbols, standaloneWeekdaySymbols,
+        setStandaloneWeekdaySymbols)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterShortStandaloneWeekdaySymbols,
+        shortStandaloneWeekdaySymbols, setShortStandaloneWeekdaySymbols)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterVeryShortStandaloneWeekdaySymbols,
+        veryShortStandaloneWeekdaySymbols,
+        setVeryShortStandaloneWeekdaySymbols)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterQuarterSymbols, quarterSymbols, setQuarterSymbols)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterShortQuarterSymbols, shortQuarterSymbols,
+        setShortQuarterSymbols)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterStandaloneQuarterSymbols, standaloneQuarterSymbols,
+        setStandaloneQuarterSymbols)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterShortStandaloneQuarterSymbols,
+        shortStandaloneQuarterSymbols, setShortStandaloneQuarterSymbols)
+    LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY(
+        kCFDateFormatterGregorianStartDate, gregorianStartDate,
+        setGregorianStartDate)
+    if(CFEqual(propertyName,
+               kCFDateFormatterDoesRelativeDateFormattingKey)) {
+        nativeFormatter.doesRelativeDateFormatting =
+            [(NSNumber *)value boolValue];
+    }
+}
+
+#undef LC32_CF_DATE_FORMATTER_OBJECT_PROPERTY
+
+#define LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(KEY, GETTER) \
+    if(CFEqual(propertyName, KEY)) \
+        return (CFTypeRef)[[nativeFormatter GETTER] copy];
+
+CFTypeRef CFDateFormatterCopyProperty(CFDateFormatterRef formatter,
+                                      CFDateFormatterKey propertyName) {
+    if(!formatter || !propertyName) return NULL;
+    NSDateFormatter *nativeFormatter = (NSDateFormatter *)formatter;
+
+    if(CFEqual(propertyName, kCFDateFormatterIsLenient))
+        return (CFTypeRef)[@(nativeFormatter.isLenient) retain];
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterTimeZone, timeZone)
+    if(CFEqual(propertyName, kCFDateFormatterCalendarName))
+        return (CFTypeRef)[nativeFormatter.calendar.calendarIdentifier copy];
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterDefaultFormat, dateFormat)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterTwoDigitStartDate, twoDigitStartDate)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterDefaultDate, defaultDate)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterCalendar, calendar)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterEraSymbols, eraSymbols)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterMonthSymbols, monthSymbols)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterShortMonthSymbols, shortMonthSymbols)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterWeekdaySymbols, weekdaySymbols)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterShortWeekdaySymbols, shortWeekdaySymbols)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterAMSymbol, AMSymbol)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterPMSymbol, PMSymbol)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterLongEraSymbols, longEraSymbols)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterVeryShortMonthSymbols, veryShortMonthSymbols)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterStandaloneMonthSymbols, standaloneMonthSymbols)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterShortStandaloneMonthSymbols,
+        shortStandaloneMonthSymbols)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterVeryShortStandaloneMonthSymbols,
+        veryShortStandaloneMonthSymbols)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterVeryShortWeekdaySymbols, veryShortWeekdaySymbols)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterStandaloneWeekdaySymbols, standaloneWeekdaySymbols)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterShortStandaloneWeekdaySymbols,
+        shortStandaloneWeekdaySymbols)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterVeryShortStandaloneWeekdaySymbols,
+        veryShortStandaloneWeekdaySymbols)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterQuarterSymbols, quarterSymbols)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterShortQuarterSymbols, shortQuarterSymbols)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterStandaloneQuarterSymbols, standaloneQuarterSymbols)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterShortStandaloneQuarterSymbols,
+        shortStandaloneQuarterSymbols)
+    LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY(
+        kCFDateFormatterGregorianStartDate, gregorianStartDate)
+    if(CFEqual(propertyName,
+               kCFDateFormatterDoesRelativeDateFormattingKey))
+        return (CFTypeRef)[@(nativeFormatter.doesRelativeDateFormatting)
+            retain];
+    return NULL;
+}
+
+#undef LC32_CF_DATE_FORMATTER_COPY_OBJECT_PROPERTY

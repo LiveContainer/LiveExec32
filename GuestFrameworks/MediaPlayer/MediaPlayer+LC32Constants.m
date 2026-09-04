@@ -35,3 +35,10 @@ NSString * const MPMoviePlayerWillEnterFullscreenNotification =
     @"MPMoviePlayerWillEnterFullscreenNotification";
 NSString * const MPMoviePlayerWillExitFullscreenNotification =
     @"MPMoviePlayerWillExitFullscreenNotification";
+
+/* These deprecated process-wide volume-HUD helpers have no guest-owned
+ * state to bridge.  Keep old callers linkable without forcing MediaPlayer
+ * into the native host at startup. */
+void MPVolumeSettingsAlertShow(void) {}
+void MPVolumeSettingsAlertHide(void) {}
+BOOL MPVolumeSettingsAlertIsVisible(void) { return NO; }

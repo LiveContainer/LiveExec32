@@ -52,6 +52,44 @@ CFArrayRef CFRunLoopCopyAllModes(CFRunLoopRef runLoop) {
         LC32_CF_HOST(runLoop));
 }
 
+CFRunLoopMode CFRunLoopCopyCurrentMode(CFRunLoopRef runLoop) {
+    return runLoop ? (CFRunLoopMode)LC32_CF_CALL(
+        LC32CoreFoundationOpRunLoopCopyCurrentMode,
+        LC32_CF_HOST(runLoop)) : NULL;
+}
+
+Boolean CFRunLoopContainsSource(CFRunLoopRef runLoop,
+                                CFRunLoopSourceRef source,
+                                CFRunLoopMode mode) {
+    return runLoop && source && mode && LC32_CF_CALL(
+        LC32CoreFoundationOpRunLoopContainsSource,
+        LC32_CF_HOST(runLoop), LC32_CF_HOST(source), LC32_CF_HOST(mode));
+}
+
+Boolean CFRunLoopContainsTimer(CFRunLoopRef runLoop,
+                               CFRunLoopTimerRef timer,
+                               CFRunLoopMode mode) {
+    return runLoop && timer && mode && LC32_CF_CALL(
+        LC32CoreFoundationOpRunLoopContainsTimer,
+        LC32_CF_HOST(runLoop), LC32_CF_HOST(timer), LC32_CF_HOST(mode));
+}
+
+CFAbsoluteTime CFRunLoopGetNextTimerFireDate(
+        CFRunLoopRef runLoop, CFRunLoopMode mode) {
+    CFAbsoluteTime result = 0.0;
+    if(!runLoop || !mode || !LC32_CF_CALL(
+            LC32CoreFoundationOpRunLoopGetNextTimerFireDate,
+            LC32_CF_HOST(runLoop), LC32_CF_HOST(mode),
+            LC32_CF_U32((uintptr_t)&result))) return 0.0;
+    return result;
+}
+
+Boolean CFRunLoopIsWaiting(CFRunLoopRef runLoop) {
+    return runLoop && LC32_CF_CALL(
+        LC32CoreFoundationOpRunLoopIsWaiting,
+        LC32_CF_HOST(runLoop));
+}
+
 void CFRunLoopRemoveSource(CFRunLoopRef runLoop, CFRunLoopSourceRef source,
                            CFRunLoopMode mode) {
     if(!runLoop || !source || !mode) return;
@@ -121,6 +159,18 @@ void CFRunLoopSourceSignal(CFRunLoopSourceRef source) {
         LC32_CF_HOST(source));
 }
 
+CFIndex CFRunLoopSourceGetOrder(CFRunLoopSourceRef source) {
+    return source ? (CFIndex)(int32_t)LC32_CF_CALL(
+        LC32CoreFoundationOpRunLoopSourceGetOrder,
+        LC32_CF_HOST(source)) : 0;
+}
+
+Boolean CFRunLoopSourceIsValid(CFRunLoopSourceRef source) {
+    return source && LC32_CF_CALL(
+        LC32CoreFoundationOpRunLoopSourceIsValid,
+        LC32_CF_HOST(source));
+}
+
 void CFRunLoopStop(CFRunLoopRef runLoop) {
     if(!runLoop) return;
     LC32_CF_CALL(LC32CoreFoundationOpRunLoopStop,
@@ -169,6 +219,57 @@ void CFRunLoopTimerSetNextFireDate(CFRunLoopTimerRef timer,
     if(!timer) return;
     LC32_CF_CALL(LC32CoreFoundationOpRunLoopTimerSetNextFireDate,
         LC32_CF_HOST(timer), LC32CFRunLoopDoubleBits(fireDate));
+}
+
+static CFTimeInterval LC32CFRunLoopTimerGetTimeValue(
+        CFRunLoopTimerRef timer, LC32CoreFoundationOpcode opcode) {
+    CFTimeInterval result = 0.0;
+    if(!timer || !LC32CoreFoundationDispatch(opcode,
+            (const uint64_t[]){
+                LC32_CF_HOST(timer),
+                LC32_CF_U32((uintptr_t)&result),
+            }, 2)) return 0.0;
+    return result;
+}
+
+CFAbsoluteTime CFRunLoopTimerGetNextFireDate(CFRunLoopTimerRef timer) {
+    return LC32CFRunLoopTimerGetTimeValue(
+        timer, LC32CoreFoundationOpRunLoopTimerGetNextFireDate);
+}
+
+CFTimeInterval CFRunLoopTimerGetInterval(CFRunLoopTimerRef timer) {
+    return LC32CFRunLoopTimerGetTimeValue(
+        timer, LC32CoreFoundationOpRunLoopTimerGetInterval);
+}
+
+Boolean CFRunLoopTimerDoesRepeat(CFRunLoopTimerRef timer) {
+    return timer && LC32_CF_CALL(
+        LC32CoreFoundationOpRunLoopTimerDoesRepeat,
+        LC32_CF_HOST(timer));
+}
+
+CFIndex CFRunLoopTimerGetOrder(CFRunLoopTimerRef timer) {
+    return timer ? (CFIndex)(int32_t)LC32_CF_CALL(
+        LC32CoreFoundationOpRunLoopTimerGetOrder,
+        LC32_CF_HOST(timer)) : 0;
+}
+
+Boolean CFRunLoopTimerIsValid(CFRunLoopTimerRef timer) {
+    return timer && LC32_CF_CALL(
+        LC32CoreFoundationOpRunLoopTimerIsValid,
+        LC32_CF_HOST(timer));
+}
+
+CFTimeInterval CFRunLoopTimerGetTolerance(CFRunLoopTimerRef timer) {
+    return LC32CFRunLoopTimerGetTimeValue(
+        timer, LC32CoreFoundationOpRunLoopTimerGetTolerance);
+}
+
+void CFRunLoopTimerSetTolerance(CFRunLoopTimerRef timer,
+                                CFTimeInterval tolerance) {
+    if(!timer) return;
+    LC32_CF_CALL(LC32CoreFoundationOpRunLoopTimerSetTolerance,
+        LC32_CF_HOST(timer), LC32CFRunLoopDoubleBits(tolerance));
 }
 
 void CFRunLoopWakeUp(CFRunLoopRef runLoop) {

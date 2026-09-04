@@ -35,6 +35,18 @@ int main(void) {
             kABPersonCompositeNameFormatFirstNameFirst &&
         ABPersonGetSortOrdering() == kABPersonSortByFirstName);
 
+    int32_t personKind = -1;
+    int32_t organizationKind = -1;
+    check("addressbook-kind-constants",
+        CFNumberGetValue(kABPersonKindPerson, kCFNumberSInt32Type,
+            &personKind) && personKind == 0 &&
+        CFNumberGetValue(kABPersonKindOrganization,
+            kCFNumberSInt32Type, &organizationKind) &&
+        organizationKind == 1);
+    check("addressbook-authorization",
+        ABAddressBookGetAuthorizationStatus() ==
+            kABAuthorizationStatusAuthorized);
+
     check("addressbook-set-first-name", ABRecordSetValue(first,
         kABPersonFirstNameProperty, CFSTR("Ada"), NULL));
     check("addressbook-set-middle-name", ABRecordSetValue(first,
@@ -65,7 +77,76 @@ int main(void) {
         people && CFArrayGetCount(people) == 1 &&
         CFArrayGetValueAtIndex(people, 0) == first);
 
+    check("addressbook-find-record",
+        ABAddressBookGetPersonCount(addressBook) == 1 &&
+        ABAddressBookGetPersonWithRecordID(addressBook, firstID) == first);
+    CFArrayRef matches = ABAddressBookCopyPeopleWithName(
+        addressBook, CFSTR("lovelace"));
+    check("addressbook-name-search",
+        matches && CFArrayGetCount(matches) == 1 &&
+        CFArrayGetValueAtIndex(matches, 0) == first);
+    if(matches) CFRelease(matches);
+
+    ABRecordRef source = ABAddressBookCopyDefaultSource(addressBook);
+    ABRecordRef personSource = ABPersonCopySource(first);
+    check("addressbook-default-source", source && personSource &&
+        ABRecordGetRecordType(source) == kABSourceType &&
+        CFEqual(source, personSource));
+    if(personSource) CFRelease(personSource);
+
+    ABRecordRef group = ABGroupCreateInSource(source);
+    check("addressbook-group-create", group &&
+        ABRecordGetRecordType(group) == kABGroupType &&
+        ABAddressBookAddRecord(addressBook, group, NULL));
+    check("addressbook-group-member",
+        ABGroupAddMember(group, first, NULL));
+    CFArrayRef members = ABGroupCopyArrayOfAllMembers(group);
+    check("addressbook-copy-group-members",
+        members && CFArrayGetCount(members) == 1 &&
+        CFArrayGetValueAtIndex(members, 0) == first &&
+        ABAddressBookGetGroupCount(addressBook) == 1);
+    if(members) CFRelease(members);
+
+    ABMutableMultiValueRef multiValue = ABMultiValueCreateMutable(
+        kABMultiStringPropertyType);
+    ABMultiValueIdentifier firstValueID = kABMultiValueInvalidIdentifier;
+    ABMultiValueIdentifier insertedValueID = kABMultiValueInvalidIdentifier;
+    check("addressbook-multivalue-add", ABMultiValueAddValueAndLabel(
+        multiValue, CFSTR("one"), kABHomeLabel, &firstValueID));
+    check("addressbook-multivalue-insert",
+        ABMultiValueInsertValueAndLabelAtIndex(multiValue,
+            CFSTR("zero"), kABWorkLabel, 0, &insertedValueID) &&
+        firstValueID != insertedValueID &&
+        ABMultiValueGetIndexForIdentifier(multiValue, firstValueID) == 1 &&
+        ABMultiValueGetIdentifierAtIndex(multiValue, 0) == insertedValueID);
+    check("addressbook-multivalue-find",
+        ABMultiValueGetFirstIndexOfValue(multiValue, CFSTR("one")) == 1);
+    check("addressbook-multivalue-replace-remove",
+        ABMultiValueReplaceValueAtIndex(multiValue, CFSTR("updated"), 1) &&
+        ABMultiValueRemoveValueAndLabelAtIndex(multiValue, 0) &&
+        ABMultiValueGetCount(multiValue) == 1);
+    if(multiValue) CFRelease(multiValue);
+
+    const UInt8 imageBytes[] = { 1, 2, 3, 4 };
+    CFDataRef image = CFDataCreate(
+        kCFAllocatorDefault, imageBytes, sizeof(imageBytes));
+    check("addressbook-image", ABPersonSetImageData(first, image, NULL) &&
+        ABPersonHasImageData(first));
+    CFDataRef copiedImage = ABPersonCopyImageData(first);
+    check("addressbook-copy-image", copiedImage &&
+        CFDataGetLength(copiedImage) == sizeof(imageBytes));
+    if(copiedImage) CFRelease(copiedImage);
+    check("addressbook-remove-image",
+        ABPersonRemoveImageData(first, NULL) && !ABPersonHasImageData(first));
+    if(image) CFRelease(image);
+
+    check("addressbook-remove-record",
+        ABAddressBookRemoveRecord(addressBook, first, NULL) &&
+        ABAddressBookGetPersonCount(addressBook) == 0);
+
     if(people) CFRelease(people);
+    if(group) CFRelease(group);
+    if(source) CFRelease(source);
     if(second) CFRelease(second);
     if(first) CFRelease(first);
     if(addressBook) CFRelease(addressBook);

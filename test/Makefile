@@ -1,19 +1,28 @@
-LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash
+LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash \
+  check-coremedia-time-values-host
 LC32_HOST_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),\
   $(if $(strip $(filter-out $(LC32_HOST_TEST_GOALS),$(MAKECMDGOALS))),,1),)
 
 HOST_CXX ?= xcrun --sdk macosx clang++
+HOST_CC ?= xcrun --sdk macosx clang
 HOST_CXXFLAGS ?= -std=c++17 -Wall -Wextra -Werror -pedantic
+HOST_CFLAGS ?= -Wall -Wextra -Werror -pedantic
 HOST_TEST_OUTPUT_DIR ?= $(CURDIR)/.theos/host-tests
 GUEST_BOOTSTRAP_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/guest-bootstrap-host
 MEMORY_HASH_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/memory-hash-host
+COREMEDIA_TIME_VALUES_HOST_TEST := \
+  $(HOST_TEST_OUTPUT_DIR)/coremedia-time-values-host
 
-.PHONY: check-guest-bootstrap check-memory-hash
+.PHONY: check-guest-bootstrap check-memory-hash \
+  check-coremedia-time-values-host
 check-guest-bootstrap: $(GUEST_BOOTSTRAP_HOST_TEST)
 	"$(GUEST_BOOTSTRAP_HOST_TEST)"
 
 check-memory-hash: $(MEMORY_HASH_HOST_TEST)
 	"$(MEMORY_HASH_HOST_TEST)"
+
+check-coremedia-time-values-host: $(COREMEDIA_TIME_VALUES_HOST_TEST)
+	"$(COREMEDIA_TIME_VALUES_HOST_TEST)"
 
 $(GUEST_BOOTSTRAP_HOST_TEST): guest_bootstrap_host.cpp \
   ../HostFrameworks/LC32/guest_bootstrap.cpp \
@@ -31,6 +40,11 @@ $(MEMORY_HASH_HOST_TEST): guest_memory_hash_host.cpp \
 	$(HOST_CXX) $(HOST_CXXFLAGS) \
 		-I"$(abspath ../HostFrameworks/LC32)" \
 		guest_memory_hash_host.cpp -o "$@"
+
+$(COREMEDIA_TIME_VALUES_HOST_TEST): coremedia_time_values.c
+	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
+	$(HOST_CC) $(HOST_CFLAGS) coremedia_time_values.c \
+		-framework CoreMedia -framework CoreFoundation -o "$@"
 
 # Keep this host-native regression test usable on a clean checkout without
 # requiring Theos or bootstrapping the iOS 10.3 guest SDK. Mixed/default goals
@@ -119,11 +133,13 @@ $(eval $(call lc32_guest_test,lc32-arc-proxy-lifetime,arc_proxy_lifetime.m arc_p
 $(eval $(call lc32_guest_test,lc32-block-bridge,block_bridge.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-cfdictionary-callbacks,cfdictionary_callbacks.m,Foundation CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-cfset-callbacks,cfset_callbacks.m,Foundation CoreFoundation LC32))
+$(eval $(call lc32_guest_test,lc32-cfnetwork-http,cfnetwork_http.m,CFNetwork CoreFoundation Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-collection-object-buffers,collection_object_buffers.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-collection-variadic,collection_variadic.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-attributed-string,corefoundation_attributed_string.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-bundle-url,corefoundation_bundle_url.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-common-wrappers,corefoundation_common_wrappers.m,Foundation CoreFoundation))
+$(eval $(call lc32_guest_test,lc32-corefoundation-low-risk,corefoundation_low_risk.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-read-stream,corefoundation_read_stream.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-run-loop,corefoundation_run_loop.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-run-loop-source,corefoundation_run_loop_source.m,Foundation CoreFoundation))
@@ -137,12 +153,16 @@ $(eval $(call lc32_guest_test,lc32-corefoundation-url-propertylist,corefoundatio
 $(eval $(call lc32_guest_test,lc32-corefoundation-url-common,corefoundation_url_common.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-uuid,corefoundation_uuid.c,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-write-stream,corefoundation_write_stream.m,Foundation CoreFoundation))
+$(eval $(call lc32_guest_test,lc32-coremedia-time-values,coremedia_time_values.c,CoreMedia CoreFoundation Foundation))
 $(eval $(call lc32_guest_test,lc32-cxx-lifecycle,cxx_lifecycle.mm,Foundation UIKit LC32))
 $(eval $(call lc32_guest_test,lc32-data-bytes,data_bytes.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-fast-enumeration,fast_enumeration.m,Foundation))
+$(eval $(call lc32_guest_test,lc32-gamecontroller-snapshot,gamecontroller_snapshot.m,GameController Foundation CoreFoundation))
 $(eval $(call lc32_test,lc32-foundation-null-utf8,foundation_null_utf8.m,Foundation))
+$(eval $(call lc32_guest_test,lc32-foundation-zone,foundation_zone.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-guest-proxy-lifetime,guest_proxy_lifetime.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-kvo-bridge,kvo_bridge.m,Foundation))
+$(eval $(call lc32_guest_test,lc32-mobilecoreservices-uti,mobilecoreservices_uti.m,MobileCoreServices CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-nsrange-bridge,nsrange_bridge.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-nsvalue-bytes,nsvalue_bytes.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-nullable-guest-cstring,nullable_guest_cstring.c,LC32))
@@ -283,14 +303,29 @@ after-$(THEOS_CURRENT_INSTANCE)-all::
 	./security_symbols.sh \
 		"$(GUEST_FRAMEWORK_DIR)/Security.framework/Security"
 endif
+ifeq ($(THEOS_CURRENT_INSTANCE),lc32-coremedia-time-values)
+after-$(THEOS_CURRENT_INSTANCE)-all::
+	LC32_GUEST_SDK="$(ISYSROOT)" ./coremedia_time_value_symbols.sh \
+		"$(GUEST_FRAMEWORK_DIR)/CoreMedia.framework/CoreMedia"
+endif
 else
 
 SHORT_TESTS := $(patsubst lc32-%,%,$(TOOL_NAME))
 .PHONY: build list frameworks clean-outputs \
   abi audio corefoundation graphics threading uikit \
   check-symbols check-openal check-opengles check-security check-coretext \
-  check-graphics-symbols \
-  check-messenger $(SHORT_TESTS)
+  check-graphics-symbols check-public-constants \
+  check-generated-framework-symbols check-generated-gameplay-symbols \
+  check-generated-ui-framework-symbols \
+  check-generated-public-symbols check-generated-legacy-public-symbols \
+  check-generated-nonui-public-symbols \
+  check-generated-ui-extension-symbols \
+  check-generated-ui-media-public-symbols \
+  check-foundation-public-symbols \
+  check-foundation-runtime-symbols \
+  check-corefoundation-low-risk-symbols corefoundation-low-risk-framework \
+  foundation-runtime-framework coremedia-time-values-framework \
+  check-coremedia-time-values check-messenger $(SHORT_TESTS)
 
 # Theos' per-instance convenience targets bypass the top-level `all` target,
 # which normally creates the Clang module validation stamp first.
@@ -309,12 +344,33 @@ $(foreach tool,$(TOOL_NAME),$(eval $(patsubst lc32-%,%,$(tool)): $(tool)))
 list:
 	@$(foreach tool,$(TOOL_NAME),printf '%s\n' '$(tool)';)
 
+# Do not let command-line Theos output overrides re-enter the recursive make
+# through MAKEFLAGS after env has removed their ordinary environment values.
+# Target-specific MAKEOVERRIDES preserves flags and the GNU make jobserver.
+frameworks: MAKEOVERRIDES =
 frameworks:
-	$(MAKE) -C ../GuestMakefile
+	env -u THEOS_OBJ_DIR -u THEOS_BUILD_DIR -u DEBUG -u FINALPACKAGE \
+		$(MAKE) -C ../GuestMakefile \
+		THEOS_PROJECT_DIR="$(abspath ../GuestMakefile)" THEOS_SCHEMA=DEFAULT \
+		_THEOS_CLEANED_SCHEMA_SET=
+
+# Symbol checks consume framework products directly.  Route their focused
+# link tests through the one normalized full framework build above instead of
+# starting overlapping recursive builds for several framework goals.
+SYMBOL_TESTS := lc32-openal-smoke lc32-opengles-smoke \
+  lc32-security-secitem lc32-coretext-font-descriptor \
+  lc32-coregraphics-bitmap lc32-quartzcore-transform \
+  lc32-uikit-accessibility lc32-mobilecoreservices-uti lc32-cfnetwork-http \
+  lc32-foundation-zone lc32-corefoundation-low-risk \
+  lc32-coremedia-time-values lc32-gamecontroller-snapshot
+$(SYMBOL_TESTS): frameworks
 
 check-openal: lc32-openal-smoke
 check-opengles: lc32-opengles-smoke
 check-security: lc32-security-secitem
+coremedia-time-values-framework: frameworks
+lc32-coremedia-time-values: coremedia-time-values-framework
+check-coremedia-time-values: lc32-coremedia-time-values
 check-coretext: lc32-coretext-font-descriptor
 	./coretext_font_descriptor_symbols.sh \
 		"$(GUEST_FRAMEWORK_DIR)/CoreText.framework/CoreText"
@@ -322,8 +378,58 @@ check-graphics-symbols: lc32-coregraphics-bitmap lc32-quartzcore-transform \
   lc32-uikit-accessibility
 	GUEST_FRAMEWORK_DIR="$(GUEST_FRAMEWORK_DIR)" \
 		./graphics_compat_symbols.sh
-check-symbols: check-openal check-opengles check-security check-coretext \
-  check-graphics-symbols
+check-public-constants: lc32-mobilecoreservices-uti lc32-cfnetwork-http
+	GUEST_FRAMEWORK_DIR="$(GUEST_FRAMEWORK_DIR)" SDKROOT="$(ISYSROOT)" \
+		./public_guest_constants.sh
+check-generated-framework-symbols: frameworks
+	GUEST_FRAMEWORK_DIR="$(GUEST_FRAMEWORK_DIR)" SDKROOT="$(ISYSROOT)" \
+		./generated_framework_symbols.sh
+check-generated-gameplay-symbols: frameworks
+	GUEST_FRAMEWORK_DIR="$(GUEST_FRAMEWORK_DIR)" SDKROOT="$(ISYSROOT)" \
+		./generated_gameplay_symbols.sh
+check-generated-ui-framework-symbols: frameworks lc32-gamecontroller-snapshot
+	GUEST_FRAMEWORK_DIR="$(GUEST_FRAMEWORK_DIR)" \
+		./generated_ui_framework_symbols.sh
+check-generated-public-symbols: frameworks
+	LC32_GUEST_SDK="$(ISYSROOT)" \
+		./generated_public_symbols.sh "$(GUEST_FRAMEWORK_DIR)"
+check-generated-legacy-public-symbols: frameworks
+	LC32_GUEST_SDK="$(ISYSROOT)" \
+		./generated_legacy_public_symbols.sh "$(GUEST_FRAMEWORK_DIR)"
+check-generated-nonui-public-symbols: frameworks
+	LC32_GUEST_SDK="$(ISYSROOT)" \
+		./generated_nonui_public_symbols.sh "$(GUEST_FRAMEWORK_DIR)"
+check-generated-ui-extension-symbols: frameworks
+	GUEST_FRAMEWORK_DIR="$(GUEST_FRAMEWORK_DIR)" SDKROOT="$(ISYSROOT)" \
+		./generated_ui_extension_symbols.sh
+check-generated-ui-media-public-symbols: frameworks
+	LC32_GUEST_SDK="$(ISYSROOT)" \
+		./generated_ui_media_public_symbols.sh "$(GUEST_FRAMEWORK_DIR)"
+check-foundation-public-symbols: frameworks
+	LC32_GUEST_SDK="$(ISYSROOT)" ./foundation_public_symbols.sh \
+		"$(GUEST_FRAMEWORK_DIR)/Foundation.framework/Foundation"
+foundation-runtime-framework: frameworks
+lc32-foundation-zone: foundation-runtime-framework
+check-foundation-runtime-symbols: lc32-foundation-zone
+	SDKROOT="$(ISYSROOT)" ./foundation_runtime_symbols.sh \
+		"$(GUEST_FRAMEWORK_DIR)/Foundation.framework/Foundation"
+corefoundation-low-risk-framework: frameworks
+lc32-corefoundation-low-risk: corefoundation-low-risk-framework
+check-corefoundation-low-risk-symbols: lc32-corefoundation-low-risk
+	SDKROOT="$(ISYSROOT)" ./corefoundation_low_risk_symbols.sh \
+		"$(GUEST_FRAMEWORK_DIR)/CoreFoundation.framework/CoreFoundation"
+# Recursive framework builds share GuestMakefile/.theos, so keep this aggregate
+# target serial even when the caller supplied -j.
+.NOTPARALLEL: check-symbols
+check-symbols: frameworks check-openal check-opengles check-security check-coretext \
+	check-graphics-symbols check-public-constants \
+	check-generated-framework-symbols check-generated-gameplay-symbols \
+	check-generated-ui-framework-symbols check-generated-public-symbols \
+	check-generated-legacy-public-symbols check-generated-nonui-public-symbols \
+	check-generated-ui-extension-symbols check-generated-ui-media-public-symbols \
+	check-foundation-public-symbols \
+	check-foundation-runtime-symbols \
+	check-corefoundation-low-risk-symbols check-coremedia-time-values
 
 check-messenger:
 	@test -n "$(MESSENGER)" || { \

@@ -10,6 +10,63 @@ static const SCNetworkReachabilityFlags LC32ReachableFlags =
 
 const CFStringRef kCNNetworkInfoKeyBSSID = CFSTR("BSSID");
 const CFStringRef kCNNetworkInfoKeySSID = CFSTR("SSID");
+const CFStringRef kCNNetworkInfoKeySSIDData = CFSTR("SSIDDATA");
+const CFStringRef kCFErrorDomainSystemConfiguration =
+    CFSTR("com.apple.SystemConfiguration");
+
+CFErrorRef SCCopyLastError(void) {
+    return CFErrorCreate(kCFAllocatorDefault,
+        kCFErrorDomainSystemConfiguration, SCError(), NULL);
+}
+
+int SCError(void) {
+    return kSCStatusOK;
+}
+
+const char *SCErrorString(int status) {
+    switch(status) {
+        case kSCStatusOK: return "Success";
+        case kSCStatusFailed: return "Non-specific failure";
+        case kSCStatusInvalidArgument: return "Invalid argument";
+        case kSCStatusAccessError: return "Permission denied";
+        case kSCStatusNoKey: return "No such key";
+        case kSCStatusKeyExists: return "Key already exists";
+        case kSCStatusLocked: return "Lock already held";
+        case kSCStatusNeedLock: return "Lock required";
+        case kSCStatusNoStoreSession:
+            return "Configuration daemon session not active";
+        case kSCStatusNoStoreServer:
+            return "Configuration daemon not available";
+        case kSCStatusNotifierActive: return "Notifier is active";
+        case kSCStatusNoPrefsSession: return "Preferences session not active";
+        case kSCStatusPrefsBusy: return "Preferences update in progress";
+        case kSCStatusNoConfigFile: return "Configuration file not found";
+        case kSCStatusNoLink: return "No such link";
+        case kSCStatusStale: return "Stale configuration";
+        case kSCStatusMaxLink: return "Maximum link count exceeded";
+        case kSCStatusReachabilityUnknown: return "Reachability unknown";
+        case kSCStatusConnectionNoService:
+            return "Network service not available";
+        case kSCStatusConnectionIgnore:
+            return "Network connection information not available";
+        default: return "Unknown SystemConfiguration status";
+    }
+}
+
+Boolean CNSetSupportedSSIDs(CFArrayRef ssidArray) {
+    (void)ssidArray;
+    return false;
+}
+
+Boolean CNMarkPortalOnline(CFStringRef interfaceName) {
+    (void)interfaceName;
+    return false;
+}
+
+Boolean CNMarkPortalOffline(CFStringRef interfaceName) {
+    (void)interfaceName;
+    return false;
+}
 
 CFArrayRef CNCopySupportedInterfaces(void) {
     return CFArrayCreate(kCFAllocatorDefault, NULL, 0,
@@ -132,12 +189,27 @@ SCNetworkReachabilityRef SCNetworkReachabilityCreateWithAddress(
         [[LC32SCNetworkReachability alloc] init];
 }
 
+SCNetworkReachabilityRef SCNetworkReachabilityCreateWithAddressPair(
+        CFAllocatorRef allocator, const struct sockaddr *localAddress,
+        const struct sockaddr *remoteAddress) {
+    (void)allocator;
+    if(!localAddress && !remoteAddress) return NULL;
+    return (SCNetworkReachabilityRef)
+        [[LC32SCNetworkReachability alloc] init];
+}
+
 SCNetworkReachabilityRef SCNetworkReachabilityCreateWithName(
         CFAllocatorRef allocator, const char *nodeName) {
     (void)allocator;
     if(!nodeName) return NULL;
     return (SCNetworkReachabilityRef)
         [[LC32SCNetworkReachability alloc] init];
+}
+
+CFTypeID SCNetworkReachabilityGetTypeID(void) {
+    // CFTypeID is opaque; callers only require a stable, nonzero identity for
+    // the process-local compatibility object.
+    return (CFTypeID)UINT32_C(0x4c433252);
 }
 
 Boolean SCNetworkReachabilityGetFlags(

@@ -496,6 +496,26 @@ CFTypeID KnownTypeID(uint32_t typeValue) {
             return CFSetGetTypeID();
         case LC32CoreFoundationTypeString:
             return CFStringGetTypeID();
+        case LC32CoreFoundationTypeAttributedString:
+            return CFAttributedStringGetTypeID();
+        case LC32CoreFoundationTypeBitVector:
+            return CFBitVectorGetTypeID();
+        case LC32CoreFoundationTypeBundle:
+            return CFBundleGetTypeID();
+        case LC32CoreFoundationTypeNotificationCenter:
+            return CFNotificationCenterGetTypeID();
+        case LC32CoreFoundationTypeReadStream:
+            return CFReadStreamGetTypeID();
+        case LC32CoreFoundationTypeWriteStream:
+            return CFWriteStreamGetTypeID();
+        case LC32CoreFoundationTypeRunLoop:
+            return CFRunLoopGetTypeID();
+        case LC32CoreFoundationTypeRunLoopSource:
+            return CFRunLoopSourceGetTypeID();
+        case LC32CoreFoundationTypeRunLoopTimer:
+            return CFRunLoopTimerGetTypeID();
+        case LC32CoreFoundationTypeSocket:
+            return CFSocketGetTypeID();
     }
     return 0;
 }
@@ -1484,6 +1504,92 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
                 static_cast<CFStringEncoding>(SlotU32(call, 0)));
             return string ? [(id)string guest_self] : 0;
         }
+        case LC32CoreFoundationOpStringGetSmallestEncoding: {
+            if(!RequireSlots(call, 1)) return kCFStringEncodingInvalidId;
+            CFStringRef string = SlotHostObject<CFStringRef>(call, 0);
+            return string ? CFStringGetSmallestEncoding(string)
+                          : kCFStringEncodingInvalidId;
+        }
+        case LC32CoreFoundationOpStringGetSystemEncoding:
+            return RequireSlots(call, 0)
+                ? CFStringGetSystemEncoding()
+                : kCFStringEncodingInvalidId;
+        case LC32CoreFoundationOpStringIsEncodingAvailable:
+            return RequireSlots(call, 1) && CFStringIsEncodingAvailable(
+                static_cast<CFStringEncoding>(SlotU32(call, 0)));
+        case LC32CoreFoundationOpStringGetNameOfEncoding: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFStringRef name = CFStringGetNameOfEncoding(
+                static_cast<CFStringEncoding>(SlotU32(call, 0)));
+            return name ? [(id)name guest_self] : 0;
+        }
+        case LC32CoreFoundationOpStringConvertEncodingToWindowsCodepage:
+            return RequireSlots(call, 1)
+                ? CFStringConvertEncodingToWindowsCodepage(
+                    static_cast<CFStringEncoding>(SlotU32(call, 0)))
+                : kCFStringEncodingInvalidId;
+        case LC32CoreFoundationOpStringConvertWindowsCodepageToEncoding:
+            return RequireSlots(call, 1)
+                ? CFStringConvertWindowsCodepageToEncoding(SlotU32(call, 0))
+                : kCFStringEncodingInvalidId;
+        case LC32CoreFoundationOpStringPad: {
+            if(!RequireSlots(call, 4)) return 0;
+            CFMutableStringRef string =
+                SlotHostObject<CFMutableStringRef>(call, 0);
+            CFStringRef padding = SlotHostObject<CFStringRef>(call, 1);
+            const u32 length = SlotU32(call, 2);
+            const u32 index = SlotU32(call, 3);
+            if(!string || !padding || length > INT32_MAX ||
+               index > INT32_MAX) return 0;
+            CFStringPad(string, padding, static_cast<CFIndex>(length),
+                        static_cast<CFIndex>(index));
+            return 1;
+        }
+        case LC32CoreFoundationOpStringTrim: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFMutableStringRef string =
+                SlotHostObject<CFMutableStringRef>(call, 0);
+            CFStringRef trim = SlotHostObject<CFStringRef>(call, 1);
+            if(!string || !trim) return 0;
+            CFStringTrim(string, trim);
+            return 1;
+        }
+        case LC32CoreFoundationOpStringGetMostCompatibleMacStringEncoding:
+            return RequireSlots(call, 1)
+                ? CFStringGetMostCompatibleMacStringEncoding(
+                    static_cast<CFStringEncoding>(SlotU32(call, 0)))
+                : kCFStringEncodingInvalidId;
+        case LC32CoreFoundationOpStringIsHyphenationAvailableForLocale: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFLocaleRef locale = SlotHostObject<CFLocaleRef>(call, 0);
+            return locale &&
+                CFStringIsHyphenationAvailableForLocale(locale);
+        }
+        case LC32CoreFoundationOpStringGetHyphenationLocationBeforeIndex: {
+            if(!RequireSlots(call, 7)) return UINT32_MAX;
+            CFStringRef string = SlotHostObject<CFStringRef>(call, 0);
+            CFLocaleRef locale = SlotHostObject<CFLocaleRef>(call, 5);
+            const u32 location = SlotU32(call, 1);
+            const u32 rangeLocation = SlotU32(call, 2);
+            const u32 rangeLength = SlotU32(call, 3);
+            if(!locale || location > INT32_MAX ||
+               !StringRangeIsValid(string, rangeLocation, rangeLength) ||
+               static_cast<CFIndex>(location) > CFStringGetLength(string)) {
+                return UINT32_MAX;
+            }
+            UTF32Char character = 0;
+            const u32 guestCharacter = SlotU32(call, 6);
+            const CFIndex result = CFStringGetHyphenationLocationBeforeIndex(
+                string, location, CFRangeMake(rangeLocation, rangeLength),
+                static_cast<CFOptionFlags>(SlotU32(call, 4)), locale,
+                guestCharacter ? &character : nullptr);
+            if(guestCharacter && !WriteGuestValue(
+                    guestCharacter, character)) return UINT32_MAX;
+            if(result == kCFNotFound) return UINT32_MAX;
+            return result > INT32_MAX
+                ? static_cast<u32>(INT32_MAX)
+                : static_cast<u32>(result);
+        }
         case LC32CoreFoundationOpURLCreateStringByAddingPercentEscapes: {
             if(!RequireSlots(call, 4)) return 0;
             CFStringRef original = SlotHostObject<CFStringRef>(call, 0);
@@ -1640,6 +1746,12 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             return url ? GuestForCreatedObject(
                 CFURLCopyHostName(url)) : 0;
         }
+        case LC32CoreFoundationOpURLCopyNetLocation: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFURLRef url = SlotHostObject<CFURLRef>(call, 0);
+            return url ? GuestForCreatedObject(
+                CFURLCopyNetLocation(url)) : 0;
+        }
         case LC32CoreFoundationOpURLCopyPath: {
             if(!RequireSlots(call, 1)) return 0;
             CFURLRef url = SlotHostObject<CFURLRef>(call, 0);
@@ -1693,6 +1805,12 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             if(!RequireSlots(call, 2)) return 0;
             CFURLRef url = SlotHostObject<CFURLRef>(call, 0);
             return url ? GuestForCreatedObject(CFURLCopyQueryString(
+                url, SlotHostObject<CFStringRef>(call, 1))) : 0;
+        }
+        case LC32CoreFoundationOpURLCopyParameterString: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFURLRef url = SlotHostObject<CFURLRef>(call, 0);
+            return url ? GuestForCreatedObject(CFURLCopyParameterString(
                 url, SlotHostObject<CFStringRef>(call, 1))) : 0;
         }
         case LC32CoreFoundationOpURLCopyFragment: {
@@ -1803,6 +1921,47 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
                 return 0;
             }
             return result != false;
+        }
+        case LC32CoreFoundationOpURLIsFileReferenceURL: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFURLRef url = SlotHostObject<CFURLRef>(call, 0);
+            return url && CFURLIsFileReferenceURL(url);
+        }
+        case LC32CoreFoundationOpURLClearResourcePropertyCacheForKey: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFURLRef url = SlotHostObject<CFURLRef>(call, 0);
+            CFStringRef key = SlotHostObject<CFStringRef>(call, 1);
+            if(!url || !key) return 0;
+            CFURLClearResourcePropertyCacheForKey(url, key);
+            return 1;
+        }
+        case LC32CoreFoundationOpURLClearResourcePropertyCache: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFURLRef url = SlotHostObject<CFURLRef>(call, 0);
+            if(!url) return 0;
+            CFURLClearResourcePropertyCache(url);
+            return 1;
+        }
+        case LC32CoreFoundationOpURLSetTemporaryResourcePropertyForKey: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFURLRef url = SlotHostObject<CFURLRef>(call, 0);
+            CFStringRef key = SlotHostObject<CFStringRef>(call, 1);
+            if(!url || !key) return 0;
+            CFURLSetTemporaryResourcePropertyForKey(
+                url, key, SlotHostObject<CFTypeRef>(call, 2));
+            return 1;
+        }
+        case LC32CoreFoundationOpURLStartAccessingSecurityScopedResource: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFURLRef url = SlotHostObject<CFURLRef>(call, 0);
+            return url && CFURLStartAccessingSecurityScopedResource(url);
+        }
+        case LC32CoreFoundationOpURLStopAccessingSecurityScopedResource: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFURLRef url = SlotHostObject<CFURLRef>(call, 0);
+            if(!url) return 0;
+            CFURLStopAccessingSecurityScopedResource(url);
+            return 1;
         }
         case LC32CoreFoundationOpURLCreateWithFileSystemPath:
         case LC32CoreFoundationOpURLCreateWithFileSystemPathRelativeToBase: {
@@ -2023,6 +2182,124 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
                 SlotHostObject<NSBundle *>(call, 0),
                 SlotHostObject<NSString *>(call, 1));
         }
+        case LC32CoreFoundationOpBundleGetAllBundles: {
+            if(!RequireSlots(call, 0)) return 0;
+            NSArray *bundles = [NSBundle allBundles];
+            return bundles ? bundles.guest_self : 0;
+        }
+        case LC32CoreFoundationOpBundleCreateBundlesFromDirectory: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFURLRef directoryURL = SlotHostObject<CFURLRef>(call, 0);
+            if(!directoryURL) return 0;
+            CFArrayRef coreBundles = CFBundleCreateBundlesFromDirectory(
+                kCFAllocatorDefault, directoryURL,
+                SlotHostObject<CFStringRef>(call, 1));
+            if(!coreBundles) return 0;
+            NSMutableArray *bundles = [[NSMutableArray alloc]
+                initWithCapacity:CFArrayGetCount(coreBundles)];
+            for(CFIndex index = 0; index < CFArrayGetCount(coreBundles);
+                    ++index) {
+                CFBundleRef coreBundle = reinterpret_cast<CFBundleRef>(
+                    const_cast<void *>(
+                        CFArrayGetValueAtIndex(coreBundles, index)));
+                CFURLRef url = CFBundleCopyBundleURL(coreBundle);
+                NSBundle *bundle = url
+                    ? [NSBundle bundleWithURL:(NSURL *)url] : nil;
+                if(bundle) [bundles addObject:bundle];
+                if(url) CFRelease(url);
+            }
+            CFRelease(coreBundles);
+            return LC32GuestObjectForOwnedHostObject(
+                reinterpret_cast<CFTypeRef>(bundles));
+        }
+        case LC32CoreFoundationOpBundleCopyExecutableArchitecturesForURL:
+        case LC32CoreFoundationOpBundleCopyInfoDictionaryForURL:
+        case LC32CoreFoundationOpBundleCopyInfoDictionaryInDirectory:
+        case LC32CoreFoundationOpBundleCopyLocalizationsForURL: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFURLRef url = SlotHostObject<CFURLRef>(call, 0);
+            if(!url) return 0;
+            CFTypeRef result = nullptr;
+            switch(opcodeValue) {
+                case LC32CoreFoundationOpBundleCopyExecutableArchitecturesForURL:
+                    result = CFBundleCopyExecutableArchitecturesForURL(url);
+                    break;
+                case LC32CoreFoundationOpBundleCopyInfoDictionaryForURL:
+                    result = CFBundleCopyInfoDictionaryForURL(url);
+                    break;
+                case LC32CoreFoundationOpBundleCopyInfoDictionaryInDirectory:
+                    result = CFBundleCopyInfoDictionaryInDirectory(url);
+                    break;
+                case LC32CoreFoundationOpBundleCopyLocalizationsForURL:
+                    result = CFBundleCopyLocalizationsForURL(url);
+                    break;
+                default:
+                    break;
+            }
+            return GuestForCreatedObject(result);
+        }
+        case LC32CoreFoundationOpBundleCopyResourceURLInDirectory: {
+            if(!RequireSlots(call, 4)) return 0;
+            CFURLRef bundleURL = SlotHostObject<CFURLRef>(call, 0);
+            CFStringRef resourceName =
+                SlotHostObject<CFStringRef>(call, 1);
+            return bundleURL && resourceName ? GuestForCreatedObject(
+                CFBundleCopyResourceURLInDirectory(bundleURL, resourceName,
+                    SlotHostObject<CFStringRef>(call, 2),
+                    SlotHostObject<CFStringRef>(call, 3))) : 0;
+        }
+        case LC32CoreFoundationOpBundleCopyResourceURLsOfTypeInDirectory: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFURLRef bundleURL = SlotHostObject<CFURLRef>(call, 0);
+            return bundleURL ? GuestForCreatedObject(
+                CFBundleCopyResourceURLsOfTypeInDirectory(bundleURL,
+                    SlotHostObject<CFStringRef>(call, 1),
+                    SlotHostObject<CFStringRef>(call, 2))) : 0;
+        }
+        case LC32CoreFoundationOpBundleGetPackageInfo: {
+            if(!RequireSlots(call, 3)) return 0;
+            NSBundle *bundle = SlotHostObject<NSBundle *>(call, 0);
+            const u32 guestPackageType = SlotU32(call, 1);
+            const u32 guestPackageCreator = SlotU32(call, 2);
+            if(!bundle.bundleURL ||
+               (guestPackageType && !GuestRangeIsValid(
+                    guestPackageType, sizeof(UInt32))) ||
+               (guestPackageCreator && !GuestRangeIsValid(
+                    guestPackageCreator, sizeof(UInt32)))) return 0;
+            CFBundleRef coreBundle = CFBundleCreate(kCFAllocatorDefault,
+                reinterpret_cast<CFURLRef>(bundle.bundleURL));
+            if(!coreBundle) return 0;
+            UInt32 packageType = 0;
+            UInt32 packageCreator = 0;
+            CFBundleGetPackageInfo(coreBundle,
+                guestPackageType ? &packageType : nullptr,
+                guestPackageCreator ? &packageCreator : nullptr);
+            CFRelease(coreBundle);
+            return (!guestPackageType ||
+                    WriteGuestValue(guestPackageType, packageType)) &&
+                (!guestPackageCreator ||
+                    WriteGuestValue(guestPackageCreator, packageCreator));
+        }
+        case LC32CoreFoundationOpBundleGetPackageInfoInDirectory: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFURLRef url = SlotHostObject<CFURLRef>(call, 0);
+            const u32 guestPackageType = SlotU32(call, 1);
+            const u32 guestPackageCreator = SlotU32(call, 2);
+            if(!url ||
+               (guestPackageType && !GuestRangeIsValid(
+                    guestPackageType, sizeof(UInt32))) ||
+               (guestPackageCreator && !GuestRangeIsValid(
+                    guestPackageCreator, sizeof(UInt32)))) return 0;
+            UInt32 packageType = 0;
+            UInt32 packageCreator = 0;
+            if(!CFBundleGetPackageInfoInDirectory(url,
+                    guestPackageType ? &packageType : nullptr,
+                    guestPackageCreator ? &packageCreator : nullptr)) return 0;
+            return (!guestPackageType ||
+                    WriteGuestValue(guestPackageType, packageType)) &&
+                (!guestPackageCreator ||
+                    WriteGuestValue(guestPackageCreator, packageCreator));
+        }
         case LC32CoreFoundationOpRunLoopGetMain: {
             if(!RequireSlots(call, 0)) return 0;
             CFRunLoopRef runLoop = CFRunLoopGetMain();
@@ -2071,6 +2348,49 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
                 SlotHostObject<CFRunLoopRef>(call, 0);
             return runLoop ? GuestForCreatedObject(
                 CFRunLoopCopyAllModes(runLoop)) : 0;
+        }
+        case LC32CoreFoundationOpRunLoopCopyCurrentMode: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFRunLoopRef runLoop =
+                SlotHostObject<CFRunLoopRef>(call, 0);
+            return runLoop ? GuestForCreatedObject(
+                CFRunLoopCopyCurrentMode(runLoop)) : 0;
+        }
+        case LC32CoreFoundationOpRunLoopContainsSource:
+        case LC32CoreFoundationOpRunLoopContainsTimer: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFRunLoopRef runLoop =
+                SlotHostObject<CFRunLoopRef>(call, 0);
+            CFRunLoopMode mode =
+                SlotHostObject<CFRunLoopMode>(call, 2);
+            if(!runLoop || !mode) return 0;
+            if(opcodeValue ==
+                    LC32CoreFoundationOpRunLoopContainsSource) {
+                CFRunLoopSourceRef source =
+                    SlotHostObject<CFRunLoopSourceRef>(call, 1);
+                return source &&
+                    CFRunLoopContainsSource(runLoop, source, mode);
+            }
+            CFRunLoopTimerRef timer =
+                SlotHostObject<CFRunLoopTimerRef>(call, 1);
+            return timer && CFRunLoopContainsTimer(runLoop, timer, mode);
+        }
+        case LC32CoreFoundationOpRunLoopGetNextTimerFireDate: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFRunLoopRef runLoop =
+                SlotHostObject<CFRunLoopRef>(call, 0);
+            CFRunLoopMode mode =
+                SlotHostObject<CFRunLoopMode>(call, 1);
+            if(!runLoop || !mode) return 0;
+            const CFAbsoluteTime result =
+                CFRunLoopGetNextTimerFireDate(runLoop, mode);
+            return WriteGuestValue(SlotU32(call, 2), result);
+        }
+        case LC32CoreFoundationOpRunLoopIsWaiting: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFRunLoopRef runLoop =
+                SlotHostObject<CFRunLoopRef>(call, 0);
+            return runLoop && CFRunLoopIsWaiting(runLoop);
         }
         case LC32CoreFoundationOpRunLoopRemoveSource: {
             if(!RequireSlots(call, 3)) return 0;
@@ -2171,6 +2491,22 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             CFRunLoopSourceSignal(source);
             return 1;
         }
+        case LC32CoreFoundationOpRunLoopSourceGetOrder: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFRunLoopSourceRef source =
+                SlotHostObject<CFRunLoopSourceRef>(call, 0);
+            if(!source) return 0;
+            const CFIndex order = CFRunLoopSourceGetOrder(source);
+            if(order < INT32_MIN) return static_cast<u32>(INT32_MIN);
+            if(order > INT32_MAX) return static_cast<u32>(INT32_MAX);
+            return static_cast<u32>(static_cast<int32_t>(order));
+        }
+        case LC32CoreFoundationOpRunLoopSourceIsValid: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFRunLoopSourceRef source =
+                SlotHostObject<CFRunLoopSourceRef>(call, 0);
+            return source && CFRunLoopSourceIsValid(source);
+        }
         case LC32CoreFoundationOpRunLoopStop: {
             if(!RequireSlots(call, 1)) return 0;
             CFRunLoopRef runLoop =
@@ -2244,6 +2580,54 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
                 SlotHostObject<CFRunLoopTimerRef>(call, 0);
             if(!timer) return 0;
             CFRunLoopTimerSetNextFireDate(timer, SlotDouble(call, 1));
+            return 1;
+        }
+        case LC32CoreFoundationOpRunLoopTimerGetNextFireDate:
+        case LC32CoreFoundationOpRunLoopTimerGetInterval:
+        case LC32CoreFoundationOpRunLoopTimerGetTolerance: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFRunLoopTimerRef timer =
+                SlotHostObject<CFRunLoopTimerRef>(call, 0);
+            if(!timer) return 0;
+            CFTimeInterval result = 0.0;
+            if(opcodeValue ==
+                    LC32CoreFoundationOpRunLoopTimerGetNextFireDate) {
+                result = CFRunLoopTimerGetNextFireDate(timer);
+            } else if(opcodeValue ==
+                    LC32CoreFoundationOpRunLoopTimerGetInterval) {
+                result = CFRunLoopTimerGetInterval(timer);
+            } else {
+                result = CFRunLoopTimerGetTolerance(timer);
+            }
+            return WriteGuestValue(SlotU32(call, 1), result);
+        }
+        case LC32CoreFoundationOpRunLoopTimerDoesRepeat:
+        case LC32CoreFoundationOpRunLoopTimerIsValid: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFRunLoopTimerRef timer =
+                SlotHostObject<CFRunLoopTimerRef>(call, 0);
+            if(!timer) return 0;
+            return opcodeValue ==
+                    LC32CoreFoundationOpRunLoopTimerDoesRepeat
+                ? CFRunLoopTimerDoesRepeat(timer)
+                : CFRunLoopTimerIsValid(timer);
+        }
+        case LC32CoreFoundationOpRunLoopTimerGetOrder: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFRunLoopTimerRef timer =
+                SlotHostObject<CFRunLoopTimerRef>(call, 0);
+            if(!timer) return 0;
+            const CFIndex order = CFRunLoopTimerGetOrder(timer);
+            if(order < INT32_MIN) return static_cast<u32>(INT32_MIN);
+            if(order > INT32_MAX) return static_cast<u32>(INT32_MAX);
+            return static_cast<u32>(static_cast<int32_t>(order));
+        }
+        case LC32CoreFoundationOpRunLoopTimerSetTolerance: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFRunLoopTimerRef timer =
+                SlotHostObject<CFRunLoopTimerRef>(call, 0);
+            if(!timer) return 0;
+            CFRunLoopTimerSetTolerance(timer, SlotDouble(call, 1));
             return 1;
         }
         case LC32CoreFoundationOpRunLoopWakeUp: {
@@ -2352,6 +2736,80 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             CFSocketInvalidate(socket);
             return 1;
         }
+        case LC32CoreFoundationOpSocketSetAddress: {
+            if(!RequireSlots(call, 2)) return static_cast<u32>(
+                static_cast<int32_t>(kCFSocketError));
+            CFSocketRef socket = SlotHostObject<CFSocketRef>(call, 0);
+            CFDataRef address = SlotHostObject<CFDataRef>(call, 1);
+            return socket && address ? static_cast<u32>(
+                static_cast<int32_t>(CFSocketSetAddress(socket, address)))
+                : static_cast<u32>(static_cast<int32_t>(kCFSocketError));
+        }
+        case LC32CoreFoundationOpSocketIsValid: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFSocketRef socket = SlotHostObject<CFSocketRef>(call, 0);
+            return socket && CFSocketIsValid(socket);
+        }
+        case LC32CoreFoundationOpSocketCopyAddress:
+        case LC32CoreFoundationOpSocketCopyPeerAddress: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFSocketRef socket = SlotHostObject<CFSocketRef>(call, 0);
+            if(!socket) return 0;
+            CFDataRef result = opcodeValue ==
+                    LC32CoreFoundationOpSocketCopyAddress
+                ? CFSocketCopyAddress(socket)
+                : CFSocketCopyPeerAddress(socket);
+            return GuestForCreatedObject(result);
+        }
+        case LC32CoreFoundationOpSocketGetSocketFlags: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFSocketRef socket = SlotHostObject<CFSocketRef>(call, 0);
+            return socket ? static_cast<u32>(
+                CFSocketGetSocketFlags(socket)) : 0;
+        }
+        case LC32CoreFoundationOpSocketSetSocketFlags: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFSocketRef socket = SlotHostObject<CFSocketRef>(call, 0);
+            if(!socket) return 0;
+            CFSocketSetSocketFlags(socket,
+                static_cast<CFOptionFlags>(SlotU32(call, 1)));
+            return 1;
+        }
+        case LC32CoreFoundationOpSocketDisableCallbacks:
+        case LC32CoreFoundationOpSocketEnableCallbacks: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFSocketRef socket = SlotHostObject<CFSocketRef>(call, 0);
+            if(!socket) return 0;
+            const CFOptionFlags callbacks =
+                static_cast<CFOptionFlags>(SlotU32(call, 1));
+            if(opcodeValue ==
+                    LC32CoreFoundationOpSocketDisableCallbacks) {
+                CFSocketDisableCallBacks(socket, callbacks);
+            } else {
+                CFSocketEnableCallBacks(socket, callbacks);
+            }
+            return 1;
+        }
+        case LC32CoreFoundationOpSocketSendData: {
+            if(!RequireSlots(call, 4)) return static_cast<u32>(
+                static_cast<int32_t>(kCFSocketError));
+            CFSocketRef socket = SlotHostObject<CFSocketRef>(call, 0);
+            CFDataRef data = SlotHostObject<CFDataRef>(call, 2);
+            if(!socket || !data) return static_cast<u32>(
+                static_cast<int32_t>(kCFSocketError));
+            return static_cast<u32>(static_cast<int32_t>(CFSocketSendData(
+                socket, SlotHostObject<CFDataRef>(call, 1), data,
+                SlotDouble(call, 3))));
+        }
+        case LC32CoreFoundationOpSocketSetDefaultNameRegistryPortNumber:
+            if(!RequireSlots(call, 1) || SlotU32(call, 0) > UINT16_MAX)
+                return 0;
+            CFSocketSetDefaultNameRegistryPortNumber(
+                static_cast<UInt16>(SlotU32(call, 0)));
+            return 1;
+        case LC32CoreFoundationOpSocketGetDefaultNameRegistryPortNumber:
+            return RequireSlots(call, 0)
+                ? CFSocketGetDefaultNameRegistryPortNumber() : 0;
         case LC32CoreFoundationOpDictionaryGetValue: {
             if(!RequireSlots(call, 4)) return 0;
             CFDictionaryRef dictionary =
@@ -3243,6 +3701,18 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
                 static_cast<int32_t>(CFDateCompare(
                     date, otherDate, nullptr))) : 0;
         }
+        case LC32CoreFoundationOpAbsoluteTimeGetDayOfWeek:
+            return RequireSlots(call, 2) ? static_cast<u32>(
+                CFAbsoluteTimeGetDayOfWeek(SlotDouble(call, 0),
+                    SlotHostObject<CFTimeZoneRef>(call, 1))) : 0;
+        case LC32CoreFoundationOpAbsoluteTimeGetDayOfYear:
+            return RequireSlots(call, 2) ? static_cast<u32>(
+                CFAbsoluteTimeGetDayOfYear(SlotDouble(call, 0),
+                    SlotHostObject<CFTimeZoneRef>(call, 1))) : 0;
+        case LC32CoreFoundationOpAbsoluteTimeGetWeekOfYear:
+            return RequireSlots(call, 2) ? static_cast<u32>(
+                CFAbsoluteTimeGetWeekOfYear(SlotDouble(call, 0),
+                    SlotHostObject<CFTimeZoneRef>(call, 1))) : 0;
         case LC32CoreFoundationOpDateFormatterCreate: {
             if(!RequireSlots(call, 3)) return 0;
             return GuestForCreatedObject(CFDateFormatterCreate(
@@ -3250,6 +3720,13 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
                 SlotHostObject<CFLocaleRef>(call, 0),
                 static_cast<CFDateFormatterStyle>(SlotU32(call, 1)),
                 static_cast<CFDateFormatterStyle>(SlotU32(call, 2))));
+        }
+        case LC32CoreFoundationOpDateFormatterCreateISO8601Formatter: {
+            if(!RequireSlots(call, 1)) return 0;
+            return GuestForCreatedObject(
+                CFDateFormatterCreateISO8601Formatter(kCFAllocatorDefault,
+                    static_cast<CFISO8601DateFormatOptions>(
+                        SlotU32(call, 0))));
         }
         case LC32CoreFoundationOpDateFormatterSetFormat: {
             if(!RequireSlots(call, 2)) return 0;
@@ -3368,6 +3845,16 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             if(!RequireSlots(call, 0)) return 0;
             return GuestForCreatedObject(CFLocaleCopyCurrent());
         }
+        case LC32CoreFoundationOpLocaleCreateCanonicalIdentifierFromScriptCodes: {
+            if(!RequireSlots(call, 2)) return 0;
+            return GuestForCreatedObject(
+                CFLocaleCreateCanonicalLocaleIdentifierFromScriptManagerCodes(
+                    kCFAllocatorDefault,
+                    static_cast<LangCode>(static_cast<int16_t>(
+                        SlotU32(call, 0))),
+                    static_cast<RegionCode>(static_cast<int16_t>(
+                        SlotU32(call, 1)))));
+        }
         case LC32CoreFoundationOpPreferencesCopyAppValue: {
             if(!RequireSlots(call, 2)) return 0;
             CFStringRef key = SlotHostObject<CFStringRef>(call, 0);
@@ -3418,6 +3905,119 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
                 SlotHostObject<CFStringRef>(call, 0);
             return applicationID &&
                 CFPreferencesAppSynchronize(applicationID);
+        }
+        case LC32CoreFoundationOpPreferencesAddSuitePreferencesToApp:
+        case LC32CoreFoundationOpPreferencesRemoveSuitePreferencesFromApp: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFStringRef applicationID =
+                SlotHostObject<CFStringRef>(call, 0);
+            CFStringRef suiteID = SlotHostObject<CFStringRef>(call, 1);
+            if(!applicationID || !suiteID) return 0;
+            if(opcodeValue ==
+                    LC32CoreFoundationOpPreferencesAddSuitePreferencesToApp) {
+                CFPreferencesAddSuitePreferencesToApp(applicationID, suiteID);
+            } else {
+                CFPreferencesRemoveSuitePreferencesFromApp(
+                    applicationID, suiteID);
+            }
+            return 1;
+        }
+        case LC32CoreFoundationOpPreferencesAppValueIsForced: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFStringRef key = SlotHostObject<CFStringRef>(call, 0);
+            CFStringRef applicationID =
+                SlotHostObject<CFStringRef>(call, 1);
+            return key && applicationID &&
+                CFPreferencesAppValueIsForced(key, applicationID);
+        }
+        case LC32CoreFoundationOpPreferencesCopyApplicationList: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFStringRef userName = SlotHostObject<CFStringRef>(call, 0);
+            CFStringRef hostName = SlotHostObject<CFStringRef>(call, 1);
+            return userName && hostName ? GuestForCreatedObject(
+                CFPreferencesCopyApplicationList(userName, hostName)) : 0;
+        }
+        case LC32CoreFoundationOpPreferencesCopyKeyList: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFStringRef applicationID =
+                SlotHostObject<CFStringRef>(call, 0);
+            CFStringRef userName = SlotHostObject<CFStringRef>(call, 1);
+            CFStringRef hostName = SlotHostObject<CFStringRef>(call, 2);
+            return applicationID && userName && hostName
+                ? GuestForCreatedObject(CFPreferencesCopyKeyList(
+                    applicationID, userName, hostName)) : 0;
+        }
+        case LC32CoreFoundationOpPreferencesCopyMultiple:
+        case LC32CoreFoundationOpPreferencesCopyValue: {
+            if(!RequireSlots(call, 4)) return 0;
+            CFStringRef applicationID =
+                SlotHostObject<CFStringRef>(call, 1);
+            CFStringRef userName = SlotHostObject<CFStringRef>(call, 2);
+            CFStringRef hostName = SlotHostObject<CFStringRef>(call, 3);
+            if(!applicationID || !userName || !hostName) return 0;
+            if(opcodeValue ==
+                    LC32CoreFoundationOpPreferencesCopyMultiple) {
+                return GuestForCreatedObject(CFPreferencesCopyMultiple(
+                    SlotHostObject<CFArrayRef>(call, 0), applicationID,
+                    userName, hostName));
+            }
+            CFStringRef key = SlotHostObject<CFStringRef>(call, 0);
+            return key ? GuestForCreatedObject(CFPreferencesCopyValue(
+                key, applicationID, userName, hostName)) : 0;
+        }
+        case LC32CoreFoundationOpPreferencesSetMultiple:
+        case LC32CoreFoundationOpPreferencesSetValue: {
+            if(!RequireSlots(call, 5)) return 0;
+            CFStringRef applicationID =
+                SlotHostObject<CFStringRef>(call, 2);
+            CFStringRef userName = SlotHostObject<CFStringRef>(call, 3);
+            CFStringRef hostName = SlotHostObject<CFStringRef>(call, 4);
+            if(!applicationID || !userName || !hostName) return 0;
+            if(opcodeValue ==
+                    LC32CoreFoundationOpPreferencesSetMultiple) {
+                CFPreferencesSetMultiple(
+                    SlotHostObject<CFDictionaryRef>(call, 0),
+                    SlotHostObject<CFArrayRef>(call, 1),
+                    applicationID, userName, hostName);
+            } else {
+                CFStringRef key = SlotHostObject<CFStringRef>(call, 0);
+                if(!key) return 0;
+                CFPreferencesSetValue(key,
+                    SlotHostObject<CFPropertyListRef>(call, 1),
+                    applicationID, userName, hostName);
+            }
+            return 1;
+        }
+        case LC32CoreFoundationOpPreferencesSynchronize: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFStringRef applicationID =
+                SlotHostObject<CFStringRef>(call, 0);
+            CFStringRef userName = SlotHostObject<CFStringRef>(call, 1);
+            CFStringRef hostName = SlotHostObject<CFStringRef>(call, 2);
+            return applicationID && userName && hostName &&
+                CFPreferencesSynchronize(
+                    applicationID, userName, hostName);
+        }
+        case LC32CoreFoundationOpNumberFormatterGetDecimalInfoForCurrencyCode: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFStringRef currencyCode =
+                SlotHostObject<CFStringRef>(call, 0);
+            const u32 guestFractionDigits = SlotU32(call, 1);
+            const u32 guestRoundingIncrement = SlotU32(call, 2);
+            if(!currencyCode || !guestFractionDigits ||
+               !guestRoundingIncrement ||
+               !GuestRangeIsValid(
+                    guestFractionDigits, sizeof(int32_t)) ||
+               !GuestRangeIsValid(
+                    guestRoundingIncrement, sizeof(double))) return 0;
+            int32_t fractionDigits = 0;
+            double roundingIncrement = 0.0;
+            if(!CFNumberFormatterGetDecimalInfoForCurrencyCode(
+                    currencyCode, &fractionDigits, &roundingIncrement))
+                return 0;
+            return WriteGuestValue(guestFractionDigits, fractionDigits) &&
+                WriteGuestValue(
+                    guestRoundingIncrement, roundingIncrement);
         }
         case LC32CoreFoundationOpPropertyListCreateWithData: {
             if(!RequireSlots(call, 5)) return 0;
@@ -3516,6 +4116,20 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
                 kCFAllocatorDefault,
                 bytes.empty() ? nullptr : bytes.data(), bitCount));
         }
+        case LC32CoreFoundationOpBitVectorCreateCopy: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFBitVectorRef bitVector =
+                SlotHostObject<CFBitVectorRef>(call, 0);
+            return bitVector ? GuestForCreatedObject(CFBitVectorCreateCopy(
+                kCFAllocatorDefault, bitVector)) : 0;
+        }
+        case LC32CoreFoundationOpBitVectorCreateMutable: {
+            if(!RequireSlots(call, 1) || SlotU32(call, 0) > INT32_MAX)
+                return 0;
+            return GuestForCreatedObject(CFBitVectorCreateMutable(
+                kCFAllocatorDefault,
+                static_cast<CFIndex>(SlotU32(call, 0))));
+        }
         case LC32CoreFoundationOpBitVectorCreateMutableCopy: {
             if(!RequireSlots(call, 2) || SlotU32(call, 0) > INT32_MAX)
                 return 0;
@@ -3525,6 +4139,59 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
                 CFBitVectorCreateMutableCopy(kCFAllocatorDefault,
                     static_cast<CFIndex>(SlotU32(call, 0)), bitVector)) : 0;
         }
+        case LC32CoreFoundationOpBitVectorGetCount: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFBitVectorRef bitVector =
+                SlotHostObject<CFBitVectorRef>(call, 0);
+            if(!bitVector) return 0;
+            const CFIndex count = CFBitVectorGetCount(bitVector);
+            return count > INT32_MAX ? INT32_MAX : static_cast<u32>(count);
+        }
+        case LC32CoreFoundationOpBitVectorGetCountOfBit:
+        case LC32CoreFoundationOpBitVectorContainsBit:
+        case LC32CoreFoundationOpBitVectorGetFirstIndexOfBit:
+        case LC32CoreFoundationOpBitVectorGetLastIndexOfBit: {
+            if(!RequireSlots(call, 4)) return 0;
+            CFBitVectorRef bitVector =
+                SlotHostObject<CFBitVectorRef>(call, 0);
+            const u32 location = SlotU32(call, 1);
+            const u32 length = SlotU32(call, 2);
+            if(!bitVector || location > INT32_MAX || length > INT32_MAX) {
+                return opcodeValue ==
+                    LC32CoreFoundationOpBitVectorGetFirstIndexOfBit ||
+                    opcodeValue ==
+                    LC32CoreFoundationOpBitVectorGetLastIndexOfBit
+                    ? UINT32_MAX : 0;
+            }
+            const CFIndex count = CFBitVectorGetCount(bitVector);
+            if(static_cast<CFIndex>(location) > count ||
+               static_cast<CFIndex>(length) > count - location) {
+                return opcodeValue ==
+                    LC32CoreFoundationOpBitVectorGetFirstIndexOfBit ||
+                    opcodeValue ==
+                    LC32CoreFoundationOpBitVectorGetLastIndexOfBit
+                    ? UINT32_MAX : 0;
+            }
+            const CFRange range = CFRangeMake(location, length);
+            const CFBit value = SlotU32(call, 3) != 0;
+            switch(opcodeValue) {
+                case LC32CoreFoundationOpBitVectorGetCountOfBit:
+                    return static_cast<u32>(
+                        CFBitVectorGetCountOfBit(bitVector, range, value));
+                case LC32CoreFoundationOpBitVectorContainsBit:
+                    return CFBitVectorContainsBit(bitVector, range, value);
+                case LC32CoreFoundationOpBitVectorGetFirstIndexOfBit:
+                    return static_cast<u32>(static_cast<int32_t>(
+                        CFBitVectorGetFirstIndexOfBit(
+                            bitVector, range, value)));
+                case LC32CoreFoundationOpBitVectorGetLastIndexOfBit:
+                    return static_cast<u32>(static_cast<int32_t>(
+                        CFBitVectorGetLastIndexOfBit(
+                            bitVector, range, value)));
+                default:
+                    return 0;
+            }
+        }
         case LC32CoreFoundationOpBitVectorGetBitAtIndex: {
             if(!RequireSlots(call, 2) || SlotU32(call, 1) > INT32_MAX)
                 return 0;
@@ -3533,6 +4200,71 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             const CFIndex index = static_cast<CFIndex>(SlotU32(call, 1));
             return bitVector && index < CFBitVectorGetCount(bitVector)
                 ? CFBitVectorGetBitAtIndex(bitVector, index) : 0;
+        }
+        case LC32CoreFoundationOpBitVectorGetBits: {
+            if(!RequireSlots(call, 4)) return 0;
+            CFBitVectorRef bitVector =
+                SlotHostObject<CFBitVectorRef>(call, 0);
+            const u32 location = SlotU32(call, 1);
+            const u32 length = SlotU32(call, 2);
+            const u32 guestBytes = SlotU32(call, 3);
+            if(!bitVector || location > INT32_MAX || length > INT32_MAX)
+                return 0;
+            const CFIndex count = CFBitVectorGetCount(bitVector);
+            if(static_cast<CFIndex>(location) > count ||
+               static_cast<CFIndex>(length) > count - location) return 0;
+            const u32 byteCount = (length + 7u) / 8u;
+            if(byteCount && !GuestRangeIsValid(guestBytes, byteCount))
+                return 0;
+            std::vector<UInt8> bytes(byteCount);
+            if(length) CFBitVectorGetBits(bitVector,
+                CFRangeMake(location, length), bytes.data());
+            return !byteCount || Dynarmic_mem_1write(
+                guestBytes, byteCount,
+                reinterpret_cast<char *>(bytes.data())) == 0;
+        }
+        case LC32CoreFoundationOpBitVectorSetCount: {
+            if(!RequireSlots(call, 2) || SlotU32(call, 1) > INT32_MAX)
+                return 0;
+            CFMutableBitVectorRef bitVector =
+                SlotHostObject<CFMutableBitVectorRef>(call, 0);
+            if(!bitVector) return 0;
+            CFBitVectorSetCount(bitVector,
+                static_cast<CFIndex>(SlotU32(call, 1)));
+            return 1;
+        }
+        case LC32CoreFoundationOpBitVectorFlipBitAtIndex: {
+            if(!RequireSlots(call, 2) || SlotU32(call, 1) > INT32_MAX)
+                return 0;
+            CFMutableBitVectorRef bitVector =
+                SlotHostObject<CFMutableBitVectorRef>(call, 0);
+            const CFIndex index = static_cast<CFIndex>(SlotU32(call, 1));
+            if(!bitVector || index >= CFBitVectorGetCount(bitVector)) return 0;
+            CFBitVectorFlipBitAtIndex(bitVector, index);
+            return 1;
+        }
+        case LC32CoreFoundationOpBitVectorFlipBits:
+        case LC32CoreFoundationOpBitVectorSetBits: {
+            const u32 expectedSlots = opcodeValue ==
+                LC32CoreFoundationOpBitVectorSetBits ? 4 : 3;
+            if(!RequireSlots(call, expectedSlots)) return 0;
+            CFMutableBitVectorRef bitVector =
+                SlotHostObject<CFMutableBitVectorRef>(call, 0);
+            const u32 location = SlotU32(call, 1);
+            const u32 length = SlotU32(call, 2);
+            if(!bitVector || location > INT32_MAX || length > INT32_MAX)
+                return 0;
+            const CFIndex count = CFBitVectorGetCount(bitVector);
+            if(static_cast<CFIndex>(location) > count ||
+               static_cast<CFIndex>(length) > count - location) return 0;
+            const CFRange range = CFRangeMake(location, length);
+            if(opcodeValue == LC32CoreFoundationOpBitVectorFlipBits) {
+                CFBitVectorFlipBits(bitVector, range);
+            } else {
+                CFBitVectorSetBits(bitVector, range,
+                    SlotU32(call, 3) != 0);
+            }
+            return 1;
         }
         case LC32CoreFoundationOpBitVectorSetBitAtIndex: {
             if(!RequireSlots(call, 3) || SlotU32(call, 1) > INT32_MAX)
@@ -3544,6 +4276,285 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             CFBitVectorSetBitAtIndex(bitVector, index,
                                      SlotU32(call, 2) != 0);
             return 1;
+        }
+        case LC32CoreFoundationOpBitVectorSetAllBits: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFMutableBitVectorRef bitVector =
+                SlotHostObject<CFMutableBitVectorRef>(call, 0);
+            if(!bitVector) return 0;
+            CFBitVectorSetAllBits(bitVector, SlotU32(call, 1) != 0);
+            return 1;
+        }
+        case LC32CoreFoundationOpFileSecurityGetTypeID:
+            return RequireSlots(call, 0)
+                ? static_cast<u32>(CFFileSecurityGetTypeID()) : 0;
+        case LC32CoreFoundationOpFileSecurityCreate:
+            return RequireSlots(call, 0) ? GuestForCreatedObject(
+                CFFileSecurityCreate(kCFAllocatorDefault)) : 0;
+        case LC32CoreFoundationOpFileSecurityCreateCopy: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFFileSecurityRef fileSecurity =
+                SlotHostObject<CFFileSecurityRef>(call, 0);
+            return fileSecurity ? GuestForCreatedObject(
+                CFFileSecurityCreateCopy(
+                    kCFAllocatorDefault, fileSecurity)) : 0;
+        }
+        case LC32CoreFoundationOpFileSecurityCopyOwnerUUID:
+        case LC32CoreFoundationOpFileSecurityCopyGroupUUID: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFFileSecurityRef fileSecurity =
+                SlotHostObject<CFFileSecurityRef>(call, 0);
+            const u32 guestUUID = SlotU32(call, 1);
+            if(!fileSecurity || !guestUUID ||
+               !GuestRangeIsValid(guestUUID, sizeof(u32))) return 0;
+            CFUUIDRef uuid = nullptr;
+            const Boolean result = opcodeValue ==
+                    LC32CoreFoundationOpFileSecurityCopyOwnerUUID
+                ? CFFileSecurityCopyOwnerUUID(fileSecurity, &uuid)
+                : CFFileSecurityCopyGroupUUID(fileSecurity, &uuid);
+            return result && WriteGuestCreatedObject(guestUUID, uuid);
+        }
+        case LC32CoreFoundationOpFileSecuritySetOwnerUUID:
+        case LC32CoreFoundationOpFileSecuritySetGroupUUID: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFFileSecurityRef fileSecurity =
+                SlotHostObject<CFFileSecurityRef>(call, 0);
+            CFUUIDRef uuid = SlotHostObject<CFUUIDRef>(call, 1);
+            if(!fileSecurity || !uuid) return 0;
+            return opcodeValue ==
+                    LC32CoreFoundationOpFileSecuritySetOwnerUUID
+                ? CFFileSecuritySetOwnerUUID(fileSecurity, uuid)
+                : CFFileSecuritySetGroupUUID(fileSecurity, uuid);
+        }
+        case LC32CoreFoundationOpFileSecurityGetOwner:
+        case LC32CoreFoundationOpFileSecurityGetGroup: {
+            if(!RequireSlots(call, 2) || !SlotU32(call, 1)) return 0;
+            CFFileSecurityRef fileSecurity =
+                SlotHostObject<CFFileSecurityRef>(call, 0);
+            if(!fileSecurity) return 0;
+            uint32_t value = 0;
+            Boolean result = false;
+            if(opcodeValue ==
+                    LC32CoreFoundationOpFileSecurityGetOwner) {
+                uid_t owner = 0;
+                result = CFFileSecurityGetOwner(fileSecurity, &owner);
+                value = static_cast<uint32_t>(owner);
+            } else {
+                gid_t group = 0;
+                result = CFFileSecurityGetGroup(fileSecurity, &group);
+                value = static_cast<uint32_t>(group);
+            }
+            return result && WriteGuestValue(SlotU32(call, 1), value);
+        }
+        case LC32CoreFoundationOpFileSecuritySetOwner:
+        case LC32CoreFoundationOpFileSecuritySetGroup: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFFileSecurityRef fileSecurity =
+                SlotHostObject<CFFileSecurityRef>(call, 0);
+            if(!fileSecurity) return 0;
+            return opcodeValue == LC32CoreFoundationOpFileSecuritySetOwner
+                ? CFFileSecuritySetOwner(
+                    fileSecurity, static_cast<uid_t>(SlotU32(call, 1)))
+                : CFFileSecuritySetGroup(
+                    fileSecurity, static_cast<gid_t>(SlotU32(call, 1)));
+        }
+        case LC32CoreFoundationOpFileSecurityGetMode: {
+            if(!RequireSlots(call, 2) || !SlotU32(call, 1)) return 0;
+            CFFileSecurityRef fileSecurity =
+                SlotHostObject<CFFileSecurityRef>(call, 0);
+            if(!fileSecurity) return 0;
+            mode_t mode = 0;
+            return CFFileSecurityGetMode(fileSecurity, &mode) &&
+                WriteGuestValue(SlotU32(call, 1), mode);
+        }
+        case LC32CoreFoundationOpFileSecuritySetMode: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFFileSecurityRef fileSecurity =
+                SlotHostObject<CFFileSecurityRef>(call, 0);
+            return fileSecurity && CFFileSecuritySetMode(
+                fileSecurity, static_cast<mode_t>(SlotU32(call, 1)));
+        }
+        case LC32CoreFoundationOpFileSecurityClearProperties: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFFileSecurityRef fileSecurity =
+                SlotHostObject<CFFileSecurityRef>(call, 0);
+            return fileSecurity && CFFileSecurityClearProperties(
+                fileSecurity, static_cast<CFFileSecurityClearOptions>(
+                    SlotU32(call, 1)));
+        }
+        case LC32CoreFoundationOpURLCopyResourcePropertyForKey: {
+            if(!RequireSlots(call, 4)) return 0;
+            CFURLRef url = SlotHostObject<CFURLRef>(call, 0);
+            CFStringRef key = SlotHostObject<CFStringRef>(call, 1);
+            const u32 guestProperty = SlotU32(call, 2);
+            const u32 guestError = SlotU32(call, 3);
+            if(!url || !key || !guestProperty ||
+               guestProperty == guestError ||
+               !GuestRangeIsValid(guestProperty, sizeof(u32)) ||
+               (guestError && !GuestRangeIsValid(
+                    guestError, sizeof(u32))) ||
+               !WriteGuestValue(guestProperty, static_cast<u32>(0)) ||
+               (guestError && !WriteGuestValue(
+                    guestError, static_cast<u32>(0)))) {
+                return 0;
+            }
+
+            CFTypeRef property = nullptr;
+            CFErrorRef error = nullptr;
+            const Boolean result = CFURLCopyResourcePropertyForKey(
+                url, key, &property, guestError ? &error : nullptr);
+            if(result) {
+                if(error) CFRelease(error);
+                return WriteGuestCreatedObject(guestProperty, property);
+            }
+            if(property) CFRelease(property);
+            (void)WriteGuestCreatedObject(guestError, error);
+            return 0;
+        }
+        case LC32CoreFoundationOpURLCopyResourcePropertiesForKeys: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFURLRef url = SlotHostObject<CFURLRef>(call, 0);
+            CFArrayRef keys = SlotHostObject<CFArrayRef>(call, 1);
+            const u32 guestError = SlotU32(call, 2);
+            if(!url || !keys ||
+               (guestError && (!GuestRangeIsValid(
+                    guestError, sizeof(u32)) ||
+                    !WriteGuestValue(
+                        guestError, static_cast<u32>(0))))) {
+                return 0;
+            }
+            CFErrorRef error = nullptr;
+            CFDictionaryRef properties =
+                CFURLCopyResourcePropertiesForKeys(
+                    url, keys, guestError ? &error : nullptr);
+            if(!WriteGuestCreatedObject(guestError, error)) {
+                if(properties) CFRelease(properties);
+                return 0;
+            }
+            return GuestForCreatedObject(properties);
+        }
+        case LC32CoreFoundationOpURLSetResourcePropertiesForKeys: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFURLRef url = SlotHostObject<CFURLRef>(call, 0);
+            CFDictionaryRef properties =
+                SlotHostObject<CFDictionaryRef>(call, 1);
+            const u32 guestError = SlotU32(call, 2);
+            if(!url || !properties ||
+               (guestError && (!GuestRangeIsValid(
+                    guestError, sizeof(u32)) ||
+                    !WriteGuestValue(
+                        guestError, static_cast<u32>(0))))) {
+                return 0;
+            }
+            CFErrorRef error = nullptr;
+            const Boolean result = CFURLSetResourcePropertiesForKeys(
+                url, properties, guestError ? &error : nullptr);
+            if(!WriteGuestCreatedObject(guestError, error)) return 0;
+            return result != false;
+        }
+        case LC32CoreFoundationOpURLResourceIsReachable: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFURLRef url = SlotHostObject<CFURLRef>(call, 0);
+            const u32 guestError = SlotU32(call, 1);
+            if(!url ||
+               (guestError && (!GuestRangeIsValid(
+                    guestError, sizeof(u32)) ||
+                    !WriteGuestValue(
+                        guestError, static_cast<u32>(0))))) {
+                return 0;
+            }
+            CFErrorRef error = nullptr;
+            const Boolean result = CFURLResourceIsReachable(
+                url, guestError ? &error : nullptr);
+            if(!WriteGuestCreatedObject(guestError, error)) return 0;
+            return result != false;
+        }
+        case LC32CoreFoundationOpURLCreateFilePathURL:
+        case LC32CoreFoundationOpURLCreateFileReferenceURL: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFURLRef url = SlotHostObject<CFURLRef>(call, 0);
+            const u32 guestError = SlotU32(call, 1);
+            if(!url ||
+               (guestError && (!GuestRangeIsValid(
+                    guestError, sizeof(u32)) ||
+                    !WriteGuestValue(
+                        guestError, static_cast<u32>(0))))) {
+                return 0;
+            }
+            CFErrorRef error = nullptr;
+            CFURLRef result = opcodeValue ==
+                    LC32CoreFoundationOpURLCreateFilePathURL
+                ? CFURLCreateFilePathURL(
+                    kCFAllocatorDefault, url,
+                    guestError ? &error : nullptr)
+                : CFURLCreateFileReferenceURL(
+                    kCFAllocatorDefault, url,
+                    guestError ? &error : nullptr);
+            if(!WriteGuestCreatedObject(guestError, error)) {
+                if(result) CFRelease(result);
+                return 0;
+            }
+            return GuestForCreatedObject(result);
+        }
+        case LC32CoreFoundationOpURLCreateData: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFURLRef url = SlotHostObject<CFURLRef>(call, 0);
+            if(!url) return 0;
+            CFURLRef visibleURL = CopyGuestVisibleURLForReadback(url);
+            if(!visibleURL) return 0;
+            CFDataRef data = CFURLCreateData(
+                kCFAllocatorDefault, visibleURL,
+                static_cast<CFStringEncoding>(SlotU32(call, 1)),
+                SlotU32(call, 2) != 0);
+            CFRelease(visibleURL);
+            return GuestForCreatedObject(data);
+        }
+        case LC32CoreFoundationOpReadStreamCreateWithFile: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFURLRef url = SlotHostObject<CFURLRef>(call, 0);
+            return url ? GuestForCreatedObject(
+                CFReadStreamCreateWithFile(kCFAllocatorDefault, url)) : 0;
+        }
+        case LC32CoreFoundationOpWriteStreamCreateWithFile: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFURLRef url = SlotHostObject<CFURLRef>(call, 0);
+            return url ? GuestForCreatedObject(
+                CFWriteStreamCreateWithFile(kCFAllocatorDefault, url)) : 0;
+        }
+        case LC32CoreFoundationOpWriteStreamCreateWithAllocatedBuffers:
+            return RequireSlots(call, 0) ? GuestForCreatedObject(
+                CFWriteStreamCreateWithAllocatedBuffers(
+                    kCFAllocatorDefault, kCFAllocatorDefault)) : 0;
+        case LC32CoreFoundationOpStreamCreateBoundPair: {
+            if(!RequireSlots(call, 3)) return 0;
+            const u32 guestReadStream = SlotU32(call, 0);
+            const u32 guestWriteStream = SlotU32(call, 1);
+            const u32 transferBufferSize = SlotU32(call, 2);
+            if(transferBufferSize > INT32_MAX ||
+               (!guestReadStream && !guestWriteStream) ||
+               (guestReadStream && guestReadStream == guestWriteStream)) {
+                return 0;
+            }
+            if((guestReadStream && !WriteGuestValue(
+                    guestReadStream, static_cast<u32>(0))) ||
+               (guestWriteStream && !WriteGuestValue(
+                    guestWriteStream, static_cast<u32>(0)))) {
+                return 0;
+            }
+
+            CFReadStreamRef readStream = nullptr;
+            CFWriteStreamRef writeStream = nullptr;
+            CFStreamCreateBoundPair(
+                kCFAllocatorDefault,
+                guestReadStream ? &readStream : nullptr,
+                guestWriteStream ? &writeStream : nullptr,
+                static_cast<CFIndex>(transferBufferSize));
+            if(!WriteGuestCreatedObject(guestReadStream, readStream)) {
+                if(writeStream) CFRelease(writeStream);
+                return 0;
+            }
+            return WriteGuestCreatedObject(
+                guestWriteStream, writeStream);
         }
         case LC32CoreFoundationOpURLCreateFromFileSystemRepresentation: {
             if(!RequireSlots(call, 3)) return 0;

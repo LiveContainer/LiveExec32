@@ -13,6 +13,7 @@
 #include <mutex>
 #include <new>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdarg.h>
 #include <string>
 #include <unordered_map>
@@ -2172,6 +2173,109 @@ u64 LC32Dlsym(u32 guest_name, bool isFunction) {
     if(r && !isFunction) r = *(u64*)r;
     printf("LC32: dlsym %s = 0x%llx\n", host_name.hostPtr, r);
     return r;
+}
+
+extern "C" u32 LC32LoadNativeFramework(u32 guestFrameworkName) {
+    DynarmicHostString frameworkName(guestFrameworkName);
+    if(!frameworkName.hostPtr || !frameworkName.hostPtr[0]) {
+        fprintf(stderr, "LC32: refusing an empty native framework name\n");
+        return 0;
+    }
+
+    const char *cursor = frameworkName.hostPtr;
+    size_t length = 0;
+    for(; *cursor; cursor++, length++) {
+        const unsigned char character = (unsigned char)*cursor;
+        const bool valid =
+            (character >= 'a' && character <= 'z') ||
+            (character >= 'A' && character <= 'Z') ||
+            (character >= '0' && character <= '9') ||
+            character == '_' || character == '-';
+        if(!valid || length >= 127) {
+            fprintf(stderr,
+                "LC32: refusing invalid native framework name: %s\n",
+                frameworkName.hostPtr);
+            return 0;
+        }
+    }
+
+    static std::mutex cacheMutex;
+    static std::unordered_map<std::string, void *> cache;
+    const std::string name(frameworkName.hostPtr, length);
+    {
+        const std::lock_guard<std::mutex> lock(cacheMutex);
+        const auto cached = cache.find(name);
+        if(cached != cache.end()) return cached->second != nullptr;
+    }
+
+    /*
+     * LiveExec32's Catalyst build is produced by rewriting the iOS build
+     * version, so TARGET_OS_MACCATALYST cannot distinguish it here.  Prefer
+     * the iOSSupport image at runtime and fall back to the ordinary iOS path;
+     * the first lookup simply fails on a real iOS device.
+     */
+    const std::string catalystPath =
+        "/System/iOSSupport/System/Library/Frameworks/" + name +
+        ".framework/" + name;
+    void *handle = dlopen(catalystPath.c_str(), RTLD_NOW | RTLD_GLOBAL);
+    std::string catalystError;
+    if(!handle) {
+        const char *error = dlerror();
+        if(error) catalystError = error;
+
+        const std::string systemPath = "/System/Library/Frameworks/" + name +
+            ".framework/" + name;
+        handle = dlopen(systemPath.c_str(), RTLD_NOW | RTLD_GLOBAL);
+    }
+
+    {
+        /*
+         * Do not hold cacheMutex while dlopen runs framework initializers:
+         * one of them may synchronously enter another guest framework shim.
+         * Concurrent loads are harmless because native image handles remain
+         * open for the process lifetime.
+         */
+        const std::lock_guard<std::mutex> lock(cacheMutex);
+        const auto inserted = cache.emplace(name, handle);
+        if(!inserted.second) {
+            /* If two first-time loads raced, retain a successful result. */
+            if(!inserted.first->second && handle) {
+                inserted.first->second = handle;
+            }
+            handle = inserted.first->second;
+        }
+    }
+    if(!handle) {
+        const char *systemError = dlerror();
+        fprintf(stderr,
+            "LC32: failed to load native framework %s: %s%s%s\n",
+            name.c_str(),
+            catalystError.empty() ? "unknown iOSSupport error" :
+                catalystError.c_str(),
+            systemError ? "; system fallback: " : "",
+            systemError ? systemError : "");
+        return 0;
+    }
+
+    return 1;
+}
+
+/*
+ * Metal's public creation function returns a native Objective-C object at
+ * +1.  An ARM32 caller cannot consume that 64-bit pointer directly, so keep
+ * the ABI-specific ownership conversion beside the generic bridge.  The
+ * guest half loads Metal before resolving this thunk; do not cache a failed
+ * dlsym lookup in case an older host loads the framework lazily.
+ */
+extern "C" u32 LC32_Metal_MTLCreateSystemDefaultDevice(void) {
+    using CreateDefaultDevice = id (*)(void);
+    CreateDefaultDevice createDefaultDevice =
+        reinterpret_cast<CreateDefaultDevice>(
+            dlsym(RTLD_DEFAULT, "MTLCreateSystemDefaultDevice"));
+    if(!createDefaultDevice) return 0;
+
+    id device = createDefaultDevice();
+    return device ? LC32GuestObjectForOwnedHostObject((CFTypeRef)device) : 0;
 }
 
 inline id LC32GetHostConstString(u32 guest_self) {

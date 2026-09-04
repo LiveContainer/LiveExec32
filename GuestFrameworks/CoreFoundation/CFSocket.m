@@ -82,6 +82,30 @@ CFSocketError CFSocketConnectToAddress(CFSocketRef socket,
         LC32CFSocketDoubleBits(timeout));
 }
 
+CFSocketError CFSocketSetAddress(CFSocketRef socket, CFDataRef address) {
+    if(!socket || !address) return kCFSocketError;
+    return (CFSocketError)(int32_t)LC32_CF_CALL(
+        LC32CoreFoundationOpSocketSetAddress,
+        LC32_CF_HOST(socket), LC32_CF_HOST(address));
+}
+
+Boolean CFSocketIsValid(CFSocketRef socket) {
+    return socket && LC32_CF_CALL(
+        LC32CoreFoundationOpSocketIsValid, LC32_CF_HOST(socket));
+}
+
+CFDataRef CFSocketCopyAddress(CFSocketRef socket) {
+    return socket ? (CFDataRef)LC32_CF_CALL(
+        LC32CoreFoundationOpSocketCopyAddress,
+        LC32_CF_HOST(socket)) : NULL;
+}
+
+CFDataRef CFSocketCopyPeerAddress(CFSocketRef socket) {
+    return socket ? (CFDataRef)LC32_CF_CALL(
+        LC32CoreFoundationOpSocketCopyPeerAddress,
+        LC32_CF_HOST(socket)) : NULL;
+}
+
 CFRunLoopSourceRef CFSocketCreateRunLoopSource(CFAllocatorRef allocator,
                                                CFSocketRef socket,
                                                CFIndex order) {
@@ -102,4 +126,49 @@ void CFSocketInvalidate(CFSocketRef socket) {
     if(!socket) return;
     LC32_CF_CALL(LC32CoreFoundationOpSocketInvalidate,
         LC32_CF_HOST(socket));
+}
+
+CFOptionFlags CFSocketGetSocketFlags(CFSocketRef socket) {
+    return socket ? (CFOptionFlags)LC32_CF_CALL(
+        LC32CoreFoundationOpSocketGetSocketFlags,
+        LC32_CF_HOST(socket)) : 0;
+}
+
+void CFSocketSetSocketFlags(CFSocketRef socket, CFOptionFlags flags) {
+    if(!socket) return;
+    LC32_CF_CALL(LC32CoreFoundationOpSocketSetSocketFlags,
+        LC32_CF_HOST(socket), LC32_CF_U32(flags));
+}
+
+void CFSocketDisableCallBacks(CFSocketRef socket,
+                              CFOptionFlags callbackTypes) {
+    if(!socket) return;
+    LC32_CF_CALL(LC32CoreFoundationOpSocketDisableCallbacks,
+        LC32_CF_HOST(socket), LC32_CF_U32(callbackTypes));
+}
+
+void CFSocketEnableCallBacks(CFSocketRef socket,
+                             CFOptionFlags callbackTypes) {
+    if(!socket) return;
+    LC32_CF_CALL(LC32CoreFoundationOpSocketEnableCallbacks,
+        LC32_CF_HOST(socket), LC32_CF_U32(callbackTypes));
+}
+
+CFSocketError CFSocketSendData(CFSocketRef socket, CFDataRef address,
+                               CFDataRef data, CFTimeInterval timeout) {
+    if(!socket || !data) return kCFSocketError;
+    return (CFSocketError)(int32_t)LC32_CF_CALL(
+        LC32CoreFoundationOpSocketSendData,
+        LC32_CF_HOST(socket), LC32_CF_HOST(address), LC32_CF_HOST(data),
+        LC32CFSocketDoubleBits(timeout));
+}
+
+void CFSocketSetDefaultNameRegistryPortNumber(UInt16 port) {
+    LC32_CF_CALL(LC32CoreFoundationOpSocketSetDefaultNameRegistryPortNumber,
+        LC32_CF_U32(port));
+}
+
+UInt16 CFSocketGetDefaultNameRegistryPortNumber(void) {
+    return (UInt16)LC32_CF_CALL0(
+        LC32CoreFoundationOpSocketGetDefaultNameRegistryPortNumber);
 }

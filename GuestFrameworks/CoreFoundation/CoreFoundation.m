@@ -185,6 +185,12 @@ CFStringRef CFURLCopyHostName(CFURLRef url) {
         LC32_CF_HOST(url)) : NULL;
 }
 
+CFStringRef CFURLCopyNetLocation(CFURLRef url) {
+    return url ? (CFStringRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCopyNetLocation,
+        LC32_CF_HOST(url)) : NULL;
+}
+
 CFStringRef CFURLCopyPath(CFURLRef url) {
     return url ? (CFStringRef)LC32_CF_CALL(
         LC32CoreFoundationOpURLCopyPath,
@@ -219,6 +225,13 @@ CFStringRef CFURLCopyQueryString(
         CFURLRef url, CFStringRef charactersToLeaveEscaped) {
     return url ? (CFStringRef)LC32_CF_CALL(
         LC32CoreFoundationOpURLCopyQueryString,
+        LC32_CF_HOST(url), LC32_CF_HOST(charactersToLeaveEscaped)) : NULL;
+}
+
+CFStringRef CFURLCopyParameterString(
+        CFURLRef url, CFStringRef charactersToLeaveEscaped) {
+    return url ? (CFStringRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCopyParameterString,
         LC32_CF_HOST(url), LC32_CF_HOST(charactersToLeaveEscaped)) : NULL;
 }
 
@@ -334,6 +347,135 @@ Boolean CFURLSetResourcePropertyForKey(
         LC32CoreFoundationOpURLSetResourcePropertyForKey,
         LC32_CF_HOST(url), LC32_CF_HOST(key),
         LC32_CF_HOST(propertyValue), LC32_CF_U32((uintptr_t)error));
+}
+
+Boolean CFURLCopyResourcePropertyForKey(
+        CFURLRef url, CFStringRef key, void *propertyValueTypeRefPtr,
+        CFErrorRef *error) {
+    if(!url || !key || !propertyValueTypeRefPtr) {
+        if(error) *error = NULL;
+        return false;
+    }
+    return LC32_CF_CALL(
+        LC32CoreFoundationOpURLCopyResourcePropertyForKey,
+        LC32_CF_HOST(url), LC32_CF_HOST(key),
+        LC32_CF_U32((uintptr_t)propertyValueTypeRefPtr),
+        LC32_CF_U32((uintptr_t)error));
+}
+
+CFDictionaryRef CFURLCopyResourcePropertiesForKeys(
+        CFURLRef url, CFArrayRef keys, CFErrorRef *error) {
+    if(!url || !keys) {
+        if(error) *error = NULL;
+        return NULL;
+    }
+    return (CFDictionaryRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCopyResourcePropertiesForKeys,
+        LC32_CF_HOST(url), LC32_CF_HOST(keys),
+        LC32_CF_U32((uintptr_t)error));
+}
+
+Boolean CFURLSetResourcePropertiesForKeys(
+        CFURLRef url, CFDictionaryRef keyedPropertyValues,
+        CFErrorRef *error) {
+    if(!url || !keyedPropertyValues) {
+        if(error) *error = NULL;
+        return false;
+    }
+    return LC32_CF_CALL(
+        LC32CoreFoundationOpURLSetResourcePropertiesForKeys,
+        LC32_CF_HOST(url), LC32_CF_HOST(keyedPropertyValues),
+        LC32_CF_U32((uintptr_t)error));
+}
+
+Boolean CFURLResourceIsReachable(CFURLRef url, CFErrorRef *error) {
+    if(!url) {
+        if(error) *error = NULL;
+        return false;
+    }
+    return LC32_CF_CALL(
+        LC32CoreFoundationOpURLResourceIsReachable,
+        LC32_CF_HOST(url), LC32_CF_U32((uintptr_t)error));
+}
+
+CFURLRef CFURLCreateFilePathURL(
+        CFAllocatorRef allocator, CFURLRef url, CFErrorRef *error) {
+    (void)allocator;
+    if(!url) {
+        if(error) *error = NULL;
+        return NULL;
+    }
+    return (CFURLRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCreateFilePathURL,
+        LC32_CF_HOST(url), LC32_CF_U32((uintptr_t)error));
+}
+
+CFURLRef CFURLCreateFileReferenceURL(
+        CFAllocatorRef allocator, CFURLRef url, CFErrorRef *error) {
+    (void)allocator;
+    if(!url) {
+        if(error) *error = NULL;
+        return NULL;
+    }
+    return (CFURLRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCreateFileReferenceURL,
+        LC32_CF_HOST(url), LC32_CF_U32((uintptr_t)error));
+}
+
+CFDataRef CFURLCreateData(CFAllocatorRef allocator, CFURLRef url,
+                          CFStringEncoding encoding,
+                          Boolean escapeWhitespace) {
+    (void)allocator;
+    return url ? (CFDataRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCreateData,
+        LC32_CF_HOST(url), LC32_CF_U32(encoding),
+        LC32_CF_U32(escapeWhitespace)) : NULL;
+}
+
+Boolean CFURLIsFileReferenceURL(CFURLRef url) {
+    return url && LC32_CF_CALL(
+        LC32CoreFoundationOpURLIsFileReferenceURL,
+        LC32_CF_HOST(url));
+}
+
+void CFURLClearResourcePropertyCacheForKey(CFURLRef url, CFStringRef key) {
+    if(url && key) {
+        (void)LC32_CF_CALL(
+            LC32CoreFoundationOpURLClearResourcePropertyCacheForKey,
+            LC32_CF_HOST(url), LC32_CF_HOST(key));
+    }
+}
+
+void CFURLClearResourcePropertyCache(CFURLRef url) {
+    if(url) {
+        (void)LC32_CF_CALL(
+            LC32CoreFoundationOpURLClearResourcePropertyCache,
+            LC32_CF_HOST(url));
+    }
+}
+
+void CFURLSetTemporaryResourcePropertyForKey(
+        CFURLRef url, CFStringRef key, CFTypeRef propertyValue) {
+    if(url && key) {
+        (void)LC32_CF_CALL(
+            LC32CoreFoundationOpURLSetTemporaryResourcePropertyForKey,
+            LC32_CF_HOST(url), LC32_CF_HOST(key),
+            LC32_CF_HOST(propertyValue));
+    }
+}
+
+Boolean CFURLStartAccessingSecurityScopedResource(CFURLRef url) {
+    return url && LC32_CF_CALL(
+        LC32CoreFoundationOpURLStartAccessingSecurityScopedResource,
+        LC32_CF_HOST(url));
+}
+
+void CFURLStopAccessingSecurityScopedResource(CFURLRef url) {
+    if(url) {
+        (void)LC32_CF_CALL(
+            LC32CoreFoundationOpURLStopAccessingSecurityScopedResource,
+            LC32_CF_HOST(url));
+    }
 }
 
 void CFRelease(CFTypeRef ref) {

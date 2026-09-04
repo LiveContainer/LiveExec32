@@ -31,3 +31,16 @@ NSString *const AVNumberOfChannelsKey =
     @"AVNumberOfChannelsKey";
 NSString *const AVSampleRateKey =
     @"AVSampleRateKey";
+
+CGRect AVMakeRectWithAspectRatioInsideRect(
+        CGSize aspectRatio, CGRect boundingRect) {
+    const CGFloat scale = MIN(
+        boundingRect.size.width / aspectRatio.width,
+        boundingRect.size.height / aspectRatio.height);
+    const CGSize size = CGSizeMake(
+        aspectRatio.width * scale, aspectRatio.height * scale);
+    return CGRectMake(
+        CGRectGetMidX(boundingRect) - size.width / 2,
+        CGRectGetMidY(boundingRect) - size.height / 2,
+        size.width, size.height);
+}

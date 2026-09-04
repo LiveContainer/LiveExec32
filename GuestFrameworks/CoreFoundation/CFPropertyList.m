@@ -5,8 +5,10 @@
 #include <stdint.h>
 #include <string.h>
 
-static_assert(sizeof(CFPropertyListFormat) == sizeof(int32_t));
-static_assert(sizeof(CFErrorRef) == sizeof(uint32_t));
+static_assert(sizeof(CFPropertyListFormat) == sizeof(int32_t),
+    "CFPropertyListFormat must use the ARM32 integer ABI");
+static_assert(sizeof(CFErrorRef) == sizeof(uint32_t),
+    "CFErrorRef must use the ARM32 pointer ABI");
 
 static BOOL LC32IsDispatchData(id object) {
     for(Class cls = object_getClass(object); cls;
@@ -108,4 +110,19 @@ CFDataRef CFPropertyListCreateXMLData(CFAllocatorRef allocator,
                                       CFPropertyListRef propertyList) {
     return CFPropertyListCreateData(allocator, propertyList,
         kCFPropertyListXMLFormat_v1_0, 0, NULL);
+}
+
+CFPropertyListRef CFPropertyListCreateFromXMLData(
+        CFAllocatorRef allocator, CFDataRef data,
+        CFOptionFlags mutabilityOption, CFStringRef *errorString) {
+    if(errorString) *errorString = NULL;
+
+    CFErrorRef error = NULL;
+    CFPropertyListRef propertyList = CFPropertyListCreateWithData(
+        allocator, data, mutabilityOption, NULL, &error);
+    if(error) {
+        if(errorString) *errorString = CFErrorCopyDescription(error);
+        CFRelease(error);
+    }
+    return propertyList;
 }

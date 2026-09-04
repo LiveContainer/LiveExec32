@@ -81,6 +81,23 @@ int main(void) {
             CFEqual(kSecReturnAttributes, CFSTR("r_Attributes")) &&
             CFEqual(kSecUseNoAuthenticationUI, CFSTR("u_NoAuthUI")) &&
             CFEqual(kSecUseOperationPrompt, CFSTR("u_OpPrompt")) &&
+            CFEqual(kSecAttrAccessControl, CFSTR("accc")) &&
+            CFEqual(kSecAttrAuthenticationTypeHTTPBasic,
+                    CFSTR("http")) &&
+            CFEqual(kSecAttrCertificateEncoding, CFSTR("cenc")) &&
+            CFEqual(kSecAttrKeyTypeEC, CFSTR("73")) &&
+            CFEqual(kSecAttrProtocolFTP, CFSTR("ftp ")) &&
+            CFEqual(kSecAttrProtocolHTTP, CFSTR("http")) &&
+            CFEqual(kSecAttrProtocolHTTPS, CFSTR("htps")) &&
+            CFEqual(kSecAttrTokenIDSecureEnclave,
+                    CFSTR("com.apple.setoken")) &&
+            CFEqual(kSecMatchPolicy, CFSTR("m_Policy")) &&
+            CFEqual(kSecUseAuthenticationUIFail,
+                    CFSTR("u_AuthUIF")) &&
+            CFEqual(kSecPolicyAppleSSL,
+                    CFSTR("1.2.840.113635.100.1.3")) &&
+            CFEqual(kSecTrustEvaluationDate,
+                    CFSTR("TrustEvaluationDate")) &&
             CFEqual(kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA1,
                     CFSTR("algid:sign:RSA:digest-PKCS1v15:SHA1")) &&
             CFEqual(kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA256,
@@ -88,7 +105,13 @@ int main(void) {
             CFEqual(kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA384,
                     CFSTR("algid:sign:RSA:digest-PKCS1v15:SHA384")) &&
             CFEqual(kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA512,
-                    CFSTR("algid:sign:RSA:digest-PKCS1v15:SHA512"));
+                    CFSTR("algid:sign:RSA:digest-PKCS1v15:SHA512")) &&
+            CFEqual(kSecKeyAlgorithmECDSASignatureDigestX962SHA256,
+                    CFSTR("algid:sign:ECDSA:digest-X962:SHA256")) &&
+            CFEqual(kSecKeyAlgorithmRSAEncryptionOAEPSHA256,
+                    CFSTR("algid:encrypt:RSA:OAEP:SHA256")) &&
+            CFEqual(kSecKeyKeyExchangeParameterSharedInfo,
+                    CFSTR("sharedInfo"));
         passed &= report("security-constants", constantsValid, noErr);
 
         SecCertificateRef copiedCertificate =
