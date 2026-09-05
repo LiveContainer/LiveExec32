@@ -2032,7 +2032,8 @@ int guest_statfs64(u32 guest_path, u32 guest_buf) {
         return return_with_carry_direct(path_error, true);
     }
     struct statfs host_buf;
-    int result = syscallRetCarry(SYS_statfs, host_path, &host_buf, 0,0,0,0,0);
+    int result = syscallRetCarry(
+        SYS_statfs64, host_path, &host_buf, 0,0,0,0,0);
     if(result == 0) {
         Dynarmic_mem_1write(guest_buf, sizeof(struct statfs), (char *)&host_buf);
     }
@@ -2041,7 +2042,8 @@ int guest_statfs64(u32 guest_path, u32 guest_buf) {
 
 int guest_fstatfs64(int fildes, u32 guest_buf) {
     struct statfs host_buf;
-    int result = syscallRetCarry(SYS_fstatfs, fildes, &host_buf, 0,0,0,0,0);
+    int result = syscallRetCarry(
+        SYS_fstatfs64, fildes, &host_buf, 0,0,0,0,0);
     if(result == 0) {
         Dynarmic_mem_1write(guest_buf, sizeof(struct statfs), (char *)&host_buf);
     }

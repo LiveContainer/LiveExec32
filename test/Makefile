@@ -115,6 +115,7 @@ $(eval $(call lc32_test,lc32-native-pthread-smoke,native_pthread_smoke.c,))
 $(eval $(call lc32_test,lc32-recvfrom-abi,recvfrom_abi.c,))
 $(eval $(call lc32_test,lc32-setsockopt-abi,setsockopt_abi.c,))
 $(eval $(call lc32_test,lc32-socket-accept-abi,socket_accept_abi.c,))
+$(eval $(call lc32_test,lc32-statfs-abi,statfs_abi.c,))
 $(eval $(call lc32_test,lc32-sysctl-size-query,sysctl_size_query.c,))
 $(eval $(call lc32_test,lc32-vm-allocate-collision,vm_allocate_collision.c,))
 $(eval $(call lc32_test,lc32-vm-copy,vm_copy.c,))
@@ -157,6 +158,7 @@ $(eval $(call lc32_guest_test,lc32-coremedia-time-values,coremedia_time_values.c
 $(eval $(call lc32_guest_test,lc32-cxx-lifecycle,cxx_lifecycle.mm,Foundation UIKit LC32))
 $(eval $(call lc32_guest_test,lc32-data-bytes,data_bytes.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-fast-enumeration,fast_enumeration.m,Foundation))
+$(eval $(call lc32_guest_test,lc32-filesystem-capacity,filesystem_capacity.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-gamecontroller-snapshot,gamecontroller_snapshot.m,GameController Foundation CoreFoundation))
 $(eval $(call lc32_test,lc32-foundation-null-utf8,foundation_null_utf8.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-foundation-zone,foundation_zone.m,Foundation))
@@ -262,7 +264,7 @@ ABI_TESTS := \
   lc32-getsockopt-abi lc32-host-info lc32-kqueue-kevent lc32-lseek-abi \
   lc32-mremap-encrypted lc32-native-pthread-smoke lc32-recvfrom-abi \
   lc32-setsockopt-abi \
-  lc32-socket-accept-abi lc32-sysctl-size-query \
+  lc32-socket-accept-abi lc32-statfs-abi lc32-sysctl-size-query \
   lc32-vm-allocate-collision lc32-vm-copy
 AUDIO_TESTS := $(filter lc32-audio-%,$(TOOL_NAME))
 COREFOUNDATION_TESTS := $(filter lc32-corefoundation-%,$(TOOL_NAME))
