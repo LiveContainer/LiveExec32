@@ -56,26 +56,14 @@ const NSFileProtectionType NSFileProtectionNone = @"NSFileProtectionNone";
 const NSFileProtectionType NSFileProtectionComplete = @"NSFileProtectionComplete";
 const NSFileProtectionType NSFileProtectionCompleteUnlessOpen = @"NSFileProtectionCompleteUnlessOpen";
 const NSFileProtectionType NSFileProtectionCompleteUntilFirstUserAuthentication = @"NSFileProtectionCompleteUntilFirstUserAuthentication";
-const NSHTTPCookiePropertyKey NSHTTPCookieName = @"Name";
-const NSHTTPCookiePropertyKey NSHTTPCookieValue = @"Value";
-const NSHTTPCookiePropertyKey NSHTTPCookieDomain = @"Domain";
-const NSHTTPCookiePropertyKey NSHTTPCookiePath = @"Path";
-const NSHTTPCookiePropertyKey NSHTTPCookieSecure = @"Secure";
-const NSHTTPCookiePropertyKey NSHTTPCookieExpires = @"Expires";
 NSString * const NSProgressCategoryKey = @"NSProgressCategoryKey";
 NSString * const NSURLErrorFailingURLErrorKey = @"NSErrorFailingURLKey";
 NSString * const NSURLErrorFailingURLStringErrorKey =
     @"NSErrorFailingURLStringKey";
-NSString * const NSGregorianCalendar = @"gregorian";
-const NSLocaleKey NSLocaleIdentifier = @"kCFLocaleIdentifierKey";
-const NSLocaleKey NSLocaleCurrencySymbol = @"kCFLocaleCurrencySymbolKey";
-NSString * const NSFontAttributeName = @"NSFont";
 const NSStreamPropertyKey NSStreamDataWrittenToMemoryStreamKey =
     @"kCFStreamPropertyDataWritten";
 const NSStreamPropertyKey NSStreamFileCurrentOffsetKey =
     @"kCFStreamPropertyFileCurrentOffset";
-NSString * const NSURLAuthenticationMethodServerTrust =
-    @"NSURLAuthenticationMethodServerTrust";
 const NSKeyValueChangeKey NSKeyValueChangeKindKey = @"kind";
 const NSKeyValueChangeKey NSKeyValueChangeNewKey = @"new";
 const NSKeyValueChangeKey NSKeyValueChangeOldKey = @"old";
@@ -83,7 +71,6 @@ const NSKeyValueChangeKey NSKeyValueChangeIndexesKey = @"indexes";
 const NSKeyValueChangeKey NSKeyValueChangeNotificationIsPriorKey =
     @"notificationIsPrior";
 const NSExceptionName NSParseErrorException = @"NSParseErrorException";
-NSString * const NSDefaultRunLoopMode = @"kCFRunLoopDefaultMode";
 NSString * const NSUserDefaultsDidChangeNotification =
     @"NSUserDefaultsDidChangeNotification";
 NSString * const NSUserActivityTypeBrowsingWeb = @"NSUserActivityTypeBrowsingWeb";

@@ -11,6 +11,41 @@ work=$(mktemp -d "${TMPDIR:-/private/tmp}/lc32-corefoundation-low-risk.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
 cat > "$work/expected" <<'EOF'
+NSDefaultRunLoopMode
+NSGregorianCalendar
+NSLocaleCurrencySymbol
+NSLocaleIdentifier
+NSStreamDataWrittenToMemoryStreamKey
+NSStreamFileCurrentOffsetKey
+NSStreamSOCKSProxyConfigurationKey
+NSStreamSOCKSProxyHostKey
+NSStreamSOCKSProxyPasswordKey
+NSStreamSOCKSProxyPortKey
+NSStreamSOCKSProxyUserKey
+NSStreamSOCKSProxyVersion4
+NSStreamSOCKSProxyVersion5
+NSStreamSOCKSProxyVersionKey
+NSStreamSocketSecurityLevelKey
+NSStreamSocketSecurityLevelNegotiatedSSL
+NSStreamSocketSecurityLevelNone
+NSStreamSocketSecurityLevelSSLv2
+NSStreamSocketSecurityLevelSSLv3
+NSStreamSocketSecurityLevelTLSv1
+kCFStreamPropertySOCKSPassword
+kCFStreamPropertySOCKSProxy
+kCFStreamPropertySOCKSProxyHost
+kCFStreamPropertySOCKSProxyPort
+kCFStreamPropertySOCKSUser
+kCFStreamPropertySOCKSVersion
+kCFStreamPropertyShouldCloseNativeSocket
+kCFStreamPropertySocketSecurityLevel
+kCFStreamSocketSOCKSVersion4
+kCFStreamSocketSOCKSVersion5
+kCFStreamSocketSecurityLevelNegotiatedSSL
+kCFStreamSocketSecurityLevelNone
+kCFStreamSocketSecurityLevelSSLv2
+kCFStreamSocketSecurityLevelSSLv3
+kCFStreamSocketSecurityLevelTLSv1
 CFCopyHomeDirectoryURL
 CFAbsoluteTimeGetDayOfWeek
 CFAbsoluteTimeGetDayOfYear
@@ -174,8 +209,8 @@ if [ -s "$work/missing" ]; then
 fi
 
 expected_count=$(wc -l < "$work/expected" | tr -d ' ')
-if [ "$expected_count" -ne 135 ]; then
-    echo "CoreFoundation shortlist baseline changed: expected 135, got $expected_count" >&2
+if [ "$expected_count" -ne 170 ]; then
+    echo "CoreFoundation shortlist baseline changed: expected 170, got $expected_count" >&2
     exit 1
 fi
 

@@ -2,6 +2,70 @@
 // from Apple's iOS 10.3 CFNetwork image to preserve its legacy ABI.
 
 #import <CFNetwork/CFNetwork.h>
+#import <Foundation/Foundation+LC32.h>
+
+#include <stdint.h>
+
+/* Exporting the legacy ABI necessarily references deprecated declarations. */
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+
+#define LC32_CFNETWORK_OBJECT_CONSTANTS(X) \
+    X(NSHTTPCookieOriginURL) \
+    X(NSHTTPCookieVersion) \
+    X(NSHTTPCookieComment) \
+    X(NSHTTPCookieCommentURL) \
+    X(NSHTTPCookieDiscard) \
+    X(NSHTTPCookieMaximumAge) \
+    X(NSHTTPCookiePort) \
+    X(NSHTTPCookieManagerAcceptPolicyChangedNotification) \
+    X(NSHTTPCookieManagerCookiesChangedNotification) \
+    X(NSURLProtectionSpaceHTTP) \
+    X(NSURLProtectionSpaceHTTPS) \
+    X(NSURLProtectionSpaceFTP) \
+    X(NSURLProtectionSpaceHTTPProxy) \
+    X(NSURLProtectionSpaceHTTPSProxy) \
+    X(NSURLProtectionSpaceFTPProxy) \
+    X(NSURLProtectionSpaceSOCKSProxy) \
+    X(NSURLAuthenticationMethodDefault) \
+    X(NSURLAuthenticationMethodHTTPBasic) \
+    X(NSURLAuthenticationMethodHTTPDigest) \
+    X(NSURLAuthenticationMethodHTMLForm) \
+    X(NSURLAuthenticationMethodNTLM) \
+    X(NSURLAuthenticationMethodNegotiate) \
+    X(NSURLAuthenticationMethodClientCertificate) \
+    X(NSURLCredentialStorageChangedNotification) \
+    X(NSURLCredentialStorageRemoveSynchronizableCredentials) \
+    X(NSNetServicesErrorCode) \
+    X(NSNetServicesErrorDomain) \
+    X(NSURLSessionDownloadTaskResumeData)
+
+#define LC32_DECLARE_CFNETWORK_OBJECT_CONSTANT(name) \
+    LC32_CONST_STR_DECL(__typeof__(name) name)
+LC32_CFNETWORK_OBJECT_CONSTANTS(LC32_DECLARE_CFNETWORK_OBJECT_CONSTANT)
+#undef LC32_DECLARE_CFNETWORK_OBJECT_CONSTANT
+
+const NSHTTPCookiePropertyKey NSHTTPCookieName = @"Name";
+const NSHTTPCookiePropertyKey NSHTTPCookieValue = @"Value";
+const NSHTTPCookiePropertyKey NSHTTPCookieDomain = @"Domain";
+const NSHTTPCookiePropertyKey NSHTTPCookiePath = @"Path";
+const NSHTTPCookiePropertyKey NSHTTPCookieSecure = @"Secure";
+const NSHTTPCookiePropertyKey NSHTTPCookieExpires = @"Expires";
+NSString * const NSURLAuthenticationMethodServerTrust =
+    @"NSURLAuthenticationMethodServerTrust";
+
+const int64_t NSURLSessionTransferSizeUnknown = -1LL;
+const float NSURLSessionTaskPriorityDefault = 0.5f;
+const float NSURLSessionTaskPriorityLow = 0.0f;
+const float NSURLSessionTaskPriorityHigh = 1.0f;
+
+__attribute__((constructor))
+static void LC32InitializeCFNetworkObjectConstants(void) {
+#define LC32_INITIALIZE_CFNETWORK_OBJECT_CONSTANT(name) \
+    LC32_CONST_STR_INIT(name);
+    LC32_CFNETWORK_OBJECT_CONSTANTS(
+        LC32_INITIALIZE_CFNETWORK_OBJECT_CONSTANT)
+#undef LC32_INITIALIZE_CFNETWORK_OBJECT_CONSTANT
+}
 
 #define LC32_CFNETWORK_STRING(name, value) \
     const CFStringRef name = CFSTR(value)
@@ -75,28 +139,14 @@ LC32_CFNETWORK_STRING(kCFStreamPropertyHTTPSProxyHost, "HTTPSProxy");
 LC32_CFNETWORK_STRING(kCFStreamPropertyHTTPSProxyPort, "HTTPSPort");
 LC32_CFNETWORK_STRING(kCFStreamPropertyNoCellular, "kCFStreamPropertyNoCellular");
 LC32_CFNETWORK_STRING(kCFStreamPropertyProxyLocalBypass, "ExcludeSimpleHostnames");
-LC32_CFNETWORK_STRING(kCFStreamPropertySOCKSPassword, "kCFStreamPropertySOCKSPassword");
-LC32_CFNETWORK_STRING(kCFStreamPropertySOCKSProxy, "kCFStreamPropertySOCKSProxy");
-LC32_CFNETWORK_STRING(kCFStreamPropertySOCKSProxyHost, "SOCKSProxy");
-LC32_CFNETWORK_STRING(kCFStreamPropertySOCKSProxyPort, "SOCKSPort");
-LC32_CFNETWORK_STRING(kCFStreamPropertySOCKSUser, "kCFStreamPropertySOCKSUser");
-LC32_CFNETWORK_STRING(kCFStreamPropertySOCKSVersion, "kCFStreamPropertySOCKSVersion");
 LC32_CFNETWORK_STRING(kCFStreamPropertySSLContext, "kCFStreamPropertySSLContext");
 LC32_CFNETWORK_STRING(kCFStreamPropertySSLPeerCertificates, "kCFStreamPropertySSLPeerCertificates");
 LC32_CFNETWORK_STRING(kCFStreamPropertySSLPeerTrust, "kCFStreamPropertySSLPeerTrust");
-LC32_CFNETWORK_STRING(kCFStreamPropertyShouldCloseNativeSocket, "kCFStreamPropertyShouldCloseNativeSocket");
 LC32_CFNETWORK_STRING(kCFStreamPropertySocketExtendedBackgroundIdleMode, "kCFStreamPropertySocketExtendedBackgroundIdleMode");
 LC32_CFNETWORK_STRING(kCFStreamPropertySocketRemoteHost, "kCFStreamPropertySocketRemoteHost");
 LC32_CFNETWORK_STRING(kCFStreamPropertySocketRemoteNetService, "kCFStreamPropertySocketRemoteNetService");
-LC32_CFNETWORK_STRING(kCFStreamPropertySocketSecurityLevel, "kCFStreamPropertySocketSecurityLevel");
-LC32_CFNETWORK_STRING(kCFStreamSocketSOCKSVersion4, "kCFStreamSocketSOCKSVersion4");
-LC32_CFNETWORK_STRING(kCFStreamSocketSOCKSVersion5, "kCFStreamSocketSOCKSVersion5");
-LC32_CFNETWORK_STRING(kCFStreamSocketSecurityLevelNegotiatedSSL, "kCFStreamSocketSecurityLevelNegotiatedSSL");
-LC32_CFNETWORK_STRING(kCFStreamSocketSecurityLevelNone, "kCFStreamSocketSecurityLevelNone");
-LC32_CFNETWORK_STRING(kCFStreamSocketSecurityLevelSSLv2, "kCFStreamSocketSecurityLevelSSLv2");
-LC32_CFNETWORK_STRING(kCFStreamSocketSecurityLevelSSLv3, "kCFStreamSocketSecurityLevelSSLv3");
-LC32_CFNETWORK_STRING(kCFStreamSocketSecurityLevelTLSv1, "kCFStreamSocketSecurityLevelTLSv1");
 LC32_CFNETWORK_STRING(kCFURLErrorFailingURLErrorKey, "NSErrorFailingURLKey");
 LC32_CFNETWORK_STRING(kCFURLErrorFailingURLStringErrorKey, "NSErrorFailingURLStringKey");
 
 #undef LC32_CFNETWORK_STRING
+#undef LC32_CFNETWORK_OBJECT_CONSTANTS

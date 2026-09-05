@@ -9,6 +9,20 @@
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
 #define LC32_COREFOUNDATION_OBJECT_CONSTANTS(X) \
+    X(NSStreamSocketSecurityLevelKey) \
+    X(NSStreamSocketSecurityLevelNone) \
+    X(NSStreamSocketSecurityLevelSSLv2) \
+    X(NSStreamSocketSecurityLevelSSLv3) \
+    X(NSStreamSocketSecurityLevelTLSv1) \
+    X(NSStreamSocketSecurityLevelNegotiatedSSL) \
+    X(NSStreamSOCKSProxyConfigurationKey) \
+    X(NSStreamSOCKSProxyHostKey) \
+    X(NSStreamSOCKSProxyPortKey) \
+    X(NSStreamSOCKSProxyVersionKey) \
+    X(NSStreamSOCKSProxyUserKey) \
+    X(NSStreamSOCKSProxyPasswordKey) \
+    X(NSStreamSOCKSProxyVersion4) \
+    X(NSStreamSOCKSProxyVersion5) \
     X(kCFLocaleCurrentLocaleDidChangeNotification) \
     X(kCFLocaleIdentifier) \
     X(kCFLocaleLanguageCode) \

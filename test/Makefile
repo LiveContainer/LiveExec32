@@ -321,6 +321,7 @@ SHORT_TESTS := $(patsubst lc32-%,%,$(TOOL_NAME))
   check-generated-nonui-public-symbols \
   check-generated-ui-extension-symbols \
   check-generated-ui-media-public-symbols \
+  check-framework-symbol-ownership \
   check-foundation-public-symbols \
   check-foundation-runtime-symbols \
   check-corefoundation-low-risk-symbols corefoundation-low-risk-framework \
@@ -405,6 +406,9 @@ check-generated-ui-extension-symbols: frameworks
 check-generated-ui-media-public-symbols: frameworks
 	LC32_GUEST_SDK="$(ISYSROOT)" \
 		./generated_ui_media_public_symbols.sh "$(GUEST_FRAMEWORK_DIR)"
+check-framework-symbol-ownership: frameworks
+	GUEST_FRAMEWORK_DIR="$(GUEST_FRAMEWORK_DIR)" \
+		./framework_symbol_ownership.sh
 check-foundation-public-symbols: frameworks
 	LC32_GUEST_SDK="$(ISYSROOT)" ./foundation_public_symbols.sh \
 		"$(GUEST_FRAMEWORK_DIR)/Foundation.framework/Foundation"
@@ -427,6 +431,7 @@ check-symbols: frameworks check-openal check-opengles check-security check-coret
 	check-generated-ui-framework-symbols check-generated-public-symbols \
 	check-generated-legacy-public-symbols check-generated-nonui-public-symbols \
 	check-generated-ui-extension-symbols check-generated-ui-media-public-symbols \
+	check-framework-symbol-ownership \
 	check-foundation-public-symbols \
 	check-foundation-runtime-symbols \
 	check-corefoundation-low-risk-symbols check-coremedia-time-values

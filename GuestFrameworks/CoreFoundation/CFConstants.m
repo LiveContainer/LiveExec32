@@ -49,8 +49,28 @@ const CFStringRef kCFStreamPropertyShouldCloseNativeSocket =
     CFSTR("kCFStreamPropertyShouldCloseNativeSocket");
 const CFStreamPropertyKey kCFStreamPropertySocketNativeHandle =
     CFSTR("kCFStreamPropertySocketNativeHandle");
+const CFStringRef kCFStreamPropertySOCKSPassword =
+    CFSTR("kCFStreamPropertySOCKSPassword");
+const CFStringRef kCFStreamPropertySOCKSProxy =
+    CFSTR("kCFStreamPropertySOCKSProxy");
+const CFStringRef kCFStreamPropertySOCKSProxyHost = CFSTR("SOCKSProxy");
+const CFStringRef kCFStreamPropertySOCKSProxyPort = CFSTR("SOCKSPort");
+const CFStringRef kCFStreamPropertySOCKSUser =
+    CFSTR("kCFStreamPropertySOCKSUser");
+const CFStringRef kCFStreamPropertySOCKSVersion =
+    CFSTR("kCFStreamPropertySOCKSVersion");
+const CFStringRef kCFStreamPropertySocketSecurityLevel =
+    CFSTR("kCFStreamPropertySocketSecurityLevel");
+const CFStringRef kCFStreamSocketSOCKSVersion4 =
+    CFSTR("kCFStreamSocketSOCKSVersion4");
+const CFStringRef kCFStreamSocketSOCKSVersion5 =
+    CFSTR("kCFStreamSocketSOCKSVersion5");
 const CFStringRef kCFStreamSocketSecurityLevelNegotiatedSSL =
     CFSTR("kCFStreamSocketSecurityLevelNegotiatedSSL");
+const CFStringRef kCFStreamSocketSecurityLevelNone =
+    CFSTR("kCFStreamSocketSecurityLevelNone");
+const CFStringRef kCFStreamSocketSecurityLevelSSLv2 =
+    CFSTR("kCFStreamSocketSecurityLevelSSLv2");
 const CFStringRef kCFStreamSocketSecurityLevelSSLv3 =
     CFSTR("kCFStreamSocketSecurityLevelSSLv3");
 const CFStringRef kCFStreamSocketSecurityLevelTLSv1 =
@@ -116,11 +136,16 @@ NSString * const NSMallocException = @"NSMallocException";
 NSString * const NSRangeException = @"NSRangeException";
 NSString * const NSLocaleCountryCode = @"kCFLocaleCountryCodeKey";
 NSString * const NSLocaleCurrencyCode = @"currency";
+const NSLocaleKey NSLocaleCurrencySymbol = @"kCFLocaleCurrencySymbolKey";
 NSString * const NSLocaleIdentifier = @"kCFLocaleIdentifierKey";
 NSString * const NSLocaleLanguageCode = @"kCFLocaleLanguageCodeKey";
 NSNotificationName const NSCurrentLocaleDidChangeNotification =
     @"kCFLocaleCurrentLocaleDidChangeNotification";
 NSString * const NSRunLoopCommonModes = @"kCFRunLoopCommonModes";
+const NSStreamPropertyKey NSStreamDataWrittenToMemoryStreamKey =
+    @"kCFStreamPropertyDataWritten";
+const NSStreamPropertyKey NSStreamFileCurrentOffsetKey =
+    @"kCFStreamPropertyFileCurrentOffset";
 NSString * const NSURLIsExcludedFromBackupKey =
     @"NSURLIsExcludedFromBackupKey";
 

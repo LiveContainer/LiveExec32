@@ -4,6 +4,8 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 sdk=${LC32_GUEST_SDK:-"$repo_root/tmp/iPhoneOS10.3.sdk"}
 image=${1:-"$repo_root/GuestMakefile/.theos/obj/armv7s/Foundation.framework/Foundation"}
+framework_root=$(dirname -- "$(dirname -- "$image")")
+cfnetwork_image="$framework_root/CFNetwork.framework/CFNetwork"
 headers="$sdk/System/Library/Frameworks/Foundation.framework/Headers"
 tbd="$sdk/System/Library/Frameworks/Foundation.framework/Foundation.tbd"
 audit_dir=$(mktemp -d "${TMPDIR:-/tmp}/lc32-foundation-public.XXXXXX")
@@ -19,6 +21,10 @@ test -f "$tbd" || {
 }
 test -f "$image" || {
     echo "Foundation: missing built guest image at $image" >&2
+    exit 1
+}
+test -f "$cfnetwork_image" || {
+    echo "Foundation: missing reexported CFNetwork image at $cfnetwork_image" >&2
     exit 1
 }
 
@@ -46,8 +52,13 @@ grep -Ev '^_(NSCopyObject|NSDecimal(Add|Compact|Compare|Copy|Divide|Multiply|Mul
 comm -23 "$audit_dir/public" "$audit_dir/expected" \
     > "$audit_dir/excluded"
 
-nm -gU "$image" | awk '{print $NF}' | LC_ALL=C sort -u \
-    > "$audit_dir/actual"
+# iOS 10 Foundation publishes a set of CFNetwork-owned constants as indirect
+# aliases.  The guest models that relationship with LC_REEXPORT_DYLIB, whose
+# recursive exports are not enumerated by nm on the Foundation image alone.
+{
+    nm -gU "$image"
+    nm -gU "$cfnetwork_image"
+} | awk '{print $NF}' | LC_ALL=C sort -u > "$audit_dir/actual"
 comm -23 "$audit_dir/expected" "$audit_dir/actual" \
     > "$audit_dir/missing"
 

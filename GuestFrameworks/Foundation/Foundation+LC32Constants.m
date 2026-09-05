@@ -64,15 +64,6 @@
     X(NSFileHandleNotificationMonitorModes) \
     X(NSURLFileScheme) \
     X(NSUbiquityIdentityDidChangeNotification) \
-    X(NSHTTPCookieOriginURL) \
-    X(NSHTTPCookieVersion) \
-    X(NSHTTPCookieComment) \
-    X(NSHTTPCookieCommentURL) \
-    X(NSHTTPCookieDiscard) \
-    X(NSHTTPCookieMaximumAge) \
-    X(NSHTTPCookiePort) \
-    X(NSHTTPCookieManagerAcceptPolicyChangedNotification) \
-    X(NSHTTPCookieManagerCookiesChangedNotification) \
     X(NSUndefinedKeyException) \
     X(NSAverageKeyValueOperator) \
     X(NSCountKeyValueOperator) \
@@ -128,22 +119,6 @@
     X(NSWillBecomeMultiThreadedNotification) \
     X(NSDidBecomeSingleThreadedNotification) \
     X(NSThreadWillExitNotification) \
-    X(NSURLProtectionSpaceHTTP) \
-    X(NSURLProtectionSpaceHTTPS) \
-    X(NSURLProtectionSpaceFTP) \
-    X(NSURLProtectionSpaceHTTPProxy) \
-    X(NSURLProtectionSpaceHTTPSProxy) \
-    X(NSURLProtectionSpaceFTPProxy) \
-    X(NSURLProtectionSpaceSOCKSProxy) \
-    X(NSURLAuthenticationMethodDefault) \
-    X(NSURLAuthenticationMethodHTTPBasic) \
-    X(NSURLAuthenticationMethodHTTPDigest) \
-    X(NSURLAuthenticationMethodHTMLForm) \
-    X(NSURLAuthenticationMethodNTLM) \
-    X(NSURLAuthenticationMethodNegotiate) \
-    X(NSURLAuthenticationMethodClientCertificate) \
-    X(NSURLCredentialStorageChangedNotification) \
-    X(NSURLCredentialStorageRemoveSynchronizableCredentials) \
     X(NSErrorFailingURLStringKey) \
     X(NSURLErrorFailingURLPeerTrustErrorKey) \
     X(NSURLErrorBackgroundTaskCancelledReasonKey) \
@@ -248,8 +223,6 @@
     X(NSMetadataQueryUbiquitousDocumentsScope) \
     X(NSMetadataQueryUbiquitousDataScope) \
     X(NSMetadataQueryAccessibleUbiquitousExternalDocumentsScope) \
-    X(NSNetServicesErrorCode) \
-    X(NSNetServicesErrorDomain) \
     X(NSUbiquitousKeyValueStoreChangedKeysKey) \
     X(NSUndoManagerGroupIsDiscardableKey) \
     X(NSUndoManagerCheckpointNotification) \
@@ -259,18 +232,13 @@
     X(NSUndoManagerDidRedoChangeNotification) \
     X(NSUndoManagerDidOpenUndoGroupNotification) \
     X(NSUndoManagerWillCloseUndoGroupNotification) \
-    X(NSUndoManagerDidCloseUndoGroupNotification) \
-    X(NSURLSessionDownloadTaskResumeData)
+    X(NSUndoManagerDidCloseUndoGroupNotification)
 
 #define LC32_DECLARE_FOUNDATION_OBJECT_CONSTANT(name) \
     LC32_CONST_STR_DECL(__typeof__(name) name)
 LC32_FOUNDATION_OBJECT_CONSTANTS(LC32_DECLARE_FOUNDATION_OBJECT_CONSTANT)
 #undef LC32_DECLARE_FOUNDATION_OBJECT_CONSTANT
 
-const int64_t NSURLSessionTransferSizeUnknown = -1LL;
-const float NSURLSessionTaskPriorityDefault = 0.5f;
-const float NSURLSessionTaskPriorityLow = 0.0f;
-const float NSURLSessionTaskPriorityHigh = 1.0f;
 const double NSBundleResourceRequestLoadingPriorityUrgent = 1.0;
 
 __attribute__((constructor))
