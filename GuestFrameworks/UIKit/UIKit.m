@@ -209,6 +209,24 @@ static CGRect LC32HostScreenRect(UIScreen *screen, SEL selector) {
     return LC32GuestCGRect(hostResult);
 }
 
+static pthread_once_t LC32LegacyScreenCoordinatesOnce = PTHREAD_ONCE_INIT;
+static BOOL LC32UsesLegacyScreenCoordinates;
+
+static void LC32ResolveLegacyScreenCoordinates(void) {
+    const uint64_t getter = LC32Dlsym(
+        "LC32GetGuestExecutableSDKVersion", YES);
+    const uint32_t sdkVersion = getter
+        ? LC32InvokeHostCRet32(getter) : 0;
+    LC32UsesLegacyScreenCoordinates =
+        sdkVersion != 0 && sdkVersion < 0x00080000;
+}
+
+static BOOL LC32GuestUsesLegacyScreenCoordinates(void) {
+    pthread_once(&LC32LegacyScreenCoordinatesOnce,
+        LC32ResolveLegacyScreenCoordinates);
+    return LC32UsesLegacyScreenCoordinates;
+}
+
 static void LC32ResolveVoiceOverFunction(void) {
     LC32HostUIAccessibilityIsVoiceOverRunning =
         LC32Dlsym("UIAccessibilityIsVoiceOverRunning", YES);
@@ -669,6 +687,15 @@ compatibleWithTraitCollection:nil];
 
 - (CGRect)bounds {
     CGRect bounds = LC32HostScreenRect(self, _cmd);
+    /* Before iOS 8, UIScreen coordinates remained portrait-oriented.
+     * Legacy landscape apps transpose this size themselves, so undo modern
+     * UIKit's orientation-aware ordering while retaining point units. */
+    if(LC32GuestUsesLegacyScreenCoordinates() &&
+            bounds.size.width > bounds.size.height) {
+        const CGFloat width = bounds.size.width;
+        bounds.size.width = bounds.size.height;
+        bounds.size.height = width;
+    }
     if(LC32ScreenNeedsLegacyIPadCanvas(bounds)) {
         bounds = CGRectMake(0, 0, 768, 1024);
     }

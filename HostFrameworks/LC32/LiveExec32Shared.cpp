@@ -42,6 +42,10 @@ extern "C" void LC32ConfigureLegacyAppTransportSecurity(
 
 static uint32_t guestExecutableSDKVersion;
 
+extern "C" uint32_t LC32GetGuestExecutableSDKVersion(void) {
+    return guestExecutableSDKVersion;
+}
+
 static void InstallGuestTracepointsFromEnvironment() {
     const char *value = getenv("LC32_GUEST_TRACEPOINTS");
     if (value == nullptr || value[0] == '\0') {
