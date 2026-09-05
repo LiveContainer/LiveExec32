@@ -98,6 +98,7 @@ SecPolicyGetTypeID
 SecRandomCopyBytes
 SecTrustCopyCustomAnchorCertificates
 SecTrustCopyExceptions
+SecTrustCopyInfo
 SecTrustCopyPolicies
 SecTrustCopyProperties
 SecTrustCopyPublicKey
@@ -338,6 +339,7 @@ kSecTrustCertificateTransparency
 kSecTrustCertificateTransparencyWhiteList
 kSecTrustEvaluationDate
 kSecTrustExtendedValidation
+kSecTrustInfoExtendedValidationKey
 kSecTrustOrganizationName
 kSecTrustResultValue
 kSecTrustRevocationChecked

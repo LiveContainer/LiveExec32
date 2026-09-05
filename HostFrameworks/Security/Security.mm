@@ -7,6 +7,9 @@
 #include <cstddef>
 #include <cstdint>
 
+extern "C" CFDictionaryRef SecTrustCopyInfo(SecTrustRef trust)
+    __attribute__((weak_import));
+
 namespace {
 
 static_assert(sizeof(LC32SecurityCall) == 32,
@@ -86,6 +89,11 @@ OSStatus CallItemUpdate(CFDictionaryRef query,
     return SecItemUpdate(query, attributes);
 }
 
+CFDictionaryRef CallTrustCopyInfo(SecTrustRef trust) {
+    SecurityHostCallQuiescence quiescence;
+    return SecTrustCopyInfo(trust);
+}
+
 u32 FinishOwnedResult(OSStatus &status, CFTypeRef nativeResult) {
     if(status != errSecSuccess) {
         if(nativeResult) CFRelease(nativeResult);
@@ -142,6 +150,18 @@ u32 LC32_Security_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
                         SlotHostObject<CFDictionaryRef>(call, 1));
                 }
                 break;
+            case LC32SecurityOpTrustCopyInfo: {
+                if(!RequireSlots(call, 1)) break;
+                if(!SecTrustCopyInfo) {
+                    status = errSecUnimplemented;
+                    break;
+                }
+                status = errSecSuccess;
+                CFDictionaryRef nativeResult = CallTrustCopyInfo(
+                    SlotHostObject<SecTrustRef>(call, 0));
+                guestResult = FinishOwnedResult(status, nativeResult);
+                break;
+            }
         }
     }
 

@@ -164,6 +164,24 @@ OSStatus SecItemUpdate(CFDictionaryRef query,
     return status;
 }
 
+/* Private Security SPI used by legacy receipt-validation code. */
+CFDictionaryRef SecTrustCopyInfo(SecTrustRef trust) {
+    if(!trust) return NULL;
+
+    OSStatus status = errSecUnimplemented;
+    const uint32_t guestResult = LC32_SECURITY_CALL(
+        LC32SecurityOpTrustCopyInfo, &status,
+        LC32_SECURITY_HOST(trust));
+    if(status == errSecSuccess) {
+        return (CFDictionaryRef)(uintptr_t)guestResult;
+    }
+    if(guestResult) {
+        /* Balance a host Copy result if status copyout did not succeed. */
+        CFRelease((CFTypeRef)(uintptr_t)guestResult);
+    }
+    return NULL;
+}
+
 /*
  * SecureTransport cannot be forwarded by pointer: SSLSetIOFuncs receives
  * ARM32 callbacks and an opaque guest connection token.  Export the legacy

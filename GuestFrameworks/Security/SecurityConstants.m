@@ -143,6 +143,9 @@ LC32_SECURITY_STRING(kSecTrustCertificateTransparency,
 LC32_SECURITY_STRING(kSecTrustCertificateTransparencyWhiteList,
                      "TrustCertificateTransparencyWhiteList");
 LC32_SECURITY_STRING(kSecTrustEvaluationDate, "TrustEvaluationDate");
+/* Private key returned by SecTrustCopyInfo on iOS 10.3.3. */
+LC32_SECURITY_STRING(kSecTrustInfoExtendedValidationKey,
+                     "ExtendedValidation");
 LC32_SECURITY_STRING(kSecTrustExtendedValidation,
                      "TrustExtendedValidation");
 LC32_SECURITY_STRING(kSecTrustOrganizationName, "Organization");

@@ -26,6 +26,8 @@ extern CFDataRef SecKeyCopyModulus(SecKeyRef key);
 extern CFIndex SecKeyGetAlgorithmId(SecKeyRef key);
 extern OSStatus SecTrustSetSignedCertificateTimestamps(
     SecTrustRef trust, CFArrayRef sctArray);
+extern CFDictionaryRef SecTrustCopyInfo(SecTrustRef trust);
+extern const CFStringRef kSecTrustInfoExtendedValidationKey;
 
 static int report(const char *name, BOOL passed, OSStatus status) {
     printf("%s: %s (%d)\n", name, passed ? "PASS" : "FAIL",
@@ -98,6 +100,8 @@ int main(void) {
                     CFSTR("1.2.840.113635.100.1.3")) &&
             CFEqual(kSecTrustEvaluationDate,
                     CFSTR("TrustEvaluationDate")) &&
+            CFEqual(kSecTrustInfoExtendedValidationKey,
+                    CFSTR("ExtendedValidation")) &&
             CFEqual(kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA1,
                     CFSTR("algid:sign:RSA:digest-PKCS1v15:SHA1")) &&
             CFEqual(kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA256,
@@ -151,6 +155,7 @@ int main(void) {
         const OSStatus ocspStatus = SecTrustSetOCSPResponse(NULL, NULL);
         const OSStatus sctStatus =
             SecTrustSetSignedCertificateTimestamps(NULL, NULL);
+        const CFDictionaryRef trustInfo = SecTrustCopyInfo(NULL);
 
         const BOOL failureStubsValid =
             createdCertificate == NULL &&
@@ -169,7 +174,7 @@ int main(void) {
             sslPolicy == NULL && policyType == 0 &&
             evaluateAsyncStatus == errSecUnimplemented &&
             trustType == 0 && ocspStatus == errSecUnimplemented &&
-            sctStatus == errSecUnimplemented;
+            sctStatus == errSecUnimplemented && trustInfo == NULL;
         passed &= report("security-failure-stubs", failureStubsValid,
             noErr);
 
