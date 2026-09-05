@@ -134,6 +134,9 @@ kern_return_t guest_mk_timer_cancel(mach_port_name_t timer,
                                     u32 guest_result_time);
 kern_return_t guest__kernelrpc_mach_vm_allocate_trap(
     u32 target, u32 guest_address, mach_vm_size_t size, int flags);
+kern_return_t guest__kernelrpc_mach_vm_purgable_control_trap(
+    mach_port_name_t target, mach_vm_offset_t guest_address,
+    vm_purgable_t control, u32 guest_state);
 kern_return_t guest__kernelrpc_mach_port_construct_trap(
     mach_port_name_t target, u32 guest_options, u64 context, u32 guest_name);
 kern_return_t guest__kernelrpc_mach_port_allocate_trap(

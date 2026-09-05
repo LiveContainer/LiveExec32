@@ -119,6 +119,7 @@ $(eval $(call lc32_test,lc32-statfs-abi,statfs_abi.c,))
 $(eval $(call lc32_test,lc32-sysctl-size-query,sysctl_size_query.c,))
 $(eval $(call lc32_test,lc32-vm-allocate-collision,vm_allocate_collision.c,))
 $(eval $(call lc32_test,lc32-vm-copy,vm_copy.c,))
+$(eval $(call lc32_test,lc32-vm-purgable,vm_purgable.c,))
 
 # AudioToolbox.
 $(eval $(call lc32_guest_test,lc32-audio-file-create-packets,audio_file_create_packets.c,AudioToolbox CoreFoundation LC32))

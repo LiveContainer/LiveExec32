@@ -1273,6 +1273,15 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
             case -12:
                 cpu->Regs()[0] = guest__kernelrpc_mach_vm_deallocate_trap(cpu->Regs()[0], cpu->Regs()[1] | ((u64)cpu->Regs()[2] << 32), cpu->Regs()[3] | ((u64)cpu->Regs()[4] << 32));
                 break;
+            case -11: // _kernelrpc_mach_vm_purgable_control_trap
+                cpu->Regs()[0] =
+                    guest__kernelrpc_mach_vm_purgable_control_trap(
+                        cpu->Regs()[0],
+                        cpu->Regs()[1] |
+                            (static_cast<u64>(cpu->Regs()[2]) << 32),
+                        static_cast<vm_purgable_t>(cpu->Regs()[3]),
+                        cpu->Regs()[4]);
+                break;
             case -10:
                 cpu->Regs()[0] = guest__kernelrpc_mach_vm_allocate_trap(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2] | ((u64)cpu->Regs()[3] << 32), cpu->Regs()[4]);
                 break;

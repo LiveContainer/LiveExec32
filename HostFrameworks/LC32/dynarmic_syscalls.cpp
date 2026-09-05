@@ -4,6 +4,36 @@
 
 #include <poll.h>
 
+/* Darwin keeps some record-lock fcntl commands as SPI, so public SDKs may
+ * omit their names even though the syscall ABI remains available. */
+#ifndef F_SETLKWTIMEOUT
+#define F_SETLKWTIMEOUT 10
+#endif
+#ifndef F_GETLKPID
+#define F_GETLKPID 66
+#endif
+#ifndef F_OFD_SETLK
+#define F_OFD_SETLK 90
+#endif
+#ifndef F_OFD_SETLKW
+#define F_OFD_SETLKW 91
+#endif
+#ifndef F_OFD_GETLK
+#define F_OFD_GETLK 92
+#endif
+#ifndef F_OFD_SETLKWTIMEOUT
+#define F_OFD_SETLKWTIMEOUT 93
+#endif
+#ifndef F_OFD_GETLKPID
+#define F_OFD_GETLKPID 94
+#endif
+#ifndef F_SETCONFINED
+#define F_SETCONFINED 95
+#endif
+#ifndef F_GETCONFINED
+#define F_GETCONFINED 96
+#endif
+
 extern "C" kern_return_t host_get_io_main(
     host_t host, io_main_t *io_main) __attribute__((weak_import));
 extern "C" kern_return_t host_get_io_master(
@@ -4200,6 +4230,114 @@ int guest_mprotect(u32 guest_addr, size_t len, int prot) {
     return result;
 }
 
+/* The armv7 flock layout is 24 bytes.  Spell it out rather than passing the
+ * guest object through as struct flock: that happens to have the same layout
+ * today, while the adjacent timespec grows from 8 to 16 bytes on arm64. */
+struct GuestFlock {
+    int64_t start;
+    int64_t length;
+    int32_t pid;
+    int16_t type;
+    int16_t whence;
+};
+
+struct GuestFlockTimeout {
+    GuestFlock lock;
+    timespec_32 timeout;
+};
+
+struct HostFlockTimeout {
+    struct flock lock;
+    struct timespec timeout;
+};
+
+static_assert(sizeof(GuestFlock) == 24,
+    "unexpected armv7 flock layout");
+static_assert(sizeof(GuestFlockTimeout) == 32,
+    "unexpected armv7 flocktimeout layout");
+static_assert(offsetof(GuestFlockTimeout, timeout) == 24,
+    "unexpected armv7 flocktimeout padding");
+
+static struct flock HostFlockFromGuest(const GuestFlock &guest) {
+    struct flock host = {};
+    host.l_start = guest.start;
+    host.l_len = guest.length;
+    host.l_pid = guest.pid;
+    host.l_type = guest.type;
+    host.l_whence = guest.whence;
+    return host;
+}
+
+static GuestFlock GuestFlockFromHost(const struct flock &host) {
+    return {
+        host.l_start,
+        host.l_len,
+        host.l_pid,
+        host.l_type,
+        host.l_whence,
+    };
+}
+
+static int GuestFcntlSetLock(
+        int fildes, int command, u32 guestArgument) {
+    const bool hasTimeout = command == F_SETLKWTIMEOUT ||
+        command == F_OFD_SETLKWTIMEOUT;
+    GuestFlock guestLock = {};
+    HostFlockTimeout hostTimeout = {};
+    void *hostArgument = &hostTimeout.lock;
+
+    if(hasTimeout) {
+        GuestFlockTimeout guestTimeout = {};
+        if(!read_guest_memory_with_permissions(
+                guestArgument, &guestTimeout, sizeof(guestTimeout),
+                PROT_READ)) {
+            return return_with_carry_direct(EFAULT, true);
+        }
+        guestLock = guestTimeout.lock;
+        hostTimeout.timeout.tv_sec = guestTimeout.timeout.tv_sec;
+        hostTimeout.timeout.tv_nsec = guestTimeout.timeout.tv_nsec;
+    } else if(!read_guest_memory_with_permissions(
+            guestArgument, &guestLock, sizeof(guestLock), PROT_READ)) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+    hostTimeout.lock = HostFlockFromGuest(guestLock);
+
+    const auto invoke = [&] {
+        return syscallRetCarry(
+            SYS_fcntl, fildes, command, hostArgument,
+            0, 0, 0, 0);
+    };
+    if(command == F_SETLKW || command == F_SETLKWTIMEOUT ||
+            command == F_OFD_SETLKW ||
+            command == F_OFD_SETLKWTIMEOUT) {
+        return debugger_aware_host_wait(
+            invoke, return_with_carry_direct(EINTR, true));
+    }
+    return invoke();
+}
+
+static int GuestFcntlGetLock(
+        int fildes, int command, u32 guestArgument) {
+    GuestFlock guestLock = {};
+    if(!read_guest_memory_with_permissions(
+            guestArgument, &guestLock, sizeof(guestLock), PROT_READ)) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+
+    struct flock hostLock = HostFlockFromGuest(guestLock);
+    const int result = syscallRetCarry(
+        SYS_fcntl, fildes, command, &hostLock,
+        0, 0, 0, 0);
+    if(threadHandle.cpsr->hasCarry()) return result;
+
+    guestLock = GuestFlockFromHost(hostLock);
+    if(!write_guest_memory_with_permissions(
+            guestArgument, &guestLock, sizeof(guestLock), PROT_WRITE)) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+    return result;
+}
+
 int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
     switch (cmd) {
         // r2 is null or is a literal
@@ -4229,7 +4367,21 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
         case F_SETOWN:
         case F_RDAHEAD:
         case F_NOCACHE:
+        case F_SETCONFINED:
+        case F_GETCONFINED:
             return syscallRetCarry(SYS_fcntl, fildes, cmd, guest_r2, 0,0,0,0);
+        case F_SETLK:
+        case F_SETLKW:
+        case F_SETLKWTIMEOUT:
+        case F_OFD_SETLK:
+        case F_OFD_SETLKW:
+        case F_OFD_SETLKWTIMEOUT:
+            return GuestFcntlSetLock(fildes, cmd, guest_r2);
+        case F_GETLK:
+        case F_GETLKPID:
+        case F_OFD_GETLK:
+        case F_OFD_GETLKPID:
+            return GuestFcntlGetLock(fildes, cmd, guest_r2);
         case F_FULLFSYNC:
             return debugger_aware_host_wait(
                 [&] {
@@ -4494,18 +4646,19 @@ kern_return_t guest__kernelrpc_mach_vm_allocate_trap(u32 target, u32 guest_addre
 
     const bool anywhere = (flags & VM_FLAGS_ANYWHERE) != 0;
     const bool overwrite = (flags & VM_FLAGS_OVERWRITE) != 0;
-    const u32 suppliedAddress =
-        Dynarmic_current_user_callbacks()->MemoryRead32(guest_address);
-    if (anywhere) {
-        // Sometimes the address pointer will contain garbage value, change it to 0
-        Dynarmic_current_user_callbacks()->MemoryWrite32(
-            guest_address, 0);
+    uint64_t suppliedAddress = 0;
+    if (!read_guest_memory_with_permissions(
+            guest_address, &suppliedAddress,
+            sizeof(suppliedAddress), PROT_READ)) {
+        return KERN_INVALID_ADDRESS;
     }
 
     if (size == 0) {
-        Dynarmic_current_user_callbacks()->MemoryWrite32(
-            guest_address, 0);
-        return KERN_SUCCESS;
+        suppliedAddress = 0;
+        return write_guest_memory_with_permissions(
+                guest_address, &suppliedAddress,
+                sizeof(suppliedAddress), PROT_WRITE)
+            ? KERN_SUCCESS : KERN_INVALID_ADDRESS;
     }
     if (size > UINT64_MAX - DYN_PAGE_MASK) {
         return KERN_NO_SPACE;
@@ -4513,12 +4666,14 @@ kern_return_t guest__kernelrpc_mach_vm_allocate_trap(u32 target, u32 guest_addre
 
     const u64 allocationSize =
         (size + DYN_PAGE_MASK) & ~u64(DYN_PAGE_MASK);
-    const u32 requestedAddress = anywhere ? 0 :
-        suppliedAddress & ~u32(DYN_PAGE_MASK);
+    const u64 requestedAddress64 = anywhere ? 0 :
+        suppliedAddress & ~u64(DYN_PAGE_MASK);
     if (!GuestAddressRangeIsValid32(
-            requestedAddress, allocationSize)) {
+            requestedAddress64, allocationSize)) {
         return KERN_NO_SPACE;
     }
+    const u32 requestedAddress =
+        static_cast<u32>(requestedAddress64);
 
     u32 result;
     if (!anywhere && !overwrite) {
@@ -4537,21 +4692,86 @@ kern_return_t guest__kernelrpc_mach_vm_allocate_trap(u32 target, u32 guest_addre
             requestedAddress, allocationSize,
             PROT_READ | PROT_WRITE,
             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
-            -1, 0);
+            -1, 0, DYN_PAGE_MASK,
+            (flags & VM_FLAGS_PURGABLE) != 0);
     } else {
         result = Dynarmic_mmap(
             requestedAddress, allocationSize,
             PROT_READ | PROT_WRITE,
             MAP_PRIVATE | MAP_ANONYMOUS |
                 (anywhere ? 0 : MAP_FIXED),
-            -1, 0);
+            -1, 0, DYN_PAGE_MASK,
+            (flags & VM_FLAGS_PURGABLE) != 0);
     }
     if (result == -1) {
         return KERN_NO_SPACE;
     }
-    Dynarmic_current_user_callbacks()->MemoryWrite32(
-        guest_address, result);
-    return KERN_SUCCESS;
+    const uint64_t resultAddress = result;
+    return write_guest_memory_with_permissions(
+            guest_address, &resultAddress,
+            sizeof(resultAddress), PROT_WRITE)
+        ? KERN_SUCCESS : KERN_INVALID_ADDRESS;
+}
+
+kern_return_t guest__kernelrpc_mach_vm_purgable_control_trap(
+        mach_port_name_t target, mach_vm_offset_t guest_address,
+        vm_purgable_t control, u32 guest_state) {
+    if (target != mach_task_self()) {
+        return MACH_SEND_INVALID_DEST;
+    }
+
+    int state = 0;
+    if (!read_guest_memory_with_permissions(
+            guest_state, &state, sizeof(state), PROT_READ)) {
+        return KERN_INVALID_ADDRESS;
+    }
+    if (control != VM_PURGABLE_SET_STATE &&
+            control != VM_PURGABLE_GET_STATE &&
+            control != VM_PURGABLE_PURGE_ALL) {
+        return KERN_INVALID_ARGUMENT;
+    }
+
+    kern_return_t result = KERN_FAILURE;
+    if (control == VM_PURGABLE_PURGE_ALL) {
+        /* XNU ignores the address for this process-wide operation.  In
+         * particular, callers are permitted to pass zero or a value that is
+         * not a mapped guest address. */
+        result = _kernelrpc_mach_vm_purgable_control_trap(
+            mach_task_self(), 0, control, &state);
+    } else {
+        if (guest_address > UINT32_MAX) {
+            return KERN_INVALID_ADDRESS;
+        }
+
+        std::lock_guard<std::recursive_mutex> lock(guestVmMutex);
+        const u64 guestPageAddress =
+            guest_address & ~u64(DYN_PAGE_MASK);
+        khash_t(memory) *memory = sharedHandle.memory;
+        if (memory == nullptr) {
+            return KERN_INVALID_ADDRESS;
+        }
+        const khiter_t iterator = kh_get(
+            memory, memory, guestPageAddress);
+        if (iterator == kh_end(memory)) {
+            return KERN_INVALID_ADDRESS;
+        }
+        const t_memory_page page = kh_value(memory, iterator);
+        if (page == nullptr || page->addr == nullptr) {
+            return KERN_INVALID_ADDRESS;
+        }
+
+        const mach_vm_address_t hostAddress =
+            reinterpret_cast<mach_vm_address_t>(page->addr) +
+            (guest_address & DYN_PAGE_MASK);
+        result = _kernelrpc_mach_vm_purgable_control_trap(
+            mach_task_self(), hostAddress, control, &state);
+    }
+    if (result == KERN_SUCCESS &&
+            !write_guest_memory_with_permissions(
+                guest_state, &state, sizeof(state), PROT_WRITE)) {
+        result = KERN_INVALID_ADDRESS;
+    }
+    return result;
 }
 
 kern_return_t guest__kernelrpc_mach_port_construct_trap(mach_port_name_t target, u32 guest_options, u64 context, u32 guest_name) {
@@ -4577,20 +4797,37 @@ kern_return_t guest__kernelrpc_mach_vm_map_trap(mach_port_name_t target, u32 gue
     if (target != mach_task_self()) {
         return KERN_FAILURE;
     }
-    bool anywhere = (flags & VM_FLAGS_ANYWHERE) != 0;
+    uint64_t suppliedAddress = 0;
+    if (!read_guest_memory_with_permissions(
+            guest_address, &suppliedAddress,
+            sizeof(suppliedAddress), PROT_READ)) {
+        return KERN_INVALID_ADDRESS;
+    }
+
+    const bool anywhere = (flags & VM_FLAGS_ANYWHERE) != 0;
     if (!anywhere) {
         printf("LC32: BackendException: _kernelrpc_mach_vm_map_trap fixed\n");
         return KERN_FAILURE;
     }
+    /* VM_FLAGS_ANYWHERE ignores the in/out address's initial value, but the
+     * full mach_vm_offset_t still has to be copied in to validate its guest
+     * memory range. */
+    suppliedAddress = 0;
     u32 result = Dynarmic_mmap(
-        Dynarmic_current_user_callbacks()->MemoryRead32(guest_address),
+        static_cast<u32>(suppliedAddress),
         size, cur_protection, MAP_PRIVATE | MAP_ANONYMOUS,
-        -1, 0, mask ?: DYN_PAGE_MASK);
+        -1, 0, mask ?: DYN_PAGE_MASK,
+        (flags & VM_FLAGS_PURGABLE) != 0);
     if (result == -1) {
         return KERN_NO_SPACE;
     }
-    Dynarmic_current_user_callbacks()->MemoryWrite32(
-        guest_address, result);
+    const uint64_t resultAddress = result;
+    if (!write_guest_memory_with_permissions(
+            guest_address, &resultAddress,
+            sizeof(resultAddress), PROT_WRITE)) {
+        (void)Dynarmic_munmap(result, size);
+        return KERN_INVALID_ADDRESS;
+    }
     return KERN_SUCCESS;
 }
 

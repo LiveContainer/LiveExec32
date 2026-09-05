@@ -386,6 +386,47 @@ static LC32SelectorValueStorage *LC32RetainedStorageForHostValue(id value) {
     return storage;
 }
 
+/*
+ * Publish the ARM32 representation alongside the native NSValue.  Native
+ * Foundation stores pointers and selectors at the host width, while callers
+ * of -getValue: have allocated only the width described by the guest SDK.
+ */
+static id LC32InstallGuestValueStorage(id value, const void *bytes,
+                                       uint32_t guestSize,
+                                       uint32_t hostSize,
+                                       const char *type) {
+    if(!value || !bytes || !guestSize || !hostSize || !type || !*type) {
+        return nil;
+    }
+
+    LC32SelectorValueStorage *storage = [LC32SelectorValueStorage new];
+    storage->_bytes = malloc(guestSize);
+    if(!storage->_bytes) {
+        [storage release];
+        CRSetCrashLogMessage(
+            "LC32: could not allocate NSValue storage");
+        return nil;
+    }
+    storage->_capacity = guestSize;
+    storage->_hostCapacity = hostSize;
+    storage->_typeEncoding = strdup(type);
+    if(!storage->_typeEncoding) {
+        free(storage->_bytes);
+        storage->_bytes = NULL;
+        storage->_capacity = 0;
+        [storage release];
+        CRSetCrashLogMessage(
+            "LC32: could not allocate NSValue type encoding");
+        return nil;
+    }
+    memcpy(storage->_bytes, bytes, guestSize);
+    LC32SelectorValueStorage *installed =
+        LC32InstallSelectorStorageIfAbsent(value, storage);
+    [installed release];
+    [storage release];
+    return LC32ReturnBorrowedGuestObject(value);
+}
+
 @implementation NSValue (LC32Bytes)
 
 + (instancetype)valueWithBytes:(const void *)bytes
@@ -441,38 +482,29 @@ static LC32SelectorValueStorage *LC32RetainedStorageForHostValue(id value) {
     LC32GuestToHostCStringFree(hostType);
     free(hostValueStorage);
     if(!result) return nil;
-
-    LC32SelectorValueStorage *storage = [LC32SelectorValueStorage new];
-    storage->_bytes = malloc(guestValueSize);
-    if(!storage->_bytes) {
-        [storage release];
-        CRSetCrashLogMessage(
-            "LC32: could not allocate NSValue storage");
-        return nil;
-    }
-    storage->_capacity = guestValueSize;
-    storage->_hostCapacity = hostValueSize;
-    storage->_typeEncoding = strdup(unqualifiedType);
-    if(!storage->_typeEncoding) {
-        free(storage->_bytes);
-        storage->_bytes = NULL;
-        storage->_capacity = 0;
-        [storage release];
-        CRSetCrashLogMessage(
-            "LC32: could not allocate NSValue type encoding");
-        return nil;
-    }
-    memcpy(storage->_bytes, bytes, guestValueSize);
-    LC32SelectorValueStorage *installed =
-        LC32InstallSelectorStorageIfAbsent(result, storage);
-    [installed release];
-    [storage release];
-    return LC32ReturnBorrowedGuestObject(result);
+    return LC32InstallGuestValueStorage(
+        result, bytes, guestValueSize, hostValueSize, unqualifiedType);
 }
 
 + (instancetype)value:(const void *)value
           withObjCType:(const char *)type {
     return [self valueWithBytes:value objCType:type];
+}
+
++ (instancetype)valueWithPointer:(const void *)pointer {
+    /* NSValue treats this as an opaque token, so zero-extension is sufficient
+     * for the native box.  Preserve the original guest-width representation
+     * for -pointerValue and -getValue: rather than exposing host pointer width
+     * to the guest. */
+    const uint32_t guestPointer = (uint32_t)(uintptr_t)pointer;
+    static uint64_t hostCommand __attribute__((aligned(8)));
+    const uint64_t command = LC32CachedHostSelector(
+        &hostCommand, _cmd, NO);
+    id result = LC32InvokeHostObjectSelector(
+        self.host_self, command, (uint64_t)guestPointer, (uint64_t)0);
+    return LC32InstallGuestValueStorage(
+        result, &guestPointer, sizeof(guestPointer), sizeof(uint64_t),
+        @encode(void *));
 }
 
 - (void)getValue:(void *)value {
@@ -565,6 +597,37 @@ static LC32SelectorValueStorage *LC32RetainedStorageForHostValue(id value) {
     const char *type = storage->_typeEncoding;
     [storage release];
     return type;
+}
+
+- (void *)pointerValue {
+    LC32SelectorValueStorage *storage =
+        LC32RetainedSelectorStorage(self);
+    const char *type = storage
+        ? LC32UnqualifiedValueType(storage->_typeEncoding)
+        : NULL;
+    if(type && (*type == '^' || *type == '*') &&
+            storage->_bytes &&
+            storage->_capacity >= sizeof(uint32_t)) {
+        uint32_t guestPointer = 0;
+        memcpy(&guestPointer, storage->_bytes, sizeof(guestPointer));
+        [storage release];
+        return (void *)(uintptr_t)guestPointer;
+    }
+    [storage release];
+
+    /* A native-created NSValue can be returned to the guest as well.  Only
+     * opaque values representable in the ARM32 address space are safe to
+     * expose; never silently truncate an actual ARM64 address. */
+    static uint64_t hostSelector __attribute__((aligned(8)));
+    const uint64_t selector = LC32CachedHostSelector(
+        &hostSelector, _cmd, NO);
+    const uint64_t hostPointer = LC32InvokeHostSelector(
+        self.host_self, selector, (uint64_t)0);
+    if(hostPointer != (uint64_t)(uint32_t)hostPointer) {
+        LC32RejectUnsupportedValueType("pointerValue", @encode(void *));
+        return NULL;
+    }
+    return (void *)(uintptr_t)(uint32_t)hostPointer;
 }
 
 @end

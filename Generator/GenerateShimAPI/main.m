@@ -833,10 +833,12 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
         if(!method.isInstanceMethod) {
             return [selector isEqualToString:
                         @"valueWithBytes:objCType:"] ||
-                   [selector isEqualToString:@"value:withObjCType:"];
+                   [selector isEqualToString:@"value:withObjCType:"] ||
+                   [selector isEqualToString:@"valueWithPointer:"];
         }
         return [selector isEqualToString:@"getValue:"] ||
-               [selector isEqualToString:@"objCType"];
+               [selector isEqualToString:@"objCType"] ||
+               [selector isEqualToString:@"pointerValue"];
     }
     if(method.isInstanceMethod && [selector isEqualToString:
             @"countByEnumeratingWithState:objects:count:"]) {
@@ -856,6 +858,25 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
        [selector isEqualToString:@"predicateWithFormat:"]) {
         return YES;
     }
+    if([className isEqualToString:@"NSNotificationCenter"] &&
+       method.isInstanceMethod &&
+       [selector isEqualToString:
+           @"addObserverForName:object:queue:usingBlock:"]) {
+        /* Some legacy Apple LLVM compilers set BLOCK_HAS_SIGNATURE while
+         * leaving the descriptor's signature pointer null.  The manual
+         * adapter gives this callback a modern, typed wrapper before it
+         * crosses the guest/host block bridge. */
+        return YES;
+    }
+    if([className isEqualToString:@"UIApplication"] &&
+       method.isInstanceMethod &&
+       [selector isEqualToString:
+           @"beginBackgroundTaskWithExpirationHandler:"]) {
+        /* Legacy Apple LLVM can likewise omit the advertised signature for
+         * this API's void(void) expiration callback.  Its manual adapter
+         * wraps that callback in a block whose ABI is known to LC32. */
+        return YES;
+    }
     if([className isEqualToString:@"NSBundle"] &&
        !method.isInstanceMethod &&
        [selector isEqualToString:@"mainBundle"]) {
@@ -866,9 +887,26 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
        ([selector isEqualToString:@"setAuthenticateHandler:"] ||
         [selector isEqualToString:@"isAuthenticated"] ||
         [selector isEqualToString:
+            @"authenticateWithCompletionHandler:"] ||
+        [selector isEqualToString:
             @"loadDefaultLeaderboardCategoryIDWithCompletionHandler:"] ||
         [selector isEqualToString:
             @"loadDefaultLeaderboardIdentifierWithCompletionHandler:"])) {
+        return YES;
+    }
+    if(method.isInstanceMethod &&
+       (([className isEqualToString:@"GKAchievement"] &&
+         [selector isEqualToString:
+             @"reportAchievementWithCompletionHandler:"]) ||
+        ([className isEqualToString:@"GKMatchmaker"] &&
+         [selector isEqualToString:@"setInviteHandler:"]) ||
+        ([className isEqualToString:@"GKVoiceChat"] &&
+         [selector isEqualToString:
+             @"setPlayerStateUpdateHandler:"]))) {
+        /* A few GameKit callbacks in early games use the same null-signature
+         * block descriptor as their notification observers.  Their public
+         * APIs define the missing callback ABI, so manual adapters can wrap
+         * them in current-compiler blocks before native GameKit sees them. */
         return YES;
     }
     if(method.isInstanceMethod &&

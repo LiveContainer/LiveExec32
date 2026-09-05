@@ -33,6 +33,37 @@ int main(void) {
     printf("nsvalue-selector-type: %s\n",
            typePassed ? "PASS" : "FAIL");
 
+    uint32_t pointee = UINT32_C(0xc01df00d);
+    const void *expectedPointer = &pointee;
+    NSValue *pointerValue = [NSValue valueWithPointer:expectedPointer];
+    NSDictionary *pointerContainer =
+        [NSDictionary dictionaryWithObject:pointerValue forKey:@"pointer"];
+    NSValue *storedPointer = [pointerContainer objectForKey:@"pointer"];
+
+    const BOOL pointerPassed =
+        [storedPointer pointerValue] == expectedPointer;
+    struct {
+        void *pointer;
+        uint32_t canary;
+    } pointerOutput = { NULL, UINT32_C(0xa11c32ed) };
+    [storedPointer getValue:&pointerOutput.pointer];
+    const BOOL pointerBytesPassed =
+        pointerOutput.pointer == expectedPointer;
+    const BOOL pointerCanaryPassed =
+        pointerOutput.canary == UINT32_C(0xa11c32ed);
+    const BOOL pointerTypePassed =
+        !strcmp([storedPointer objCType], @encode(void *));
+    printf("nsvalue-pointer-round-trip: %s\n",
+           pointerPassed ? "PASS" : "FAIL");
+    printf("nsvalue-pointer-get-value: %s\n",
+           pointerBytesPassed ? "PASS" : "FAIL");
+    printf("nsvalue-pointer-write-width: %s\n",
+           pointerCanaryPassed ? "PASS" : "FAIL");
+    printf("nsvalue-pointer-type: %s\n",
+           pointerTypePassed ? "PASS" : "FAIL");
+
     [pool drain];
-    return !(selectorPassed && canaryPassed && typePassed);
+    return !(selectorPassed && canaryPassed && typePassed &&
+             pointerPassed && pointerBytesPassed &&
+             pointerCanaryPassed && pointerTypePassed);
 }
