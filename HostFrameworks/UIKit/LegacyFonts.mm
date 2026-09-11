@@ -108,155 +108,17 @@ static id LC32RepairPreferredFont(id original, bool descriptorResult,
     return descriptorResult ? concrete : repaired;
 }
 
-/* Private methods are optional and can change ABI. Inspect each argument's
- * actual encoding, ignoring stack offsets and quoted Objective-C class names.
- * The captured original IMP always receives its real selector, never an alias. */
-static Method LC32FontClassMethod(Class cls, const char *name, const char *arguments) {
-    Method method = class_getClassMethod(cls, sel_registerName(name));
-    if(!method || method_getNumberOfArguments(method) != strlen(arguments) + 2) return nullptr;
-    char type[32];
-    method_getReturnType(method, type, sizeof(type));
-    if(type[0] != '@') return nullptr;
-    for(unsigned index = 0; arguments[index]; ++index) {
-        method_getArgumentType(method, index + 2, type, sizeof(type));
-        if(type[0] != arguments[index]) return nullptr;
+static void swizzle(Class cls, SEL originalAction, SEL swizzledAction) {
+    Method originalMethod = class_getInstanceMethod(cls, originalAction);
+    if(!originalMethod) {
+        NSLog(@"%s not found", sel_getName(originalAction));
+        return;
     }
-    return method;
+    method_exchangeImplementations(originalMethod,
+        class_getInstanceMethod(cls, swizzledAction));
 }
 
-static void LC32ReplaceFontClassMethod(Class cls, Method method, id block) {
-    class_replaceMethod(object_getClass(cls), method_getName(method),
-        imp_implementationWithBlock(block), method_getTypeEncoding(method));
-}
-
-static void LC32HookPreferredFontPair(Class cls, bool descriptor) {
-    const char *oneName = descriptor ? "preferredFontDescriptorWithTextStyle:" : "preferredFontForTextStyle:";
-    const char *twoName = descriptor ? "preferredFontDescriptorWithTextStyle:compatibleWithTraitCollection:" :
-        "preferredFontForTextStyle:compatibleWithTraitCollection:";
-    Method one = LC32FontClassMethod(cls, oneName, "@");
-    Method two = LC32FontClassMethod(cls, twoName, "@@");
-    if(!two) return;
-    SEL twoSelector = method_getName(two);
-    auto twoOriginal = (id (*)(id, SEL, NSString *, UITraitCollection *))method_getImplementation(two);
-    LC32ReplaceFontClassMethod(cls, two, ^id(id self, NSString *style, UITraitCollection *traits) {
-        id result = twoOriginal(self, twoSelector, style, traits);
-        return LC32RepairPreferredFont(result, descriptor, traits, ^id(UITraitCollection *fallback) {
-            return twoOriginal(self, twoSelector, style, fallback);
-        });
-    });
-    if(one) {
-        SEL selector = method_getName(one);
-        auto original = (id (*)(id, SEL, NSString *))method_getImplementation(one);
-        LC32ReplaceFontClassMethod(cls, one, ^id(id self, NSString *style) {
-            id result = original(self, selector, style);
-            return LC32RepairPreferredFont(result, descriptor, nil, ^id(UITraitCollection *fallback) {
-                // The one-argument spelling has no place to pass the category.
-                return twoOriginal(self, twoSelector, style, fallback);
-            });
-        });
-    }
-}
-
-static void LC32HookPreferredDescriptorTraits(void) {
-    Class cls = UIFontDescriptor.class;
-    Method method = LC32FontClassMethod(cls,
-        "_preferredFontDescriptorWithTextStyle:addingSymbolicTraits:compatibleWithTraitCollection:", "@I@");
-    if(!method) return;
-    SEL selector = method_getName(method);
-    auto original = (id (*)(id, SEL, NSString *, uint32_t, UITraitCollection *))method_getImplementation(method);
-    LC32ReplaceFontClassMethod(cls, method, ^id(id self, NSString *style, uint32_t symbolic, UITraitCollection *traits) {
-        id result = original(self, selector, style, symbolic, traits);
-        return LC32RepairPreferredFont(result, true, traits, ^id(UITraitCollection *fallback) {
-            return original(self, selector, style, symbolic, fallback);
-        });
-    });
-}
-
-static void LC32HookPreferredDescriptorOptions(void) {
-    Class cls = UIFontDescriptor.class;
-    Method method = LC32FontClassMethod(cls,
-        "preferredFontDescriptorWithTextStyle:addingSymbolicTraits:options:", "@IQ");
-    if(!method) return;
-    SEL selector = method_getName(method);
-    auto original = (id (*)(id, SEL, NSString *, uint32_t, NSUInteger))method_getImplementation(method);
-    LC32ReplaceFontClassMethod(cls, method,
-        ^id(id self, NSString *style, uint32_t symbolic, NSUInteger options) {
-        /* Native alert text fields and action-sheet titles use this factory,
-         * which calls CoreText directly rather than the trait-taking methods.
-         * Keep its category policy and symbolic traits, repairing only an
-         * invalid result. For a missing AX point size, option bit 0 caps the
-         * legacy category at XXXL; preserve all other option bits. */
-        id result = original(self, selector, style, symbolic, options);
-        return LC32RepairPreferredFont(result, true, nil, ^id(UITraitCollection *) {
-            return original(self, selector, style, symbolic, options | 1u);
-        });
-    });
-}
-
-static void LC32HookPreferredDescriptorDesign(void) {
-    Class cls = UIFontDescriptor.class;
-    Method method = LC32FontClassMethod(cls,
-        "_preferredFontDescriptorWithTextStyle:design:weight:compatibleWithTraitCollection:", "@@d@");
-    if(method) {
-        SEL selector = method_getName(method);
-        auto original = (id (*)(id, SEL, NSString *, NSString *, CGFloat, UITraitCollection *))method_getImplementation(method);
-        LC32ReplaceFontClassMethod(cls, method, ^id(id self, NSString *style, NSString *design, CGFloat weight, UITraitCollection *traits) {
-            id result = original(self, selector, style, design, weight, traits);
-            return LC32RepairPreferredFont(result, true, traits, ^id(UITraitCollection *fallback) {
-                return original(self, selector, style, design, weight, fallback);
-            });
-        });
-    }
-    method = LC32FontClassMethod(cls,
-        "_preferredFontDescriptorWithTextStyle:addingSymbolicTraits:design:weight:compatibleWithTraitCollection:", "@I@d@");
-    if(method) {
-        SEL selector = method_getName(method);
-        auto original = (id (*)(id, SEL, NSString *, uint32_t, NSString *, CGFloat, UITraitCollection *))method_getImplementation(method);
-        LC32ReplaceFontClassMethod(cls, method, ^id(id self, NSString *style, uint32_t symbolic, NSString *design, CGFloat weight, UITraitCollection *traits) {
-            id result = original(self, selector, style, symbolic, design, weight, traits);
-            return LC32RepairPreferredFont(result, true, traits, ^id(UITraitCollection *fallback) {
-                return original(self, selector, style, symbolic, design, weight, fallback);
-            });
-        });
-    }
-}
-
-static void LC32HookPreferredFontVariants(void) {
-    Class cls = UIFont.class;
-    Method method = LC32FontClassMethod(cls,
-        "_preferredFontForTextStyle:design:weight:symbolicTraits:maximumContentSizeCategory:compatibleWithTraitCollection:pointSize:pointSizeForScaling:",
-        "@@@I@@dd");
-    if(method) {
-        SEL selector = method_getName(method);
-        auto original = (id (*)(id, SEL, NSString *, NSString *, NSNumber *, uint32_t,
-            NSString *, UITraitCollection *, CGFloat, CGFloat))method_getImplementation(method);
-        LC32ReplaceFontClassMethod(cls, method, ^id(id self, NSString *style, NSString *design,
-            NSNumber *weight, uint32_t symbolic, NSString *maximum, UITraitCollection *traits,
-            CGFloat size, CGFloat scalingSize) {
-            id result = original(self, selector, style, design, weight, symbolic, maximum, traits, size, scalingSize);
-            return LC32RepairPreferredFont(result, false, traits, ^id(UITraitCollection *fallback) {
-                return original(self, selector, style, design, weight, symbolic, maximum, fallback, size, scalingSize);
-            });
-        });
-    }
-    method = LC32FontClassMethod(cls,
-        "_preferredFontForTextStyle:maximumContentSizeCategory:compatibleWithTraitCollection:", "@@@");
-    if(method) {
-        SEL selector = method_getName(method);
-        auto original = (id (*)(id, SEL, NSString *, NSString *, UITraitCollection *))method_getImplementation(method);
-        LC32ReplaceFontClassMethod(cls, method, ^id(id self, NSString *style, NSString *maximum, UITraitCollection *traits) {
-            id result = original(self, selector, style, maximum, traits);
-            return LC32RepairPreferredFont(result, false, traits, ^id(UITraitCollection *fallback) {
-                return original(self, selector, style, maximum, fallback);
-            });
-        });
-    }
-}
-
-@interface LC32LegacyFonts : NSObject
-@end
-
-@implementation LC32LegacyFonts
+@implementation UIFont (LC32LegacyFonts)
 + (void)load {
     if(dyld_program_sdk_at_least({PLATFORM_IOS, 0x000b0000})) return;
 
@@ -267,11 +129,145 @@ static void LC32HookPreferredFontVariants(void) {
      * the returned UIFont and its descriptor must both be usable by CoreText.
      * Valid fonts remain untouched, and no process SDK or font table is changed.
      * This safety fix is independent of the optional LC32 geometry adapters. */
-    LC32HookPreferredFontPair(UIFont.class, false);
-    LC32HookPreferredFontPair(UIFontDescriptor.class, true);
-    LC32HookPreferredDescriptorTraits();
-    LC32HookPreferredDescriptorOptions();
-    LC32HookPreferredDescriptorDesign();
-    LC32HookPreferredFontVariants();
+    Class cls = object_getClass(self);
+    swizzle(cls, @selector(preferredFontForTextStyle:),
+        @selector(lc32_preferredFontForTextStyle:));
+    swizzle(cls, @selector(preferredFontForTextStyle:compatibleWithTraitCollection:),
+        @selector(lc32_preferredFontForTextStyle:compatibleWithTraitCollection:));
+    swizzle(cls, @selector(_preferredFontForTextStyle:maximumContentSizeCategory:compatibleWithTraitCollection:),
+        @selector(lc32_preferredFontForTextStyle:maximumContentSizeCategory:compatibleWithTraitCollection:));
+    swizzle(cls, @selector(_preferredFontForTextStyle:design:weight:symbolicTraits:maximumContentSizeCategory:compatibleWithTraitCollection:pointSize:pointSizeForScaling:),
+        @selector(lc32_preferredFontForTextStyle:design:weight:symbolicTraits:maximumContentSizeCategory:compatibleWithTraitCollection:pointSize:pointSizeForScaling:));
+}
+
++ (UIFont *)lc32_preferredFontForTextStyle:(UIFontTextStyle)style {
+    UIFont *result = [self lc32_preferredFontForTextStyle:style];
+    return LC32RepairPreferredFont(result, false, nil, ^id(UITraitCollection *fallback) {
+        // The one-argument spelling has no place to pass the category.
+        return [self lc32_preferredFontForTextStyle:style compatibleWithTraitCollection:fallback];
+    });
+}
+
++ (UIFont *)lc32_preferredFontForTextStyle:(UIFontTextStyle)style
+            compatibleWithTraitCollection:(UITraitCollection *)traits {
+    UIFont *result = [self lc32_preferredFontForTextStyle:style compatibleWithTraitCollection:traits];
+    return LC32RepairPreferredFont(result, false, traits, ^id(UITraitCollection *fallback) {
+        return [self lc32_preferredFontForTextStyle:style compatibleWithTraitCollection:fallback];
+    });
+}
+
++ (UIFont *)lc32_preferredFontForTextStyle:(UIFontTextStyle)style
+               maximumContentSizeCategory:(UIContentSizeCategory)maximum
+            compatibleWithTraitCollection:(UITraitCollection *)traits {
+    UIFont *result = [self lc32_preferredFontForTextStyle:style
+        maximumContentSizeCategory:maximum compatibleWithTraitCollection:traits];
+    return LC32RepairPreferredFont(result, false, traits, ^id(UITraitCollection *fallback) {
+        return [self lc32_preferredFontForTextStyle:style
+            maximumContentSizeCategory:maximum compatibleWithTraitCollection:fallback];
+    });
+}
+
++ (UIFont *)lc32_preferredFontForTextStyle:(UIFontTextStyle)style
+                                   design:(NSString *)design
+                                   weight:(NSNumber *)weight
+                           symbolicTraits:(UIFontDescriptorSymbolicTraits)symbolic
+               maximumContentSizeCategory:(UIContentSizeCategory)maximum
+            compatibleWithTraitCollection:(UITraitCollection *)traits
+                                pointSize:(CGFloat)size
+                      pointSizeForScaling:(CGFloat)scalingSize {
+    UIFont *result = [self lc32_preferredFontForTextStyle:style design:design
+        weight:weight symbolicTraits:symbolic maximumContentSizeCategory:maximum
+        compatibleWithTraitCollection:traits pointSize:size pointSizeForScaling:scalingSize];
+    return LC32RepairPreferredFont(result, false, traits, ^id(UITraitCollection *fallback) {
+        return [self lc32_preferredFontForTextStyle:style design:design weight:weight
+            symbolicTraits:symbolic maximumContentSizeCategory:maximum
+            compatibleWithTraitCollection:fallback pointSize:size pointSizeForScaling:scalingSize];
+    });
+}
+@end
+
+@implementation UIFontDescriptor (LC32LegacyFonts)
++ (void)load {
+    if(dyld_program_sdk_at_least({PLATFORM_IOS, 0x000b0000})) return;
+    Class cls = object_getClass(self);
+    swizzle(cls, @selector(preferredFontDescriptorWithTextStyle:),
+        @selector(lc32_preferredFontDescriptorWithTextStyle:));
+    swizzle(cls, @selector(preferredFontDescriptorWithTextStyle:compatibleWithTraitCollection:),
+        @selector(lc32_preferredFontDescriptorWithTextStyle:compatibleWithTraitCollection:));
+    swizzle(cls, @selector(_preferredFontDescriptorWithTextStyle:addingSymbolicTraits:compatibleWithTraitCollection:),
+        @selector(lc32_preferredFontDescriptorWithTextStyle:addingSymbolicTraits:compatibleWithTraitCollection:));
+    swizzle(cls, @selector(preferredFontDescriptorWithTextStyle:addingSymbolicTraits:options:),
+        @selector(lc32_preferredFontDescriptorWithTextStyle:addingSymbolicTraits:options:));
+    swizzle(cls, @selector(_preferredFontDescriptorWithTextStyle:design:weight:compatibleWithTraitCollection:),
+        @selector(lc32_preferredFontDescriptorWithTextStyle:design:weight:compatibleWithTraitCollection:));
+    swizzle(cls, @selector(_preferredFontDescriptorWithTextStyle:addingSymbolicTraits:design:weight:compatibleWithTraitCollection:),
+        @selector(lc32_preferredFontDescriptorWithTextStyle:addingSymbolicTraits:design:weight:compatibleWithTraitCollection:));
+}
+
++ (UIFontDescriptor *)lc32_preferredFontDescriptorWithTextStyle:(UIFontTextStyle)style {
+    UIFontDescriptor *result = [self lc32_preferredFontDescriptorWithTextStyle:style];
+    return LC32RepairPreferredFont(result, true, nil, ^id(UITraitCollection *fallback) {
+        return [self lc32_preferredFontDescriptorWithTextStyle:style compatibleWithTraitCollection:fallback];
+    });
+}
+
++ (UIFontDescriptor *)lc32_preferredFontDescriptorWithTextStyle:(UIFontTextStyle)style
+                                compatibleWithTraitCollection:(UITraitCollection *)traits {
+    UIFontDescriptor *result = [self lc32_preferredFontDescriptorWithTextStyle:style
+        compatibleWithTraitCollection:traits];
+    return LC32RepairPreferredFont(result, true, traits, ^id(UITraitCollection *fallback) {
+        return [self lc32_preferredFontDescriptorWithTextStyle:style compatibleWithTraitCollection:fallback];
+    });
+}
+
++ (UIFontDescriptor *)lc32_preferredFontDescriptorWithTextStyle:(UIFontTextStyle)style
+                                         addingSymbolicTraits:(UIFontDescriptorSymbolicTraits)symbolic
+                                compatibleWithTraitCollection:(UITraitCollection *)traits {
+    UIFontDescriptor *result = [self lc32_preferredFontDescriptorWithTextStyle:style
+        addingSymbolicTraits:symbolic compatibleWithTraitCollection:traits];
+    return LC32RepairPreferredFont(result, true, traits, ^id(UITraitCollection *fallback) {
+        return [self lc32_preferredFontDescriptorWithTextStyle:style
+            addingSymbolicTraits:symbolic compatibleWithTraitCollection:fallback];
+    });
+}
+
++ (UIFontDescriptor *)lc32_preferredFontDescriptorWithTextStyle:(UIFontTextStyle)style
+                                         addingSymbolicTraits:(UIFontDescriptorSymbolicTraits)symbolic
+                                                      options:(NSUInteger)options {
+    /* Native alert text fields and action-sheet titles use this factory,
+     * which calls CoreText directly rather than the trait-taking methods.
+     * For a missing AX point size, option bit 0 caps the legacy category at
+     * XXXL; preserve all other option bits and symbolic traits. */
+    UIFontDescriptor *result = [self lc32_preferredFontDescriptorWithTextStyle:style
+        addingSymbolicTraits:symbolic options:options];
+    return LC32RepairPreferredFont(result, true, nil, ^id(UITraitCollection *) {
+        return [self lc32_preferredFontDescriptorWithTextStyle:style
+            addingSymbolicTraits:symbolic options:options | 1u];
+    });
+}
+
++ (UIFontDescriptor *)lc32_preferredFontDescriptorWithTextStyle:(UIFontTextStyle)style
+                                                       design:(NSString *)design
+                                                       weight:(CGFloat)weight
+                                compatibleWithTraitCollection:(UITraitCollection *)traits {
+    UIFontDescriptor *result = [self lc32_preferredFontDescriptorWithTextStyle:style
+        design:design weight:weight compatibleWithTraitCollection:traits];
+    return LC32RepairPreferredFont(result, true, traits, ^id(UITraitCollection *fallback) {
+        return [self lc32_preferredFontDescriptorWithTextStyle:style
+            design:design weight:weight compatibleWithTraitCollection:fallback];
+    });
+}
+
++ (UIFontDescriptor *)lc32_preferredFontDescriptorWithTextStyle:(UIFontTextStyle)style
+                                         addingSymbolicTraits:(UIFontDescriptorSymbolicTraits)symbolic
+                                                       design:(NSString *)design
+                                                       weight:(CGFloat)weight
+                                compatibleWithTraitCollection:(UITraitCollection *)traits {
+    UIFontDescriptor *result = [self lc32_preferredFontDescriptorWithTextStyle:style
+        addingSymbolicTraits:symbolic design:design weight:weight compatibleWithTraitCollection:traits];
+    return LC32RepairPreferredFont(result, true, traits, ^id(UITraitCollection *fallback) {
+        return [self lc32_preferredFontDescriptorWithTextStyle:style addingSymbolicTraits:symbolic
+            design:design weight:weight compatibleWithTraitCollection:fallback];
+    });
 }
 @end

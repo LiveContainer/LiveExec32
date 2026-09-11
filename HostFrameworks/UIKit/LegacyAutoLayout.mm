@@ -18,8 +18,10 @@ extern "C" uint32_t LC32UIKitLegacyCompatibilityEnabled(void) {
      * installed: changing modes with a live hierarchy is unsafe. UIKit's
      * native pre-iOS-8 window compositor already handles legacy rotation.
      * Applying our modern-host adapters as well can turn the content twice.
-     * Use the actual process SDK, not the guest SDK: a modern LiveContainer
-     * host still needs these adapters even when running a pre-iOS-8 guest. */
+     * Use dyld's effective process SDK, not the on-disk host/guest headers.
+     * LiveContainer installs its dyld SDK override before loading us: an
+     * unclamped pre-iOS-8 override must use native geometry, while existing
+     * SDK-11-clamped hosts/shims still need our modern-host adapters. */
     static const bool enabled = [] {
         const char *value = getenv("LC32_DISABLE_UIKIT_COMPATIBILITY");
         if(value && strcmp(value, "1") == 0) return false;

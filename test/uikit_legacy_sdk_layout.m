@@ -18,6 +18,30 @@ extern bool dyld_program_sdk_at_least(struct SDKBuildVersion version);
 extern uint32_t LC32UIKitLegacyCompatibilityEnabled(void);
 #endif
 
+#if LC32_TEST_EFFECTIVE_SDK_PROVIDER
+/* The policy-only binary substitutes these two query names at compile time
+ * in this file and LegacyAutoLayout.mm. Its real Mach-O remains SDK11. The
+ * provider is ready before +load, like LiveContainer's pre-dlopen SDK hook,
+ * but it deliberately does not interpose or alter UIKit's own dyld calls. */
+static bool policyTestEnteredMain;
+static unsigned policyQueriesBeforeMain;
+
+uint32_t dyld_get_program_sdk_version(void) {
+    if(!policyTestEnteredMain) ++policyQueriesBeforeMain;
+    const char *value = getenv("LC32_TEST_EFFECTIVE_SDK");
+    if(!value || !*value) abort();
+    char *end = NULL;
+    unsigned long sdk = strtoul(value, &end, 0);
+    if(!end || *end || sdk > UINT32_MAX) abort();
+    return (uint32_t)sdk;
+}
+
+bool dyld_program_sdk_at_least(struct SDKBuildVersion version) {
+    return version.platform == PLATFORM_IOS &&
+        version.version <= dyld_get_program_sdk_version();
+}
+#endif
+
 static int failures;
 static uint32_t expectedSDK, effectiveSDK;
 
@@ -75,7 +99,11 @@ static void checkCompatibilityPolicy(void) {
         effectiveSDK, atLeast8, hasFix);
     /* A zero Mach-O SDK has a dyld-defined fallback; do not treat it as
      * necessarily pre-8. Both the predicate and effective SDK are observed. */
-    check("dyld-sdk", expectedSDK == 0 || effectiveSDK == expectedSDK);
+    NSNumber *expectedEffectiveSDK = [bundle objectForInfoDictionaryKey:
+        @"LC32ExpectedEffectiveSDK"];
+    check("dyld-sdk", expectedEffectiveSDK
+        ? effectiveSDK == expectedEffectiveSDK.unsignedIntValue
+        : expectedSDK == 0 || effectiveSDK == expectedSDK);
     check("dyld-sdk-predicate", atLeast8 == (effectiveSDK >= 0x00080000));
     if(hasFix) {
 #if LC32_TEST_LINKED_COMPATIBILITY_POLICY
@@ -97,6 +125,12 @@ static void checkCompatibilityPolicy(void) {
         check("production-compatibility-policy-linked", NO);
 #endif
     }
+#if LC32_TEST_EFFECTIVE_SDK_PROVIDER
+    check("policy-provider-keeps-sdk11-executable", expectedSDK == 0x000b0000);
+    check("effective-sdk-provider-active-during-load", policyQueriesBeforeMain != 0);
+    puts("sdk-layout-policy-only: no UIKit geometry or system-wide SDK spoof is exercised");
+    return;
+#endif
     SEL selector = sel_registerName("_forceLayoutEngineSolutionInRationalEdges");
     Method method = class_getInstanceMethod([UIView class], selector);
     check("native-policy-selector", method != NULL);
@@ -245,10 +279,18 @@ static BOOL sameRect(CGRect a, CGRect b) {
 @end
 
 int main(int argc, char *argv[]) {
+#if LC32_TEST_EFFECTIVE_SDK_PROVIDER
+    policyTestEnteredMain = true;
+#endif
     setvbuf(stdout, NULL, _IONBF, 0);
     @autoreleasepool {
         NSSetUncaughtExceptionHandler(uncaught);
         checkCompatibilityPolicy();
+#if LC32_TEST_EFFECTIVE_SDK_PROVIDER
+        printf("sdk-layout-regression: %s policy-only sdk=0x%08x effective=0x%08x\n",
+            failures ? "FAIL" : "PASS", expectedSDK, effectiveSDK);
+        return failures ? 1 : 0;
+#endif
         return UIApplicationMain(argc, argv, nil,
             NSStringFromClass([SDKLayoutAppDelegate class]));
     }

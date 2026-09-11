@@ -56,10 +56,15 @@ gmake
   available with `sh test/uikit_legacy_sdk_layout.sh --device UDID --baseline`;
   it tests actual SDK 0, 7, 8, 10.3, and 11 Mach-O variants, needs an already
   booted Simulator, and installs/removes only its own temporary test apps.
-  Processes actually linked before iOS 8 use UIKit's native legacy rotation
-  and geometry instead of LiveExec32's adapters, avoiding a duplicate turn.
-  This checks the host process SDK, so modern LiveContainer hosts retain
-  the adapters even for old guests. To compare native UIKit geometry on
+  Processes with an effective SDK before iOS 8 use UIKit's native legacy
+  rotation and geometry instead of LiveExec32's adapters, avoiding a duplicate
+  turn. This follows dyld's process-SDK query, including LiveContainer's SDK
+  override installed before LiveExec32 loads. Thus an unclamped old SDK in
+  LiveContainer disables these adapters, while existing SDK-11-clamped
+  executables or LiveContainer overrides retain them. The native test also
+  includes policy-only cases with an SDK-11 executable and test-provided
+  effective SDKs; those isolate this selection without spoofing UIKit itself.
+  To compare native UIKit geometry on
   newer hosts, launch with `LC32_DISABLE_UIKIT_COMPATIBILITY=1` in the host
   process environment. This disables the host and guest canvas, orientation,
   and synthetic-root adaptations, but retains the low-SDK Auto Layout fixes,
