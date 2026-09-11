@@ -66,7 +66,8 @@ LiveExec32Shared_FILES = \
 	../CoreText/CoreText.mm ../CoreMedia/CoreMedia.mm ../CoreVideo/CoreVideo.mm \
 	../AudioToolbox/AudioToolbox.mm \
 	../OpenAL/OpenAL.mm ../OpenGLES/OpenGLES.mm ../UIKit/UIKit.mm \
-	../UIKit/LegacyAutoLayout.mm ../UIKit/LegacyFonts.mm ../UIKit/LegacyAlerts.mm
+	../UIKit/LegacyAutoLayout.mm ../UIKit/LegacyFonts.mm ../UIKit/LegacyAlerts.mm \
+	../UIKit/LegacyRotation.mm
 LiveExec32Shared_CFLAGS = \
 	-I. -I$(DYNARMIC_ROOT)/src -I../../include -DDYNARMIC_MASTER \
 	-I../../External/mini-gdbstub/include -DLC32_DEBUG_LOGS=$(LC32_DEBUG_LOGS)
@@ -74,6 +75,7 @@ LiveExec32Shared_CCFLAGS = -std=c++17
 crash_exception.mm_CFLAGS = -fobjc-arc
 ../UIKit/LegacyFonts.mm_CFLAGS = -fobjc-arc
 ../UIKit/LegacyAlerts.mm_CFLAGS = -fobjc-arc
+../UIKit/LegacyRotation.mm_CFLAGS = -fobjc-arc
 LiveExec32Shared_OBJ_FILES = $(DYNARMIC_STATIC_LIBS)
 LiveExec32Shared_LDFLAGS = -L../../External/mini-gdbstub/build
 LiveExec32Shared_LIBRARIES = gdbstub

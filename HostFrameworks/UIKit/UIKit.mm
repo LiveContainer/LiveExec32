@@ -6,6 +6,7 @@
 #include "crash_exception.h"
 #include "LiveExec32Shared.h"
 #include "LC32LegacyCanvas.h"
+#include "LC32LegacyRotation.h"
 #include "../CoreGraphics/LC32CoreGraphicsHost.h"
 
 #include <atomic>
@@ -584,6 +585,28 @@ void LC32GuestLoadView(UIViewController *controller, SEL selector) {
     LC32GuestLoadViewScope scope(controller);
     (void)LC32InvokeGuestSelector(
         controller, selector, 0, 0, 0, 0, 0, 0);
+}
+
+void LC32GuestWillRotate(UIViewController *controller, SEL selector,
+        UIInterfaceOrientation orientation, NSTimeInterval duration) {
+    if(!LC32CanQueryGuestOrientation()) return;
+
+    // A typed native IMP receives duration in d0. Darwin ARMv7 uses four-byte
+    // argument alignment here: self/cmd/orientation occupy r0-r2, the double's
+    // low word is r3, and its high word is the first stack argument. Do not
+    // insert the eight-byte alignment padding used by generic AAPCS examples.
+    // Verified with Clang's armv7-apple-ios Objective-C caller and callee.
+    static_assert(sizeof(duration) == sizeof(u64));
+    u64 durationBits;
+    memcpy(&durationBits, &duration, sizeof(durationBits));
+    u32 arguments[] = {
+        [controller guest_self],
+        guest_sel_registerName(sel_getName(selector)),
+        static_cast<u32>(orientation),
+        static_cast<u32>(durationBits),
+        static_cast<u32>(durationBits >> 32),
+    };
+    (void)guest_objc_msgSend(sizeof(arguments) / sizeof(*arguments), arguments);
 }
 
 bool LC32NativeViewIfLoaded(UIViewController *controller, UIView **view) {
@@ -1624,6 +1647,20 @@ LC32LegacyIPadGeometryMode LC32LegacyPhoneCanvasGeometryMode(
         constexpr CGFloat epsilon = 0.5;
         if(fabs(shortEdge - 320) < epsilon &&
                 fabs(longEdge - 480) < epsilon) {
+            static Class eaglLayerClass = NSClassFromString(@"CAEAGLLayer");
+            if(LC32GuestUsesFixedLandscapePhoneCanvas() &&
+                    bounds.size.width < bounds.size.height &&
+                    LC32TransformNearlyEquals(
+                        LC32NativeViewTransform(contentView),
+                        CGAffineTransformIdentity) &&
+                    [LC32NativeViewLayer(contentView)
+                        isKindOfClass:eaglLayerClass]) {
+                /* An unturned portrait GL surface can rotate in the engine's
+                 * projection matrix. Preserve it before the first drawable
+                 * allocation; some old renderers never reallocate storage.
+                 * Matching only the short/long edges loses this contract. */
+                return LC32LegacyIPadGeometryModePreservePhonePortraitCanvas;
+            }
             /* Old applications often follow setRootViewController: with a
              * redundant addSubview:. Modern controller containment makes
              * that reparent invalid, so normalize either archived ordering
@@ -2415,7 +2452,11 @@ void LC32FinishGuestOrientationStartupAfterLaunch(void) {
                 true, std::memory_order_release);
             // Recompute rather than permanently caching the Info.plist
             // fallback: initialized controllers can have narrower policies.
-            LC32AdoptLegacyRootViewControllers();
+            if(LC32NativeLegacyRotationEnabled()) {
+                LC32FinishNativeLegacyRotationStartup();
+            } else {
+                LC32AdoptLegacyRootViewControllers();
+            }
         });
     if(observer) {
         CFRunLoopAddObserver(CFRunLoopGetMain(), observer, kCFRunLoopCommonModes);
@@ -2482,6 +2523,10 @@ void LC32AdoptLegacyPhoneCanvases(UIApplication *application) {
 }
 
 } // namespace
+
+extern "C" BOOL LC32NativeLegacyRotationCanCallGuest(void) {
+    return LC32CanQueryGuestOrientation();
+}
 
 extern "C" void LC32UIKitDidSetGuestAutoresizingMask(id object) {
     if(!LC32UIKitLegacyCompatibilityEnabled()) return;
@@ -2991,6 +3036,15 @@ extern "C" void LC32UIKitPrepareGuestClass(Class cls) {
             guestLoadView, (IMP)&LC32GuestLoadView);
     }
 
+    if(LC32NativeLegacyRotationEnabled()) {
+        Method guestWillRotate = LC32ClassOwnMethod(cls,
+            @selector(willRotateToInterfaceOrientation:duration:));
+        if(guestWillRotate && method_getImplementation(guestWillRotate) ==
+                (IMP)&LC32InvokeGuestSelector) {
+            method_setImplementation(guestWillRotate, (IMP)&LC32GuestWillRotate);
+        }
+        LC32PrepareNativeLegacyRotationClass(cls);
+    }
     if(!LC32UIKitLegacyCompatibilityEnabled()) return;
 
     auto addNativeAdapter = ^(SEL selector, IMP implementation) {
@@ -3449,7 +3503,7 @@ int LC32_UIKit_UIApplicationMain(u32 r2, u32 r3, u32 sp) {
         return LC32RunDebuggerAwareMainRunLoop();
     }
     firstEntry = false;
-    if(LC32UIKitLegacyCompatibilityEnabled()) {
+    if(LC32UIKitLegacyCompatibilityEnabled() || LC32NativeLegacyRotationEnabled()) {
         LC32GuestOrientationStartupCallbackDepth = LC32GuestCallbackDepth();
         LC32GuestOrientationStartupComplete.store(false, std::memory_order_release);
     }
@@ -3461,13 +3515,13 @@ int LC32_UIKit_UIApplicationMain(u32 r2, u32 r3, u32 sp) {
 
     NSLog(@"UIApplicationMain(%d, 0x%x, %@, %@)\n", argc, guest_argv, principalClassName, delegateClassName);
     static id launchObserver;
-    if(LC32UIKitLegacyCompatibilityEnabled()) {
+    if(LC32UIKitLegacyCompatibilityEnabled() || LC32NativeLegacyRotationEnabled()) {
         launchObserver = [NSNotificationCenter.defaultCenter
             addObserverForName:UIApplicationDidFinishLaunchingNotification
                         object:nil
                          queue:nil
                     usingBlock:^(__unused NSNotification *notification) {
-            LC32AdoptLegacyRootViewControllers();
+            if(LC32UIKitLegacyCompatibilityEnabled()) LC32AdoptLegacyRootViewControllers();
             LC32FinishGuestOrientationStartupAfterLaunch();
         }];
     }

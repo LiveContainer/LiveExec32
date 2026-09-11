@@ -248,6 +248,8 @@ $(eval $(call lc32_guest_test,lc32-uikit-image-context,uikit_image_context.m,Fou
 $(eval $(call lc32_guest_test,lc32-uikit-legacy-device,uikit_legacy_device.m,Foundation UIKit LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-legacy-overlay,uikit_legacy_overlay.m,Foundation UIKit QuartzCore CoreGraphics LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-legacy-root-geometry,uikit_legacy_root_geometry.m,Foundation UIKit QuartzCore CoreGraphics LC32))
+$(eval $(call lc32_guest_test,lc32-uikit-legacy-phone-canvas,uikit_legacy_phone_canvas.m,Foundation UIKit QuartzCore CoreGraphics LC32))
+$(eval $(call lc32_guest_test,lc32-uikit-legacy-rotation-duration,uikit_legacy_rotation_duration.m,Foundation UIKit LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-legacy-nested-renderer,uikit_legacy_nested_renderer.m,Foundation UIKit QuartzCore CoreGraphics LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-legacy-direct-renderer,uikit_legacy_direct_renderer.m,Foundation UIKit QuartzCore CoreGraphics LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-orientation-startup,uikit_orientation_startup.m,Foundation UIKit LC32))
@@ -300,6 +302,16 @@ lc32-uikit-legacy-overlay_CFLAGS := -fno-objc-arc -target armv7s-apple-ios7.0
 lc32-uikit-legacy-overlay_LDFLAGS += -target armv7s-apple-ios7.0
 lc32-uikit-legacy-root-geometry_CFLAGS := -fno-objc-arc -target armv7s-apple-ios7.0
 lc32-uikit-legacy-root-geometry_LDFLAGS += -target armv7s-apple-ios7.0
+# Exercise the modern fixed-phone container using an SDK-11 host launcher.
+lc32-uikit-legacy-phone-canvas_USE_MODULES := 1
+lc32-uikit-legacy-phone-canvas_CFLAGS := -fno-objc-arc -target armv7s-apple-ios7.0 \
+	-I$(abspath ../GuestFrameworks) -I$(abspath ../include)
+lc32-uikit-legacy-phone-canvas_LDFLAGS += -target armv7s-apple-ios7.0
+# Run under a launcher with effective SDK < 8 to exercise the native adapter.
+lc32-uikit-legacy-rotation-duration_USE_MODULES := 1
+lc32-uikit-legacy-rotation-duration_CFLAGS := -fno-objc-arc -target armv7s-apple-ios7.0 \
+	-I$(abspath ../GuestFrameworks) -I$(abspath ../include)
+lc32-uikit-legacy-rotation-duration_LDFLAGS += -target armv7s-apple-ios7.0
 lc32-uikit-legacy-nested-renderer_USE_MODULES := 1
 lc32-uikit-legacy-nested-renderer_CFLAGS := -fno-objc-arc -target armv7s-apple-ios7.0 \
 	-I$(abspath ../GuestFrameworks) -I$(abspath ../include)
