@@ -199,6 +199,7 @@ $(eval $(call lc32_guest_test,lc32-data-bytes,data_bytes.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-fast-enumeration,fast_enumeration.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-filesystem-capacity,filesystem_capacity.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-gamecontroller-snapshot,gamecontroller_snapshot.m,GameController Foundation CoreFoundation))
+$(eval $(call lc32_guest_test,lc32-gamekit-achievement-properties,gamekit_achievement_properties.m,GameKit Foundation LC32))
 $(eval $(call lc32_test,lc32-foundation-null-utf8,foundation_null_utf8.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-foundation-zone,foundation_zone.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-guest-proxy-lifetime,guest_proxy_lifetime.m,Foundation LC32))
@@ -288,6 +289,9 @@ lc32-corefoundation-url-common_CFLAGS := -fno-objc-arc
 lc32-corefoundation-write-stream_CFLAGS := -fno-objc-arc
 lc32-coretext-bridge_CFLAGS := -fno-objc-arc
 lc32-foundation-null-utf8_CFLAGS := -fno-objc-arc
+lc32-gamekit-achievement-properties_USE_MODULES := 1
+lc32-gamekit-achievement-properties_CFLAGS := -fno-objc-arc \
+	-I$(abspath ../GuestFrameworks) -I$(abspath ../include)
 lc32-property-list-serialization_CFLAGS := -fno-objc-arc -Wno-deprecated-declarations
 lc32-uikit-legacy-window-root_CFLAGS := -fno-objc-arc -Wall -Wextra -Werror
 # Override Theos' clang target, which otherwise takes precedence over a

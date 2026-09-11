@@ -2801,12 +2801,47 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
                receiver ? class_getName(object_getClass(receiver)) : "<nil>");
         return 0;
     }
-    if(method) {
+    /* A native object may implement a selector through Objective-C message
+     * forwarding without installing a concrete Method. GameKit uses this
+     * for achievement properties, including double-valued accessors. Their
+     * forwarding signature is still authoritative for the native ABI; an
+     * integer-only fallback would read x0 instead of the returned d0.
+     *
+     * Keep ordinary Method lookups on their existing fast path. Only query
+     * native receivers after the missing guest-super case above has exited:
+     * a mirror's signature can describe ARM32 guest code or reenter it.
+     * Hold the returned signature for this invocation, not in a global cache,
+     * since forwarding can depend on the individual receiver's current state. */
+    LC32HostInvocationReceiverGuard forwardingSignatureGuard;
+    NSMethodSignature *forwardingSignature = nil;
+    if(!method && receiver) {
+        LC32GuestHostCallQuiescence quiescence;
+        forwardingSignature = [receiver methodSignatureForSelector:selector];
+        forwardingSignatureGuard.acquireUnmapped(forwardingSignature);
+    }
+    const NSUInteger methodArgumentCount = method
+        ? method_getNumberOfArguments(method)
+        : [forwardingSignature numberOfArguments];
+    const bool hasMethodSignature =
+        (method || forwardingSignature) && methodArgumentCount >= 2;
+    auto copyArgumentType = [&](NSUInteger index) -> char * {
+        if(method) return method_copyArgumentType(method, (unsigned int)index);
+        if(!forwardingSignature || index >= methodArgumentCount) return nullptr;
+        const char *type =
+            [forwardingSignature getArgumentTypeAtIndex:index];
+        return type ? strdup(type) : nullptr;
+    };
+    auto copyReturnType = [&]() -> char * {
+        if(method) return method_copyReturnType(method);
+        const char *type = [forwardingSignature methodReturnType];
+        return type ? strdup(type) : nullptr;
+    };
+
+    if(hasMethodSignature) {
         const unsigned int argumentCount =
-            MIN(method_getNumberOfArguments(method) - 2, 9u);
+            (unsigned int)MIN(methodArgumentCount - 2, (NSUInteger)9);
         for(unsigned int index = 0; index < argumentCount; index++) {
-            char *argumentType =
-                method_copyArgumentType(method, index + 2);
+            char *argumentType = copyArgumentType(index + 2);
             if(!argumentType) continue;
             const char *unqualifiedType = argumentType;
             while(*unqualifiedType &&
@@ -2972,8 +3007,8 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
                     return 0;
                 }
 
-                char *countType = method_copyArgumentType(
-                    method, descriptor.countArgumentIndex + 2);
+                char *countType = copyArgumentType(
+                    descriptor.countArgumentIndex + 2);
                 const char *unqualifiedCountType = countType;
                 while(unqualifiedCountType && *unqualifiedCountType &&
                         strchr("rnNoORVA", *unqualifiedCountType)) {
@@ -3222,18 +3257,16 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
      */
     u64 integerArguments[9] = {};
     u64 floatingArguments[8] = {};
-    bool useTypedScalarArguments = method != nullptr;
-    if(method) {
-        const unsigned int argumentCount =
-            method_getNumberOfArguments(method) - 2;
+    bool useTypedScalarArguments = hasMethodSignature;
+    if(hasMethodSignature) {
+        const NSUInteger argumentCount = methodArgumentCount - 2;
         size_t integerArgumentCount = 0;
         size_t floatingArgumentCount = 0;
         if(argumentCount > 9) useTypedScalarArguments = false;
 
         for(unsigned int index = 0;
                 useTypedScalarArguments && index < argumentCount; index++) {
-            char *argumentType =
-                method_copyArgumentType(method, index + 2);
+            char *argumentType = copyArgumentType(index + 2);
             const char *unqualifiedType = argumentType;
             while(unqualifiedType && *unqualifiedType &&
                     strchr("rnNoORVA", *unqualifiedType)) {
@@ -3382,8 +3415,8 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
     } returnKind = HostReturnKind::Integer;
     bool returnsBlock = false;
     bool returnsNSRange = false;
-    if(method) {
-        char *returnType = method_copyReturnType(method);
+    if(hasMethodSignature) {
+        char *returnType = copyReturnType();
         if(returnType) {
             const char *unqualifiedType = returnType;
             while(*unqualifiedType &&

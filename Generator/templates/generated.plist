@@ -44274,6 +44274,8 @@
 				<string>@8@0:4</string>
 				<key>hash</key>
 				<string>I8@0:4</string>
+				<key>identifier</key>
+				<string>@8@0:4</string>
 				<key>imageURL</key>
 				<string>@8@0:4</string>
 				<key>init</key>
@@ -44298,10 +44300,14 @@
 				<string>c12@0:4@8</string>
 				<key>issueChallengeToPlayers:message:</key>
 				<string>v16@0:4@8@12</string>
+				<key>lastReportedDate</key>
+				<string>@8@0:4</string>
 				<key>loadImageWithCompletionHandler:</key>
 				<string>v12@0:4@?8</string>
 				<key>methodSignatureForSelector:</key>
 				<string>@12@0:4:8</string>
+				<key>percentComplete</key>
+				<string>d8@0:4</string>
 				<key>player</key>
 				<string>@8@0:4</string>
 				<key>playerID</key>
@@ -44316,8 +44322,12 @@
 				<string>v16@0:4@8@?12</string>
 				<key>setGame:</key>
 				<string>v12@0:4@8</string>
+				<key>setIdentifier:</key>
+				<string>v12@0:4@8</string>
 				<key>setInternal:</key>
 				<string>v12@0:4@8</string>
+				<key>setPercentComplete:</key>
+				<string>v16@0:4d8</string>
 				<key>setShowsCompletionBanner:</key>
 				<string>v12@0:4c8</string>
 				<key>setValue:forUndefinedKey:</key>
