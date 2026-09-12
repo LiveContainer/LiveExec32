@@ -104,6 +104,7 @@ include $(THEOS_MAKE_PATH)/framework.mk
 
 # The nested CMake build uses a fixed worker count. Its build command drops the
 # parent Theos jobserver instead of advertising it and then overriding it.
+# Match the framework's iOS 15 minimum and keep libc++ availability enabled.
 .PHONY: lc32-dynarmic-static
 lc32-dynarmic-static:
 	@test -f "$(DYNARMIC_ROOT)/CMakeLists.txt" || { \
@@ -123,7 +124,7 @@ lc32-dynarmic-static:
 		-DCMAKE_SYSTEM_PROCESSOR=aarch64 \
 		-DCMAKE_OSX_SYSROOT="$(ISYSROOT)" \
 		-DCMAKE_OSX_ARCHITECTURES=arm64 \
-		-DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
+		-DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
 		-DCMAKE_C_FLAGS="-arch arm64"
 	env -u MAKEFLAGS cmake --build "$(DYNARMIC_BUILD_DIR)" \
 		--target dynarmic --parallel 4

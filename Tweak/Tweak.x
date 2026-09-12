@@ -212,7 +212,10 @@ static BOOL LC32InjectArm64ExecutableSliceWithError(
 - (BOOL)_validateWithError:
         (NSError *__autoreleasing *)error {
     NSString *pkgPath = [self.bundleURL.path stringByAppendingPathComponent:@"PkgInfo"];
-    BOOL isPlaceholder = ![NSFileManager.defaultManager fileExistsAtPath:pkgPath];
+    NSString *csPath = [self.bundleURL.path stringByAppendingPathComponent:@"_CodeSignature"];
+    BOOL isPlaceholder = ![NSFileManager.defaultManager fileExistsAtPath:pkgPath] &&
+        ![NSFileManager.defaultManager fileExistsAtPath:csPath];
+        
     BOOL isValid = %orig;
     if(isPlaceholder || self.bundleType != MIBundleTypeUserApp || !isValid)
         return isValid;
