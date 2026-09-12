@@ -15,6 +15,22 @@ SOURCE_ROOT="$WORK_ROOT/libiconv-$COMMIT"
 BUILD_ROOT="$WORK_ROOT/build"
 LOCK_FILE="$WORK_ROOT.lock"
 
+# The new Xcode linker can drop ARM32 Thumb bits from initializer pointers.
+# Select a real classic linker, not the ignored modern -ld_classic switch.
+GUEST_LINKER=${LC32_GUEST_LINKER:-}
+if [ -z "$GUEST_LINKER" ]; then
+    GUEST_LINKER=$(xcrun --find ld-classic 2>/dev/null || true)
+fi
+if [ -z "$GUEST_LINKER" ]; then
+    echo "Classic ARM32 linker unavailable: xcrun --find ld-classic failed" >&2
+    echo "Select a toolchain with ld-classic or set LC32_GUEST_LINKER=/absolute/path/to/ld-classic" >&2
+    exit 1
+fi
+if [ ! -f "$GUEST_LINKER" ] || [ ! -x "$GUEST_LINKER" ]; then
+    echo "ARM32 guest linker is not an executable file: $GUEST_LINKER" >&2
+    exit 1
+fi
+
 archive_sha256() {
     if command -v shasum >/dev/null 2>&1; then
         shasum -a 256 "$1" | awk '{ print $1 }'
@@ -162,6 +178,7 @@ compile "$BUILD_ROOT/version.c" "$BUILD_ROOT/version.o"
 
 output_tmp=$(mktemp "$(dirname "$OUTPUT")/.libiconv.2.dylib.XXXXXX")
 "$CC" -arch armv7s -isysroot "$SDK_ROOT" -miphoneos-version-min=10.3 \
+    -fuse-ld="$GUEST_LINKER" \
     -dynamiclib -Wl,-install_name,/usr/lib/libiconv.2.dylib \
     -Wl,-compatibility_version,7 -Wl,-current_version,7 -Wl,-dead_strip \
     "$BUILD_ROOT/iconv.o" "$BUILD_ROOT/localcharset.o" \

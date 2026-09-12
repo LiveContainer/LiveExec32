@@ -4,9 +4,9 @@ FINALPACKAGE = 1
 STRIP = 0
 INSTALL_TARGET_PROCESSES = installd trollstorehelper SpringBoard
 
-# Experimental: retain the ARM32 app's reported SDK in the injected shim.
-# Its minimum deployment target remains iOS 11 in either mode.
-LC32_PRESERVE_GUEST_SDK ?= 0
+# Retain the ARM32 app's reported SDK by default. Set 0 to restore the iOS 11
+# SDK floor; the minimum deployment target remains iOS 11 in either mode.
+LC32_PRESERVE_GUEST_SDK ?= 1
 ifneq ($(LC32_PRESERVE_GUEST_SDK),0)
 ifneq ($(LC32_PRESERVE_GUEST_SDK),1)
 $(error LC32_PRESERVE_GUEST_SDK must be 0 or 1)

@@ -1,5 +1,7 @@
 # Objective-C proxy bridge
 
+[Back to the README](../README.md)
+
 LiveExec32 runs two independent Objective-C runtimes in one process:
 
 - The **guest runtime** is the 32-bit Objective-C runtime from the iOS 10
@@ -53,9 +55,9 @@ The generation pipeline is:
 
 1. Method metadata captured from the iOS 10 environment supplies the guest
    encodings. This preserves 32-bit pointer, integer, and `CGFloat` widths.
-2. [GenerateShimAPI](Generator/GenerateShimAPI/main.m) validates the method
+2. [GenerateShimAPI](../Generator/GenerateShimAPI/main.m) validates the method
    encodings and emits guest forwarding methods.
-3. [generate-shims.sh](GuestMakefile/generate-shims.sh) stages the result and
+3. [generate-shims.sh](../GuestMakefile/generate-shims.sh) stages the result and
    atomically replaces `GuestFrameworks/.generated`.
 4. Generated sources and hand-written framework adapters are compiled into
    the guest frameworks together.
@@ -70,7 +72,7 @@ unsupported ABI are filtered and need a hand-written adapter.
 
 Application classes are loaded normally by guest libobjc. When native
 `objc_getClass` cannot find a class, the hook in
-[bridge.mm](HostFrameworks/LC32/bridge.mm) checks
+[bridge.mm](../HostFrameworks/LC32/bridge.mm) checks
 the guest runtime and, when appropriate:
 
 1. resolves or synthesizes the superclass;
@@ -225,7 +227,7 @@ storage descriptors, separates integer and floating-point register banks,
 and invokes a typed `objc_msgSend` shape.
 
 The guest-side tagged argument protocol is defined in
-[LC32ObjCBridgeABI.h](include/LC32ObjCBridgeABI.h). It covers:
+[LC32ObjCBridgeABI.h](../include/LC32ObjCBridgeABI.h). It covers:
 
 - an ordinary eight-byte indirect cell;
 - a canonical floating-point pointee which can widen `CGFloat *`;
@@ -310,9 +312,9 @@ The main Objective-C-related operations are:
 | 1020 | Copy a raw host C string safely into guest memory. |
 | 1022–1023 | Look up or update the authoritative host mapping. |
 
-The veneers live in [LC32.s](GuestFrameworks/LC32/LC32.s); the SVC cases are
+The veneers live in [LC32.s](../GuestFrameworks/LC32/LC32.s); the SVC cases are
 serviced in
-[dynarmic_callbacks.cpp](HostFrameworks/LC32/dynarmic_callbacks.cpp).
+[dynarmic_callbacks.cpp](../HostFrameworks/LC32/dynarmic_callbacks.cpp).
 
 ## Threading, reentrancy, and quiescence
 
@@ -358,7 +360,7 @@ mapped to its copied guest block.
 
 ## Why UIKit uses `LC32NativeView*`
 
-The native view helpers in [UIKit.mm](HostFrameworks/UIKit/UIKit.mm) are
+The native view helpers in [UIKit.mm](../HostFrameworks/UIKit/UIKit.mm) are
 intentional dispatch-bypass calls. A cast to `UIView *` does not suppress
 Objective-C dynamic dispatch: sending `setBounds:` to an instance of a
 synthesized guest subclass could enter `LC32InvokeGuestSelector` and run ARM32
@@ -445,25 +447,25 @@ The other tracing switches remain runtime environment variables:
 
 ## Implementation map
 
-- [bridge.mm](HostFrameworks/LC32/bridge.mm): identity registry, object
+- [bridge.mm](../HostFrameworks/LC32/bridge.mm): identity registry, object
   conversion, native class
   synthesis, selector marshalling, lifetime pins, and weak ownership.
-- [LC32.h](GuestFrameworks/LC32/LC32.h),
-  [LC32.m](GuestFrameworks/LC32/LC32.m), and
-  [LC32.s](GuestFrameworks/LC32/LC32.s): guest-facing proxy APIs, ownership
+- [LC32.h](../GuestFrameworks/LC32/LC32.h),
+  [LC32.m](../GuestFrameworks/LC32/LC32.m), and
+  [LC32.s](../GuestFrameworks/LC32/LC32.s): guest-facing proxy APIs, ownership
   swizzles, tagged argument helpers, and SVC veneers.
-- [LC32ObjCBridgeABI.h](include/LC32ObjCBridgeABI.h): shared selector flags,
+- [LC32ObjCBridgeABI.h](../include/LC32ObjCBridgeABI.h): shared selector flags,
   pointer tags, mapping operations, and descriptor layouts.
-- [GenerateShimAPI](Generator/GenerateShimAPI/main.m): generated framework
+- [GenerateShimAPI](../Generator/GenerateShimAPI/main.m): generated framework
   method bodies and ownership-family selection.
-- [block_bridge.mm](HostFrameworks/LC32/block_bridge.mm) and
-  [LC32BlockBridgeABI.h](include/LC32BlockBridgeABI.h): block signature
+- [block_bridge.mm](../HostFrameworks/LC32/block_bridge.mm) and
+  [LC32BlockBridgeABI.h](../include/LC32BlockBridgeABI.h): block signature
   translation and foreign-thread callback execution.
-- [UIKit.mm](HostFrameworks/UIKit/UIKit.mm): UIKit-specific guest class
+- [UIKit.mm](../HostFrameworks/UIKit/UIKit.mm): UIKit-specific guest class
   preparation and native-only compatibility dispatch.
-- [dynarmic_callbacks.cpp](HostFrameworks/LC32/dynarmic_callbacks.cpp),
-  [dynarmic_core.cpp](HostFrameworks/LC32/dynarmic_core.cpp), and
-  [dynarmic_thread_state.cpp](HostFrameworks/LC32/dynarmic_thread_state.cpp):
+- [dynarmic_callbacks.cpp](../HostFrameworks/LC32/dynarmic_callbacks.cpp),
+  [dynarmic_core.cpp](../HostFrameworks/LC32/dynarmic_core.cpp), and
+  [dynarmic_thread_state.cpp](../HostFrameworks/LC32/dynarmic_thread_state.cpp):
   SVC servicing, nested execution, and debugger
   quiescence.
 

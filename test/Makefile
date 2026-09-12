@@ -1,5 +1,6 @@
 LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash \
-  check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info
+  check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info \
+  check-guest-thumb-linker
 LC32_HOST_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),\
   $(if $(strip $(filter-out $(LC32_HOST_TEST_GOALS),$(MAKECMDGOALS))),,1),)
 
@@ -20,7 +21,11 @@ BUILD_INFO_LOGGING_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/build-info-
   present missing)
 
 .PHONY: check-guest-bootstrap check-memory-hash \
-  check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info
+  check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info \
+  check-guest-thumb-linker
+check-guest-thumb-linker:
+	./guest_thumb_linker.sh
+
 check-guest-bootstrap: $(GUEST_BOOTSTRAP_HOST_TEST)
 	"$(GUEST_BOOTSTRAP_HOST_TEST)"
 
@@ -104,9 +109,9 @@ $(COREMEDIA_TIME_VALUES_HOST_TEST): coremedia_time_values.c
 	$(HOST_CC) $(HOST_CFLAGS) coremedia_time_values.c \
 		-framework CoreMedia -framework CoreFoundation -o "$@"
 
-# Keep this host-native regression test usable on a clean checkout without
-# requiring Theos or bootstrapping the iOS 10.3 guest SDK. Mixed/default goals
-# continue through the normal guest-test declarations below.
+# Host-only checks do not require Theos. The Thumb-linker audit needs a
+# prepared guest SDK; the native tests do not. Mixed/default goals continue
+# through the normal guest-test declarations below.
 ifeq ($(strip $(LC32_HOST_ONLY_BUILD)),)
 
 ARCHS := armv7s
@@ -129,7 +134,7 @@ ROOTFS ?= $(abspath ../Resources/RootFS)
 include ../module-cache.mk
 
 ADDITIONAL_CFLAGS := -Wno-deprecated-module-dot-map
-ADDITIONAL_LDFLAGS := -fno-autolink
+ADDITIONAL_LDFLAGS := -fno-autolink $(LC32_GUEST_LINKER_FLAGS)
 
 include $(THEOS)/makefiles/common.mk
 
@@ -166,6 +171,7 @@ $(eval $(call lc32_test,lc32-debugger-stop-main,debugger_stop.c,))
 $(eval $(call lc32_test,lc32-fcntl-filesigs-return,fcntl_filesigs_return.c,))
 $(eval $(call lc32_test,lc32-getsockname-abi,getsockname_abi.c,))
 $(eval $(call lc32_test,lc32-getsockopt-abi,getsockopt_abi.c,))
+$(eval $(call lc32_test,lc32-guest-thumb-linker,guest_thumb_linker.c,))
 $(eval $(call lc32_test,lc32-host-info,host_info.c,))
 $(eval $(call lc32_test,lc32-iconv-smoke,iconv_smoke.c,))
 $(eval $(call lc32_test,lc32-kqueue-kevent,kqueue_kevent.c,))
@@ -424,6 +430,7 @@ THREADING_TESTS := lc32-native-pthread-smoke lc32-ownership-publication-race lc3
 UIKIT_TESTS := $(filter lc32-uikit-%,$(TOOL_NAME)) lc32-guest-fp-return lc32-guest-host-aggregate-arguments lc32-scalar-pointer-bridge lc32-text-input-traits
 
 include $(THEOS_MAKE_PATH)/tool.mk
+include ../GuestMakefile/guest-build-config.mk
 
 # Cover both the normal internal-all fanout and direct per-test targets.
 ifneq ($(strip $(LC32_GUEST_SDK_DEPENDENCY)),)

@@ -44,7 +44,7 @@ ADDITIONAL_CFLAGS = \
   -I$(MANUAL_FRAMEWORKS_ROOT) \
   -Wno-deprecated-module-dot-map \
   -F$(ISYSROOT)/System/Library/Frameworks/AVFoundation.framework/Frameworks
-ADDITIONAL_LDFLAGS = -fno-autolink -F$(THEOS_OBJ_DIR)
+ADDITIONAL_LDFLAGS = -fno-autolink -F$(THEOS_OBJ_DIR) $(LC32_GUEST_LINKER_FLAGS)
 include $(THEOS)/makefiles/common.mk
 
 LC32_LIBICONV_COMMIT := 6bcfda8c4720659e855c04ce72a8335fb4a67b0b
@@ -200,6 +200,7 @@ $(LC32_LIBICONV_CONFIG): lc32-libiconv-config-force
 		printf '%s\n' "url=$(LC32_LIBICONV_URL)"; \
 		printf '%s\n' "sha256=$(LC32_LIBICONV_SHA256)"; \
 		printf '%s\n' "sdk=$(abspath $(ISYSROOT))"; \
+		printf '%s\n' "linker=$(LC32_GUEST_LINKER)"; \
 	} > "$$tmp"; \
 	if [ -f "$@" ] && cmp -s "$$tmp" "$@"; then \
 		rm -f "$$tmp"; \
@@ -210,6 +211,7 @@ $(LC32_LIBICONV_CONFIG): lc32-libiconv-config-force
 $(LC32_LIBICONV_PRODUCTS) &: build-libiconv.sh guest-sdk.mk \
   $(LC32_GUEST_SDK_DEPENDENCY) $(LC32_LIBICONV_CONFIG)
 	@LC32_GUEST_SDK="$(ISYSROOT)" \
+	LC32_GUEST_LINKER="$(LC32_GUEST_LINKER)" \
 	LC32_LIBICONV_COMMIT="$(LC32_LIBICONV_COMMIT)" \
 	LC32_LIBICONV_ARCHIVE="$(LC32_LIBICONV_ARCHIVE)" \
 	LC32_LIBICONV_URL="$(LC32_LIBICONV_URL)" \
@@ -218,25 +220,7 @@ $(LC32_LIBICONV_PRODUCTS) &: build-libiconv.sh guest-sdk.mk \
 	"$(CURDIR)/build-libiconv.sh"
 
 include $(THEOS_MAKE_PATH)/framework.mk
-
-# Theos caches flag-specific objects, but an older cached object may not
-# trigger relinking when switching back to a previously built trace mode.
-# Invalidate only this framework/architecture's objects when its mode changes.
-ifneq ($(strip $(THEOS_CURRENT_ARCH)),)
-LC32_OBJC_TRACE_CONFIG := $(THEOS_OBJ_DIR)/.$(THEOS_CURRENT_INSTANCE)-objc-trace-config
-.PHONY: lc32-objc-trace-config-force
-$(LC32_OBJC_TRACE_CONFIG): lc32-objc-trace-config-force
-	@set -e; \
-	mkdir -p "$(@D)"; \
-	tmp="$@.$$$$"; \
-	printf '%s\n' "LC32_OBJC_TRACE=$(LC32_OBJC_TRACE)" > "$$tmp"; \
-	if [ -f "$@" ] && cmp -s "$$tmp" "$@"; then \
-		rm -f "$$tmp"; \
-	else \
-		mv -f "$$tmp" "$@"; \
-	fi
-$(OBJ_FILES_TO_LINK): $(LC32_OBJC_TRACE_CONFIG)
-endif
+include guest-build-config.mk
 
 # Theos can fan framework builds out from internal-all, and its convenience
 # targets bypass before-all. Gate both paths so no compiler observes a partial
