@@ -1,10 +1,41 @@
 @import Darwin;
 @import Foundation;
 #include <asl.h>
+#include <sys/utsname.h>
+
+extern CFTypeRef MGCopyAnswer(CFStringRef property, CFDictionaryRef options)
+    __attribute__((weak_import));
 
 @interface NSUserDefaults(LiveContainer)
 + (instancetype)lcSharedDefaults;
 @end
+
+static NSString *LC32DeviceModel(void) {
+    const char *simulatorModel = getenv("SIMULATOR_MODEL_IDENTIFIER");
+    if(simulatorModel && simulatorModel[0]) {
+        return [NSString stringWithFormat:@"Simulator (%s)", simulatorModel];
+    }
+
+    // MobileGestalt is weak-linked; balance its owned Copy result under MRC.
+    NSString *name = MGCopyAnswer
+        ? [(NSString *)MGCopyAnswer(CFSTR("marketing-name"), NULL) autorelease] : nil;
+    if(name.length) return name;
+
+    struct utsname systemInfo;
+    return uname(&systemInfo) == 0
+        ? [NSString stringWithUTF8String:systemInfo.machine] : @"unknown";
+}
+
+static void LC32LogBuildAndDeviceInfo(void) {
+    @autoreleasepool {
+        NSBundle *lc32Bundle = [NSBundle bundleWithIdentifier:@CONFIG_SHARED_FRAMEWORK_BUNDLE_ID];
+        NSString *lc32Version = lc32Bundle.infoDictionary[@"CFBundleShortVersionString"];
+        printf("LiveExec32 version: %s commit %s (%s)\n",
+            (lc32Version ?: @CONFIG_VERSION).UTF8String, CONFIG_COMMIT, CONFIG_BRANCH);
+        printf("Device: %s, %s\n", LC32DeviceModel().UTF8String,
+            NSProcessInfo.processInfo.operatingSystemVersionString.UTF8String);
+    }
+}
 
 __attribute__((constructor)) void logToFileIfNeeded() {
     // Don't log in CLI
@@ -51,4 +82,6 @@ __attribute__((constructor)) void logToFileIfNeeded() {
         }
         [file closeFile];
     });
+
+    LC32LogBuildAndDeviceInfo();
 }

@@ -8,6 +8,7 @@ STRIP = 0
 TARGET_CODESIGN =
 
 include ../../module-cache.mk
+include ../../version.mk
 
 include $(THEOS)/makefiles/common.mk
 
@@ -22,6 +23,7 @@ LC32HelpUI_INSTALL_PATH = @rpath
 LC32HelpUI_INSTALL = 0
 
 after-LC32HelpUI-all::
+	$(call lc32_stamp_version,$(THEOS_OBJ_DIR)/LC32HelpUI.framework/Info.plist)
 	@ldid -S "$(THEOS_OBJ_DIR)/LC32HelpUI.framework/LC32HelpUI"
 
 include $(THEOS_MAKE_PATH)/framework.mk

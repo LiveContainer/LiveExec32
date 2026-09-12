@@ -36,6 +36,18 @@ gmake
   Errors and actionable warnings remain enabled in both modes, and existing
   specialized runtime trace controls are unchanged.
 
+  `Version:` in the root `control` file is the single release-version source
+  (use a numeric version such as `0.0.1`). Builds copy it into
+  `CFBundleShortVersionString` for LiveExec32, LiveExec32Shared, and LC32HelpUI
+  before signing; tracked Info.plist templates are not rewritten. Theos can
+  still append package-only suffixes via `PACKAGE_BUILDNAME` or `PACKAGE_VERSION`.
+  `CFBundleVersion` remains each bundle's separate build number.
+  Startup logs include that release version, the 7-character Git commit
+  (with `-dirty` for tracked local changes), branch, device model, and OS.
+  Detached CI checkouts use `GITHUB_HEAD_REF`/`GITHUB_REF_NAME` for the branch;
+  source archives without Git metadata use `unknown` for the commit.
+  Run `gmake -C test check-build-info` for the metadata/logging regressions.
+
   The jailbreak injector normally floors the arm64 shim's SDK at iOS 11.
   To experiment with the ARM32 app's original SDK instead, build the deb
   with `gmake PACKAGE_FORMAT=deb LC32_PRESERVE_GUEST_SDK=1 package` (plus

@@ -42,7 +42,8 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<!-- Replaced from control's Version by version.mk before signing. -->
+	<string>$(LC32_VERSION)</string>
 	<key>CFBundleSignature</key>
 	<string>????</string>
         <key>CFBundleSupportedPlatforms</key>

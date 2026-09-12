@@ -13,10 +13,15 @@ LC32_DEBUG_LOGS ?= 0
 TARGET_CODESIGN =
 
 include ../../module-cache.mk
+include ../../version.mk
 
 include $(THEOS)/makefiles/common.mk
 
 FRAMEWORK_NAME = LiveExec32Shared
+
+LC32_BUILD_INFO_HEADER := $(THEOS_PROJECT_DIR)/.theos/LC32BuildInfo.h
+# Keep changing Git metadata local to the logging translation unit.
+log.m_CFLAGS = -include "$(LC32_BUILD_INFO_HEADER)"
 
 DYNARMIC_ROOT := $(abspath ../../External/dynarmic)
 DYNARMIC_BUILD_DIR := $(THEOS_PROJECT_DIR)/.theos/obj/dynarmic
@@ -77,7 +82,7 @@ crash_exception.mm_CFLAGS = -fobjc-arc
 ../UIKit/LegacyAlerts.mm_CFLAGS = -fobjc-arc
 ../UIKit/LegacyRotation.mm_CFLAGS = -fobjc-arc
 LiveExec32Shared_OBJ_FILES = $(DYNARMIC_STATIC_LIBS)
-LiveExec32Shared_LDFLAGS = -L../../External/mini-gdbstub/build
+LiveExec32Shared_LDFLAGS = -L../../External/mini-gdbstub/build -Wl,-weak-lMobileGestalt
 LiveExec32Shared_LIBRARIES = gdbstub
 LiveExec32Shared_FRAMEWORKS = \
 	AudioToolbox CFNetwork CoreFoundation CoreMedia CoreVideo Foundation GameKit IOKit \
@@ -89,8 +94,16 @@ LiveExec32Shared_INSTALL = 0
 
 # mini-gdbstub is a static dependency of this framework rather than of the
 # launcher, which also keeps direct framework builds complete.
-before-LiveExec32Shared-all:: lc32-dynarmic-static
+before-LiveExec32Shared-all:: lc32-build-info lc32-dynarmic-static
 	$(MAKE) -C ../../External/mini-gdbstub ARCH=rv32 CC="cc -isysroot $(ISYSROOT) -miphoneos-version-min=15.0"
+
+.PHONY: lc32-build-info
+lc32-build-info:
+	/bin/bash "$(LC32_REPO_ROOT)/Scripts/build-info.sh" \
+		--root "$(LC32_REPO_ROOT)" --output "$(LC32_BUILD_INFO_HEADER)"
+
+after-LiveExec32Shared-all::
+	$(call lc32_stamp_version,$(THEOS_OBJ_DIR)/LiveExec32Shared.framework/Info.plist)
 
 internal-clean::
 	$(MAKE) -C ../../External/mini-gdbstub clean

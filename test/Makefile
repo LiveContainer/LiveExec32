@@ -1,5 +1,5 @@
 LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash \
-  check-coremedia-time-values-host check-debug-logging
+  check-coremedia-time-values-host check-debug-logging check-build-info
 LC32_HOST_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),\
   $(if $(strip $(filter-out $(LC32_HOST_TEST_GOALS),$(MAKECMDGOALS))),,1),)
 
@@ -14,9 +14,11 @@ COREMEDIA_TIME_VALUES_HOST_TEST := \
   $(HOST_TEST_OUTPUT_DIR)/coremedia-time-values-host
 DEBUG_LOGGING_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/debug-logging-,\
   default disabled enabled)
+BUILD_INFO_LOGGING_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/build-info-logging-,\
+  present missing)
 
 .PHONY: check-guest-bootstrap check-memory-hash \
-  check-coremedia-time-values-host check-debug-logging
+  check-coremedia-time-values-host check-debug-logging check-build-info
 check-guest-bootstrap: $(GUEST_BOOTSTRAP_HOST_TEST)
 	"$(GUEST_BOOTSTRAP_HOST_TEST)"
 
@@ -30,6 +32,23 @@ check-debug-logging: $(DEBUG_LOGGING_HOST_TESTS)
 	"$(HOST_TEST_OUTPUT_DIR)/debug-logging-default"
 	"$(HOST_TEST_OUTPUT_DIR)/debug-logging-disabled"
 	"$(HOST_TEST_OUTPUT_DIR)/debug-logging-enabled"
+
+check-build-info: $(BUILD_INFO_LOGGING_HOST_TESTS)
+	python3 build_info.py
+	"$(HOST_TEST_OUTPUT_DIR)/build-info-logging-present"
+	"$(HOST_TEST_OUTPUT_DIR)/build-info-logging-missing"
+
+$(HOST_TEST_OUTPUT_DIR)/build-info-logging-present: BUILD_INFO_LOGGING_TEST_FLAGS := \
+  -DLC32_TEST_MG_PRESENT=1
+$(HOST_TEST_OUTPUT_DIR)/build-info-logging-missing: BUILD_INFO_LOGGING_TEST_FLAGS := \
+  -DLC32_TEST_MG_PRESENT=0 -Wl,-U,_LC32TestMGCopyAnswer
+
+$(BUILD_INFO_LOGGING_HOST_TESTS): build_info_logging.m ../HostFrameworks/LC32/log.m Makefile
+	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
+	$(HOST_CC) -fmodules -fno-objc-arc -fblocks -Wall -Wextra -Werror \
+		-fmodules-cache-path="$(abspath ../.theos/module-cache)" \
+		-Wno-deprecated-declarations $(BUILD_INFO_LOGGING_TEST_FLAGS) \
+		build_info_logging.m -framework Foundation -o "$@"
 
 $(HOST_TEST_OUTPUT_DIR)/debug-logging-default: DEBUG_LOGGING_TEST_FLAGS := \
   -ULC32_DEBUG_LOGS -DLC32_TEST_EXPECT_ENABLED=0
