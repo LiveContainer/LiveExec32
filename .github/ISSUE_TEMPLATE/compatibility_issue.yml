@@ -1,0 +1,67 @@
+name: Compatibility Issue
+description: >-
+  This is for compatibility issues with apps. Includes crashes, rendering,
+  aspect ratio issues.
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Thanks for taking the time to fill out this Compatibility Issue report!
+        Before you continue filling out the report, please **[search in GitHub
+        Issues](https://github.com/LiveContainer/LiveExec32/labels/compatibility)
+        for the app you are experiencing issues with** in case it has already
+        been reported.
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the issue
+      description: What is the problem? How did you discover it?
+      placeholder: Please be concise with your explaination.
+    validations:
+      required: true
+  - type: textarea
+    id: how-to-reproduce
+    attributes:
+      label: Instructions to reproduce
+      description: >-
+        Please include consistent instructions to reproduce the problem to make
+        it easier for us to fix it.
+    validations:
+      required: true
+  - type: textarea
+    id: version-info
+    attributes:
+      label: Device and version info
+      description: >-
+        Please include the following: device model, iOS version, LiveExec32 build
+        (or you can paste 2 first lines from `LiveExec32.log`, read below for
+        how to get it). Additionally, include LiveContainer version if you are using it.
+    validations:
+      required: true
+  - type: textarea
+    id: app-name
+    attributes:
+      label: The name, version the app having issues
+      description: Please put the **exact** name and version of the app having issues here.
+    validations:
+      required: true
+  - type: textarea
+    id: crash-log
+    attributes:
+      label: LiveExec32.log and crash log
+      description: |-
+        If a crash happened, please upload LiveExec32.log.
+        - For jailbreak tweak: long-press on the app icon > Share LiveExec32.log > Copy, then paste it here.
+        - For LiveContainer: after restarting it might show you an error with `LiveExec32 guest crash report`. Hit the Share button > Copy then paste it here (depending on LiveContainer version, you might instead see the old Copy button which copies only the crash report)
+        
+        You may also want to upload the crash log in iOS settings > Privacy Security > Analytics Improvements > Analytics Data - Search \<AppName\>/LiveContainer/LiveProcess.
+        Change .ips to .txt and upload it.
+    validations:
+      required: true
+  - type: textarea
+    id: other-info
+    attributes:
+      label: Other
+      description: >-
+        If you have any other info that might be useful, or if you found a
+        workaround, please put it here.
