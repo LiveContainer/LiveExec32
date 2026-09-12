@@ -2,7 +2,7 @@ ARCHS := arm64 arm64e
 TARGET := iphone:clang:latest:15.0
 FINALPACKAGE = 1
 STRIP = 0
-INSTALL_TARGET_PROCESSES = installd trollstorehelper
+INSTALL_TARGET_PROCESSES = installd trollstorehelper SpringBoard
 
 # Experimental: retain the ARM32 app's reported SDK in the injected shim.
 # Its minimum deployment target remains iOS 11 in either mode.
@@ -19,7 +19,7 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = LiveExec32Injector
 
-LiveExec32Injector_FILES = Tweak.x FatMachO.c MachOImage.c AdHocSigner.c LegacyBundleLayout.c
+LiveExec32Injector_FILES = SpringBoard.x Tweak.x FatMachO.c MachOImage.c AdHocSigner.c LegacyBundleLayout.c
 LiveExec32Injector_CFLAGS = -fobjc-arc $(LC32_INJECTOR_SDK_FLAGS)
 LiveExec32Injector_LDFLAGS = -Wl,-dead_strip
 LiveExec32Injector_FRAMEWORKS = CoreFoundation Security

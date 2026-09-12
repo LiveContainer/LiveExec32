@@ -1,5 +1,8 @@
 {
 	Filter = {
+		Bundles = (
+			"com.apple.springboard",
+		);
 		Executables = (
 			installd,
 			trollstorehelper,
