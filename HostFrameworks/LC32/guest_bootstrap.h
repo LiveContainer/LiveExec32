@@ -58,7 +58,6 @@ EnvironmentSelection CollectEnvironment(char *const environment[]);
 std::vector<std::string> FinalizeEnvironment(
     EnvironmentSelection selection,
     const std::string &guestHome,
-    const std::string &objcTrace,
     const std::string &nativeGuestThreads,
     std::vector<std::string> *overriddenNames = nullptr);
 

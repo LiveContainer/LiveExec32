@@ -428,9 +428,16 @@ separate adapter families.
 
 The high-volume tracing switches are opt-in because they affect timing:
 
+Generated guest-to-host Objective-C send tracing is compiled out by default.
+Enable it when building the guest frameworks with
+`gmake -C GuestMakefile LC32_OBJC_TRACE=1`, or rebuild with
+`LC32_OBJC_TRACE=0` to disable it. It is not a runtime environment setting.
+Repack the guest root filesystem and rebuild the app after changing it.
+
+The other tracing switches remain runtime environment variables:
+
 | Environment variable | Trace |
 |---|---|
-| `LC32_OBJC_TRACE=1` | Generated guest-to-host Objective-C sends. |
 | `LC32_CALLBACK_TRACE=1` | Native-to-guest Objective-C callbacks. |
 | `LC32_BLOCK_TRACE=1` | Block creation, invocation, executor, and release paths. |
 | `LC32_OPERATION_TRACE=1` | NSOperation proxy identity and ownership transitions. |

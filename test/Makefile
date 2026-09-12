@@ -1,5 +1,5 @@
 LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash \
-  check-coremedia-time-values-host check-debug-logging check-build-info
+  check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info
 LC32_HOST_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),\
   $(if $(strip $(filter-out $(LC32_HOST_TEST_GOALS),$(MAKECMDGOALS))),,1),)
 
@@ -14,11 +14,13 @@ COREMEDIA_TIME_VALUES_HOST_TEST := \
   $(HOST_TEST_OUTPUT_DIR)/coremedia-time-values-host
 DEBUG_LOGGING_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/debug-logging-,\
   default disabled enabled)
+OBJC_TRACE_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/objc-trace-,\
+  default disabled enabled)
 BUILD_INFO_LOGGING_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/build-info-logging-,\
   present missing)
 
 .PHONY: check-guest-bootstrap check-memory-hash \
-  check-coremedia-time-values-host check-debug-logging check-build-info
+  check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info
 check-guest-bootstrap: $(GUEST_BOOTSTRAP_HOST_TEST)
 	"$(GUEST_BOOTSTRAP_HOST_TEST)"
 
@@ -32,6 +34,11 @@ check-debug-logging: $(DEBUG_LOGGING_HOST_TESTS)
 	"$(HOST_TEST_OUTPUT_DIR)/debug-logging-default"
 	"$(HOST_TEST_OUTPUT_DIR)/debug-logging-disabled"
 	"$(HOST_TEST_OUTPUT_DIR)/debug-logging-enabled"
+
+check-objc-trace: $(OBJC_TRACE_HOST_TESTS)
+	"$(HOST_TEST_OUTPUT_DIR)/objc-trace-default"
+	"$(HOST_TEST_OUTPUT_DIR)/objc-trace-disabled"
+	"$(HOST_TEST_OUTPUT_DIR)/objc-trace-enabled"
 
 check-build-info: $(BUILD_INFO_LOGGING_HOST_TESTS)
 	python3 build_info.py
@@ -61,6 +68,18 @@ $(DEBUG_LOGGING_HOST_TESTS): debug_logging.c ../include/LC32DebugLog.h
 	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
 	$(HOST_CC) $(HOST_CFLAGS) $(DEBUG_LOGGING_TEST_FLAGS) \
 		-I"$(abspath ../include)" debug_logging.c -o "$@"
+
+$(HOST_TEST_OUTPUT_DIR)/objc-trace-default: OBJC_TRACE_TEST_FLAGS := \
+  -ULC32_OBJC_TRACE -DLC32_TEST_EXPECT_ENABLED=0
+$(HOST_TEST_OUTPUT_DIR)/objc-trace-disabled: OBJC_TRACE_TEST_FLAGS := \
+  -ULC32_OBJC_TRACE -DLC32_OBJC_TRACE=0 -DLC32_TEST_EXPECT_ENABLED=0
+$(HOST_TEST_OUTPUT_DIR)/objc-trace-enabled: OBJC_TRACE_TEST_FLAGS := \
+  -ULC32_OBJC_TRACE -DLC32_OBJC_TRACE=1 -DLC32_TEST_EXPECT_ENABLED=1
+
+$(OBJC_TRACE_HOST_TESTS): objc_trace.c ../include/LC32ObjCTrace.h
+	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
+	$(HOST_CC) $(HOST_CFLAGS) -O0 $(OBJC_TRACE_TEST_FLAGS) \
+		-I"$(abspath ../include)" objc_trace.c -o "$@"
 
 $(GUEST_BOOTSTRAP_HOST_TEST): guest_bootstrap_host.cpp \
   ../HostFrameworks/LC32/guest_bootstrap.cpp \

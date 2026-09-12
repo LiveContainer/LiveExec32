@@ -7,6 +7,8 @@ STRIP = 0
 OPTFLAG = -O2
 .DEFAULT_GOAL := all
 GO_EASY_ON_ME = 1
+# High-volume Objective-C send tracing is compiled out unless explicitly enabled.
+LC32_OBJC_TRACE ?= 0
 
 # Theos normally serializes product targets and only parallelizes source files
 # within one framework.  Let the top-level guest build fan independent
@@ -37,6 +39,7 @@ endif
 include ../module-cache.mk
 
 ADDITIONAL_CFLAGS = \
+  -DLC32_OBJC_TRACE=$(LC32_OBJC_TRACE) \
   -I$(abspath ../include) \
   -I$(MANUAL_FRAMEWORKS_ROOT) \
   -Wno-deprecated-module-dot-map \
@@ -215,6 +218,25 @@ $(LC32_LIBICONV_PRODUCTS) &: build-libiconv.sh guest-sdk.mk \
 	"$(CURDIR)/build-libiconv.sh"
 
 include $(THEOS_MAKE_PATH)/framework.mk
+
+# Theos caches flag-specific objects, but an older cached object may not
+# trigger relinking when switching back to a previously built trace mode.
+# Invalidate only this framework/architecture's objects when its mode changes.
+ifneq ($(strip $(THEOS_CURRENT_ARCH)),)
+LC32_OBJC_TRACE_CONFIG := $(THEOS_OBJ_DIR)/.$(THEOS_CURRENT_INSTANCE)-objc-trace-config
+.PHONY: lc32-objc-trace-config-force
+$(LC32_OBJC_TRACE_CONFIG): lc32-objc-trace-config-force
+	@set -e; \
+	mkdir -p "$(@D)"; \
+	tmp="$@.$$$$"; \
+	printf '%s\n' "LC32_OBJC_TRACE=$(LC32_OBJC_TRACE)" > "$$tmp"; \
+	if [ -f "$@" ] && cmp -s "$$tmp" "$@"; then \
+		rm -f "$$tmp"; \
+	else \
+		mv -f "$$tmp" "$@"; \
+	fi
+$(OBJ_FILES_TO_LINK): $(LC32_OBJC_TRACE_CONFIG)
+endif
 
 # Theos can fan framework builds out from internal-all, and its convenience
 # targets bypass before-all. Gate both paths so no compiler observes a partial

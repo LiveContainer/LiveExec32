@@ -33,7 +33,8 @@ gmake
   Verbose host bridge, loader, memory, syscall, and thread logs are compiled
   out by default. Build with `gmake LC32_DEBUG_LOGS=1` to enable them; rebuild
   with `gmake LC32_DEBUG_LOGS=0` (or plain `gmake`) to disable them again.
-  Errors and actionable warnings remain enabled in both modes, and existing
+  Errors and actionable warnings remain enabled in both modes. Guest
+  Objective-C tracing has its own build flag described below; other
   specialized runtime trace controls are unchanged.
 
   `Version:` in the root `control` file is the single release-version source
@@ -166,11 +167,19 @@ LC32_GUEST_ENV_NSUnbufferedIO=YES \
   .theos/obj/LiveExec32.app/LiveExec32 /var/mobile/ramdisk32/usr/bin/fdisk
 ```
 
-`HOME`, `LC32_OBJC_TRACE`, `NATIVE_GUEST_THREADS`, and
-`DYLD_SHARED_REGION` remain launcher-owned and cannot be overridden through
+`HOME`, `NATIVE_GUEST_THREADS`, and `DYLD_SHARED_REGION` remain
+launcher-owned and cannot be overridden through
 this mechanism. `DYLD_PRINT_*` diagnostics are disabled by default, but can
 be enabled explicitly, for example with
 `LC32_GUEST_ENV_DYLD_PRINT_SEGMENTS=1`.
+
+Generated Objective-C send tracing is a guest build-time option, disabled
+by default. Enable it with `gmake -C GuestMakefile LC32_OBJC_TRACE=1`;
+rebuild with `LC32_OBJC_TRACE=0` to disable it. Runtime environment variables
+do not configure this tracing, including an explicitly forwarded
+`LC32_GUEST_ENV_LC32_OBJC_TRACE` value.
+Repack the guest root filesystem and rebuild the app to deploy the changed
+guest frameworks.
 
 ## Design
 - LiveExec32 has most of the codebase and references from [unidbg](https://github.com/zhkl0228/unidbg), so it also uses Dynarmic as the dynamic translator of ARMv7 code to ARM64.

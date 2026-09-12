@@ -278,7 +278,6 @@ EnvironmentSelection CollectEnvironment(char *const environment[]) {
 std::vector<std::string> FinalizeEnvironment(
         EnvironmentSelection selection,
         const std::string &guestHome,
-        const std::string &objcTrace,
         const std::string &nativeGuestThreads,
         std::vector<std::string> *overriddenNames) {
     auto setLauncherValue = [&](const char *name, const std::string &value) {
@@ -289,7 +288,6 @@ std::vector<std::string> FinalizeEnvironment(
     };
 
     setLauncherValue("HOME", guestHome);
-    setLauncherValue("LC32_OBJC_TRACE", objcTrace);
     setLauncherValue("NATIVE_GUEST_THREADS", nativeGuestThreads);
     setLauncherValue("DYLD_SHARED_REGION", "private");
 

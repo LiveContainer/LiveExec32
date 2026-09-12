@@ -515,7 +515,7 @@ void TestEnvironmentSelection() {
 
 void TestEnvironmentFinalization() {
     char home[] = "LC32_GUEST_ENV_HOME=/spoofed";
-    char trace[] = "LC32_GUEST_ENV_LC32_OBJC_TRACE=spoofed";
+    char trace[] = "LC32_GUEST_ENV_LC32_OBJC_TRACE=forwarded";
     char threads[] = "LC32_GUEST_ENV_NATIVE_GUEST_THREADS=spoofed";
     char sharedRegion[] = "LC32_GUEST_ENV_DYLD_SHARED_REGION=spoofed";
     char custom[] = "LC32_GUEST_ENV_CUSTOM=value";
@@ -527,29 +527,33 @@ void TestEnvironmentFinalization() {
     const std::vector<std::string> finalized =
         LC32GuestBootstrap::FinalizeEnvironment(
             LC32GuestBootstrap::CollectEnvironment(source),
-            "/var/mobile", "1", "0", &overridden);
+            "/var/mobile", "0", &overridden);
     const std::map<std::string, std::string> values =
         ParseEnvironment(finalized);
 
     CHECK(values.at("HOME") == "/var/mobile");
-    CHECK(values.at("LC32_OBJC_TRACE") == "1");
+    // The trace name is now an ordinary forwarded value, not a launcher
+    // setting. Guest tracing itself is configured at compile time.
+    CHECK(values.at("LC32_OBJC_TRACE") == "forwarded");
     CHECK(values.at("NATIVE_GUEST_THREADS") == "0");
     CHECK(values.at("DYLD_SHARED_REGION") == "private");
     CHECK(values.at("CUSTOM") == "value");
-    CHECK(overridden.size() == 4);
+    CHECK(overridden.size() == 3);
     CHECK(Contains(overridden, "HOME"));
-    CHECK(Contains(overridden, "LC32_OBJC_TRACE"));
+    CHECK(!Contains(overridden, "LC32_OBJC_TRACE"));
     CHECK(Contains(overridden, "NATIVE_GUEST_THREADS"));
     CHECK(Contains(overridden, "DYLD_SHARED_REGION"));
 }
 
 void TestDyldPrintOptIn() {
     char unrelated[] = "LC32_GUEST_ENV_APPLICATION_MODE=test";
-    char *defaultSource[] = {unrelated, nullptr};
+    char hostTrace[] = "LC32_OBJC_TRACE=1";
+    char *defaultSource[] = {unrelated, hostTrace, nullptr};
     const std::vector<std::string> defaults =
         LC32GuestBootstrap::FinalizeEnvironment(
             LC32GuestBootstrap::CollectEnvironment(defaultSource),
-            "/var/mobile", "0", "0");
+            "/var/mobile", "0");
+    CHECK(ParseEnvironment(defaults).count("LC32_OBJC_TRACE") == 0);
     for(const std::string &entry : defaults) {
         CHECK(entry.compare(0, std::strlen("DYLD_PRINT_"),
                             "DYLD_PRINT_") != 0);
@@ -565,7 +569,7 @@ void TestDyldPrintOptIn() {
     const std::map<std::string, std::string> optedIn =
         ParseEnvironment(LC32GuestBootstrap::FinalizeEnvironment(
             LC32GuestBootstrap::CollectEnvironment(optInSource),
-            "/var/mobile", "0", "0"));
+            "/var/mobile", "0"));
     CHECK(optedIn.at("DYLD_PRINT_ENV") == "1");
     CHECK(optedIn.at("DYLD_PRINT_INITIALIZERS") == "1");
 }

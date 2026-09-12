@@ -1102,7 +1102,6 @@ int LC32RunGuest(int argc, char* argv[], char* envp[]) {
     std::vector<std::string> guestEnvironment =
         LC32GuestBootstrap::FinalizeEnvironment(
             std::move(guestEnvironmentSelection), guestHome,
-            getenv("LC32_OBJC_TRACE") ?: "0",
             getenv("NATIVE_GUEST_THREADS") ?: "0",
             &overriddenGuestEnvironmentNames);
     for(const std::string &name : overriddenGuestEnvironmentNames) {

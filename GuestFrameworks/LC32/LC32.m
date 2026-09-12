@@ -41,8 +41,6 @@ uint64_t LC32CachedHostSelector(
     return expected;
 }
 
-static pthread_once_t LC32ObjCTraceOnce = PTHREAD_ONCE_INIT;
-static BOOL LC32ObjCTraceIsEnabled;
 static pthread_once_t LC32OperationTraceOnce = PTHREAD_ONCE_INIT;
 static BOOL LC32OperationTraceIsEnabled;
 static uint64_t LC32OperationTraceSequence;
@@ -50,12 +48,6 @@ static pthread_once_t LC32AutoreleaseSchedulerOnce = PTHREAD_ONCE_INIT;
 static uint64_t LC32AutoreleaseScheduler;
 static pthread_once_t LC32HostFrameworkLoaderOnce = PTHREAD_ONCE_INIT;
 static uint64_t LC32HostFrameworkLoader;
-
-static void LC32InitializeObjCTrace(void) {
-    const char *value = getenv("LC32_OBJC_TRACE");
-    LC32ObjCTraceIsEnabled =
-        value && value[0] && strcmp(value, "0") != 0;
-}
 
 static void LC32InitializeOperationTrace(void) {
     const char *value = getenv("LC32_OPERATION_TRACE");
@@ -118,11 +110,9 @@ BOOL LC32BindHostObjectConstant(id guestConstant, const char *symbolName) {
     return YES;
 }
 
-BOOL LC32ObjCTraceEnabled(void) {
-    // pthread_once avoids the problematic inline ARMv7 CAS sequence clang
-    // emits for a local atomic while remaining safe with native guest threads.
-    pthread_once(&LC32ObjCTraceOnce, LC32InitializeObjCTrace);
-    return LC32ObjCTraceIsEnabled;
+// Parentheses bypass the function-like macro for this legacy ABI entry point.
+BOOL (LC32ObjCTraceEnabled)(void) {
+    return LC32ObjCTraceEnabled();
 }
 
 void *LC32CreateHostObjectArray(const id *objects, uint32_t count,

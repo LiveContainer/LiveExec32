@@ -5,6 +5,7 @@
 #include <LC32BlockBridgeABI.h>
 #include <LC32FoundationBridgeABI.h>
 #include <LC32ObjCBridgeABI.h>
+#include <LC32ObjCTrace.h>
 
 #define CRSetCrashLogMessage(msg) __assert_rtn(NULL, __FILE__, __LINE__, msg)
 #define HALT __builtin_trap()
@@ -66,8 +67,10 @@ BOOL LC32BindHostObjectConstant(id guestConstant, const char *symbolName);
 
 // Generated Objective-C call tracing is intentionally opt-in; high-frequency
 // selectors such as view/render loops otherwise overwhelm stderr and can
-// materially perturb guest scheduling. Enable it with LC32_OBJC_TRACE=1.
-BOOL LC32ObjCTraceEnabled(void);
+// materially perturb guest scheduling. Build guest frameworks with
+// LC32_OBJC_TRACE=1 to enable it. Calls expand to a compile-time constant;
+// retain the exported function for previously built guest frameworks.
+BOOL (LC32ObjCTraceEnabled)(void);
 
 uint32_t LC32InvokeHostCRet32(uint64_t hostPtr, ...);
 
