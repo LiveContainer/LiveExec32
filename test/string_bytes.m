@@ -51,6 +51,52 @@ static BOOL testLongUnicodeLiteral(void) {
     return passed;
 }
 
+static BOOL testLegacyWideCStringPadding(void) {
+    /* Seed the associated guest buffer with nonzero bytes before shortening
+     * the string. This makes a legacy four-byte scan past the UTF-16 NUL
+     * deterministic, without depending on allocator contents or reading
+     * outside the buffer's existing allocation. */
+    NSMutableString *string = [NSMutableString stringWithString:@"XXXXXXXXXXXXXXX"];
+    const char *seed = [string UTF8String];
+    if(!seed || memcmp(seed, "XXXXXXXXXXXXXXX", 16) != 0) return NO;
+
+    [string setString:@"A"];
+    const char *bytes = [string cStringUsingEncoding:NSUTF16StringEncoding];
+    uint32_t words[2] = {};
+    if(!bytes) return NO;
+    memcpy(words, bytes, sizeof(words));
+    BOOL passed = words[0] == 'A' && words[1] == 0;
+    printf("string-cstring-utf16-wide-scan: %s\n", passed ? "PASS" : "FAIL");
+
+    /* Padding must not reinterpret UTF-16 as UTF-32: preserve paired code
+     * units, explicit byte order, and supplementary characters. */
+    [string setString:@"AB"];
+    const unsigned char expectedPair[] = {'A', 0, 'B', 0, 0, 0, 0, 0};
+    bytes = [string cStringUsingEncoding:NSUTF16LittleEndianStringEncoding];
+    BOOL pairPassed = bytes && memcmp(bytes, expectedPair, sizeof(expectedPair)) == 0;
+    printf("string-cstring-utf16-payload: %s\n", pairPassed ? "PASS" : "FAIL");
+
+    const unsigned char expectedBE[] = {0, 'A', 0, 'B', 0, 0, 0, 0};
+    bytes = [string cStringUsingEncoding:NSUTF16BigEndianStringEncoding];
+    BOOL bigEndianPassed = bytes && memcmp(bytes, expectedBE, sizeof(expectedBE)) == 0;
+    printf("string-cstring-utf16-big-endian: %s\n", bigEndianPassed ? "PASS" : "FAIL");
+
+    [string setString:@"\U0001f600"];
+    const unsigned char expectedSurrogate[] = {0x3d, 0xd8, 0x00, 0xde, 0, 0, 0, 0};
+    bytes = [string cStringUsingEncoding:NSUTF16LittleEndianStringEncoding];
+    BOOL surrogatePassed = bytes &&
+        memcmp(bytes, expectedSurrogate, sizeof(expectedSurrogate)) == 0;
+    printf("string-cstring-utf16-surrogates: %s\n", surrogatePassed ? "PASS" : "FAIL");
+
+    [string setString:@""];
+    bytes = [string cStringUsingEncoding:NSUTF16StringEncoding];
+    uint32_t empty = UINT32_MAX;
+    if(bytes) memcpy(&empty, bytes, sizeof(empty));
+    BOOL emptyPassed = bytes && empty == 0;
+    printf("string-cstring-utf16-empty-wide-scan: %s\n", emptyPassed ? "PASS" : "FAIL");
+    return passed && pairPassed && bigEndianPassed && surrogatePassed && emptyPassed;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     NSAutoreleasePool *pool = [NSAutoreleasePool new];
@@ -127,8 +173,10 @@ int main(void) {
     printf("string-literal-multipage-utf16: %s\n",
         longUnicodePassed ? "PASS" : "FAIL");
 
+    const BOOL wideCStringPassed = testLegacyWideCStringPadding();
+
     [pool drain];
     return !(utf8Passed && latin1Passed && charactersPassed &&
              allCharactersPassed && utf32Passed && emptyUTF32Passed &&
-             noCopyPassed && longUnicodePassed);
+             noCopyPassed && longUnicodePassed && wideCStringPassed);
 }

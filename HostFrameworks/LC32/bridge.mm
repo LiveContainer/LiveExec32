@@ -2155,9 +2155,18 @@ u32 LC32CopyHostStringBytes(u64 host_object, u32 encoding,
         [string lengthOfBytesUsingEncoding:nativeEncoding];
     const size_t terminatorSize =
         LC32HostStringTerminatorSize(nativeEncoding);
-    if(payloadCount > UINT32_MAX - terminatorSize) return 0;
+    /* Some legacy clients pass UTF-16 C strings to a four-byte wchar_t
+     * scanner. Keep the requested UTF-16 payload, but pad through the next
+     * aligned wide NUL so single-character input and deletion do not scan
+     * stale guest-buffer bytes. This tolerates that historical misuse; it
+     * does not reinterpret multi-character UTF-16 strings as UTF-32. */
+    const size_t widePadding = terminatorSize == sizeof(uint16_t)
+        ? sizeof(uint32_t) +
+            (sizeof(uint32_t) - payloadCount % sizeof(uint32_t)) % sizeof(uint32_t)
+        : terminatorSize;
+    if(payloadCount > UINT32_MAX - widePadding) return 0;
 
-    const u32 byteCount = (u32)(payloadCount + terminatorSize);
+    const u32 byteCount = (u32)(payloadCount + widePadding);
     char *bytes = (char *)malloc(byteCount);
     if(!bytes) return 0;
     if(![string getCString:bytes maxLength:byteCount
@@ -2168,7 +2177,7 @@ u32 LC32CopyHostStringBytes(u64 host_object, u32 encoding,
     /* Foundation terminates -getCString: with one zero byte even for its
      * fixed-width UTF-16/UTF-32 encodings.  C callers consume a complete
      * encoded NUL code unit, so make the remaining bytes deterministic. */
-    memset(bytes + payloadCount, 0, terminatorSize);
+    memset(bytes + payloadCount, 0, widePadding);
 
     if(guest_output && capacity >= byteCount &&
             Dynarmic_mem_1write(guest_output, byteCount, bytes) != 0) {
