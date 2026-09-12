@@ -133,9 +133,7 @@ static void checkURL(void) {
         written == sizeof(contents) - 1 && closed == 0);
     NSString *filePath = [NSString stringWithUTF8String:path];
     NSURL *url = [NSURL fileURLWithPath:filePath];
-    /* Foundation's NSURLFileSizeKey export is not in the guest symbol set
-     * yet. Its native string value keeps this test scoped to o^@ methods. */
-    NSString *fileSizeKey = @"NSURLFileSizeKey";
+    NSString *fileSizeKey = NSURLFileSizeKey;
 
     ObjectSlot value = objectSlot();
     ObjectSlot error = objectSlot();

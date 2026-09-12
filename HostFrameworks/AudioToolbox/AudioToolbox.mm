@@ -2165,6 +2165,25 @@ OSStatus DispatchAudioConverterFillComplexBuffer(
     }
 }
 
+OSStatus PublishExtAudioFile(ExtAudioFileRef file, u32 guestOutFile) {
+    const u32 token = InsertExtAudioFile(file);
+    if(token && WriteGuestU32(guestOutFile, token)) return noErr;
+
+    auto entry = token ? TakeExtAudioFile(token) : nullptr;
+    if(entry) {
+        std::lock_guard<std::mutex> lock(entry->mutex);
+        if(entry->file) {
+            AudioToolboxGuestHostCallQuiescence quiescence;
+            ExtAudioFileDispose(entry->file);
+            entry->file = nullptr;
+        }
+    } else if(file) {
+        AudioToolboxGuestHostCallQuiescence quiescence;
+        ExtAudioFileDispose(file);
+    }
+    return kAudio_ParamError;
+}
+
 OSStatus PublishAudioFile(
         AudioFileID file, u32 guestOutAudioFile,
         std::unique_ptr<AudioFileCallbackContext> callbackContext = {}) {
@@ -3397,21 +3416,28 @@ extern "C" u32 LC32_AudioToolbox_Dispatch(u32 opcode, u32 guestCall, u32) {
             const OSStatus status = ExtAudioFileOpenURL(
                 SlotHostObject<CFURLRef>(call, 0), &file);
             if(status != noErr) return static_cast<u32>(status);
-            const u32 token = InsertExtAudioFile(file);
-            if(!token || !WriteGuestU32(SlotU32(call, 1), token)) {
-                auto entry = token ? TakeExtAudioFile(token) : nullptr;
-                if(entry) {
-                    std::lock_guard<std::mutex> lock(entry->mutex);
-                    if(entry->file) {
-                        ExtAudioFileDispose(entry->file);
-                        entry->file = nullptr;
-                    }
-                } else {
-                    ExtAudioFileDispose(file);
-                }
+            return static_cast<u32>(PublishExtAudioFile(file, SlotU32(call, 1)));
+        }
+        case LC32AudioToolboxOpExtAudioFileWrapAudioFileID: {
+            if(!RequireSlots(call, 3) || !SlotU32(call, 2) ||
+               !WriteGuestU32(SlotU32(call, 2), 0)) {
                 return static_cast<u32>(kAudio_ParamError);
             }
-            return static_cast<u32>(noErr);
+            auto input = FindAudioFile(SlotU32(call, 0));
+            if(!input) return static_cast<u32>(kAudio_ParamError);
+            std::lock_guard<std::mutex> lock(input->mutex);
+            if(!input->file) return static_cast<u32>(kAudio_ParamError);
+            ExtAudioFileRef file = nullptr;
+            OSStatus status;
+            {
+                AudioToolboxGuestHostCallQuiescence quiescence;
+                status = ExtAudioFileWrapAudioFileID(
+                    input->file, SlotU32(call, 1) != 0, &file);
+            }
+            if(status != noErr) return static_cast<u32>(status);
+            // Native Wrap borrows the AudioFileID. Disposing this wrapper
+            // (including on publication failure) must not close the input.
+            return static_cast<u32>(PublishExtAudioFile(file, SlotU32(call, 2)));
         }
         case LC32AudioToolboxOpExtAudioFileDispose: {
             if(!RequireSlots(call, 1))

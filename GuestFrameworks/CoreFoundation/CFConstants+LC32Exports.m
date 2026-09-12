@@ -2,6 +2,8 @@
 // by the generated shims.  Pointer constants are distinct guest objects bound
 // to the exact native constants, so their values remain correct even when a
 // key's literal spelling differs from its exported symbol name.
+// Foundation also declares many NS-prefixed constants whose iOS 10.3 exports
+// live in this image; legacy clients can bind directly to CoreFoundation.
 
 #import <CoreFoundation/CoreFoundation+LC32.h>
 #import <Foundation/Foundation+LC32.h>
@@ -9,6 +11,173 @@
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
 #define LC32_COREFOUNDATION_OBJECT_CONSTANTS(X) \
+    X(NSLocaleScriptCode) \
+    X(NSLocaleVariantCode) \
+    X(NSLocaleExemplarCharacterSet) \
+    X(NSLocaleCalendar) \
+    X(NSLocaleCollationIdentifier) \
+    X(NSLocaleUsesMetricSystem) \
+    X(NSLocaleMeasurementSystem) \
+    X(NSLocaleDecimalSeparator) \
+    X(NSLocaleGroupingSeparator) \
+    X(NSLocaleCollatorIdentifier) \
+    X(NSLocaleQuotationBeginDelimiterKey) \
+    X(NSLocaleQuotationEndDelimiterKey) \
+    X(NSLocaleAlternateQuotationBeginDelimiterKey) \
+    X(NSLocaleAlternateQuotationEndDelimiterKey) \
+    /* Calendar identifiers and calendar notifications. */ \
+    X(NSCalendarDayChangedNotification) \
+    X(NSCalendarIdentifierBuddhist) \
+    X(NSCalendarIdentifierChinese) \
+    X(NSCalendarIdentifierCoptic) \
+    X(NSCalendarIdentifierEthiopicAmeteAlem) \
+    X(NSCalendarIdentifierEthiopicAmeteMihret) \
+    X(NSCalendarIdentifierGregorian) \
+    X(NSCalendarIdentifierHebrew) \
+    X(NSCalendarIdentifierISO8601) \
+    X(NSCalendarIdentifierIndian) \
+    X(NSCalendarIdentifierIslamic) \
+    X(NSCalendarIdentifierIslamicCivil) \
+    X(NSCalendarIdentifierIslamicTabular) \
+    X(NSCalendarIdentifierIslamicUmmAlQura) \
+    X(NSCalendarIdentifierJapanese) \
+    X(NSCalendarIdentifierPersian) \
+    X(NSCalendarIdentifierRepublicOfChina) \
+    /* Clock and time-zone notifications. */ \
+    X(NSSystemClockDidChangeNotification) \
+    X(NSSystemTimeZoneDidChangeNotification) \
+    /* Public NSString transliteration identifiers. */ \
+    X(NSStringTransformFullwidthToHalfwidth) \
+    X(NSStringTransformHiraganaToKatakana) \
+    X(NSStringTransformLatinToArabic) \
+    X(NSStringTransformLatinToCyrillic) \
+    X(NSStringTransformLatinToGreek) \
+    X(NSStringTransformLatinToHangul) \
+    X(NSStringTransformLatinToHebrew) \
+    X(NSStringTransformLatinToHiragana) \
+    X(NSStringTransformLatinToKatakana) \
+    X(NSStringTransformLatinToThai) \
+    X(NSStringTransformMandarinToLatin) \
+    X(NSStringTransformStripCombiningMarks) \
+    X(NSStringTransformStripDiacritics) \
+    X(NSStringTransformToLatin) \
+    X(NSStringTransformToUnicodeName) \
+    X(NSStringTransformToXMLHex) \
+    /* NSURL resource keys, file types, protection values, and thumbnails. */ \
+    X(NSThumbnail1024x1024SizeKey) \
+    X(NSURLAddedToDirectoryDateKey) \
+    X(NSURLAttributeModificationDateKey) \
+    X(NSURLCanonicalPathKey) \
+    X(NSURLContentAccessDateKey) \
+    X(NSURLContentModificationDateKey) \
+    X(NSURLCreationDateKey) \
+    X(NSURLCustomIconKey) \
+    X(NSURLDocumentIdentifierKey) \
+    X(NSURLEffectiveIconKey) \
+    X(NSURLFileAllocatedSizeKey) \
+    X(NSURLFileProtectionComplete) \
+    X(NSURLFileProtectionCompleteUnlessOpen) \
+    X(NSURLFileProtectionCompleteUntilFirstUserAuthentication) \
+    X(NSURLFileProtectionKey) \
+    X(NSURLFileProtectionNone) \
+    X(NSURLFileResourceIdentifierKey) \
+    X(NSURLFileResourceTypeBlockSpecial) \
+    X(NSURLFileResourceTypeCharacterSpecial) \
+    X(NSURLFileResourceTypeDirectory) \
+    X(NSURLFileResourceTypeKey) \
+    X(NSURLFileResourceTypeNamedPipe) \
+    X(NSURLFileResourceTypeRegular) \
+    X(NSURLFileResourceTypeSocket) \
+    X(NSURLFileResourceTypeSymbolicLink) \
+    X(NSURLFileResourceTypeUnknown) \
+    X(NSURLFileSecurityKey) \
+    X(NSURLFileSizeKey) \
+    X(NSURLGenerationIdentifierKey) \
+    X(NSURLHasHiddenExtensionKey) \
+    X(NSURLIsAliasFileKey) \
+    X(NSURLIsApplicationKey) \
+    X(NSURLIsDirectoryKey) \
+    X(NSURLIsExecutableKey) \
+    X(NSURLIsHiddenKey) \
+    X(NSURLIsMountTriggerKey) \
+    X(NSURLIsPackageKey) \
+    X(NSURLIsReadableKey) \
+    X(NSURLIsRegularFileKey) \
+    X(NSURLIsSymbolicLinkKey) \
+    X(NSURLIsSystemImmutableKey) \
+    X(NSURLIsUbiquitousItemKey) \
+    X(NSURLIsUserImmutableKey) \
+    X(NSURLIsVolumeKey) \
+    X(NSURLIsWritableKey) \
+    X(NSURLKeysOfUnsetValuesKey) \
+    X(NSURLLabelColorKey) \
+    X(NSURLLabelNumberKey) \
+    X(NSURLLinkCountKey) \
+    X(NSURLLocalizedLabelKey) \
+    X(NSURLLocalizedNameKey) \
+    X(NSURLLocalizedTypeDescriptionKey) \
+    X(NSURLNameKey) \
+    X(NSURLParentDirectoryURLKey) \
+    X(NSURLPathKey) \
+    X(NSURLPreferredIOBlockSizeKey) \
+    X(NSURLThumbnailDictionaryKey) \
+    X(NSURLTotalFileAllocatedSizeKey) \
+    X(NSURLTotalFileSizeKey) \
+    X(NSURLTypeIdentifierKey) \
+    X(NSURLUbiquitousItemContainerDisplayNameKey) \
+    X(NSURLUbiquitousItemDownloadRequestedKey) \
+    X(NSURLUbiquitousItemDownloadingErrorKey) \
+    X(NSURLUbiquitousItemDownloadingStatusCurrent) \
+    X(NSURLUbiquitousItemDownloadingStatusDownloaded) \
+    X(NSURLUbiquitousItemDownloadingStatusKey) \
+    X(NSURLUbiquitousItemDownloadingStatusNotDownloaded) \
+    X(NSURLUbiquitousItemHasUnresolvedConflictsKey) \
+    X(NSURLUbiquitousItemIsDownloadedKey) \
+    X(NSURLUbiquitousItemIsDownloadingKey) \
+    X(NSURLUbiquitousItemIsUploadedKey) \
+    X(NSURLUbiquitousItemIsUploadingKey) \
+    X(NSURLUbiquitousItemPercentDownloadedKey) \
+    X(NSURLUbiquitousItemPercentUploadedKey) \
+    X(NSURLUbiquitousItemUploadingErrorKey) \
+    X(NSURLVolumeAvailableCapacityKey) \
+    X(NSURLVolumeCreationDateKey) \
+    X(NSURLVolumeIdentifierKey) \
+    X(NSURLVolumeIsAutomountedKey) \
+    X(NSURLVolumeIsBrowsableKey) \
+    X(NSURLVolumeIsEjectableKey) \
+    X(NSURLVolumeIsEncryptedKey) \
+    X(NSURLVolumeIsInternalKey) \
+    X(NSURLVolumeIsJournalingKey) \
+    X(NSURLVolumeIsLocalKey) \
+    X(NSURLVolumeIsReadOnlyKey) \
+    X(NSURLVolumeIsRemovableKey) \
+    X(NSURLVolumeIsRootFileSystemKey) \
+    X(NSURLVolumeLocalizedFormatDescriptionKey) \
+    X(NSURLVolumeLocalizedNameKey) \
+    X(NSURLVolumeMaximumFileSizeKey) \
+    X(NSURLVolumeNameKey) \
+    X(NSURLVolumeResourceCountKey) \
+    X(NSURLVolumeSupportsAdvisoryFileLockingKey) \
+    X(NSURLVolumeSupportsCasePreservedNamesKey) \
+    X(NSURLVolumeSupportsCaseSensitiveNamesKey) \
+    X(NSURLVolumeSupportsCompressionKey) \
+    X(NSURLVolumeSupportsExclusiveRenamingKey) \
+    X(NSURLVolumeSupportsExtendedSecurityKey) \
+    X(NSURLVolumeSupportsFileCloningKey) \
+    X(NSURLVolumeSupportsHardLinksKey) \
+    X(NSURLVolumeSupportsJournalingKey) \
+    X(NSURLVolumeSupportsPersistentIDsKey) \
+    X(NSURLVolumeSupportsRenamingKey) \
+    X(NSURLVolumeSupportsRootDirectoryDatesKey) \
+    X(NSURLVolumeSupportsSparseFilesKey) \
+    X(NSURLVolumeSupportsSwapRenamingKey) \
+    X(NSURLVolumeSupportsSymbolicLinksKey) \
+    X(NSURLVolumeSupportsVolumeSizesKey) \
+    X(NSURLVolumeSupportsZeroRunsKey) \
+    X(NSURLVolumeTotalCapacityKey) \
+    X(NSURLVolumeURLForRemountingKey) \
+    X(NSURLVolumeURLKey) \
+    X(NSURLVolumeUUIDStringKey) \
     X(NSStreamSocketSecurityLevelKey) \
     X(NSStreamSocketSecurityLevelNone) \
     X(NSStreamSocketSecurityLevelSSLv2) \

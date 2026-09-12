@@ -92,11 +92,11 @@ audit CoreText "$work/CoreText.expected" 117
 audit CoreMedia "$work/CoreMedia.expected" 251
 audit AddressBook "$work/AddressBook.expected" 90
 audit AudioToolbox "$work/AudioToolbox.expected" 26
-audit CFNetwork "$work/CFNetwork.expected" 181
+audit CFNetwork "$work/CFNetwork.expected" 183
 audit SystemConfiguration "$work/SystemConfiguration.expected" 4
 
-if [ "$total" -ne 810 ]; then
-    echo "Public guest symbol baseline changed: expected 810, got $total" >&2
+if [ "$total" -ne 812 ]; then
+    echo "Public guest symbol baseline changed: expected 812, got $total" >&2
     exit 1
 fi
 echo "Public guest symbol audit: PASS ($total exports)"

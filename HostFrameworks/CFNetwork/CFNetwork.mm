@@ -18,6 +18,20 @@ namespace {
 
 constexpr uint32_t kMaximumHTTPChunkBytes = 64u * 1024u * 1024u;
 
+class NativeCFHostResolutionScope {
+public:
+    NativeCFHostResolutionScope()
+        : active(Dynarmic_guest_host_call_quiescence_begin()) {}
+    ~NativeCFHostResolutionScope() {
+        if(active) Dynarmic_guest_host_call_quiescence_end();
+    }
+    NativeCFHostResolutionScope(const NativeCFHostResolutionScope &) = delete;
+    NativeCFHostResolutionScope &operator=(const NativeCFHostResolutionScope &) = delete;
+
+private:
+    const bool active;
+};
+
 bool ReadCFNetworkCall(u32 guestAddress, LC32CFNetworkCall &call) {
     struct {
         uint32_t version;
@@ -445,6 +459,32 @@ u32 LC32_CFNetwork_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             return RequireSlots(call, 1) ? GuestForCreatedObject(
                 CFHostCreateCopy(kCFAllocatorDefault,
                     SlotHostObject<CFHostRef>(call, 0))) : 0;
+        case LC32CFNetworkOpHostStartInfoResolution: {
+            if(!RequireSlots(call, 3)) return 0;
+            CFHostRef host = SlotHostObject<CFHostRef>(call, 0);
+            const auto info = static_cast<CFHostInfoType>(SlotU32(call, 1));
+            const u32 guestError = SlotU32(call, 2);
+            CFStreamError error = {};
+            if(!host || !ReadGuestCFStreamError(guestError, error)) return 0;
+            // CFHost performs a synchronous lookup when no client is set.
+            // Stage the error: CFIndex is 64-bit on the host, 32-bit in ARM.
+            Boolean result;
+            {
+                // DNS can block. Publish stable guest registers only during
+                // the native lookup, not during argument or error marshalling.
+                NativeCFHostResolutionScope scope;
+                result = CFHostStartInfoResolution(
+                    host, info, guestError ? &error : nullptr);
+            }
+            return WriteGuestCFStreamError(guestError, error) && result;
+        }
+        case LC32CFNetworkOpHostCancelInfoResolution:
+            if(RequireSlots(call, 2)) {
+                CFHostRef host = SlotHostObject<CFHostRef>(call, 0);
+                if(host) CFHostCancelInfoResolution(host,
+                    static_cast<CFHostInfoType>(SlotU32(call, 1)));
+            }
+            return 0;
         case LC32CFNetworkOpHostGetAddressing:
         case LC32CFNetworkOpHostGetNames:
         case LC32CFNetworkOpHostGetReachability: {

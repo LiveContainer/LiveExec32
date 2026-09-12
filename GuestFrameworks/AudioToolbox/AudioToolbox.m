@@ -2236,6 +2236,16 @@ OSStatus ExtAudioFileOpenURL(CFURLRef url, ExtAudioFileRef *outFile) {
         [(id)url host_self], LC32_AUDIO_U32((uintptr_t)outFile));
 }
 
+OSStatus ExtAudioFileWrapAudioFileID(AudioFileID audioFile,
+                                    Boolean forWriting,
+                                    ExtAudioFileRef *outFile) {
+    if(!audioFile || !outFile) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpExtAudioFileWrapAudioFileID,
+        LC32_AUDIO_U32((uintptr_t)audioFile), LC32_AUDIO_U32(forWriting),
+        LC32_AUDIO_U32((uintptr_t)outFile));
+}
+
 OSStatus ExtAudioFileDispose(ExtAudioFileRef file) {
     if(!file) return kAudio_ParamError;
     return (OSStatus)LC32_AUDIO_CALL(

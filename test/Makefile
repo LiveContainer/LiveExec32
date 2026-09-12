@@ -171,6 +171,7 @@ $(eval $(call lc32_test,lc32-vm-purgable,vm_purgable.c,))
 $(eval $(call lc32_guest_test,lc32-audio-converter,audio_converter.c,AudioToolbox CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-audio-file-create-packets,audio_file_create_packets.c,AudioToolbox CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-audio-file-smoke,audio_file_smoke.c,AudioToolbox CoreFoundation LC32))
+$(eval $(call lc32_guest_test,lc32-ext-audio-file-wrap,ext_audio_file_wrap.c,AudioToolbox CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-audio-queue-input,audio_queue_input.c,AudioToolbox CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-audio-queue-output,audio_queue_output.c,AudioToolbox CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-audio-session,audio_session.c,AudioToolbox CoreFoundation LC32))
@@ -186,6 +187,7 @@ $(eval $(call lc32_guest_test,lc32-cfarray-callbacks,cfarray_callbacks.m,Foundat
 $(eval $(call lc32_guest_test,lc32-cfdictionary-callbacks,cfdictionary_callbacks.m,Foundation CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-cfset-callbacks,cfset_callbacks.m,Foundation CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-cfnetwork-http,cfnetwork_http.m,CFNetwork CoreFoundation Foundation LC32))
+$(eval $(call lc32_guest_test,lc32-cfnetwork-host-resolution,cfnetwork_host_resolution.m,CFNetwork CoreFoundation Foundation))
 $(eval $(call lc32_guest_test,lc32-collection-object-buffers,collection_object_buffers.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-class-cluster-reuse,class_cluster_reuse.m,Foundation CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-guest-input-stream,guest_input_stream.m,Foundation LC32))
@@ -220,9 +222,12 @@ $(eval $(call lc32_guest_test,lc32-filesystem-capacity,filesystem_capacity.m,Fou
 $(eval $(call lc32_guest_test,lc32-gamecontroller-snapshot,gamecontroller_snapshot.m,GameController Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-gamekit-achievement-properties,gamekit_achievement_properties.m,GameKit Foundation LC32))
 $(eval $(call lc32_test,lc32-foundation-null-utf8,foundation_null_utf8.m,Foundation))
+$(eval $(call lc32_guest_test,lc32-foundation-constants,foundation_constants.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-foundation-zone,foundation_zone.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-guest-proxy-lifetime,guest_proxy_lifetime.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-kvo-bridge,kvo_bridge.m,Foundation))
+$(eval $(call lc32_guest_test,lc32-imageio-roundtrip,imageio_roundtrip.m,ImageIO CoreGraphics CoreFoundation Foundation))
+$(eval $(call lc32_guest_test,lc32-locale-constants,locale_constants.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-mobilecoreservices-uti,mobilecoreservices_uti.m,MobileCoreServices CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-mediaplayer-legacy,mediaplayer_legacy.m,MediaPlayer CFNetwork Foundation CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-nsrange-bridge,nsrange_bridge.m,Foundation LC32))
@@ -311,6 +316,11 @@ lc32-corefoundation-url-common_CFLAGS := -fno-objc-arc
 lc32-corefoundation-write-stream_CFLAGS := -fno-objc-arc
 lc32-coretext-bridge_CFLAGS := -fno-objc-arc
 lc32-foundation-null-utf8_CFLAGS := -fno-objc-arc
+lc32-ext-audio-file-wrap_CFLAGS := -Wall -Wextra -Werror
+lc32-cfnetwork-host-resolution_CFLAGS := -fno-objc-arc -Wall -Wextra -Werror -Wno-deprecated-declarations
+lc32-foundation-constants_CFLAGS := -fno-objc-arc -Wall -Wextra -Werror
+lc32-locale-constants_CFLAGS := -fno-objc-arc -Wall -Wextra -Werror
+lc32-imageio-roundtrip_CFLAGS := -fno-objc-arc -Wall -Wextra -Werror
 lc32-gamekit-achievement-properties_USE_MODULES := 1
 lc32-gamekit-achievement-properties_CFLAGS := -fno-objc-arc \
 	-I$(abspath ../GuestFrameworks) -I$(abspath ../include)
@@ -443,7 +453,7 @@ SHORT_TESTS := $(patsubst lc32-%,%,$(TOOL_NAME))
 .PHONY: build list frameworks clean-outputs \
   abi audio corefoundation graphics threading uikit \
   check-symbols check-openal check-opengles check-security check-coretext \
-  check-graphics-symbols check-public-constants \
+  check-graphics-symbols check-imageio-symbols check-public-constants \
   check-generated-framework-symbols check-generated-gameplay-symbols \
   check-generated-ui-framework-symbols \
   check-generated-public-symbols check-generated-legacy-public-symbols \
@@ -509,6 +519,9 @@ check-graphics-symbols: lc32-coregraphics-bitmap lc32-quartzcore-transform \
   lc32-uikit-accessibility
 	GUEST_FRAMEWORK_DIR="$(GUEST_FRAMEWORK_DIR)" \
 		./graphics_compat_symbols.sh
+check-imageio-symbols: frameworks
+	LC32_GUEST_SDK="$(ISYSROOT)" ./imageio_symbols.sh \
+		"$(GUEST_FRAMEWORK_DIR)/ImageIO.framework/ImageIO"
 check-public-constants: lc32-mobilecoreservices-uti lc32-cfnetwork-http
 	GUEST_FRAMEWORK_DIR="$(GUEST_FRAMEWORK_DIR)" SDKROOT="$(ISYSROOT)" \
 		./public_guest_constants.sh
@@ -556,7 +569,7 @@ check-corefoundation-low-risk-symbols: lc32-corefoundation-low-risk
 # target serial even when the caller supplied -j.
 .NOTPARALLEL: check-symbols
 check-symbols: frameworks check-openal check-opengles check-security check-coretext \
-	check-graphics-symbols check-public-constants \
+	check-graphics-symbols check-imageio-symbols check-public-constants \
 	check-generated-framework-symbols check-generated-gameplay-symbols \
 	check-generated-ui-framework-symbols check-generated-public-symbols \
 	check-generated-legacy-public-symbols check-generated-nonui-public-symbols \

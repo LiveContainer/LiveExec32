@@ -407,6 +407,19 @@ CFHostRef CFHostCreateCopy(CFAllocatorRef allocator, CFHostRef host) {
         LC32_CFNETWORK_HOST(host)) : NULL;
 }
 
+Boolean CFHostStartInfoResolution(CFHostRef host, CFHostInfoType info,
+                                  CFStreamError *error) {
+    return host && LC32_CFNETWORK_CALL(
+        LC32CFNetworkOpHostStartInfoResolution,
+        LC32_CFNETWORK_HOST(host), LC32_CFNETWORK_U32(info),
+        LC32_CFNETWORK_U32((uintptr_t)error)) != 0;
+}
+
+void CFHostCancelInfoResolution(CFHostRef host, CFHostInfoType info) {
+    if(host) LC32_CFNETWORK_CALL(LC32CFNetworkOpHostCancelInfoResolution,
+        LC32_CFNETWORK_HOST(host), LC32_CFNETWORK_U32(info));
+}
+
 CFArrayRef CFHostGetAddressing(CFHostRef host,
                                 Boolean *hasBeenResolved) {
     return host ? (CFArrayRef)LC32_CFNETWORK_CALL(

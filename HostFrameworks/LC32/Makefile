@@ -68,6 +68,7 @@ LiveExec32Shared_FILES = \
 	../Foundation/Foundation.mm ../Foundation/NSString.mm \
 	../CoreFoundation/CoreFoundation.mm ../CFNetwork/CFNetwork.mm \
 	../Security/Security.mm ../CoreGraphics/CoreGraphics.mm \
+	../ImageIO/ImageIO.mm \
 	../CoreText/CoreText.mm ../CoreMedia/CoreMedia.mm ../CoreVideo/CoreVideo.mm \
 	../AudioToolbox/AudioToolbox.mm \
 	../OpenAL/OpenAL.mm ../OpenGLES/OpenGLES.mm ../UIKit/UIKit.mm \
@@ -86,7 +87,7 @@ LiveExec32Shared_LDFLAGS = -L../../External/mini-gdbstub/build -Wl,-weak-lMobile
 LiveExec32Shared_LIBRARIES = gdbstub
 LiveExec32Shared_FRAMEWORKS = \
 	AudioToolbox CFNetwork CoreFoundation CoreMedia CoreVideo Foundation GameKit IOKit \
-	OpenAL OpenGLES QuartzCore Security UIKit
+	ImageIO OpenAL OpenGLES QuartzCore Security UIKit
 LiveExec32Shared_PUBLIC_HEADERS = LiveExec32Shared.h
 LiveExec32Shared_RESOURCE_DIRS = Resources
 LiveExec32Shared_INSTALL_PATH = @rpath

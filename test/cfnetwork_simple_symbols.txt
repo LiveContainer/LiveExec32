@@ -15,6 +15,7 @@ CFHTTPMessageCopyResponseStatusLine
 CFHTTPMessageCreateCopy
 CFHTTPMessageGetTypeID
 CFHTTPMessageIsRequest
+CFHostCancelInfoResolution
 CFHostCreateCopy
 CFHostCreateWithAddress
 CFHostCreateWithName
@@ -22,6 +23,7 @@ CFHostGetAddressing
 CFHostGetNames
 CFHostGetReachability
 CFHostGetTypeID
+CFHostStartInfoResolution
 CFNetServiceCreate
 CFNetServiceCreateCopy
 CFNetServiceCreateDictionaryWithTXTData

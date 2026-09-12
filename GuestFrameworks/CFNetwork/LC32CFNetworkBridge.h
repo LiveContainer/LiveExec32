@@ -72,6 +72,8 @@ typedef enum : uint32_t {
     LC32CFNetworkOpNetServiceCreateTXTDataWithDictionary = 55,
     LC32CFNetworkOpCopyProxiesForAutoConfigurationScript = 56,
     LC32CFNetworkOpReadStreamCreateForStreamedHTTPRequest = 57,
+    LC32CFNetworkOpHostStartInfoResolution = 58,
+    LC32CFNetworkOpHostCancelInfoResolution = 59,
 } LC32CFNetworkOpcode;
 
 #endif

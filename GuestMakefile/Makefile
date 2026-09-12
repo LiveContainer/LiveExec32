@@ -132,6 +132,11 @@ CoreGraphics_LDFLAGS = \
   -compatibility_version 359.4.0 \
   -current_version 359.4.0
 
+ImageIO_FRAMEWORKS = LC32 CoreFoundation
+ImageIO_LDFLAGS = \
+  -compatibility_version 1.0.0 \
+  -current_version 0
+
 CoreText_FRAMEWORKS = LC32
 CoreText_LDFLAGS = \
   -compatibility_version 359.4.0 \
@@ -238,6 +243,8 @@ AVFoundation: | AVFAudio
 AVFoundation.all.framework.variables: | AVFAudio.all.framework.variables
 CoreVideo: | CoreFoundation
 CoreVideo.all.framework.variables: | CoreFoundation.all.framework.variables
+ImageIO: | CoreFoundation
+ImageIO.all.framework.variables: | CoreFoundation.all.framework.variables
 endif
 
 # Exclude linking against CoreFoundation and Foundation for themselves
