@@ -109,6 +109,13 @@ gmake -C GuestMakefile
   cold module cache compact. Set `LC32_SHARE_GUEST_MODULE_CACHE=0` only when
   diagnosing an isolated Clang module-cache issue.
 
+  The generator reports methods disabled by unsupported type encodings,
+  separately from intentionally filtered/manual methods. Run
+  `Generator/GenerateShimAPI/test-object-out-pointers.sh` to check object
+  output marshalling and the captured-template disabled-method baseline.
+  Build the corresponding ARM32 runtime regression with
+  `gmake -C test object-out-parameters`.
+
   The guest build downloads the third-party iOS 10.3 SDK archive to
   `tmp/iPhoneOS10.3.sdk.tar.gz`, verifies its pinned SHA-256 checksum, and
   extracts it atomically to `tmp/iPhoneOS10.3.sdk` for subsequent builds. Set

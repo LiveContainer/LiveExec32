@@ -1,8 +1,8 @@
 #import <Foundation/Foundation.h>
 #import <CoreFoundation/CoreFoundation.h>
 
-/* The generated methods cannot marshal `out id *`. CoreFoundation already
- * stages property-list data and output pointers across the guest/host ABI. */
+/* Keep these CF-backed adapters for the legacy owned error strings and the
+ * property-list-specific output rules, rather than generic object copyback. */
 static id LC32ReadPropertyList(NSData *data,
         NSPropertyListReadOptions options, NSPropertyListFormat *format,
         CFErrorRef *error) {

@@ -229,6 +229,7 @@ $(eval $(call lc32_guest_test,lc32-nsrange-bridge,nsrange_bridge.m,Foundation LC
 $(eval $(call lc32_guest_test,lc32-nsvalue-bytes,nsvalue_bytes.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-nullable-guest-cstring,nullable_guest_cstring.c,LC32))
 $(eval $(call lc32_guest_test,lc32-native-proxy-release,native_proxy_release.m,Foundation LC32))
+$(eval $(call lc32_guest_test,lc32-object-out-parameters,object_out_parameters.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-owned-create-copy,owned_create_copy.m,CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-ownership-publication-race,ownership_publication_race.m ownership_publication_race_weak.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-pointer-out-params,pointer_out_params.m,Foundation LC32))
@@ -313,6 +314,7 @@ lc32-foundation-null-utf8_CFLAGS := -fno-objc-arc
 lc32-gamekit-achievement-properties_USE_MODULES := 1
 lc32-gamekit-achievement-properties_CFLAGS := -fno-objc-arc \
 	-I$(abspath ../GuestFrameworks) -I$(abspath ../include)
+lc32-object-out-parameters_CFLAGS := -fno-objc-arc
 lc32-property-list-serialization_CFLAGS := -fno-objc-arc -Wno-deprecated-declarations
 lc32-uikit-legacy-window-root_CFLAGS := -fno-objc-arc -Wall -Wextra -Werror
 # Override Theos' clang target, which otherwise takes precedence over a

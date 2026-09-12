@@ -229,6 +229,16 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
     return YES;
 }
 
+- (const char *)objectOutPointerSignature {
+    const char *pointer = self.signature;
+    // Only extend the existing one-object cell to explicit `out` pointers.
+    // const/in pointers can be arrays, and inout needs its incoming value.
+    if(pointer && *pointer == 'o') pointer++;
+    if(!pointer || pointer[0] != '^' ||
+       (pointer[1] != '@' && pointer[1] != '#')) return NULL;
+    return pointer;
+}
+
 - (instancetype)initWithIndex:(int)index name:(NSString *)name type:(NSString *)type signature:(const char *)signature {
     self = [super init];
     self.index = index;
@@ -255,6 +265,9 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
         return [NSString stringWithFormat:
             @"void *host_arg%1$d = LC32CreateHostObjectArray(guest_arg%1$d, (uint32_t)guest_arg%2$d, %2$d);",
             self.index, self.objectArrayCountIndex];
+    }
+    if(self.objectOutPointerSignature) {
+        return [NSString stringWithFormat:@"uint64_t host_arg%d = 0;", self.index];
     }
     if(LC32EncodingIsOpaqueCFObjectPointer(self.signature)) {
         return [NSString stringWithFormat:
@@ -294,10 +307,7 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
         case ':':
             return [NSString stringWithFormat:@"uint64_t host_arg%1$d = LC32GetHostSelector(guest_arg%1$d);", self.index];
         case '^':
-            if(self.signature[1] == '@' || self.signature[1] == '#') {
-                return [NSString stringWithFormat:
-                    @"uint64_t host_arg%d = 0;", self.index];
-            } else if ([self.type isEqualToString:@"_NSZone *"]) {
+            if ([self.type isEqualToString:@"_NSZone *"]) {
                 return [NSString stringWithFormat:@"uint64_t host_arg%d = 0;", self.index];
             }
             /* Known CF-style opaque pointers are represented guest-side by
@@ -339,6 +349,11 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
         return [NSString stringWithFormat:
             @"LC32HostObjectArrayArgument(host_arg%d)", self.index];
     }
+    if(self.objectOutPointerSignature) {
+        return [NSString stringWithFormat:
+            @"LC32HostIndirectArgument(guest_arg%1$d ? &host_arg%1$d : NULL)",
+            self.index];
+    }
     if(LC32EncodingIsOpaqueCFObjectPointer(self.signature)) {
         return [NSString stringWithFormat:@"host_arg%d", self.index];
     }
@@ -354,7 +369,6 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
             self.index, helper];
     }
     BOOL returnDirect = NO;
-    BOOL returnPointer = NO;
     switch(self.signature[0]) {
         case '@':
         case '#':
@@ -362,8 +376,6 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
             returnDirect = YES;
             break;
         case '^':
-            returnPointer = self.signature[1] == '@' ||
-                            self.signature[1] == '#';
             returnDirect |= [self.type isEqualToString:@"_NSZone *"] ||
                             LC32EncodingIsOpaqueCFObjectPointer(
                                 self.signature);
@@ -384,10 +396,6 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
 
     if(returnDirect) {
         return [NSString stringWithFormat:@"host_arg%d", self.index];
-    } else if(returnPointer) {
-        return [NSString stringWithFormat:
-            @"LC32HostIndirectArgument(guest_arg%1$d ? &host_arg%1$d : NULL)",
-            self.index];
     }
     return [NSString stringWithFormat:@"/* %s: unhandled type %@ */", sel_getName(_cmd), self.type];
 }
@@ -396,6 +404,11 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
     if(self.isCountedObjectArray) {
         return [NSString stringWithFormat:
             @"LC32DestroyHostObjectArray(host_arg%d);", self.index];
+    }
+    if(self.objectOutPointerSignature) {
+        return [NSString stringWithFormat:
+            @"if(guest_arg%1$d) *guest_arg%1$d = host_arg%1$d ? LC32HostToGuestObject(host_arg%1$d) : nil;",
+            self.index];
     }
     if(LC32EncodingIsOpaqueCFObjectPointer(self.signature)) {
         return [NSString stringWithFormat:
@@ -446,15 +459,6 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
         default:
             return [NSString stringWithFormat:@"// No post-process for guest_arg%d", self.index];
     }
-    switch(self.signature[1]) {
-        case '@': // id **
-        case '#': // class **
-            return [NSString stringWithFormat:
-                @"if(guest_arg%1$d) *guest_arg%1$d = host_arg%1$d ? LC32HostToGuestObject(host_arg%1$d) : nil;",
-                self.index];
-        default:
-            break;
-    }
     return [NSString stringWithFormat:@"/* %s: unhandled type %@ */", sel_getName(_cmd), self.type];
 }
 
@@ -502,7 +506,7 @@ static BOOL LC32MethodReturnsOwnedResult(NSString *className,
 @property(nonatomic, retain) NSString *returnType;
 @property(nonatomic, retain) NSMutableArray<MethodParameter *> *parameters;
 @property(nonatomic, retain) NSMutableArray<NSString *> *lines;
-@property(nonatomic) BOOL skip;
+@property(nonatomic) BOOL disabledByUnhandledType;
 @end
 @implementation MethodBuilder
 
@@ -593,6 +597,7 @@ static BOOL LC32MethodReturnsOwnedResult(NSString *className,
     [self.lines addObject:@"}"];
 
     if([self.description containsString:@"unhandled type"]) {
+        self.disabledByUnhandledType = YES;
         [self.lines insertObject:@"#if 0 // FIXME: has unhandled types" atIndex:0];
         [self.lines addObject:@"#endif"];
     }
@@ -739,6 +744,7 @@ static BOOL LC32MethodReturnsOwnedResult(NSString *className,
 @property(nonatomic) BOOL usesRuntimeSignatures;
 @property(nonatomic) NSUInteger skippedIncompleteMethods;
 @property(nonatomic) NSUInteger skippedFilteredMethods;
+@property(nonatomic, readonly) NSUInteger disabledMethods;
 - (void)validateAndAddMethod:(LC32ObjCMethod *)method;
 - (void)validateAndAddRuntimeMethod:(Method)objcMethod
                   isInstanceMethod:(BOOL)isInstanceMethod;
@@ -747,6 +753,15 @@ static BOOL LC32MethodReturnsOwnedResult(NSString *className,
 static BOOL LC32MethodHasManualAdapter(NSString *className,
                                       LC32ObjCMethod *method) {
     NSString *selector = method.selectorString;
+    if([className isEqualToString:@"NSPropertyListSerialization"] &&
+       !method.isInstanceMethod) {
+        // Preserve the CF-backed adapters, including the legacy owned
+        // errorDescription strings and unchanged format output on failure.
+        return [selector isEqualToString:@"dataWithPropertyList:format:options:error:"] ||
+               [selector isEqualToString:@"propertyListWithData:options:format:error:"] ||
+               [selector isEqualToString:@"dataFromPropertyList:format:errorDescription:"] ||
+               [selector isEqualToString:@"propertyListFromData:mutabilityOption:format:errorDescription:"];
+    }
     if([className isEqualToString:@"NSArray"]) {
         return (!method.isInstanceMethod &&
                 [selector isEqualToString:@"arrayWithObjects:"]) ||
@@ -1009,6 +1024,15 @@ static BOOL LC32MethodHasIndirectObjectBuffer(NSString *className,
 }
 
 @implementation ClassBuilder
+- (NSUInteger)disabledMethods {
+    NSUInteger count = 0;
+    for(id method in self.methods.allValues) {
+        if([method isKindOfClass:MethodBuilder.class] &&
+           [(MethodBuilder *)method disabledByUnhandledType]) count++;
+    }
+    return count;
+}
+
 - (instancetype)initWithClass:(Class)cls imagePath:(NSString *)imagePath {
     self = [super init];
     if(!self || !cls) return nil;
@@ -1438,6 +1462,7 @@ typedef struct {
     NSUInteger generated;
     NSUInteger unavailable;
     NSUInteger failures;
+    NSUInteger disabledMethods;
 } LC32RuntimeGenerationResult;
 
 static LC32RuntimeGenerationResult
@@ -1539,6 +1564,7 @@ LC32GenerateRuntimeUIKitExtras(NSString *outputRoot,
             continue;
         }
         result.generated++;
+        result.disabledMethods += classBuilder.disabledMethods;
     }
     return result;
 }
@@ -1624,6 +1650,7 @@ int main(int argc, char **argv) {
         NSUInteger methodCount = 0;
         NSUInteger skippedIncompleteMethods = 0;
         NSUInteger skippedFilteredMethods = 0;
+        NSUInteger disabledMethods = 0;
         NSUInteger writeFailureCount = 0;
         NSMutableSet<NSString *> *createdFrameworks = [NSMutableSet new];
 
@@ -1704,6 +1731,7 @@ int main(int argc, char **argv) {
                         continue;
                     }
                     classCount++;
+                    disabledMethods += classBuilder.disabledMethods;
                 }
             }
         }
@@ -1726,6 +1754,10 @@ int main(int argc, char **argv) {
                    (unsigned long)runtimeResult.unavailable);
         }
         printf(".\n");
+        // These methods have complete encodings but no emitted bridge body;
+        // keep them visible separately from incomplete/filtered signatures.
+        printf("Disabled %lu methods with unhandled types (wrapped in #if 0).\n",
+               (unsigned long)(disabledMethods + runtimeResult.disabledMethods));
 
         return writeFailureCount == 0 && runtimeResult.failures == 0 &&
                runtimeResult.unavailable == 0 ? 0 : 1;
