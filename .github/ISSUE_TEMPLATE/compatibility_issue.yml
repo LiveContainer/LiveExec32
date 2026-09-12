@@ -2,6 +2,7 @@ name: Compatibility Issue
 description: >-
   This is for compatibility issues with apps. Includes crashes, rendering,
   aspect ratio issues.
+labels: ["compatibility"]
 body:
   - type: markdown
     attributes:
