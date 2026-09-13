@@ -58,7 +58,7 @@ endif
 
 LiveExec32Shared_FILES = \
 	LiveExec32Shared.cpp guest_bootstrap.cpp debugger_server.cpp \
-	crash_exception.mm guest_dispatch.mm \
+	crash_exception.mm guest_dispatch.mm guest_timer_queue.cpp guest_timers.cpp \
 	arm_dynarmic_cp15.cpp dynarmic.cpp dynarmic_syscalls.cpp \
 	darwin_file_syscalls.cpp guest_mach_messages.cpp \
 	dynarmic_memory.cpp dynarmic_callbacks.cpp dynarmic_thread_state.cpp \

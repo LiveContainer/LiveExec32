@@ -768,6 +768,7 @@ struct NativeGuestJit {
     bool hostThreadCreated = false;
     bool exited = false;
     bool workqueue = false;
+    bool workqueueEventManager = false;
     std::atomic<bool> workqueueHostBlocked{false};
     std::atomic<bool> workqueueCompensationPending{false};
     u32 workqueuePriority = 0;
@@ -919,6 +920,8 @@ struct GuestWorkqueueJob {
     bool hasDelivery = false;
 };
 
+// The singleton event manager has a reserved additional slot, so ordinary
+// workers blocked on timer delivery cannot exhaust its scheduling capacity.
 inline constexpr size_t MaxNativeGuestWorkqueueWorkers = 4;
 
 struct GuestWorkqueuePendingUpcall {
@@ -1049,6 +1052,7 @@ bool ConsumeGuestConditionPrepost(
 bool EnsureGuestWorkqueueWorker();
 bool PrepareGuestWorkqueueUpcall(
     const GuestWorkqueueDelivery *delivery, u32 priority);
-bool NextGuestWorkqueueEvent(GuestWorkqueueDelivery &delivery);
+bool NextGuestWorkqueueEvent(GuestWorkqueueDelivery &delivery,
+    bool allowEventManager = true, bool allowOrdinary = true);
 
 #pragma GCC visibility pop

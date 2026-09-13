@@ -1,7 +1,7 @@
 LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash \
   check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info \
   check-guest-thumb-linker \
-  check-scalar-callback-signature
+  check-scalar-callback-signature check-guest-timer-queue
 LC32_HOST_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),\
   $(if $(strip $(filter-out $(LC32_HOST_TEST_GOALS),$(MAKECMDGOALS))),,1),)
 
@@ -12,6 +12,8 @@ HOST_CFLAGS ?= -Wall -Wextra -Werror -pedantic
 HOST_TEST_OUTPUT_DIR ?= $(CURDIR)/.theos/host-tests
 GUEST_BOOTSTRAP_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/guest-bootstrap-host
 MEMORY_HASH_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/memory-hash-host
+GUEST_TIMER_QUEUE_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/guest-timer-queue-host
+GUEST_TIMER_QUEUE_HOST_OBJECT := $(HOST_TEST_OUTPUT_DIR)/guest-timer-queue-backend.o
 COREMEDIA_TIME_VALUES_HOST_TEST := \
   $(HOST_TEST_OUTPUT_DIR)/coremedia-time-values-host
 DEBUG_LOGGING_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/debug-logging-,\
@@ -24,12 +26,31 @@ BUILD_INFO_LOGGING_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/build-info-
 .PHONY: check-guest-bootstrap check-memory-hash \
   check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info \
   check-guest-thumb-linker \
-  check-scalar-callback-signature
+  check-scalar-callback-signature check-guest-timer-queue
 check-guest-thumb-linker:
 	./guest_thumb_linker.sh
 
 check-scalar-callback-signature:
 	HOST_CXX="$(HOST_CXX)" python3 scalar_callback_signature.py
+
+check-guest-timer-queue: $(GUEST_TIMER_QUEUE_HOST_TEST)
+	"$(GUEST_TIMER_QUEUE_HOST_TEST)"
+
+$(GUEST_TIMER_QUEUE_HOST_TEST): guest_timer_queue.cpp $(GUEST_TIMER_QUEUE_HOST_OBJECT) \
+  ../HostFrameworks/LC32/guest_timer_queue.h ../HostFrameworks/LC32/mach_private.h
+	$(HOST_CXX) $(HOST_CXXFLAGS) -pthread -I"$(abspath ../HostFrameworks/LC32)" \
+		-Wno-c99-extensions -Wno-embedded-directive \
+		guest_timer_queue.cpp "$(GUEST_TIMER_QUEUE_HOST_OBJECT)" -o "$@"
+
+# Test-only syscall wrapper pauses an expiry after native kevent64 returns;
+# no production hook or alternate timer implementation is involved.
+$(GUEST_TIMER_QUEUE_HOST_OBJECT): ../HostFrameworks/LC32/guest_timer_queue.cpp \
+  ../HostFrameworks/LC32/guest_timer_queue.h \
+  ../HostFrameworks/LC32/mach_private.h
+	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
+	$(HOST_CXX) $(HOST_CXXFLAGS) -pthread -I"$(abspath ../HostFrameworks/LC32)" \
+		-Wno-c99-extensions -Wno-embedded-directive \
+		-Dkevent64=LC32TestKevent64 -c ../HostFrameworks/LC32/guest_timer_queue.cpp -o "$@"
 
 check-guest-bootstrap: $(GUEST_BOOTSTRAP_HOST_TEST)
 	"$(GUEST_BOOTSTRAP_HOST_TEST)"

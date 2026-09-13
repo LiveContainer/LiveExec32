@@ -1,4 +1,5 @@
 #include "dynarmic_internal.h"
+#include "guest_timers.h"
 #include "dynarmic_syscalls.h"
 #include "darwin_file_syscalls.h"
 #include "guest_mach_messages.h"
@@ -2388,6 +2389,11 @@ static int ApplyGuestKeventChanges(u32 changelist, int nchanges) {
     std::lock_guard<std::recursive_mutex> lock(
         guestWorkqueueMutex);
     for (const guest_kevent_qos_s &change : changes) {
+        if(change.filter == EVFILT_TIMER) {
+            const int error = ApplyGuestWorkqueueTimerChange(change);
+            if(error) return error;
+            continue;
+        }
         WORKQUEUE_TRACE(
             "LC32: workqueue change ident=0x%llx filter=%d "
             "flags=0x%x qos=0x%x fflags=0x%x udata=0x%llx\n",
@@ -2417,14 +2423,17 @@ static int ApplyGuestKeventChanges(u32 changelist, int nchanges) {
 
         if ((change.flags & EV_ADD) != 0) {
             const bool enabled = (change.flags & EV_DISABLE) == 0;
+            const bool triggered = change.filter == EVFILT_USER &&
+                (change.fflags & NOTE_TRIGGER) != 0;
             if (registered == guestWorkqueueKevents.end()) {
                 guestWorkqueueKevents.push_back(
                     {.event = change,
                      .enabled = enabled,
-                     .triggered = false});
+                     .triggered = triggered});
             } else {
                 registered->event = change;
                 registered->enabled = enabled;
+                registered->triggered |= triggered;
             }
             continue;
         }
@@ -2440,6 +2449,18 @@ static int ApplyGuestKeventChanges(u32 changelist, int nchanges) {
         }
     }
     return 0;
+}
+
+static void PumpGuestWorkqueueAfterKeventChanges() {
+    // XNU wakes an event-manager worker when a registration becomes ready,
+    // without requiring a separate WQOPS_QUEUE_REQTHREADS call. In particular
+    // dispatch's first timer configuration is queued behind an EVFILT_USER
+    // NOTE_TRIGGER. The pump must run after all registration locks are gone.
+    const GuestWorkqueuePumpResult result = PumpGuestWorkqueue();
+    if(result == GuestWorkqueuePumpResult::CooperativeTransition &&
+       NativeGuestThreadIsCurrent() && CurrentGuestThreadId() != 1) {
+        ScheduleMainGuestWorkqueueTransition();
+    }
 }
 
 int guest_bsdthread_register(u32 guest_func_thread_start, u32 guest_func_start_wqthread, int pthread_size, u32 data, int32_t datasize, off_t offset) {
@@ -2619,10 +2640,9 @@ int guest_workq_kernreturn(int options, u32 item, int arg2, int arg3) {
              */
             return return_with_carry_direct(ENOTSUP, true);
         case WQOPS_THREAD_KEVENT_RETURN: {
-            std::lock_guard<std::recursive_mutex> lock(
-                guestWorkqueueMutex);
             const int error =
                 ApplyGuestKeventChanges(item, arg2);
+            if(!error) PumpGuestWorkqueueAfterKeventChanges();
             return return_with_carry_direct(error, error != 0);
         }
         case WQOPS_THREAD_RETURN:
@@ -2635,27 +2655,29 @@ int guest_workq_kernreturn(int options, u32 item, int arg2, int arg3) {
 int guest_kevent_qos(int kq, u32 changelist, int nchanges,
         u32 eventlist, int nevents, u32 data_out, u32 data_available,
         unsigned int flags) {
-    std::lock_guard<std::recursive_mutex> lock(
-        guestWorkqueueMutex);
     WORKQUEUE_TRACE(
         "LC32: kevent_qos kq=%d changes=%d events=%d flags=0x%x\n",
         kq, nchanges, nevents, flags);
     /*
      * This is the registration half of direct-kevent workqueue support.
      * libdispatch asks the default workqueue kqueue (-1) to install changes
-     * and optionally return change errors. There can be no delivery until
-     * WQOPS_QUEUE_REQTHREADS can create a guest event-manager thread.
+     * and optionally return change errors. Ready registrations themselves
+     * schedule an event-manager worker after the changes have been applied.
      */
-    if (kq != -1 || !guest_workqueue_opened ||
+    {
+        std::lock_guard<std::recursive_mutex> lock(guestWorkqueueMutex);
+        if (kq != -1 || !guest_workqueue_opened ||
             !guest_workqueue_kevent_enabled ||
             (flags & KEVENT_FLAG_WORKQ) == 0) {
-        return return_with_carry_direct(ENOTSUP, true);
+            return return_with_carry_direct(ENOTSUP, true);
+        }
     }
     if (eventlist != 0 && nevents > 0 &&
             (flags & KEVENT_FLAG_ERROR_EVENTS) == 0) {
         return return_with_carry_direct(ENOTSUP, true);
     }
     const int error = ApplyGuestKeventChanges(changelist, nchanges);
+    if(!error) PumpGuestWorkqueueAfterKeventChanges();
     return return_with_carry_direct(error, error != 0);
 }
 

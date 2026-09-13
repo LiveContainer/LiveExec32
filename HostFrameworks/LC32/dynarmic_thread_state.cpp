@@ -1,4 +1,5 @@
 #include "dynarmic_internal.h"
+#include "guest_timers.h"
 
 NativeThreadStateSlot mainNativeThreadState;
 std::recursive_mutex guestThreadMutex;
@@ -1066,7 +1067,9 @@ gdb_thread_id_t CurrentGuestThreadId() {
 void EnsureGuestThreadRegistry() {
     std::lock_guard<std::recursive_mutex> lock(guestThreadMutex);
     if (guestThreadRegistryInitialized) {
-        if (NativeGuestThreadsEnabled() && nativeGuestThreadId == 0) {
+        if (NativeGuestThreadsEnabled() && nativeGuestThreadId == 0 &&
+                nativeGuestRuntime == nullptr && threadHandle.jit != nullptr &&
+                threadHandle.cb != nullptr && threadHandle.cb == sharedHandle.cb) {
             nativeGuestThreadId = 1;
         }
         return;
@@ -2321,10 +2324,14 @@ bool PrepareGuestWorkqueueUpcall(const GuestWorkqueueDelivery *delivery,
     return true;
 }
 
-bool NextGuestWorkqueueEvent(GuestWorkqueueDelivery &delivery) {
+bool NextGuestWorkqueueEvent(GuestWorkqueueDelivery &delivery,
+        bool allowEventManager, bool allowOrdinary) {
+    if(NextGuestWorkqueueTimerEvent(delivery, allowEventManager, allowOrdinary)) return true;
     for (size_t i = 0; i < guestWorkqueueKevents.size(); ++i) {
         GuestWorkqueueKevent &registered = guestWorkqueueKevents[i];
-        if (!registered.enabled) {
+        const bool eventManager =
+            (registered.event.qos & PTHREAD_PRIORITY_EVENT_MANAGER_FLAG) != 0;
+        if (!registered.enabled || (eventManager ? !allowEventManager : !allowOrdinary)) {
             continue;
         }
 

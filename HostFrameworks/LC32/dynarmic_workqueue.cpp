@@ -18,8 +18,9 @@ GuestWorkqueuePumpResult PumpGuestWorkqueue() {
             guestNativeWorkqueuePumpMutex);
         bool startedWorker = false;
         for (;;) {
-            size_t activeWorkers = 0;
-            size_t blockedWorkers = 0;
+            size_t ordinaryWorkers = 0;
+            size_t blockedOrdinaryWorkers = 0;
+            bool eventManagerActive = false;
             u32 compensationPriority = 0;
             gdb_thread_id_t compensationThreadId = 0;
             {
@@ -30,10 +31,14 @@ GuestWorkqueuePumpResult PumpGuestWorkqueue() {
                             thread.nativeJit == nullptr) {
                         continue;
                     }
-                    ++activeWorkers;
+                    if(thread.nativeJit->workqueueEventManager) {
+                        eventManagerActive = true;
+                        continue;
+                    }
+                    ++ordinaryWorkers;
                     if (thread.nativeJit->workqueueHostBlocked.load(
                             std::memory_order_acquire)) {
-                        ++blockedWorkers;
+                        ++blockedOrdinaryWorkers;
                         if (compensationThreadId == 0 &&
                                 thread.nativeJit->
                                     workqueueCompensationPending.load(
@@ -45,7 +50,9 @@ GuestWorkqueuePumpResult PumpGuestWorkqueue() {
                     }
                 }
             }
-            if (activeWorkers >= MaxNativeGuestWorkqueueWorkers) {
+            const bool allowOrdinary = ordinaryWorkers < MaxNativeGuestWorkqueueWorkers;
+            const bool allowEventManager = !eventManagerActive;
+            if (!allowOrdinary && !allowEventManager) {
                 break;
             }
 
@@ -58,10 +65,19 @@ GuestWorkqueuePumpResult PumpGuestWorkqueue() {
                 if (!guest_workqueue_opened) {
                     break;
                 }
-                if (!guestNativeWorkqueuePendingJobs.empty()) {
-                    job = std::move(
-                        guestNativeWorkqueuePendingJobs.front());
-                    guestNativeWorkqueuePendingJobs.pop_front();
+                // XNU grants a single event-manager upcall at a time.
+                // libdispatch owns its timer heaps under that manager lock.
+                // Keep ordinary jobs eligible while a manager is active.
+                auto pendingJob = std::find_if(
+                    guestNativeWorkqueuePendingJobs.begin(),
+                    guestNativeWorkqueuePendingJobs.end(),
+                    [allowEventManager, allowOrdinary](const GuestWorkqueueJob &candidate) {
+                        return candidate.hasDelivery && candidate.delivery.eventManager
+                            ? allowEventManager : allowOrdinary;
+                    });
+                if (pendingJob != guestNativeWorkqueuePendingJobs.end()) {
+                    job = std::move(*pendingJob);
+                    guestNativeWorkqueuePendingJobs.erase(pendingJob);
                     haveJob = true;
                     retryJobOnFailure = true;
                 } else {
@@ -69,7 +85,7 @@ GuestWorkqueuePumpResult PumpGuestWorkqueue() {
                             guestWorkqueueRequests.front().remaining <= 0) {
                         guestWorkqueueRequests.pop_front();
                     }
-                    if (!guestWorkqueueRequests.empty()) {
+                    if (allowOrdinary && !guestWorkqueueRequests.empty()) {
                         GuestWorkqueueRequest &request =
                             guestWorkqueueRequests.front();
                         job.priority = request.priority;
@@ -81,7 +97,7 @@ GuestWorkqueuePumpResult PumpGuestWorkqueue() {
                         retryJobOnFailure = true;
                     } else {
                         GuestWorkqueueDelivery delivery;
-                        if (NextGuestWorkqueueEvent(delivery)) {
+                        if (NextGuestWorkqueueEvent(delivery, allowEventManager, allowOrdinary)) {
                             job.priority = delivery.eventManager
                                 ? guestWorkqueueEventManagerPriority
                                 : static_cast<u32>(delivery.event.qos);
@@ -89,8 +105,8 @@ GuestWorkqueuePumpResult PumpGuestWorkqueue() {
                             job.hasDelivery = true;
                             haveJob = true;
                             retryJobOnFailure = true;
-                        } else if (activeWorkers != 0 &&
-                                blockedWorkers == activeWorkers &&
+                        } else if (allowOrdinary && ordinaryWorkers != 0 &&
+                                blockedOrdinaryWorkers == ordinaryWorkers &&
                                 compensationThreadId != 0) {
                             /* XNU's workqueue scheduler compensates when all
                              * constrained workers are asleep in the kernel.
@@ -140,7 +156,8 @@ GuestWorkqueuePumpResult PumpGuestWorkqueue() {
 
     std::lock_guard<std::recursive_mutex> lock(
         guestWorkqueueMutex);
-    if (guestWorkqueueUpcallActive || !guest_workqueue_opened) {
+    if (guestWorkqueueUpcallActive || guestWorkqueuePendingUpcall.valid ||
+            !guest_workqueue_opened) {
         return GuestWorkqueuePumpResult::None;
     }
     /*

@@ -954,6 +954,7 @@ bool StartNativeGuestWorkqueueWorker(
     }
     runtime->debuggerId = debuggerId;
     runtime->workqueue = true;
+    runtime->workqueueEventManager = job.hasDelivery && job.delivery.eventManager;
     runtime->workqueuePriority = priority;
 
     GuestThreadContext thread = {};

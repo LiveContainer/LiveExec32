@@ -1,6 +1,7 @@
 #include "dynarmic_internal.h"
 #include "darwin_file_syscalls.h"
 #include "guest_dispatch.h"
+#include "guest_timers.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -188,6 +189,7 @@ void Dynarmic_nativeDestroy() {
         nativeShutdownRequested.store(
             true, std::memory_order_release);
         LC32RemoveGuestMainQueueSource();
+        RequestGuestWorkqueueTimersStop();
         StopGuestCallbackExecutor();
         HaltAllGuestJits(LC32HaltReasonExit);
         InterruptDebuggerMachCalls();
@@ -221,6 +223,7 @@ void Dynarmic_nativeDestroy() {
     // Disable native run-loop delivery after publishing shutdown, before
     // destroying the guest JIT and its callback address space.
     LC32RemoveGuestMainQueueSource();
+    StopGuestWorkqueueTimers();
     StopGuestCallbackExecutor();
 
     {
