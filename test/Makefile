@@ -1,6 +1,7 @@
 LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash \
   check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info \
-  check-guest-thumb-linker
+  check-guest-thumb-linker \
+  check-scalar-callback-signature
 LC32_HOST_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),\
   $(if $(strip $(filter-out $(LC32_HOST_TEST_GOALS),$(MAKECMDGOALS))),,1),)
 
@@ -22,9 +23,13 @@ BUILD_INFO_LOGGING_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/build-info-
 
 .PHONY: check-guest-bootstrap check-memory-hash \
   check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info \
-  check-guest-thumb-linker
+  check-guest-thumb-linker \
+  check-scalar-callback-signature
 check-guest-thumb-linker:
 	./guest_thumb_linker.sh
+
+check-scalar-callback-signature:
+	HOST_CXX="$(HOST_CXX)" python3 scalar_callback_signature.py
 
 check-guest-bootstrap: $(GUEST_BOOTSTRAP_HOST_TEST)
 	"$(GUEST_BOOTSTRAP_HOST_TEST)"
@@ -192,6 +197,9 @@ lc32-vm-read-overwrite_CFLAGS := -DLC32_TEST_VM_READ_OVERWRITE
 $(eval $(call lc32_test,lc32-vm-memory-entry,vm_memory_entry.c,))
 $(eval $(call lc32_test,lc32-vm-purgable,vm_purgable.c,))
 
+# Accelerate.
+$(eval $(call lc32_guest_test,lc32-accelerate-vdsp,accelerate_vdsp.c,Accelerate))
+
 # AudioToolbox.
 $(eval $(call lc32_guest_test,lc32-audio-converter,audio_converter.c,AudioToolbox CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-audio-file-create-packets,audio_file_create_packets.c,AudioToolbox CoreFoundation LC32))
@@ -208,6 +216,8 @@ $(eval $(call lc32_guest_test,lc32-addressbook-compat,addressbook_compat.m,Addre
 $(eval $(call lc32_guest_test,lc32-nsuuid-bytes,nsuuid_bytes.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-arc-proxy-lifetime,arc_proxy_lifetime.m arc_proxy_lifetime_support.m,Foundation UIKit LC32))
 $(eval $(call lc32_guest_test,lc32-block-bridge,block_bridge.m,Foundation LC32))
+$(eval $(call lc32_guest_test,lc32-dispatch-main-queue,dispatch_main_queue.m,Foundation CoreFoundation AVFoundation))
+$(eval $(call lc32_guest_test,lc32-dispatch-timers,dispatch_timers.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-cfarray-callbacks,cfarray_callbacks.m,Foundation CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-cfdictionary-callbacks,cfdictionary_callbacks.m,Foundation CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-cfset-callbacks,cfset_callbacks.m,Foundation CoreFoundation LC32))
@@ -257,6 +267,10 @@ $(eval $(call lc32_guest_test,lc32-mobilecoreservices-uti,mobilecoreservices_uti
 $(eval $(call lc32_guest_test,lc32-mediaplayer-legacy,mediaplayer_legacy.m,MediaPlayer CFNetwork Foundation CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-nsrange-bridge,nsrange_bridge.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-nsvalue-bytes,nsvalue_bytes.m,Foundation))
+$(eval $(call lc32_guest_test,lc32-notification-selector,notification_selector.m,Foundation LC32))
+$(eval $(call lc32_guest_test,lc32-foundation-not-found,foundation_not_found.m,Foundation))
+$(eval $(call lc32_guest_test,lc32-nsproxy-bridge,nsproxy_bridge.m,Foundation LC32))
+$(eval $(call lc32_guest_test,lc32-host-self-sidetable-race,host_self_sidetable_race.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-nullable-guest-cstring,nullable_guest_cstring.c,LC32))
 $(eval $(call lc32_guest_test,lc32-native-proxy-release,native_proxy_release.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-object-out-parameters,object_out_parameters.m,Foundation))
@@ -320,6 +334,8 @@ lc32-ownership-publication-race_CFLAGS := -fobjc-arc
 ownership_publication_race.m_CFLAGS := -fno-objc-arc
 
 lc32-block-bridge_CFLAGS := -fblocks
+lc32-dispatch-main-queue_CFLAGS := -fblocks -fno-objc-arc -Wall -Wextra -Werror -Wno-deprecated-declarations
+lc32-dispatch-timers_CFLAGS := -fblocks -fno-objc-arc -Wall -Wextra -Werror
 lc32-thread-modes_CFLAGS := -fblocks
 lc32-thread-suspend-hostcall_CFLAGS := -fno-objc-arc
 lc32-thread-perform_CFLAGS := -fblocks
@@ -473,6 +489,11 @@ after-$(THEOS_CURRENT_INSTANCE)-all::
 	sh ./corevideo_symbols.sh \
 		"$(GUEST_FRAMEWORK_DIR)/CoreVideo.framework/CoreVideo"
 endif
+ifeq ($(THEOS_CURRENT_INSTANCE),lc32-accelerate-vdsp)
+after-$(THEOS_CURRENT_INSTANCE)-all::
+	sh ./accelerate_symbols.sh \
+		"$(GUEST_FRAMEWORK_DIR)/Accelerate.framework/Accelerate"
+endif
 else
 
 SHORT_TESTS := $(patsubst lc32-%,%,$(TOOL_NAME))
@@ -491,7 +512,7 @@ SHORT_TESTS := $(patsubst lc32-%,%,$(TOOL_NAME))
   check-foundation-runtime-symbols \
   check-corefoundation-low-risk-symbols corefoundation-low-risk-framework \
   foundation-runtime-framework coremedia-time-values-framework \
-  check-coremedia-time-values check-corevideo check-messenger $(SHORT_TESTS)
+  check-coremedia-time-values check-corevideo check-accelerate check-messenger $(SHORT_TESTS)
 
 # Theos' per-instance convenience targets bypass the top-level `all` target,
 # which normally creates the Clang module validation stamp first.
@@ -523,7 +544,7 @@ frameworks:
 # Symbol checks consume framework products directly.  Route their focused
 # link tests through the one normalized full framework build above instead of
 # starting overlapping recursive builds for several framework goals.
-SYMBOL_TESTS := lc32-openal-smoke lc32-opengles-smoke \
+SYMBOL_TESTS := lc32-openal-smoke lc32-opengles-smoke lc32-accelerate-vdsp \
   lc32-security-secitem lc32-coretext-font-descriptor \
   lc32-coregraphics-bitmap lc32-quartzcore-transform \
   lc32-uikit-accessibility lc32-mobilecoreservices-uti lc32-cfnetwork-http \
@@ -538,6 +559,7 @@ coremedia-time-values-framework: frameworks
 lc32-coremedia-time-values: coremedia-time-values-framework
 check-coremedia-time-values: lc32-coremedia-time-values
 check-corevideo: lc32-corevideo-buffers
+check-accelerate: lc32-accelerate-vdsp
 check-coretext: lc32-coretext-font-descriptor
 	./coretext_font_descriptor_symbols.sh \
 		"$(GUEST_FRAMEWORK_DIR)/CoreText.framework/CoreText"
@@ -594,7 +616,7 @@ check-corefoundation-low-risk-symbols: lc32-corefoundation-low-risk
 # Recursive framework builds share GuestMakefile/.theos, so keep this aggregate
 # target serial even when the caller supplied -j.
 .NOTPARALLEL: check-symbols
-check-symbols: frameworks check-openal check-opengles check-security check-coretext \
+check-symbols: frameworks check-openal check-opengles check-security check-coretext check-accelerate \
 	check-graphics-symbols check-imageio-symbols check-public-constants \
 	check-generated-framework-symbols check-generated-gameplay-symbols \
 	check-generated-ui-framework-symbols check-generated-public-symbols \

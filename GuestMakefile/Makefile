@@ -99,6 +99,10 @@ FileProvider_INSTALL_PATH = /System/Library/PrivateFrameworks
 
 LC32_LIBRARIES = objc.A
 
+Accelerate_LDFLAGS = \
+  -compatibility_version 1.0.0 \
+  -current_version 4.0.0
+
 AVFoundation_LDFLAGS = \
   -compatibility_version 1.0.0 \
   -current_version 2.0.0 \

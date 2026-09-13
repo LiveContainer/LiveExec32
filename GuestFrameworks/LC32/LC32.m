@@ -15,7 +15,6 @@
 extern id _objc_rootAutorelease(id object);
 extern void _objc_rootRelease(id object);
 extern BOOL _objc_rootReleaseWasZero(id object);
-extern BOOL _objc_rootIsDeallocating(id object);
 extern id _objc_rootRetain(id object);
 extern uintptr_t _objc_rootRetainCount(id object);
 extern int32_t OSAtomicAdd32Barrier(
@@ -410,6 +409,56 @@ static uint64_t LC32ExistingHostSelf(id object) {
     return mapping == LC32_HOST_MAPPING_DEAD ? 0 : mapping;
 }
 
+/* Final release can reenter the bridge from subclass -dealloc, or while
+ * root -dealloc destroys associated objects and C++ ivars. Track those
+ * synchronous scopes without probing
+ * _objc_rootIsDeallocating: its ARM32 implementation assumes the caller
+ * already holds libobjc's SideTable lock, which our ownership gate is not.
+ * Frames live on the caller's stack and contain only the numeric address,
+ * never an ownership reference to the object being destroyed. */
+typedef struct LC32GuestDeallocFrame {
+    uint32_t guestObject;
+    struct LC32GuestDeallocFrame *previous;
+} LC32GuestDeallocFrame;
+
+static pthread_once_t LC32GuestDeallocOnce = PTHREAD_ONCE_INIT;
+static pthread_key_t LC32GuestDeallocKey;
+
+static void LC32InitializeGuestDeallocKey(void) {
+    if(pthread_key_create(&LC32GuestDeallocKey, NULL) != 0) abort();
+}
+
+static LC32GuestDeallocFrame *LC32GuestDeallocStack(void) {
+    if(pthread_once(&LC32GuestDeallocOnce,
+            LC32InitializeGuestDeallocKey) != 0) abort();
+    return pthread_getspecific(LC32GuestDeallocKey);
+}
+
+static void LC32SetGuestDeallocStack(LC32GuestDeallocFrame *frame) {
+    if(pthread_setspecific(LC32GuestDeallocKey, frame) != 0) abort();
+}
+
+static BOOL LC32GuestDeallocIsActive(uint32_t guestObject) {
+    for(LC32GuestDeallocFrame *frame = LC32GuestDeallocStack();
+            frame; frame = frame->previous) {
+        if(frame->guestObject == guestObject) return YES;
+    }
+    return NO;
+}
+
+static void LC32SendGuestDealloc(id object) {
+    LC32GuestDeallocFrame frame = {
+        (uint32_t)(uintptr_t)object,
+        LC32GuestDeallocStack(),
+    };
+    LC32SetGuestDeallocStack(&frame);
+    @try {
+        [object dealloc];
+    } @finally {
+        LC32SetGuestDeallocStack(frame.previous);
+    }
+}
+
 @implementation LC32GuestBuffer
 - (void)dealloc {
     free(_bytes);
@@ -439,7 +488,7 @@ uint32_t LC32ReleaseGuestLifetimePin(id object) {
      * tombstone. The private primitive atomically reports whether this exact
      * decrement reached zero without invoking -dealloc itself. */
     const BOOL releasedToZero = _objc_rootReleaseWasZero(object);
-    if(releasedToZero) [object dealloc];
+    if(releasedToZero) LC32SendGuestDealloc(object);
     return releasedToZero;
 }
 
@@ -450,7 +499,10 @@ uint32_t LC32ReleaseGuestNativeProxyOwnership(id object) {
      * are held. Strong/weak retains can only increase the count concurrently.
      * Do not message the object or run arbitrary guest cleanup here: the host
      * invokes this primitive without draining deferred releases. */
-    if(!object || _objc_rootIsDeallocating(object)) return 0;
+    /* The native/pin leases above already prevent this object from entering
+     * deallocation. Do not use _objc_rootIsDeallocating as an extra check:
+     * that private primitive reads the shared refcount map without locking. */
+    if(!object) return 0;
     const uintptr_t count = _objc_rootRetainCount(object);
     if(!count) return 0;
     if(count == 1 || count == UINTPTR_MAX) return 1;
@@ -610,15 +662,15 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
                     ptr = LC32RawExistingHostSelf(self);
                     if(ptr == LC32_HOST_MAPPING_DEAD) return 0;
                     if(!ptr) {
-                        /* Root -dealloc detaches a dead peer before guest
-                         * storage becomes reusable. The original runtime
-                         * still destroys C++ ivars and associations afterward;
-                         * their callbacks must not recreate a native peer for
-                         * this zero-count allocation. Existing owned teardown
-                         * mappings above remain callable on their owner thread.
+                        /* A final release may enter an unmapped subclass's
+                         * -dealloc, and root -dealloc detaches dead peers before
+                         * destroying C++ ivars and associations. Neither scope
+                         * may recreate a native peer for a zero-count object.
+                         * Existing owned teardown mappings above remain
+                         * callable on their owner thread.
                          */
-                        if(!object_isClass(self) &&
-                                _objc_rootIsDeallocating(self)) return 0;
+                        if(LC32GuestDeallocIsActive(
+                                (uint32_t)(uintptr_t)self)) return 0;
                         /*
                          * Retains performed while an object is guest-only
                          * deliberately stay local. LC32GetHostObject returns
@@ -710,7 +762,7 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
         const uint32_t token = LC32UpdateHostMapping(
             guestSelf, LC32HostMappingBeginGuestTeardown, hostSelf);
         if(!token) abort();
-        [self dealloc];
+        LC32SendGuestDealloc(self);
         if(!LC32UpdateHostMapping(
                 guestSelf, LC32HostMappingFinishGuestTeardown,
                 token)) abort();
@@ -737,7 +789,7 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
                 const uint32_t token = LC32UpdateHostMapping(
                     guestSelf,
                     LC32HostMappingBeginGuestTeardown, 0);
-                [self dealloc];
+                LC32SendGuestDealloc(self);
                 if(token && !LC32UpdateHostMapping(
                         guestSelf,
                         LC32HostMappingFinishGuestTeardown,
@@ -764,7 +816,7 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
         const uint32_t token = LC32UpdateHostMapping(
             guestSelf, LC32HostMappingBeginGuestTeardown, hostSelf);
         if(!token) abort();
-        [self dealloc];
+        LC32SendGuestDealloc(self);
         if(!LC32UpdateHostMapping(
                 guestSelf,
                 LC32HostMappingFinishGuestTeardownAndReleaseHost,
@@ -861,9 +913,20 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
      * native peer's guest key before that allocation becomes reusable; the
      * host_self creation guard rejects reentry from this remaining cleanup.
      * This never sends -dealloc to the native peer. */
-    if(!LC32UpdateHostMapping((uint32_t)(uintptr_t)self,
-            LC32HostMappingGuestRootDealloc, 0)) abort();
-    [self LC32_dealloc];
+    LC32GuestDeallocFrame frame = {
+        (uint32_t)(uintptr_t)self,
+        LC32GuestDeallocStack(),
+    };
+    LC32SetGuestDeallocStack(&frame);
+    @try {
+        if(!LC32UpdateHostMapping(frame.guestObject,
+                LC32HostMappingGuestRootDealloc, 0)) abort();
+        [self LC32_dealloc];
+    } @finally {
+        /* The original root implementation has freed self. Restore only
+         * the saved stack link; do not inspect or message that address. */
+        LC32SetGuestDeallocStack(frame.previous);
+    }
 }
 @end
 

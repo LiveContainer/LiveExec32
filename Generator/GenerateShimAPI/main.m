@@ -500,6 +500,53 @@ static BOOL LC32MethodReturnsOwnedResult(NSString *className,
            LC32SelectorIsInMethodFamily(method.selector, "mutableCopy");
 }
 
+static BOOL LC32MethodReturnsNotFoundIndex(NSString *className,
+                                           LC32ObjCMethod *method) {
+    /* NSNotFound is NSIntegerMax, not an all-ones value. Only these public
+     * scalar index APIs promise that sentinel; a generic integer conversion
+     * would corrupt counts, hashes, or unrelated methods returning -1. */
+    const char *encoding = method.returnType;
+    if(!method.isInstanceMethod || !encoding || !encoding[0] ||
+       !strchr("iIlL", encoding[0]) || encoding[1] != '\0') return NO;
+
+    static const char *const arraySelectors[] = {
+        "indexOfObject:", "indexOfObject:inRange:",
+        "indexOfObjectIdenticalTo:", "indexOfObjectIdenticalTo:inRange:",
+        "indexOfObjectPassingTest:", "indexOfObjectWithOptions:passingTest:",
+        "indexOfObjectAtIndexes:options:passingTest:",
+        "indexOfObject:inSortedRange:options:usingComparator:",
+    };
+    static const char *const orderedSetSelectors[] = {
+        "indexOfObject:", "indexOfObjectPassingTest:",
+        "indexOfObjectWithOptions:passingTest:",
+        "indexOfObjectAtIndexes:options:passingTest:",
+        "indexOfObject:inSortedRange:options:usingComparator:",
+    };
+    static const char *const indexSetSelectors[] = {
+        "firstIndex", "lastIndex", "indexGreaterThanIndex:",
+        "indexLessThanIndex:", "indexGreaterThanOrEqualToIndex:",
+        "indexLessThanOrEqualToIndex:", "indexPassingTest:",
+        "indexWithOptions:passingTest:", "indexInRange:options:passingTest:",
+    };
+    const char *const *selectors = NULL;
+    size_t count = 0;
+    if([className isEqualToString:@"NSArray"]) {
+        selectors = arraySelectors;
+        count = sizeof(arraySelectors) / sizeof(*arraySelectors);
+    } else if([className isEqualToString:@"NSOrderedSet"]) {
+        selectors = orderedSetSelectors;
+        count = sizeof(orderedSetSelectors) / sizeof(*orderedSetSelectors);
+    } else if([className isEqualToString:@"NSIndexSet"]) {
+        selectors = indexSetSelectors;
+        count = sizeof(indexSetSelectors) / sizeof(*indexSetSelectors);
+    }
+    const char *selector = sel_getName(method.selector);
+    for(size_t i = 0; i < count; ++i) {
+        if(!strcmp(selector, selectors[i])) return YES;
+    }
+    return NO;
+}
+
 @interface MethodBuilder : NSObject
 @property(nonatomic, retain) LC32ObjCMethod *method;
 @property(nonatomic, retain) NSString *className;
@@ -652,6 +699,11 @@ static BOOL LC32MethodReturnsOwnedResult(NSString *className,
 }
 
 - (NSString *)returnLine {
+    if(LC32MethodReturnsNotFoundIndex(self.className, self.method)) {
+        return [NSString stringWithFormat:
+            @"return (%@)(host_ret == INT64_MAX ? INT32_MAX : host_ret);",
+            self.returnType];
+    }
     switch(self.method.returnType[0]) {
         case 'v':
             if([self.method.selectorString isEqualToString:@"dealloc"]) {

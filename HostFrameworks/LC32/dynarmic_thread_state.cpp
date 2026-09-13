@@ -392,31 +392,34 @@ static bool NativeDebuggerResumeQuiescentHostCall(
  * invocation; a nested host-to-guest callback temporarily revokes it before
  * saving or changing registers.
  */
-void NativeGuestHostCallEnter() {
+NativeGuestHostCallState NativeGuestHostCallEnter() {
     NativeThreadStateSlot *slot =
         CurrentNativeThreadStateSlot();
     if (slot == nullptr) {
-        return;
+        return {};
     }
     auto lock = LockUnsuspendedGuestRegisters(*slot);
     ++slot->hostCallDepth;
     /* Argument marshalling is still guest work.  The bridge explicitly
      * publishes quiescence only around the actual native invocation. */
     slot->hostRegistersQuiescent = false;
+    return {slot, slot->hostCallQuiescenceDepth};
 }
 
-void NativeGuestHostCallExit() {
-    NativeThreadStateSlot *slot =
-        CurrentNativeThreadStateSlot();
+void NativeGuestHostCallExit(const NativeGuestHostCallState &state) {
+    NativeThreadStateSlot *slot = state.slot;
     if (slot == nullptr) {
         return;
     }
+    assert(slot == CurrentNativeThreadStateSlot());
     auto lock = LockUnsuspendedGuestRegisters(*slot);
     assert(slot->hostCallDepth != 0);
-    /* A host-to-guest callback may contain a nested host call while the
-     * outer native invocation's quiescence scope remains on its stack. */
-    assert(slot->hostCallQuiescenceDepth <
-        slot->hostCallDepth);
+    /* One host call can nest several native quiescence scopes, for example
+     * receiver-guard release followed by a final mirror release. A callback
+     * may reenter the guest while all those scopes remain on the native
+     * stack, so their count need not be less than the host-call count.
+     * Only scopes opened by this call must have ended before it returns. */
+    assert(slot->hostCallQuiescenceDepth == state.quiescenceDepth);
     --slot->hostCallDepth;
     /* The host return value has not yet been written to the guest JIT. */
     slot->hostRegistersQuiescent = false;

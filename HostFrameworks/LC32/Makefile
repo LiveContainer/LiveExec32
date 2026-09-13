@@ -58,7 +58,7 @@ endif
 
 LiveExec32Shared_FILES = \
 	LiveExec32Shared.cpp guest_bootstrap.cpp debugger_server.cpp \
-	crash_exception.mm \
+	crash_exception.mm guest_dispatch.mm \
 	arm_dynarmic_cp15.cpp dynarmic.cpp dynarmic_syscalls.cpp \
 	darwin_file_syscalls.cpp guest_mach_messages.cpp \
 	dynarmic_memory.cpp dynarmic_callbacks.cpp dynarmic_thread_state.cpp \
@@ -71,6 +71,7 @@ LiveExec32Shared_FILES = \
 	../ImageIO/ImageIO.mm \
 	../CoreText/CoreText.mm ../CoreMedia/CoreMedia.mm ../CoreVideo/CoreVideo.mm \
 	../AudioToolbox/AudioToolbox.mm \
+	../Accelerate/Accelerate.mm \
 	../OpenAL/OpenAL.mm ../OpenGLES/OpenGLES.mm ../UIKit/UIKit.mm \
 	../UIKit/LegacyAutoLayout.mm ../UIKit/LegacyFonts.mm ../UIKit/LegacyAlerts.mm \
 	../UIKit/LegacyRotation.mm
@@ -86,7 +87,7 @@ LiveExec32Shared_OBJ_FILES = $(DYNARMIC_STATIC_LIBS)
 LiveExec32Shared_LDFLAGS = -L../../External/mini-gdbstub/build -Wl,-weak-lMobileGestalt
 LiveExec32Shared_LIBRARIES = gdbstub
 LiveExec32Shared_FRAMEWORKS = \
-	AudioToolbox CFNetwork CoreFoundation CoreMedia CoreVideo Foundation GameKit IOKit \
+	Accelerate AudioToolbox CFNetwork CoreFoundation CoreMedia CoreVideo Foundation GameKit IOKit \
 	ImageIO OpenAL OpenGLES QuartzCore Security UIKit
 LiveExec32Shared_PUBLIC_HEADERS = LiveExec32Shared.h
 LiveExec32Shared_RESOURCE_DIRS = Resources

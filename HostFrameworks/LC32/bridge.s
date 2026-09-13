@@ -78,3 +78,35 @@ _LC32InvokeHostMessageSixDoubles:
     .cfi_def_cfa sp, 0
     ret
     .cfi_endproc
+
+// Signature-gated scalar callbacks capture the integer and FP banks before
+// any C/Objective-C bookkeeping can clobber caller-saved registers.
+// LC32ScalarCallbackFrame: integers[8] at 0, floating[8] at 64.
+.global _LC32InvokeGuestSelectorScalars
+_LC32InvokeGuestSelectorScalars:
+    .cfi_startproc
+    stp x29, x30, [sp, #-16]!
+    .cfi_def_cfa_offset 16
+    .cfi_offset x29, -16
+    .cfi_offset x30, -8
+    mov x29, sp
+    .cfi_def_cfa_register x29
+    sub sp, sp, #128
+    stp x0, x1, [sp]
+    stp x2, x3, [sp, #16]
+    stp x4, x5, [sp, #32]
+    stp x6, x7, [sp, #48]
+    stp d0, d1, [sp, #64]
+    stp d2, d3, [sp, #80]
+    stp d4, d5, [sp, #96]
+    stp d6, d7, [sp, #112]
+    mov x0, sp
+    bl _LC32InvokeGuestSelectorScalarFrame
+    // C returns raw bits: integer/object values use x0, float/double values
+    // use s0/d0. Setting both is harmless and requires no return-kind branch.
+    fmov d0, x0
+    add sp, sp, #128
+    ldp x29, x30, [sp], #16
+    .cfi_def_cfa sp, 0
+    ret
+    .cfi_endproc

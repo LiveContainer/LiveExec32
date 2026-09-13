@@ -332,8 +332,12 @@ gdb_thread_id_t ActiveMainDebuggerThread();
 bool NativeDebuggerMainContextMayRun();
 bool NativeThreadStatePauseHostWaitIfNeeded();
 bool NativeThreadStatePauseRequestedForCurrent();
-void NativeGuestHostCallEnter();
-void NativeGuestHostCallExit();
+struct NativeGuestHostCallState {
+    NativeThreadStateSlot *slot = nullptr;
+    size_t quiescenceDepth = 0;
+};
+NativeGuestHostCallState NativeGuestHostCallEnter();
+void NativeGuestHostCallExit(const NativeGuestHostCallState &state);
 void NativeGuestCallbackRegisterAccessBegin();
 void NativeGuestCallbackRegisterAccessEnd();
 bool ConsumeNativeThreadStateHalt(Dynarmic::HaltReason &reason);
@@ -374,12 +378,12 @@ kern_return_t CopyGuestThreadPolicy(
 template <typename Function>
 auto InvokeNativeGuestHostCall(Function &&function)
         -> decltype(function()) {
-    NativeGuestHostCallEnter();
     struct ExitScope {
+        NativeGuestHostCallState state;
         ~ExitScope() {
-            NativeGuestHostCallExit();
+            NativeGuestHostCallExit(state);
         }
-    } exitScope;
+    } exitScope{NativeGuestHostCallEnter()};
     return function();
 }
 

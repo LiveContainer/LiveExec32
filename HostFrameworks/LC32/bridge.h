@@ -34,6 +34,8 @@ extern int __CFConstantStringClassReference[];
 - (u32)guest_selfOrNull;
 - (u32)LC32_bindGuestSelfIfAbsent:(u32)ptr;
 - (u32)guest_self;
+- (NSMethodSignature *)LC32_nativeMethodSignatureForSelector:(SEL)selector
+                                           instanceMethods:(BOOL)instanceMethods;
 @end
 
 u32 LC32HostToGuestCopyClassName(u32 guest_output, size_t length, u64 host_object);

@@ -147,12 +147,10 @@ static int64_t invokeRead(NSInvocation *invocation, NSMutableData *output,
     setNativeArgument(invocation, &maxLength, sizeof(maxLength), 3);
     [invocation invoke];
 
-    NSMutableData *returned = [NSMutableData dataWithLength:sizeof(int64_t)];
-    LC32InvokeHostSelector([invocation host_self],
-        LC32GetHostSelector(@selector(getReturnValue:)),
-        nativeBytes(returned, YES), (uint64_t)0);
+    // The native stream signature uses q, so the typed invocation bridge
+    // copies its full 64-bit result directly into this guest buffer.
     int64_t result = 0;
-    memcpy(&result, [returned bytes], sizeof(result));
+    [invocation getReturnValue:&result];
     return result;
 }
 
