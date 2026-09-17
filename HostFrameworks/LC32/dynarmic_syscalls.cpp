@@ -4,6 +4,8 @@
 #include "guest_mach_messages.h"
 
 #include <poll.h>
+#include <net/if.h>
+#include <sys/sockio.h>
 
 /* Darwin keeps some record-lock fcntl commands as SPI, so public SDKs may
  * omit their names even though the syscall ABI remains available. */
@@ -4390,6 +4392,133 @@ static int guest_aes_ioctl(u32 request, u32 guest_arg) {
     return return_with_carry_direct(0, false);
 }
 
+/*
+ * The armv7 SIOCGIFCONF request embeds an 8-byte struct ifconf whose pointer
+ * is 32 bits wide (0xc0086924). The native process is arm64, so forwarding
+ * that request or guest pointer directly would expose the wrong ABI to XNU.
+ * Stage the payload in host memory, issue the native SIOCGIFCONF, and copy the
+ * returned interface records back into the guest buffer.
+ */
+static constexpr u32 LC32_SIOCGIFCONF32 = 0xc0086924u;
+static constexpr size_t LC32_MAXIMUM_IFCONF_BYTES = 1024 * 1024;
+
+struct LC32Ifconf32 {
+    int32_t ifc_len;
+    u32 guest_buf;
+};
+
+static_assert(sizeof(LC32Ifconf32) == 8,
+    "armv7 ifconf ABI must remain 8 bytes");
+
+static int guest_siocgifconf32(int fildes, u32 guest_arg) {
+    if (guest_arg == 0) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+
+    LC32Ifconf32 guestIfconf{};
+    if (!read_guest_memory_with_permissions(
+            guest_arg, &guestIfconf, sizeof(guestIfconf), PROT_READ) ||
+            !guest_memory_range_has_permissions(
+                guest_arg, sizeof(guestIfconf), PROT_WRITE)) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+    if (guestIfconf.ifc_len < 0) {
+        return return_with_carry_direct(EINVAL, true);
+    }
+
+    const size_t guestCapacity =
+        static_cast<size_t>(guestIfconf.ifc_len);
+    if (guestCapacity > LC32_MAXIMUM_IFCONF_BYTES) {
+        return return_with_carry_direct(ENOMEM, true);
+    }
+    if (guestCapacity != 0) {
+        if (guestIfconf.guest_buf == 0 ||
+                !guest_memory_range_has_permissions(
+                    guestIfconf.guest_buf, guestCapacity, PROT_WRITE)) {
+            return return_with_carry_direct(EFAULT, true);
+        }
+    }
+
+    std::vector<char> hostBuffer;
+    try {
+        hostBuffer.resize(std::max<size_t>(guestCapacity, 1));
+    } catch (const std::bad_alloc &) {
+        return return_with_carry_direct(ENOMEM, true);
+    }
+
+    struct ifconf hostIfconf{};
+    hostIfconf.ifc_len = static_cast<int>(guestCapacity);
+    hostIfconf.ifc_buf = guestCapacity != 0 ? hostBuffer.data() : nullptr;
+
+    const int result = syscallRetCarry(
+        SYS_ioctl, fildes, SIOCGIFCONF, &hostIfconf, 0, 0, 0, 0);
+    if (threadHandle.cpsr->hasCarry()) {
+        return result;
+    }
+    if (hostIfconf.ifc_len < 0) {
+        return return_with_carry_direct(EIO, true);
+    }
+
+    const size_t returnedLength =
+        static_cast<size_t>(hostIfconf.ifc_len);
+    const size_t copyLength =
+        std::min(returnedLength, guestCapacity);
+    if (copyLength != 0 &&
+            !write_guest_memory_with_permissions(
+                guestIfconf.guest_buf, hostBuffer.data(),
+                copyLength, PROT_WRITE)) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+    if (returnedLength > static_cast<size_t>(INT32_MAX)) {
+        return return_with_carry_direct(EOVERFLOW, true);
+    }
+
+    guestIfconf.ifc_len = static_cast<int32_t>(returnedLength);
+    if (!write_guest_memory_with_permissions(
+            guest_arg, &guestIfconf, sizeof(guestIfconf), PROT_WRITE)) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+
+    LC32_DEBUG_PRINTF(
+        "LC32: SIOCGIFCONF32 fd=%d capacity=%zu returned=%zu\n",
+        fildes, guestCapacity, returnedLength);
+    return result;
+}
+
+/*
+ * The classic interface-query ioctls use a 32-byte ifreq on both the armv7
+ * guest ABI and current Darwin arm64 ABI. Stage it anyway so the kernel never
+ * receives a guest virtual address.
+ */
+static int guest_ifreq_ioctl(int fildes, u32 request, u32 guest_arg) {
+    static constexpr size_t GuestIfreqSize = 32;
+    static_assert(sizeof(struct ifreq) == GuestIfreqSize,
+        "native Darwin ifreq layout changed");
+
+    if (guest_arg == 0) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+
+    struct ifreq hostRequest{};
+    if (!read_guest_memory_with_permissions(
+            guest_arg, &hostRequest, sizeof(hostRequest), PROT_READ) ||
+            !guest_memory_range_has_permissions(
+                guest_arg, sizeof(hostRequest), PROT_WRITE)) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+
+    const int result = syscallRetCarry(
+        SYS_ioctl, fildes, request, &hostRequest, 0, 0, 0, 0);
+    if (threadHandle.cpsr->hasCarry()) {
+        return result;
+    }
+    if (!write_guest_memory_with_permissions(
+            guest_arg, &hostRequest, sizeof(hostRequest), PROT_WRITE)) {
+        return return_with_carry_direct(EFAULT, true);
+    }
+    return result;
+}
+
 int guest_ioctl(int fildes, u32 request, u32 guest_r2) {
     if (IsGuestAesFileDescriptor(fildes)) {
         return guest_aes_ioctl(request, guest_r2);
@@ -4417,6 +4546,15 @@ int guest_ioctl(int fildes, u32 request, u32 guest_r2) {
             //case BIOCFLUSH:
             //case BIOCPROMISC:
             return syscallRetCarry(SYS_ioctl, fildes, request, guest_r2, 0,0,0,0);
+        case LC32_SIOCGIFCONF32:
+            return guest_siocgifconf32(fildes, guest_r2);
+        case SIOCGIFFLAGS:
+        case SIOCGIFADDR:
+        case SIOCGIFDSTADDR:
+        case SIOCGIFBRDADDR:
+        case SIOCGIFNETMASK:
+        case SIOCGIFMTU:
+            return guest_ifreq_ioctl(fildes, request, guest_r2);
         case FIODTYPE: {
             int host_r2;
             int result = syscallRetCarry(SYS_ioctl, fildes, request, &host_r2, 0,0,0,0);
