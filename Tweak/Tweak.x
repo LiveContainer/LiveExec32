@@ -256,8 +256,7 @@ static BOOL LC32InjectArm64ExecutableSliceWithError(
      * policy does not preserve conflicts or implement the two-hop layout. */
     MIExecutableBundle *bundle = self.bundleContainer.bundle;
     MIDataContainer *data = self.dataContainer;
-    if(bundle.bundleType == MIBundleTypeUserApp &&
-            [data.identifier isEqualToString:bundle.identifier]) {
+    if(bundle.bundleType == MIBundleTypeUserApp) {
         LC32InstallLegacyOuterLink(bundle.bundleURL, bundle.identifier,
             data.containerURL);
     }

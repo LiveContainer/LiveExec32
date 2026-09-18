@@ -1,6 +1,6 @@
 LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash \
   check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info \
-  check-guest-thumb-linker \
+  check-guest-thumb-linker check-uikit-legacy-rootless-rotation-build \
   check-scalar-callback-signature check-guest-timer-queue
 LC32_HOST_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),\
   $(if $(strip $(filter-out $(LC32_HOST_TEST_GOALS),$(MAKECMDGOALS))),,1),)
@@ -25,10 +25,13 @@ BUILD_INFO_LOGGING_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/build-info-
 
 .PHONY: check-guest-bootstrap check-memory-hash \
   check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info \
-  check-guest-thumb-linker \
+  check-guest-thumb-linker check-uikit-legacy-rootless-rotation-build \
   check-scalar-callback-signature check-guest-timer-queue
 check-guest-thumb-linker:
 	./guest_thumb_linker.sh
+
+check-uikit-legacy-rootless-rotation-build:
+	sh ./uikit_legacy_rootless_rotation.sh --build-only
 
 check-scalar-callback-signature:
 	HOST_CXX="$(HOST_CXX)" python3 scalar_callback_signature.py

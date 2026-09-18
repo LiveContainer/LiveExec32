@@ -1,20 +1,40 @@
 #!/bin/sh
 # Opt-in native simulator regression. Compiles the real production rotation
 # unit without the guest bridge/emulator; --build-only never installs or runs.
+# Example focused run (temporarily foregrounds only its own fixture apps):
+#   sh test/uikit_legacy_rootless_rotation.sh --device UDID --sdk 6.1 \
+#       --case modern-explicit --case modern-refresh --case ownership --case lifecycle
+# --sdk and --case may be repeated; omitted filters run the complete matrix.
 set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 device=booted
 build_only=0
 keep=0
+sdks=
+test_cases=
 run_timeout=${LC32_ROOTLESS_ROTATION_TIMEOUT:-30}
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --device) [ "$#" -ge 2 ] || exit 2; device=$2; shift 2 ;;
         --build-only) build_only=1; keep=1; shift ;;
         --keep) keep=1; shift ;;
-        *) echo "usage: $0 [--device UDID] [--build-only] [--keep]" >&2; exit 2 ;;
+        --sdk)
+            [ "$#" -ge 2 ] || exit 2
+            case "$2" in 5|6.1|7|8|11) sdks="$sdks $2" ;; *) exit 2 ;; esac
+            shift 2 ;;
+        --case)
+            [ "$#" -ge 2 ] || exit 2
+            case "$2" in
+                rootless|explicit|modern|modern-explicit|modern-refresh|unregistered|manual|modal|manual-disabled|lifecycle|ownership|replacement)
+                    test_cases="$test_cases $2" ;;
+                *) exit 2 ;;
+            esac
+            shift 2 ;;
+        *) echo "usage: $0 [--device UDID] [--build-only] [--keep] [--sdk 5|6.1|7|8|11] [--case NAME]" >&2; exit 2 ;;
     esac
 done
+[ -n "$sdks" ] || sdks="5 6.1 7 8 11"
+[ -n "$test_cases" ] || test_cases="rootless explicit modern modern-explicit modern-refresh unregistered manual modal manual-disabled lifecycle ownership replacement"
 case "$run_timeout" in ''|*[!0-9]*) echo "invalid timeout" >&2; exit 2 ;; esac
 [ "$run_timeout" -ge 1 ] && [ "$run_timeout" -le 60 ] || exit 2
 temp_base=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)
@@ -51,7 +71,11 @@ xcrun --sdk iphonesimulator clang -target arm64-apple-ios15.0-simulator \
     "$repo_root/HostFrameworks/UIKit/LegacyAutoLayout.mm" \
     "$repo_root/HostFrameworks/UIKit/LegacyRotation.mm" -o "$workdir/test"
 
-for sdk in 5 7 8 11; do
+for sdk in $sdks; do
+    case "$sdk" in
+        6.1) sdk_value=393472; sdk_version=6.1 ;;
+        *) sdk_value=$((sdk * 65536)); sdk_version=$sdk.0 ;;
+    esac
     app="$workdir/sdk$sdk.app"
     bundle="org.liveexec32.test.rootlessrotation.$run_id.sdk$sdk"
     mkdir "$app"
@@ -70,8 +94,8 @@ for sdk in 5 7 8 11; do
     plutil -insert UIStatusBarHidden -bool YES "$plist"
     plutil -insert UISupportedInterfaceOrientations -json \
         '["UIInterfaceOrientationLandscapeRight","UIInterfaceOrientationLandscapeLeft"]' "$plist"
-    plutil -insert LC32ExpectedSDK -integer "$((sdk * 65536))" "$plist"
-    xcrun vtool -set-build-version 7 11.0 "$sdk.0" -replace \
+    plutil -insert LC32ExpectedSDK -integer "$sdk_value" "$plist"
+    xcrun vtool -set-build-version 7 11.0 "$sdk_version" -replace \
         -output "$app/RootlessRotation" "$workdir/test"
     codesign --force --sign - "$app" >/dev/null 2>&1
     codesign --verify --strict "$app"
@@ -80,13 +104,14 @@ for sdk in 5 7 8 11; do
 
     installed_bundle=$bundle
     bounded "$run_timeout" xcrun simctl install "$device" "$app"
-    for test_case in rootless explicit modern unregistered manual modal manual-disabled lifecycle ownership replacement; do
+    for test_case in $test_cases; do
         log="$workdir/sdk$sdk-$test_case.log"
         status=0
         bounded "$run_timeout" xcrun simctl launch --console "$device" "$bundle" \
             --case "$test_case" >"$log" 2>&1 || status=$?
         echo "Rootless rotation SDK$sdk/$test_case status=$status"
         sed -n '1,160p' "$log"
+        awk 'NR > 160 && /rootless-rotation.*: FAIL|rootless-rotation-regression:/' "$log"
         bounded 10 xcrun simctl terminate "$device" "$bundle" >/dev/null 2>&1 || :
         if [ "$status" -ne 0 ] || ! grep -q 'rootless-rotation-regression: PASS' "$log"; then
             matrix_failed=1
