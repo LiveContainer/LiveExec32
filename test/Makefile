@@ -293,7 +293,7 @@ $(eval $(call lc32_guest_test,lc32-locale-constants,locale_constants.m,Foundatio
 $(eval $(call lc32_guest_test,lc32-mobilecoreservices-uti,mobilecoreservices_uti.m,MobileCoreServices CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-mediaplayer-legacy,mediaplayer_legacy.m,MediaPlayer CFNetwork Foundation CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-nsrange-bridge,nsrange_bridge.m,Foundation LC32))
-$(eval $(call lc32_guest_test,lc32-nsvalue-bytes,nsvalue_bytes.m,Foundation))
+$(eval $(call lc32_guest_test,lc32-nsvalue-bytes,nsvalue_bytes.m,Foundation QuartzCore LC32))
 $(eval $(call lc32_guest_test,lc32-notification-selector,notification_selector.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-foundation-not-found,foundation_not_found.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-nsproxy-bridge,nsproxy_bridge.m,Foundation LC32))
@@ -440,6 +440,9 @@ DEBUG.CFLAGS := $(filter-out -O0,$(DEBUG.CFLAGS)) $(OPTFLAG)
 endif
 lc32-nsrange-bridge_USE_MODULES := 1
 lc32-nsrange-bridge_CFLAGS := -I$(abspath ../GuestFrameworks) -I$(abspath ../include)
+lc32-nsvalue-bytes_USE_MODULES := 1
+lc32-nsvalue-bytes_CFLAGS := -fno-objc-arc \
+	-I$(abspath ../GuestFrameworks) -I$(abspath ../include)
 lc32-scalar-pointer-bridge_USE_MODULES := 1
 lc32-scalar-pointer-bridge_CFLAGS := -I$(abspath ../GuestFrameworks) -I$(abspath ../include)
 

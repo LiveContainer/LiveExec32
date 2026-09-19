@@ -121,6 +121,18 @@ static void LC32NarrowFloats4(const void *host, void *guest) {
     dst[3] = (float)src[3];
 }
 
+static void LC32ConvertFloats16(const void *guest, void *host) {
+    const float *src = guest;
+    double *dst = host;
+    for(unsigned i = 0; i < 16; i++) dst[i] = src[i];
+}
+
+static void LC32NarrowFloats16(const void *host, void *guest) {
+    const double *src = host;
+    float *dst = guest;
+    for(unsigned i = 0; i < 16; i++) dst[i] = (float)src[i];
+}
+
 static void LC32ConvertNSRange(const void *guest, void *host) {
     const uint32_t *src = guest;
     uint64_t *dst = host;
@@ -171,6 +183,14 @@ static const LC32ValueLayout LC32ValueLayouts[] = {
         .hostSize = 32,
         .guestToHost = LC32ConvertFloats4,
         .hostToGuest = LC32NarrowFloats4,
+    },
+    {
+        .guestEncoding = "{CATransform3D=ffffffffffffffff}",
+        .hostEncoding = "{CATransform3D=dddddddddddddddd}",
+        .guestSize = 64,
+        .hostSize = 128,
+        .guestToHost = LC32ConvertFloats16,
+        .hostToGuest = LC32NarrowFloats16,
     },
     {
         .guestEncoding = "{_NSRange=II}",

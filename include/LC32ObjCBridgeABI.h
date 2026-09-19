@@ -44,7 +44,8 @@
 #define LC32_HOST_OBJECT_ARRAY_MAGIC UINT32_C(0x4f413332) /* "OA32" */
 #define LC32_HOST_OBJECT_ARRAY_MAX_COUNT UINT32_C(1048576)
 #define LC32_HOST_SIZED_INDIRECT_MAGIC UINT32_C(0x53493332) /* "SI32" */
-#define LC32_HOST_SIZED_INDIRECT_MAX_SIZE UINT32_C(64)
+/* CATransform3D contains sixteen native CGFloats (128 bytes on ARM64). */
+#define LC32_HOST_SIZED_INDIRECT_MAX_SIZE UINT32_C(128)
 
 /*
  * Result of SVC 1019. Values above the sentinels are opaque pending-retain

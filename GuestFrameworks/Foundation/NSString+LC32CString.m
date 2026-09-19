@@ -43,6 +43,13 @@
         ? bytes : NULL;
 }
 
+- (const char *)cString {
+    /* This deprecated API uses the process's default C-string encoding,
+     * not necessarily UTF-8. Reuse the guest-owned buffer adapter rather
+     * than forwarding a native char pointer into ARM32 address space. */
+    return [self cStringUsingEncoding:[NSString defaultCStringEncoding]];
+}
+
 - (const char *)fileSystemRepresentation {
     /* Darwin paths are UTF-8.  Keep the bytes in guest-owned associated
      * storage so POSIX calls can safely consume the returned pointer. */

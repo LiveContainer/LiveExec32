@@ -97,6 +97,34 @@ static BOOL testLegacyWideCStringPadding(void) {
     return passed && pairPassed && bigEndianPassed && surrogatePassed && emptyPassed;
 }
 
+static BOOL checkDeprecatedCString(const char *name, NSString *string) {
+    NSData *expected = [string dataUsingEncoding:[NSString defaultCStringEncoding]
+                           allowLossyConversion:NO];
+    const char *bytes = [string cString];
+    BOOL passed = expected
+        ? bytes && !memcmp(bytes, expected.bytes, expected.length) &&
+            bytes[expected.length] == '\0'
+        : bytes == NULL;
+    printf("%s: %s\n", name, passed ? "PASS" : "FAIL");
+    return passed;
+}
+
+static BOOL testDeprecatedCString(void) {
+    BOOL passed = checkDeprecatedCString("string-cstring-legacy-ascii", @"Snoopy");
+    passed &= checkDeprecatedCString("string-cstring-legacy-native-result",
+        [@"xSnoopy" substringFromIndex:1]);
+    passed &= checkDeprecatedCString("string-cstring-legacy-empty", @"");
+    // Compare to the actual default encoding, not an assumed UTF-8 encoding.
+    passed &= checkDeprecatedCString("string-cstring-legacy-unicode", @"caf\u00e9 \u03b1");
+    passed &= checkDeprecatedCString("string-cstring-legacy-embedded-nul", @"A\0B");
+    NSMutableString *mutable = [NSMutableString stringWithString:@"a longer value"];
+    const char *seed = [mutable cString];
+    passed &= seed && !strcmp(seed, "a longer value");
+    [mutable setString:@"short"];
+    passed &= checkDeprecatedCString("string-cstring-legacy-mutation", mutable);
+    return passed;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     NSAutoreleasePool *pool = [NSAutoreleasePool new];
@@ -174,9 +202,11 @@ int main(void) {
         longUnicodePassed ? "PASS" : "FAIL");
 
     const BOOL wideCStringPassed = testLegacyWideCStringPadding();
+    const BOOL deprecatedCStringPassed = testDeprecatedCString();
 
     [pool drain];
     return !(utf8Passed && latin1Passed && charactersPassed &&
              allCharactersPassed && utf32Passed && emptyUTF32Passed &&
-             noCopyPassed && longUnicodePassed && wideCStringPassed);
+             noCopyPassed && longUnicodePassed && wideCStringPassed &&
+             deprecatedCStringPassed);
 }
