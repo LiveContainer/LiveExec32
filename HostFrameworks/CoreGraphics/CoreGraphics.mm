@@ -634,6 +634,15 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             CGDataProviderRelease(provider);
             return 0;
         }
+        case LC32CoreGraphicsOpDataProviderCopyData: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGDataProviderRef provider =
+                SlotHostObject<CGDataProviderRef>(call, 0);
+            if(!provider ||
+               CFGetTypeID(provider) != CGDataProviderGetTypeID()) return 0;
+            CFDataRef data = CGDataProviderCopyData(provider);
+            return data ? LC32GuestObjectForOwnedHostObject(data) : 0;
+        }
         case LC32CoreGraphicsOpFontCreateWithDataProvider: {
             if(!RequireCoreGraphicsSlots(call, 1)) return 0;
             CGDataProviderRef provider =
@@ -1132,6 +1141,21 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             }
             return 1;
         }
+        case LC32CoreGraphicsOpContextGetTextPosition: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            const u32 guestAddress = SlotU32(call, 1);
+            if(!context || !guestAddress ||
+               static_cast<uint64_t>(guestAddress) + 2 * sizeof(float) >
+                   static_cast<uint64_t>(UINT32_MAX) + 1) return 0;
+            const CGPoint position = CGContextGetTextPosition(context);
+            float guestPosition[] = {
+                static_cast<float>(position.x),
+                static_cast<float>(position.y),
+            };
+            return Dynarmic_mem_1write(guestAddress, sizeof(guestPosition),
+                reinterpret_cast<char *>(guestPosition)) == 0;
+        }
         case LC32CoreGraphicsOpContextAddLines: {
             if(!RequireCoreGraphicsSlots(call, 3)) return 0;
             CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
@@ -1404,6 +1428,27 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
             if(!context) return 0;
             CGContextSetLineWidth(context, SlotCGFloat(call, 1));
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextSetAllowsAntialiasing: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            const u32 allowsAntialiasing = SlotU32(call, 1);
+            if(!context || allowsAntialiasing > 1) return 0;
+            CGContextSetAllowsAntialiasing(context, allowsAntialiasing != 0);
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextSetAllowsFontSubpixelPositioning:
+        case LC32CoreGraphicsOpContextSetShouldSubpixelQuantizeFonts: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            const u32 enabled = SlotU32(call, 1);
+            if(!context || enabled > 1) return 0;
+            if(static_cast<LC32CoreGraphicsOpcode>(opcode) ==
+                    LC32CoreGraphicsOpContextSetAllowsFontSubpixelPositioning)
+                CGContextSetAllowsFontSubpixelPositioning(context, enabled != 0);
+            else
+                CGContextSetShouldSubpixelQuantizeFonts(context, enabled != 0);
             return 1;
         }
         case LC32CoreGraphicsOpContextSetShouldAntialias: {

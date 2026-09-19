@@ -223,6 +223,12 @@ CGDataProviderRef CGDataProviderRetain(CGDataProviderRef provider) {
         LC32_CG_HOST(provider)) : NULL;
 }
 
+CFDataRef CGDataProviderCopyData(CGDataProviderRef provider) {
+    return provider ? (CFDataRef)LC32_CG_CALL(
+        LC32CoreGraphicsOpDataProviderCopyData,
+        LC32_CG_HOST(provider)) : NULL;
+}
+
 #pragma mark CGFont
 
 CGFontRef CGFontCreateWithDataProvider(CGDataProviderRef provider) {
@@ -290,6 +296,10 @@ CGImageRef CGImageCreateWithPNGDataProvider(
         LC32CoreGraphicsOpImageCreateWithPNGDataProvider,
         LC32_CG_HOST(source), LC32_CG_U32((uintptr_t)decode),
         LC32_CG_U32(shouldInterpolate), LC32_CG_U32(intent));
+}
+
+CGImageRef CGImageRetain(CGImageRef image) {
+    return image ? (CGImageRef)CFRetain(image) : NULL;
 }
 
 void CGImageRelease(CGImageRef image) {
@@ -711,9 +721,35 @@ void CGContextSetShouldAntialias(CGContextRef context, bool shouldAntialias) {
         LC32_CG_HOST(context), LC32_CG_U32(shouldAntialias));
 }
 
+void CGContextSetAllowsAntialiasing(CGContextRef context, bool allowsAntialiasing) {
+    if(context) LC32_CG_CALL(
+        LC32CoreGraphicsOpContextSetAllowsAntialiasing,
+        LC32_CG_HOST(context), LC32_CG_U32(allowsAntialiasing));
+}
+
+void CGContextSetAllowsFontSubpixelPositioning(CGContextRef context, bool allows) {
+    if(context) LC32_CG_CALL(
+        LC32CoreGraphicsOpContextSetAllowsFontSubpixelPositioning,
+        LC32_CG_HOST(context), LC32_CG_U32(allows));
+}
+
+void CGContextSetShouldSubpixelQuantizeFonts(CGContextRef context, bool should) {
+    if(context) LC32_CG_CALL(
+        LC32CoreGraphicsOpContextSetShouldSubpixelQuantizeFonts,
+        LC32_CG_HOST(context), LC32_CG_U32(should));
+}
+
 void CGContextSetTextPosition(CGContextRef context, CGFloat x, CGFloat y) {
     if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextSetTextPosition,
         LC32_CG_HOST(context), LC32_CG_F32(x), LC32_CG_F32(y));
+}
+
+CGPoint CGContextGetTextPosition(CGContextRef context) {
+    if(!context) return CGPointZero;
+    CGPoint result = CGPointZero;
+    return LC32_CG_CALL(LC32CoreGraphicsOpContextGetTextPosition,
+        LC32_CG_HOST(context), LC32_CG_U32((uintptr_t)&result))
+        ? result : CGPointZero;
 }
 
 void CGContextSetTextMatrix(CGContextRef context,
