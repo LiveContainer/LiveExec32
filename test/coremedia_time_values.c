@@ -22,6 +22,11 @@ static Boolean rangeBitsEqual(CMTimeRange left, CMTimeRange right) {
 }
 
 int main(void) {
+    check("sample-timing-invalid-layout",
+        sizeof(kCMTimingInfoInvalid) == 3 * sizeof(CMTime) &&
+        timeBitsEqual(kCMTimingInfoInvalid.duration, kCMTimeInvalid) &&
+        timeBitsEqual(kCMTimingInfoInvalid.presentationTimeStamp, kCMTimeInvalid) &&
+        timeBitsEqual(kCMTimingInfoInvalid.decodeTimeStamp, kCMTimeInvalid));
     check("make-rejects-zero-timescale",
         timeBitsEqual(CMTimeMake(3, 0), kCMTimeInvalid));
     check("make-rejects-negative-timescale",

@@ -24,6 +24,10 @@ const CMTime kCMTimeNegativeInfinity = {
 };
 const CMTime kCMTimeZero = {0, 1, kCMTimeFlags_Valid, 0};
 
+const CMSampleTimingInfo kCMTimingInfoInvalid = {
+    {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0},
+};
+
 const CMTimeRange kCMTimeRangeZero = {
     {0, 1, kCMTimeFlags_Valid, 0},
     {0, 1, kCMTimeFlags_Valid, 0},

@@ -59,6 +59,26 @@ int main(void) {
     failures += report("data-provider-cfdata-owned", provider != NULL);
 
     CGColorSpaceRef rgb = CGColorSpaceCreateDeviceRGB();
+    CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
+    failures += report("color-space-component-counts", rgb && gray &&
+        CGColorSpaceGetNumberOfComponents(rgb) == 3 &&
+        CGColorSpaceGetNumberOfComponents(gray) == 1 &&
+        CGColorSpaceGetNumberOfComponents(NULL) == 0);
+    const CGFloat grayComponents[] = {0.5f, 0.25f};
+    CGColorRef retainedColor = CGColorCreate(gray, grayComponents);
+    failures += report("color-retain-identity", retainedColor &&
+        CGColorRetain(retainedColor) == retainedColor && CGColorRetain(NULL) == NULL);
+    CGColorRelease(retainedColor);
+    CGColorSpaceRelease(gray);
+    failures += report("color-retain-lifetime", retainedColor &&
+        CGColorGetNumberOfComponents(retainedColor) == 2 &&
+        fabsf(CGColorGetAlpha(retainedColor) - 0.25f) < 0.001f);
+    CGColorRef copiedColor = CGColorCreateCopy(retainedColor);
+    CGColorRelease(retainedColor);
+    failures += report("color-copy-lifetime", copiedColor &&
+        fabsf(CGColorGetAlpha(copiedColor) - 0.25f) < 0.001f &&
+        CGColorCreateCopy(NULL) == NULL);
+    CGColorRelease(copiedColor);
     failures += test_antialiasing(rgb);
     const CGFloat imageDecode[] = {0, 1, 0, 1, 0, 1};
     CGImageRef providerImage = rgb && provider ? CGImageCreate(
@@ -108,6 +128,13 @@ int main(void) {
         failures += report("bitmap-clear-sync",
             !buffer_has_nonzero_byte(pixels, sizeof(pixels)));
 
+        CGContextSetAlpha(context, 0.5f);
+        CGContextSetGrayFillColor(context, 1, 1);
+        CGContextFillRect(context, CGRectMake(0, 0, 4, 4));
+        failures += report("bitmap-global-alpha", pixels[3] >= 127 && pixels[3] <= 128);
+        CGContextSetAlpha(context, 1);
+        CGContextClearRect(context, CGRectMake(0, 0, 4, 4));
+
         const CGPoint linePoints[] = {
             CGPointMake(0, 0), CGPointMake(3, 0), CGPointMake(3, 3),
         };
@@ -139,6 +166,19 @@ int main(void) {
                 CGPointMake(1.5f, 1.5f), false));
 
         CGMutablePathRef boundingPath = CGPathCreateMutable();
+        CGMutablePathRef ellipse = CGPathCreateMutable();
+        CGPathAddEllipseInRect(ellipse, &translation, CGRectMake(0, 0, 4, 2));
+        failures += report("path-ellipse-transformed-shape",
+            CGPathContainsPoint(ellipse, NULL, CGPointMake(3, 2), false) &&
+            !CGPathContainsPoint(ellipse, NULL, CGPointMake(1.1f, 1.1f), false));
+        CGPathRelease(ellipse);
+        CGMutablePathRef curve = CGPathCreateMutable();
+        CGPathMoveToPoint(curve, NULL, 0, 0);
+        CGPathAddQuadCurveToPoint(curve, &translation, 1, 3, 3, 0);
+        CGRect curveBounds = CGPathGetBoundingBox(curve);
+        failures += report("path-quad-transformed-control", curveBounds.size.width == 4 &&
+            curveBounds.size.height == 4);
+        CGPathRelease(curve);
         if(boundingPath) CGPathAddRect(
             boundingPath, NULL, CGRectMake(2, 3, 4, 5));
         const CGRect boundingBox = boundingPath

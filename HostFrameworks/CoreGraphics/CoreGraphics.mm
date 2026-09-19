@@ -561,6 +561,18 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
                 ? CGColorSpaceGetModel(space)
                 : kCGColorSpaceModelUnknown);
         }
+        case LC32CoreGraphicsOpContextSetAlpha: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            if(!context) return 0;
+            CGContextSetAlpha(context, SlotCGFloat(call, 1));
+            return 1;
+        }
+        case LC32CoreGraphicsOpColorSpaceGetNumberOfComponents: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGColorSpaceRef space = SlotHostObject<CGColorSpaceRef>(call, 0);
+            return space ? static_cast<u32>(CGColorSpaceGetNumberOfComponents(space)) : 0;
+        }
         case LC32CoreGraphicsOpDataProviderCreateWithFilename: {
             if(!RequireCoreGraphicsSlots(call, 2)) return 0;
             const u32 guestFilename = SlotU32(call, 0);
@@ -1524,7 +1536,9 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
         }
         case LC32CoreGraphicsOpPathAddArcToPoint:
         case LC32CoreGraphicsOpPathAddCurveToPoint:
-        case LC32CoreGraphicsOpPathAddRect: {
+        case LC32CoreGraphicsOpPathAddRect:
+        case LC32CoreGraphicsOpPathAddEllipseInRect:
+        case LC32CoreGraphicsOpPathAddQuadCurveToPoint: {
             const auto operation =
                 static_cast<LC32CoreGraphicsOpcode>(opcode);
             const u32 expectedSlots =
@@ -1549,8 +1563,15 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
                     SlotCGFloat(call, 8), SlotCGFloat(call, 9),
                     SlotCGFloat(call, 10), SlotCGFloat(call, 11),
                     SlotCGFloat(call, 12), SlotCGFloat(call, 13));
+            } else if(operation == LC32CoreGraphicsOpPathAddQuadCurveToPoint) {
+                CGPathAddQuadCurveToPoint(path, transform,
+                    SlotCGFloat(call, 8), SlotCGFloat(call, 9),
+                    SlotCGFloat(call, 10), SlotCGFloat(call, 11));
             } else {
-                CGPathAddRect(path, transform, SlotRect(call, 8));
+                if(operation == LC32CoreGraphicsOpPathAddEllipseInRect)
+                    CGPathAddEllipseInRect(path, transform, SlotRect(call, 8));
+                else
+                    CGPathAddRect(path, transform, SlotRect(call, 8));
             }
             return 1;
         }

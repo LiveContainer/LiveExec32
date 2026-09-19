@@ -77,6 +77,15 @@ void CGColorRelease(CGColorRef color) {
     if(color) CFRelease(color);
 }
 
+CGColorRef CGColorRetain(CGColorRef color) {
+    return color ? (CGColorRef)CFRetain(color) : NULL;
+}
+
+CGColorRef CGColorCreateCopy(CGColorRef color) {
+    // CGColor is immutable; a copy carries independent +1 ownership.
+    return CGColorRetain(color);
+}
+
 CGFloat CGColorGetAlpha(CGColorRef color) {
     if(!color) return 0;
     const uint32_t bits = LC32_CG_CALL(
@@ -124,6 +133,12 @@ CGColorSpaceModel CGColorSpaceGetModel(CGColorSpaceRef space) {
     return space ? (CGColorSpaceModel)(int32_t)LC32_CG_CALL(
         LC32CoreGraphicsOpColorSpaceGetModel,
         LC32_CG_HOST(space)) : kCGColorSpaceModelUnknown;
+}
+
+size_t CGColorSpaceGetNumberOfComponents(CGColorSpaceRef space) {
+    return space ? (size_t)LC32_CG_CALL(
+        LC32CoreGraphicsOpColorSpaceGetNumberOfComponents,
+        LC32_CG_HOST(space)) : 0;
 }
 void CGColorSpaceRelease(CGColorSpaceRef color) {
     if(!color) return;
@@ -419,6 +434,11 @@ void CGContextTranslateCTM(CGContextRef context, CGFloat tx, CGFloat ty) {
 void CGContextRotateCTM(CGContextRef context, CGFloat angle) {
     if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextRotateCTM,
         LC32_CG_HOST(context), LC32_CG_F32(angle));
+}
+
+void CGContextSetAlpha(CGContextRef context, CGFloat alpha) {
+    if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextSetAlpha,
+        LC32_CG_HOST(context), LC32_CG_F32(alpha));
 }
 
 void CGContextSaveGState(CGContextRef context) {
@@ -923,6 +943,36 @@ void CGPathAddRect(CGMutablePathRef path,
         transform ? LC32_CG_F32(transform->ty) : 0,
         LC32_CG_F32(rect.origin.x), LC32_CG_F32(rect.origin.y),
         LC32_CG_F32(rect.size.width), LC32_CG_F32(rect.size.height));
+}
+
+void CGPathAddEllipseInRect(CGMutablePathRef path,
+        const CGAffineTransform *transform, CGRect rect) {
+    if(!path) return;
+    LC32_CG_CALL(LC32CoreGraphicsOpPathAddEllipseInRect,
+        LC32_CG_HOST(path), LC32_CG_U32(transform != NULL),
+        transform ? LC32_CG_F32(transform->a) : 0,
+        transform ? LC32_CG_F32(transform->b) : 0,
+        transform ? LC32_CG_F32(transform->c) : 0,
+        transform ? LC32_CG_F32(transform->d) : 0,
+        transform ? LC32_CG_F32(transform->tx) : 0,
+        transform ? LC32_CG_F32(transform->ty) : 0,
+        LC32_CG_F32(rect.origin.x), LC32_CG_F32(rect.origin.y),
+        LC32_CG_F32(rect.size.width), LC32_CG_F32(rect.size.height));
+}
+
+void CGPathAddQuadCurveToPoint(CGMutablePathRef path,
+        const CGAffineTransform *transform, CGFloat cpx, CGFloat cpy,
+        CGFloat x, CGFloat y) {
+    if(!path) return;
+    LC32_CG_CALL(LC32CoreGraphicsOpPathAddQuadCurveToPoint,
+        LC32_CG_HOST(path), LC32_CG_U32(transform != NULL),
+        transform ? LC32_CG_F32(transform->a) : 0,
+        transform ? LC32_CG_F32(transform->b) : 0,
+        transform ? LC32_CG_F32(transform->c) : 0,
+        transform ? LC32_CG_F32(transform->d) : 0,
+        transform ? LC32_CG_F32(transform->tx) : 0,
+        transform ? LC32_CG_F32(transform->ty) : 0,
+        LC32_CG_F32(cpx), LC32_CG_F32(cpy), LC32_CG_F32(x), LC32_CG_F32(y));
 }
 
 CGPathRef CGPathCreateCopy(CGPathRef path) {

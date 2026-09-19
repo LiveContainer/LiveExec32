@@ -135,6 +135,10 @@ typedef enum : uint32_t {
     LC32CoreGraphicsOpContextSetAllowsAntialiasing = 117,
     LC32CoreGraphicsOpContextSetAllowsFontSubpixelPositioning = 118,
     LC32CoreGraphicsOpContextSetShouldSubpixelQuantizeFonts = 119,
+    LC32CoreGraphicsOpColorSpaceGetNumberOfComponents = 120,
+    LC32CoreGraphicsOpPathAddEllipseInRect = 121,
+    LC32CoreGraphicsOpContextSetAlpha = 122,
+    LC32CoreGraphicsOpPathAddQuadCurveToPoint = 123,
 } LC32CoreGraphicsOpcode;
 
 #endif
