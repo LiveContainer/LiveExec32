@@ -6,8 +6,8 @@
 #include <cstring>
 
 namespace {
-// iOS 10.3 mach/task.h: IDs 3413/3415 carry one copy-send port descriptor;
-// 3414 is a simple request. These wire layouts do not contain host pointers.
+// iOS 10.3 task/thread exception-port APIs share these ARM32 wire layouts:
+// set/swap carry a copy-send descriptor; get is a simple request.
 struct __attribute__((packed, aligned(4))) ExceptionPortRequest32 {
     mach_msg_header_t head;
     mach_msg_body_t body;
@@ -32,8 +32,9 @@ bool HandleGuestExceptionPortMessage(
         mach_msg_size_t receiveSize, mach_msg_bits_t requestBits,
         mach_msg_return_t *result) {
     if(!message || !result) return false;
-    const bool query = message->msgh_id == 3414;
-    if(!query && message->msgh_id != 3413 && message->msgh_id != 3415)
+    const bool thread = message->msgh_id >= 3613 && message->msgh_id <= 3615;
+    const bool query = message->msgh_id == 3414 || message->msgh_id == 3614;
+    if(!thread && !query && message->msgh_id != 3413 && message->msgh_id != 3415)
         return false;
 
     *result = MACH_MSG_SUCCESS;
@@ -70,9 +71,10 @@ bool HandleGuestExceptionPortMessage(
     reply.Head.msgh_size = sizeof(reply);
     reply.NDR = NDR_record;
     reply.RetCode = !valid ? MIG_BAD_ARGUMENTS :
-        message->msgh_remote_port != mach_task_self() ? KERN_INVALID_ARGUMENT :
+        (!MACH_PORT_VALID(message->msgh_remote_port) ||
+         (!thread && message->msgh_remote_port != mach_task_self())) ? KERN_INVALID_ARGUMENT :
         KERN_NOT_SUPPORTED;
-    // Do not forward to task_{set,swap}_exception_ports: an ARM32 crash
+    // Do not forward to task/thread_{set,swap}_exception_ports: an ARM32 crash
     // reporter cannot receive/interpret the emulator host's ARM64 exceptions.
     // A truthful failure lets optional reporters abandon registration instead
     // of aborting the game or claiming an exception handler was installed.

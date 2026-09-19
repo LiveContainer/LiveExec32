@@ -82,6 +82,28 @@ int main() {
     mig_reply_error_t reply;
     std::memcpy(&reply, &query, sizeof(reply));
     check("get-unsupported", handled && result == MACH_MSG_SUCCESS && reply.RetCode == KERN_NOT_SUPPORTED);
+    for(unsigned id = 3613; id <= 3615; ++id) {
+        Request request = {};
+        request.head.msgh_id = id;
+        request.head.msgh_remote_port = port;
+        request.head.msgh_size = id == 3614 ? 36 : sizeof(request);
+        request.head.msgh_bits = id == 3614 ? 0 : MACH_MSGH_BITS_COMPLEX;
+        if(id == 3614) {
+            std::memcpy(reinterpret_cast<char *>(&request) + 24, &NDR_record, 8);
+        } else {
+            request.ndr = NDR_record;
+            request.body.msgh_descriptor_count = 1;
+            request.port.name = port;
+            request.port.type = MACH_MSG_PORT_DESCRIPTOR;
+            request.port.disposition = MACH_MSG_TYPE_COPY_SEND;
+        }
+        handled = HandleGuestExceptionPortMessage(&request.head, request.head.msgh_size,
+            sizeof(request), request.head.msgh_bits, &result);
+        std::memcpy(&reply, &request, sizeof(reply));
+        check(id == 3613 ? "thread-set-unsupported" :
+              id == 3614 ? "thread-get-unsupported" : "thread-swap-unsupported",
+              handled && result == MACH_MSG_SUCCESS && reply.RetCode == KERN_NOT_SUPPORTED);
+    }
     mach_port_urefs_t refs = 0;
     check("send-right-not-consumed", mach_port_get_refs(mach_task_self(), port,
         MACH_PORT_RIGHT_SEND, &refs) == KERN_SUCCESS && refs == 1);

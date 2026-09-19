@@ -788,6 +788,24 @@ guest_mach_msg_trap(u32 guest_msg,
     const mach_msg_bits_t request_bits = host_header->msgh_bits;
     host_header->msgh_bits &= 0xff;
     switch(host_header->msgh_id) {
+        case 3403: { // mach_ports_register (libxpc's pre-fork hook)
+            // The guest cannot replace the host task's registered ports, and
+            // fork itself is rejected by the syscall bridge. Return a MIG
+            // error so feature probes can unwind normally.
+            const mach_port_t target = host_header->msgh_request_port;
+            if(rcv_size < sizeof(mig_reply_error_t)) {
+                host_header->msgh_size = sizeof(mig_reply_error_t);
+                result = MACH_RCV_TOO_LARGE;
+                break;
+            }
+            auto *reply = reinterpret_cast<mig_reply_error_t *>(host_header);
+            reply->Head.msgh_bits &= ~MACH_MSGH_BITS_COMPLEX;
+            reply->Head.msgh_size = sizeof(*reply);
+            reply->NDR = NDR_record;
+            reply->RetCode = send_size != 52 ? MIG_BAD_ARGUMENTS :
+                target != mach_task_self() ? KERN_INVALID_ARGUMENT : KERN_NOT_SUPPORTED;
+            break;
+        }
         case 0: {
             result = MACH_SEND_INVALID_HEADER; // TODO
             break;
@@ -4510,20 +4528,22 @@ static int guest_siocgifconf32(int fildes, u32 guest_arg) {
 }
 
 /*
- * The classic interface-query ioctls use a 32-byte ifreq on both the armv7
- * guest ABI and current Darwin arm64 ABI. Stage it anyway so the kernel never
- * receives a guest virtual address.
+ * Only use this for pointer-free payloads with an identical guest/host ABI.
+ * Stage them so the kernel never receives a guest virtual address.
  */
-static int guest_ifreq_ioctl(int fildes, u32 request, u32 guest_arg) {
-    static constexpr size_t GuestIfreqSize = 32;
-    static_assert(sizeof(struct ifreq) == GuestIfreqSize,
-        "native Darwin ifreq layout changed");
+// sys/kern_control.h is omitted from the public iOS SDK. XNU's ctl_info is
+// a uint32 ID followed by a 96-byte name, identical on ARM32 and ARM64.
+struct LC32CtlInfo { uint32_t id; char name[96]; };
+static constexpr u32 LC32_CTLIOCGINFO = 0xc0644e03u;
+static_assert(sizeof(LC32CtlInfo) == 100, "Darwin ctl_info ABI");
 
+template<typename Payload>
+static int guest_inout_ioctl(int fildes, u32 request, u32 guest_arg) {
     if (guest_arg == 0) {
         return return_with_carry_direct(EFAULT, true);
     }
 
-    struct ifreq hostRequest{};
+    Payload hostRequest{};
     if (!read_guest_memory_with_permissions(
             guest_arg, &hostRequest, sizeof(hostRequest), PROT_READ) ||
             !guest_memory_range_has_permissions(
@@ -4578,7 +4598,11 @@ int guest_ioctl(int fildes, u32 request, u32 guest_r2) {
         case SIOCGIFBRDADDR:
         case SIOCGIFNETMASK:
         case SIOCGIFMTU:
-            return guest_ifreq_ioctl(fildes, request, guest_r2);
+            static_assert(sizeof(struct ifreq) == 32,
+                "native Darwin ifreq layout changed");
+            return guest_inout_ioctl<struct ifreq>(fildes, request, guest_r2);
+        case LC32_CTLIOCGINFO:
+            return guest_inout_ioctl<LC32CtlInfo>(fildes, request, guest_r2);
         case FIODTYPE: {
             int host_r2;
             int result = syscallRetCarry(SYS_ioctl, fildes, request, &host_r2, 0,0,0,0);
@@ -5079,6 +5103,22 @@ static bool GuestVmRangeHasMappingLocked(
         }
     }
     return false;
+}
+
+kern_return_t guest__kernelrpc_mach_vm_protect_trap(
+        mach_port_name_t target, mach_vm_address_t address, mach_vm_size_t size,
+        boolean_t setMaximum, vm_prot_t protection) {
+    if(target != mach_task_self()) return KERN_INVALID_ARGUMENT;
+    if(!GuestProtectionIsValid(protection)) return KERN_INVALID_ARGUMENT;
+    // Maximum VM protections are not tracked yet. Do not claim to enforce a
+    // permanent restriction by merely changing current permissions.
+    if(setMaximum) return KERN_NOT_SUPPORTED;
+    if(!GuestAddressRangeIsValid32(address, size)) return KERN_INVALID_ADDRESS;
+    if(!size) return KERN_SUCCESS;
+    const u64 start = address & ~u64(DYN_PAGE_MASK);
+    const u64 end = (address + size + DYN_PAGE_MASK) & ~u64(DYN_PAGE_MASK);
+    if(Dynarmic_mprotect(start, end - start, protection) == 0) return KERN_SUCCESS;
+    return errno == ENOMEM ? KERN_INVALID_ADDRESS : KERN_PROTECTION_FAILURE;
 }
 
 kern_return_t guest__kernelrpc_mach_vm_allocate_trap(u32 target, u32 guest_address, mach_vm_size_t size, int flags) {

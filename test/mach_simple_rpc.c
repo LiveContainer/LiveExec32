@@ -242,6 +242,8 @@ static void test_host_clock(void) {
 }
 
 static void test_exception_ports(void) {
+    report("registered-ports-isolated", mach_ports_register(
+        mach_task_self(), NULL, 0) == KERN_NOT_SUPPORTED);
     /* Guest crash reporters must not install ARM32 exception handlers on the
      * native ARM64 host task. The public MIG stubs must receive a real error,
      * without consuming the reporter's own port or writing output arrays. */
@@ -282,6 +284,18 @@ static void test_exception_ports(void) {
         report("exception-set-unsupported", task_set_exception_ports(
             mach_task_self(), EXC_MASK_BAD_ACCESS, port, EXCEPTION_DEFAULT,
             ARM_THREAD_STATE) == KERN_NOT_SUPPORTED);
+        thread_t thread = mach_thread_self();
+        mach_msg_type_number_t count = EXC_TYPES_COUNT;
+        report("thread-exception-get-unsupported", thread_get_exception_ports(
+            thread, EXC_MASK_BAD_ACCESS, masks, &count, ports, behaviors, flavors)
+            == KERN_NOT_SUPPORTED && count == EXC_TYPES_COUNT);
+        report("thread-exception-set-unsupported", thread_set_exception_ports(
+            thread, EXC_MASK_BAD_ACCESS, port, EXCEPTION_DEFAULT, ARM_THREAD_STATE)
+            == KERN_NOT_SUPPORTED);
+        report("thread-exception-swap-unsupported", thread_swap_exception_ports(
+            thread, EXC_MASK_BAD_ACCESS, port, EXCEPTION_DEFAULT, ARM_THREAD_STATE,
+            masks, &count, ports, behaviors, flavors) == KERN_NOT_SUPPORTED);
+        mach_port_deallocate(mach_task_self(), thread);
         mach_port_urefs_t refs = 0;
         report("exception-send-right-intact", mach_port_get_refs(mach_task_self(),
             port, MACH_PORT_RIGHT_SEND, &refs) == KERN_SUCCESS && refs == 1);

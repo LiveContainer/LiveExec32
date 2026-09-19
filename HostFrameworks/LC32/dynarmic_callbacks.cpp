@@ -1270,6 +1270,12 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                 // NOTE: skip r7 since it's frame pointer
                 cpu->Regs()[0] = guest__kernelrpc_mach_vm_map_trap(cpu->Regs()[0], cpu->Regs()[1], cpu->Regs()[2] | ((u64)cpu->Regs()[3] << 32), cpu->Regs()[4] | ((u64)cpu->Regs()[5] << 32), cpu->Regs()[6], cpu->Regs()[8]);
                 break;
+            case -14: // _kernelrpc_mach_vm_protect_trap (ARM32: wllww)
+                cpu->Regs()[0] = guest__kernelrpc_mach_vm_protect_trap(
+                    cpu->Regs()[0], cpu->Regs()[1] | ((u64)cpu->Regs()[2] << 32),
+                    cpu->Regs()[3] | ((u64)cpu->Regs()[4] << 32),
+                    cpu->Regs()[5], cpu->Regs()[6]);
+                break;
             case -12:
                 cpu->Regs()[0] = guest__kernelrpc_mach_vm_deallocate_trap(cpu->Regs()[0], cpu->Regs()[1] | ((u64)cpu->Regs()[2] << 32), cpu->Regs()[3] | ((u64)cpu->Regs()[4] << 32));
                 break;
