@@ -1,6 +1,7 @@
 #import <MediaPlayer/MediaPlayer.h>
 #import <LC32/LC32.h>
 #import <dispatch/dispatch.h>
+#import <objc/runtime.h>
 
 /*
  * iPhone OS 2.x exposed this compatibility selector before controlStyle was
@@ -10,9 +11,31 @@
  */
 @interface MPMoviePlayerController (LC32MovieControlMode)
 - (void)setMovieControlMode:(NSInteger)mode;
+- (UIColor *)backgroundColor;
+- (void)setBackgroundColor:(UIColor *)color;
 @end
 
 @implementation MPMoviePlayerController (LC32MovieControlMode)
+- (UIColor *)backgroundColor {
+    return self.backgroundView.backgroundColor;
+}
+
+- (void)setBackgroundColor:(UIColor *)color {
+    self.backgroundView.backgroundColor = color;
+}
+
+- (BOOL)useApplicationAudioSession {
+    NSNumber *preference = objc_getAssociatedObject(self, @selector(useApplicationAudioSession));
+    return preference ? preference.boolValue : YES;
+}
+
+- (void)setUseApplicationAudioSession:(BOOL)useApplicationAudioSession {
+    // Modern movie playback shares the application's session. Preserve the
+    // removed legacy preference without changing the application's category.
+    objc_setAssociatedObject(self, @selector(useApplicationAudioSession),
+        @(useApplicationAudioSession), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 - (void)setMovieControlMode:(NSInteger)mode {
     self.controlStyle = mode == 2
         ? MPMovieControlStyleNone

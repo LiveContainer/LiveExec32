@@ -7,7 +7,13 @@
 
 NSString * const MPMoviePlayerPlaybackDidFinishNotification = @"MovieFinished";
 NSString * const MPMoviePlayerPlaybackDidFinishReasonUserInfoKey = @"FinishReason";
+@implementation UIColor
+@end
+@implementation UIView
+- (void)dealloc { [_backgroundColor release]; [super dealloc]; }
+@end
 @implementation MPMoviePlayerController
+- (void)dealloc { [_backgroundView release]; [super dealloc]; }
 @end
 @implementation NSObject (LC32MovieTestBridge)
 - (uint64_t)host_self { return (uintptr_t)self; }
@@ -69,6 +75,18 @@ int main(void) {
     @autoreleasepool {
         NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
         MPMoviePlayerController *movie = [MPMoviePlayerController new];
+        movie.backgroundView = [[[UIView alloc] init] autorelease];
+        UIColor *color = [[[UIColor alloc] init] autorelease];
+        movie.backgroundColor = color;
+        check(movie.backgroundView.backgroundColor == color && movie.backgroundColor == color,
+              "legacy background color maps to the movie background view");
+        movie.backgroundColor = nil;
+        check(movie.backgroundView.backgroundColor == nil, "legacy background color accepts nil");
+        check(movie.useApplicationAudioSession, "legacy audio session preference defaults to YES");
+        movie.useApplicationAudioSession = NO;
+        check(!movie.useApplicationAudioSession, "legacy audio session preference round trips NO");
+        movie.useApplicationAudioSession = YES;
+        check(movie.useApplicationAudioSession, "legacy audio session preference round trips YES");
         __block unsigned finishes = 0;
         __block NSInteger reason = -1;
         __block BOOL reenter = NO;
