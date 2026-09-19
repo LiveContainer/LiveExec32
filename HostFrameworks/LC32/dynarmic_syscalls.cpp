@@ -2166,6 +2166,8 @@ guest_mach_msg_trap(u32 guest_msg,
             return result;
         }
         default:
+            if(HandleGuestExceptionPortMessage(host_header, send_size, rcv_size,
+                    request_bits, &result)) break;
             if(HandleGuestSimpleMachMessage(host_header, send_size, rcv_size,
                     request_bits, &result)) break;
             printf("LC32: Unhandled msgh_id %d\n",

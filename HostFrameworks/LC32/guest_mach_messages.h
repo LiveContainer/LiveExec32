@@ -8,3 +8,10 @@ bool HandleGuestSimpleMachMessage(
     mach_msg_header_t *message, mach_msg_size_t sendSize,
     mach_msg_size_t receiveSize, mach_msg_bits_t requestBits,
     mach_msg_return_t *result);
+
+/* Guest exception delivery is not implemented. Reject optional crash-handler
+ * registration with a MIG error, without altering the native task's ports. */
+bool HandleGuestExceptionPortMessage(
+    mach_msg_header_t *message, mach_msg_size_t sendSize,
+    mach_msg_size_t receiveSize, mach_msg_bits_t requestBits,
+    mach_msg_return_t *result);

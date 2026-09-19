@@ -60,7 +60,7 @@ LiveExec32Shared_FILES = \
 	LiveExec32Shared.cpp guest_bootstrap.cpp debugger_server.cpp \
 	crash_exception.mm guest_dispatch.mm guest_timer_queue.cpp guest_timers.cpp \
 	arm_dynarmic_cp15.cpp dynarmic.cpp dynarmic_syscalls.cpp \
-	darwin_file_syscalls.cpp guest_mach_messages.cpp \
+	darwin_file_syscalls.cpp guest_mach_messages.cpp guest_mach_exceptions.cpp \
 	dynarmic_memory.cpp dynarmic_callbacks.cpp dynarmic_thread_state.cpp \
 	dynarmic_native_jit.cpp dynarmic_psynch.cpp dynarmic_workqueue.cpp \
 	dynarmic_core.cpp filesystem.cpp variables.cpp ap_getparents.c target.c \

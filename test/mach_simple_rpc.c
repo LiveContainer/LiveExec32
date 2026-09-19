@@ -241,9 +241,59 @@ static void test_host_clock(void) {
     mach_port_deallocate(mach_task_self(), host);
 }
 
+static void test_exception_ports(void) {
+    /* Guest crash reporters must not install ARM32 exception handlers on the
+     * native ARM64 host task. The public MIG stubs must receive a real error,
+     * without consuming the reporter's own port or writing output arrays. */
+    mach_port_t port = MACH_PORT_NULL;
+    kern_return_t kr = mach_port_allocate(mach_task_self(),
+        MACH_PORT_RIGHT_RECEIVE, &port);
+    report("exception-allocate", kr == KERN_SUCCESS);
+    if(kr != KERN_SUCCESS) return;
+    kr = mach_port_insert_right(mach_task_self(), port, port,
+        MACH_MSG_TYPE_MAKE_SEND);
+    report("exception-send-right", kr == KERN_SUCCESS);
+    if(kr == KERN_SUCCESS) {
+        exception_mask_t masks[EXC_TYPES_COUNT];
+        exception_handler_t ports[EXC_TYPES_COUNT];
+        exception_behavior_t behaviors[EXC_TYPES_COUNT];
+        thread_state_flavor_t flavors[EXC_TYPES_COUNT];
+        for(unsigned swap = 0; swap < 2; ++swap) {
+            memset(masks, 0xa5, sizeof(masks));
+            memset(ports, 0xa5, sizeof(ports));
+            memset(behaviors, 0xa5, sizeof(behaviors));
+            memset(flavors, 0xa5, sizeof(flavors));
+            mach_msg_type_number_t count = EXC_TYPES_COUNT;
+            kr = swap ? task_swap_exception_ports(mach_task_self(),
+                EXC_MASK_BAD_ACCESS, port, EXCEPTION_DEFAULT, ARM_THREAD_STATE,
+                masks, &count, ports, behaviors, flavors) :
+                task_get_exception_ports(mach_task_self(), EXC_MASK_BAD_ACCESS,
+                masks, &count, ports, behaviors, flavors);
+            int intact = count == EXC_TYPES_COUNT;
+            for(unsigned i = 0; i < EXC_TYPES_COUNT; ++i) {
+                intact &= (uint32_t)masks[i] == 0xa5a5a5a5U &&
+                    (uint32_t)ports[i] == 0xa5a5a5a5U &&
+                    (uint32_t)behaviors[i] == 0xa5a5a5a5U &&
+                    (uint32_t)flavors[i] == 0xa5a5a5a5U;
+            }
+            report(swap ? "exception-swap-unsupported" : "exception-get-unsupported",
+                kr == KERN_NOT_SUPPORTED && intact);
+        }
+        report("exception-set-unsupported", task_set_exception_ports(
+            mach_task_self(), EXC_MASK_BAD_ACCESS, port, EXCEPTION_DEFAULT,
+            ARM_THREAD_STATE) == KERN_NOT_SUPPORTED);
+        mach_port_urefs_t refs = 0;
+        report("exception-send-right-intact", mach_port_get_refs(mach_task_self(),
+            port, MACH_PORT_RIGHT_SEND, &refs) == KERN_SUCCESS && refs == 1);
+        mach_port_deallocate(mach_task_self(), port);
+    }
+    mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_RECEIVE, -1);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     test_host_clock();
+    test_exception_ports();
     mach_port_t receivePort = MACH_PORT_NULL, portSet = MACH_PORT_NULL;
     kern_return_t kr = call_port(3204, 1, MACH_PORT_RIGHT_RECEIVE,
         0, 0, &receivePort);
