@@ -285,6 +285,9 @@ $(eval $(call lc32_guest_test,lc32-foundation-constants,foundation_constants.m,F
 $(eval $(call lc32_guest_test,lc32-foundation-zone,foundation_zone.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-guest-proxy-lifetime,guest_proxy_lifetime.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-kvo-bridge,kvo_bridge.m,Foundation))
+$(eval $(call lc32_guest_test,lc32-kvc-ivar-ownership,kvc_ivar_ownership.m kvc_ivar_ownership_arc.m,Foundation UIKit CoreGraphics LC32))
+kvc_ivar_ownership.m_CFLAGS := -fno-objc-arc
+kvc_ivar_ownership_arc.m_CFLAGS := -fobjc-arc
 $(eval $(call lc32_guest_test,lc32-imageio-roundtrip,imageio_roundtrip.m,ImageIO CoreGraphics CoreFoundation Foundation))
 $(eval $(call lc32_guest_test,lc32-locale-constants,locale_constants.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-mobilecoreservices-uti,mobilecoreservices_uti.m,MobileCoreServices CoreFoundation))

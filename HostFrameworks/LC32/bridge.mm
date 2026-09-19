@@ -5671,8 +5671,8 @@ void LC32SetGuestScalarIvar(id self, SEL _cmd, u64 value) {
 void LC32SetGuestNSObjectIvar(id self, SEL _cmd, id value) {
     LC32GuestIvarBinding binding;
     if(!LC32GuestIvarBindingForReceiver(self, _cmd, &binding)) return;
-    guest_object_setInstanceVariable([self guest_self], binding.name.c_str(),
-                                     (u32)(u64)[value guest_self]);
+    guest_object_setInstanceVariableWithStrongDefault(
+        [self guest_self], binding.name.c_str(), (u32)(u64)[value guest_self]);
 }
 
 id LC32GetGuestNSObjectIvar(id self, SEL _cmd) {
@@ -5795,10 +5795,15 @@ u32 guest_object_getClass(u32 guest_obj) {
     return Dynarmic_current_user_callbacks()->MemoryRead32(guest_obj);
 }
 
-u32 guest_object_setInstanceVariable(u32 guest_obj, const char *host_name, u32 newValue) {
+u32 guest_object_setInstanceVariableWithStrongDefault(
+        u32 guest_obj, const char *host_name, u32 newValue) {
     static std::atomic<u32> cache{0};
+    // Synthetic accessors stand in for KVC's direct-ivar assignment. Bare
+    // MRC outlets own their value; ordinary object_setInstanceVariable does
+    // not retain them. The strong-default variant also respects ARC layouts
+    // (including weak and unsafe-unretained ivars) and balances replacement.
     const u32 guestPtr = LC32CachedGuestSymbol(
-        cache, "object_setInstanceVariable");
+        cache, "object_setInstanceVariableWithStrongDefault");
     DynarmicGuestStackString guest_name(host_name);
     u32 args[] = {guest_obj, guest_name.guestPtr, newValue};
     return LC32InvokeGuestC(guestPtr, false, sizeof(args)/sizeof(*args), args);
