@@ -52,6 +52,9 @@ int main(void) {
         [customButton awakeFromNib];
         passed &= report("guest-override-super",
             objectAwakeCount == 1 && buttonAwakeCount == 1);
+        passed &= report("missing-optional-nib",
+            [[NSBundle mainBundle] loadNibNamed:@"LC32MissingOptionalNib"
+                owner:nil options:nil] == nil);
 
 #if !__has_feature(objc_arc)
         [customButton release];

@@ -1,7 +1,7 @@
 LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash \
   check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info \
   check-guest-thumb-linker check-uikit-legacy-rootless-rotation-build \
-  check-scalar-callback-signature check-guest-timer-queue
+  check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading
 LC32_HOST_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),\
   $(if $(strip $(filter-out $(LC32_HOST_TEST_GOALS),$(MAKECMDGOALS))),,1),)
 
@@ -12,6 +12,7 @@ HOST_CFLAGS ?= -Wall -Wextra -Werror -pedantic
 HOST_TEST_OUTPUT_DIR ?= $(CURDIR)/.theos/host-tests
 GUEST_BOOTSTRAP_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/guest-bootstrap-host
 MEMORY_HASH_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/memory-hash-host
+LEGACY_NIB_LOADING_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/legacy-nib-loading-host
 GUEST_TIMER_QUEUE_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/guest-timer-queue-host
 GUEST_TIMER_QUEUE_HOST_OBJECT := $(HOST_TEST_OUTPUT_DIR)/guest-timer-queue-backend.o
 COREMEDIA_TIME_VALUES_HOST_TEST := \
@@ -26,7 +27,19 @@ BUILD_INFO_LOGGING_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/build-info-
 .PHONY: check-guest-bootstrap check-memory-hash \
   check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info \
   check-guest-thumb-linker check-uikit-legacy-rootless-rotation-build \
-  check-scalar-callback-signature check-guest-timer-queue
+  check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading
+check-legacy-nib-loading: $(LEGACY_NIB_LOADING_HOST_TEST)
+	"$(LEGACY_NIB_LOADING_HOST_TEST)"
+
+$(LEGACY_NIB_LOADING_HOST_TEST): legacy_nib_loading_host.mm \
+  ../HostFrameworks/UIKit/LegacyNibLoading.mm \
+  ../HostFrameworks/UIKit/LegacyNibLoading.h
+	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
+	$(HOST_CXX) $(HOST_CXXFLAGS) -fobjc-arc -fmodules \
+		-fmodules-cache-path="$(abspath ../.theos/module-cache)" \
+		legacy_nib_loading_host.mm ../HostFrameworks/UIKit/LegacyNibLoading.mm \
+		-framework Foundation -o "$@"
+
 check-guest-thumb-linker:
 	./guest_thumb_linker.sh
 

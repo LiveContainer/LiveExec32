@@ -4,6 +4,7 @@
 #include "guest_dispatch.h"
 #include "LC32ObjCBridgeABI.h"
 #include "LC32DebugLog.h"
+#import "../UIKit/LegacyNibLoading.h"
 
 #import <dispatch/dispatch.h>
 #import <mach/mach_init.h>
@@ -2825,6 +2826,16 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
             return loadedView
                 ? LC32GuestObjectForBorrowedHostResult(loadedView) : 0;
         }
+    }
+    if(returnGuestObject &&
+       selector == sel_registerName("loadNibNamed:owner:options:") &&
+       [receiver isKindOfClass:NSBundle.class] &&
+       ![(id)object_getClass(receiver) isGuestClass]) {
+        LC32GuestHostCallQuiescence quiescence;
+        NSArray *objects = LC32LoadGuestNib((NSBundle *)receiver,
+            (NSString *)args[0], (id)args[1], (NSDictionary *)args[2]);
+        quiescence.finish();
+        return objects ? LC32GuestObjectForBorrowedHostResult(objects) : 0;
     }
     Class dispatchClass = object_getClass(receiver);
     const bool invokeSuper = [(id)dispatchClass isGuestClass];
