@@ -65,7 +65,7 @@ LiveExec32Shared_FILES = \
 	dynarmic_native_jit.cpp dynarmic_psynch.cpp dynarmic_workqueue.cpp \
 	dynarmic_core.cpp filesystem.cpp variables.cpp ap_getparents.c target.c \
 	bridge.mm block_bridge.mm bridge.s log.m \
-	../Foundation/Foundation.mm ../Foundation/NSString.mm \
+	../Foundation/Foundation.mm ../Foundation/NSString.mm ../Foundation/MachPort.mm \
 	../CoreFoundation/CoreFoundation.mm ../CFNetwork/CFNetwork.mm \
 	../Security/Security.mm ../CoreGraphics/CoreGraphics.mm \
 	../ImageIO/ImageIO.mm \

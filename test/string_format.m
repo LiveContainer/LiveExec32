@@ -82,6 +82,13 @@ int main(void) {
     failed += check("unknown-non-consuming",
                     [NSString stringWithFormat:@"%b/%@", @"after"],
                     @"b/after");
+    failed += check("unknown-I-path",
+                    [NSString stringWithFormat:@"%@/%Info.plist", @"bundle"],
+                    @"bundle/Info.plist");
+    failed += check("unknown-I-non-consuming",
+                    [NSString stringWithFormat:@"%I/%@", @"after"], @"I/after");
+    failed += check("unknown-I-dynamic-width-non-consuming",
+                    [NSString stringWithFormat:@"%*.*I/%@", @"after"], @"*.*I/after");
 #pragma clang diagnostic pop
 
     NSString *embeddedNUL =

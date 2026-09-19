@@ -2,7 +2,8 @@ LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash \
   check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info \
   check-guest-thumb-linker check-uikit-legacy-rootless-rotation-build \
   check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading \
-  check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop
+  check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop \
+  check-foundation-ports-host
 LC32_HOST_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),\
   $(if $(strip $(filter-out $(LC32_HOST_TEST_GOALS),$(MAKECMDGOALS))),,1),)
 
@@ -11,6 +12,7 @@ HOST_CC ?= xcrun --sdk macosx clang
 HOST_CXXFLAGS ?= -std=c++17 -Wall -Wextra -Werror -pedantic
 HOST_CFLAGS ?= -Wall -Wextra -Werror -pedantic
 HOST_TEST_OUTPUT_DIR ?= $(CURDIR)/.theos/host-tests
+FOUNDATION_PORTS_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/foundation-ports-host
 GUEST_BOOTSTRAP_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/guest-bootstrap-host
 MEMORY_HASH_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/memory-hash-host
 LEGACY_NIB_LOADING_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/legacy-nib-loading-host
@@ -32,7 +34,8 @@ BUILD_INFO_LOGGING_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/build-info-
   check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info \
   check-guest-thumb-linker check-uikit-legacy-rootless-rotation-build \
   check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading \
-  check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop
+  check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop \
+  check-foundation-ports-host
 check-mediaplayer-stop: $(MEDIAPLAYER_STOP_HOST_TEST)
 	"$(MEDIAPLAYER_STOP_HOST_TEST)"
 
@@ -55,6 +58,15 @@ $(UIKIT_BACKGROUND_TASKS_HOST_TEST): uikit_background_tasks_host.m \
 		-fobjc-arc -fblocks -Ibackground-task-stubs -framework Foundation \
 		uikit_background_tasks_host.m \
 		../GuestFrameworks/UIKit/UIApplication+LC32BlockCompatibility.m -o "$@"
+
+check-foundation-ports-host: $(FOUNDATION_PORTS_HOST_TEST)
+	"$(FOUNDATION_PORTS_HOST_TEST)"
+
+$(FOUNDATION_PORTS_HOST_TEST): foundation_ports_host.m \
+  ../HostFrameworks/Foundation/MachPort.mm ../HostFrameworks/Foundation/MachPort.h
+	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
+	$(HOST_CC) -fblocks -Wall -Wextra -Wno-unused-parameter -framework Foundation \
+		foundation_ports_host.m ../HostFrameworks/Foundation/MachPort.mm -o "$@"
 
 check-mach-exception-ports: $(MACH_EXCEPTION_PORTS_HOST_TEST)
 	"$(MACH_EXCEPTION_PORTS_HOST_TEST)"
@@ -359,6 +371,7 @@ $(eval $(call lc32_guest_test,lc32-predicate-variadic,predicate_variadic.m,Found
 $(eval $(call lc32_guest_test,lc32-property-list-serialization,property_list_serialization.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-string-bytes,string_bytes.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-string-format,string_format.m,Foundation))
+$(eval $(call lc32_guest_test,lc32-foundation-ports,foundation_ports.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-audio-graph,audio_graph.c,AudioToolbox Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-string-get-bytes,string_get_bytes.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-string-range,string_range.m,Foundation))

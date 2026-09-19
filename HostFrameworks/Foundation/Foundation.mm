@@ -1,5 +1,6 @@
 @import Foundation;
 #import "bridge.h"
+#import "MachPort.h"
 #include "../../GuestFrameworks/Foundation/LC32FoundationBridge.h"
 
 #include <cstring>
@@ -44,6 +45,10 @@ NSString *LC32UserSearchPath(NSSearchPathDirectory directory,
 } // namespace
 
 __BEGIN_DECLS
+
+u32 LC32_Foundation_AllocateMachPortPeer(void) {
+    return LC32GuestObjectForOwnedHostObject((CFTypeRef)LC32AllocateMachPortPeer());
+}
 
 u32 LC32_Foundation_NSTemporaryDirectory() {
     return NSTemporaryDirectory().guest_self;
