@@ -2,7 +2,7 @@
 
 Completed the evaluation of all **45 installed game/version bundles**, prioritizing OvenBreak 2 and original Legacy SDKs. **OvenBreak's reproduced background-task timeout is fixed and retested.** SDK 11 was not tested in this pass.
 
-Of the **43 ARM32 bundles**: 24 survived at the observed menu, prompt, or loading screen; two additional bundles kept the same active PID but remained black; 15 failed during startup; one declares exit-on-suspend and exited on Home; and Temple Run 2 has an unresolved intermittent foreground exception despite two successful clean retries. The two LC-native-classified controls were blocked before a lifecycle test. This is not a claim that every game is fixed or gameplay-compatible. [Machine-readable result summary](../tmp/resume-eval-20260919/results-summary.json).
+Of the **43 ARM32 bundles**: 24 survived at the observed menu, prompt, or loading screen; two additional bundles kept the same active PID but remained black; 15 failed during startup; one declares exit-on-suspend and exited on Home; and Temple Run 2 has an unresolved intermittent foreground exception despite two successful clean retries. The two LC-native-classified controls were blocked before a lifecycle test. This is not a claim that every game is fixed or gameplay-compatible. [Machine-readable result summary](../../tmp/resume-eval-20260919/results-summary.json).
 
 ## Method
 
@@ -33,7 +33,7 @@ The existing guest `UIApplication+LC32BlockCompatibility` adapter now covers bot
 
 The shim generator omits all three manually implemented methods. Native tests compile the production guest adapter against a fake host: **17/17 checks passed**, including anonymous/named/nil handlers, reentrant task creation, duplicate/racing completion, and host refusal. ARMv7s UIKit rebuilt successfully; the generator object-output regression also passed.
 
-**Post-fix: OvenBreak survived two 40-second background intervals, with 15 seconds of foreground observation after each, in the same PID 71448.** No debugger was attached until both cycles finished. The final inspection confirmed SDK `0x60100` and active application state. Settings were restored exactly. The game still showed “Heating oven”; its separate loading problem is not fixed. [Captures](../tmp/resume-eval-20260919/05-fixed/sheet.jpg), [result](../tmp/resume-eval-20260919/05-fixed/result.json).
+**Post-fix: OvenBreak survived two 40-second background intervals, with 15 seconds of foreground observation after each, in the same PID 71448.** No debugger was attached until both cycles finished. The final inspection confirmed SDK `0x60100` and active application state. Settings were restored exactly. The game still showed “Heating oven”; its separate loading problem is not fixed. [Captures](../../tmp/resume-eval-20260919/05-fixed/sheet.jpg), [result](../../tmp/resume-eval-20260919/05-fixed/result.json).
 
 Deployed guest UIKit SHA-256: `9f5ea328fbfd119d04232c7479007b42113d3b6b96c7183ca838c649359c91a7`. The native shared framework remains unchanged. Both prior UIKit runtime/resource binaries are backed up in the evidence directory.
 
@@ -43,7 +43,7 @@ Additional host regressions: scalar callback signatures (87 cases), guest timer 
 
 Before deploying the fix, Minecraft PE 0.6.1 (SDK 6.0) and LEGO Ninjago (SDK 6.1) survived a 35-second background interval and returned in the same PID. Ninjago's title canvas became smaller after resume; that is a separate layout observation, not a lifecycle-crash pass for gameplay. The first Angry Birds Rio sweep attempt was interrupted for deployment before its startup observation finished and is excluded.
 
-Local evidence: [resume-eval-20260919](../tmp/resume-eval-20260919/), [OvenBreak initial run](../tmp/resume-eval-20260919/05-baseline/result.json). Raw logs, captures, settings snapshots, and runtime backups are local ignored artifacts, not files intended for a source commit.
+Local evidence: [resume-eval-20260919](../../tmp/resume-eval-20260919/), [OvenBreak initial run](../../tmp/resume-eval-20260919/05-baseline/result.json). Raw logs, captures, settings snapshots, and runtime backups are local ignored artifacts, not files intended for a source commit.
 
 ## Post-fix game matrix
 
@@ -105,15 +105,15 @@ The first Asphalt 5 attempt (`16-retest`) was interrupted during runner coordina
 
 ## Temple Run 2 follow-up and crash-report limits
 
-Temple Run 2's first run (PID 9928) survived backgrounding but aborted shortly after foregrounding. The host crash service recovered `NSInvalidArgumentException`, `-[NSNull length]: unrecognized selector sent to instance`. Its absence from the normal report directory was **not** evidence of a clean exit: OSAnalytics rejected the `.ips` request with `Log limit exceeded`. The system crash-report limit was left unchanged. [Recovered exception](../tmp/resume-eval-20260919/34-retest/reportcrash-service.log), [report-limit evidence](../tmp/resume-eval-20260919/34-retest/reportcrash-completion.log).
+Temple Run 2's first run (PID 9928) survived backgrounding but aborted shortly after foregrounding. The host crash service recovered `NSInvalidArgumentException`, `-[NSNull length]: unrecognized selector sent to instance`. Its absence from the normal report directory was **not** evidence of a clean exit: OSAnalytics rejected the `.ips` request with `Log limit exceeded`. The system crash-report limit was left unchanged. [Recovered exception](../../tmp/resume-eval-20260919/34-retest/reportcrash-service.log), [report-limit evidence](../../tmp/resume-eval-20260919/34-retest/reportcrash-completion.log).
 
-The 90-second no-background control reached the main menu (PID 12167). The debugger-assisted lifecycle run (PID 13311) did not reproduce the abort and is diagnostic only. A fresh run without a debugger through both cycles (PID 14568) survived two 35-second background / 15-second foreground intervals, progressing from the animated intro to the menu. Final SDK 6.0 and active application state were verified afterward. [Clean repeat captures](../tmp/resume-eval-20260919/34-clean-repeat/sheet.jpg), [result](../tmp/resume-eval-20260919/34-clean-repeat/result.json).
+The 90-second no-background control reached the main menu (PID 12167). The debugger-assisted lifecycle run (PID 13311) did not reproduce the abort and is diagnostic only. A fresh run without a debugger through both cycles (PID 14568) survived two 35-second background / 15-second foreground intervals, progressing from the animated intro to the menu. Final SDK 6.0 and active application state were verified afterward. [Clean repeat captures](../../tmp/resume-eval-20260919/34-clean-repeat/sheet.jpg), [result](../../tmp/resume-eval-20260919/34-clean-repeat/result.json).
 
 This remains an intermittent failure, **not a claimed fix**. The available evidence does not identify the caller that treated `NSNull` as a string, nor establish that backgrounding is necessary to trigger it. A generic `NSNull length` hook would conceal the invalid value without establishing the cause, so none was added.
 
 ## Verification and cleanup
 
-- Final audit: **45/45 saved configurations unchanged**, comparing Classic Mode, SDK override (including absence), orientation lock, Classic Mode cache, data-container UUID, and ARM32 classification with the pre-test inventory. [Audit](../tmp/resume-eval-20260919/settings-audit.json).
+- Final audit: **45/45 saved configurations unchanged**, comparing Classic Mode, SDK override (including absence), orientation lock, Classic Mode cache, data-container UUID, and ARM32 classification with the pre-test inventory. [Audit](../../tmp/resume-eval-20260919/settings-audit.json).
 - Every ARM32 result classified as surviving has a same-PID check plus post-cycle SDK and active-state verification. The two black-screen cases remain explicitly limited. Diagnostic/debugger runs are not substituted for clean lifecycle tests.
 - The production background-task adapter passed **17/17** host checks; scalar callbacks (87 cases), the guest timer queue (80 checks), legacy nib loading, Mach exception ports, and the shim-generator regression passed. The ARMv7s UIKit build succeeded. Final source whitespace check passed.
 - Patched UIKit is deployed to the current launcher and resource tree. The native shared-framework hash remains unchanged from the pre-test value. Prior runtime binaries and the pre-existing source diff are backed up in the evidence directory.

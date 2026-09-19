@@ -39,6 +39,7 @@ On the iOS device, launch an ARM32 binary with the installed app's executable:
 - [Building](docs/building.md): prerequisites, downloads, guest RootFS, and macOS testing.
 - [Configuration and diagnostics](docs/configuration.md): logging, guest environment, and SDK/UIKit compatibility.
 - [Objective-C proxy bridge](docs/ObjCProxy.md): architecture, ownership, and ABI details.
+- [Compatibility reports](docs/compatibility/): game testing, fixes, and remaining issues.
 
 ## Design
 - LiveExec32 has most of the codebase and references from [unidbg](https://github.com/zhkl0228/unidbg), so it also uses Dynarmic as the dynamic translator of ARMv7 code to ARM64.
