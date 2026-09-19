@@ -2,7 +2,7 @@ LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash \
   check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info \
   check-guest-thumb-linker check-uikit-legacy-rootless-rotation-build \
   check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading \
-  check-mach-exception-ports check-uikit-background-tasks
+  check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop
 LC32_HOST_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),\
   $(if $(strip $(filter-out $(LC32_HOST_TEST_GOALS),$(MAKECMDGOALS))),,1),)
 
@@ -16,6 +16,7 @@ MEMORY_HASH_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/memory-hash-host
 LEGACY_NIB_LOADING_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/legacy-nib-loading-host
 MACH_EXCEPTION_PORTS_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/mach-exception-ports-host
 UIKIT_BACKGROUND_TASKS_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/uikit-background-tasks-host
+MEDIAPLAYER_STOP_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/mediaplayer-stop-host
 GUEST_TIMER_QUEUE_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/guest-timer-queue-host
 GUEST_TIMER_QUEUE_HOST_OBJECT := $(HOST_TEST_OUTPUT_DIR)/guest-timer-queue-backend.o
 COREMEDIA_TIME_VALUES_HOST_TEST := \
@@ -31,7 +32,18 @@ BUILD_INFO_LOGGING_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/build-info-
   check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info \
   check-guest-thumb-linker check-uikit-legacy-rootless-rotation-build \
   check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading \
-  check-mach-exception-ports check-uikit-background-tasks
+  check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop
+check-mediaplayer-stop: $(MEDIAPLAYER_STOP_HOST_TEST)
+	"$(MEDIAPLAYER_STOP_HOST_TEST)"
+
+$(MEDIAPLAYER_STOP_HOST_TEST): mediaplayer_stop_host.m \
+  mediaplayer-stubs/MediaPlayer/MediaPlayer.h mediaplayer-stubs/LC32/LC32.h \
+  ../GuestFrameworks/MediaPlayer/MPMoviePlayerController+LC32Legacy.m
+	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
+	$(HOST_CC) -Wall -Wextra -Werror -fblocks -Imediaplayer-stubs -framework Foundation \
+		mediaplayer_stop_host.m \
+		../GuestFrameworks/MediaPlayer/MPMoviePlayerController+LC32Legacy.m -o "$@"
+
 check-uikit-background-tasks: $(UIKIT_BACKGROUND_TASKS_HOST_TEST)
 	"$(UIKIT_BACKGROUND_TASKS_HOST_TEST)"
 
