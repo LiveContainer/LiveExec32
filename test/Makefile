@@ -359,6 +359,7 @@ $(eval $(call lc32_guest_test,lc32-predicate-variadic,predicate_variadic.m,Found
 $(eval $(call lc32_guest_test,lc32-property-list-serialization,property_list_serialization.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-string-bytes,string_bytes.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-string-format,string_format.m,Foundation))
+$(eval $(call lc32_guest_test,lc32-audio-graph,audio_graph.c,AudioToolbox Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-string-get-bytes,string_get_bytes.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-string-range,string_range.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-thread-modes,thread_modes.m,Foundation))

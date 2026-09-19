@@ -292,6 +292,12 @@ typedef struct {
     void *userData;
 } LC32SilentAudioRenderNotify;
 
+typedef struct {
+    AudioUnitPropertyID property;
+    AudioUnitPropertyListenerProc proc;
+    void *userData;
+} LC32AudioPropertyListener;
+
 typedef enum {
     LC32SilentAudioUnitKindRemoteIO = 1,
     LC32SilentAudioUnitKindSpatialMixer = 2,
@@ -322,6 +328,8 @@ typedef struct LC32SilentAudioUnit {
     AURenderCallbackStruct renderCallback;
     LC32SilentAudioRenderNotify *renderNotifies;
     size_t renderNotifyCount;
+    LC32AudioPropertyListener *propertyListeners;
+    size_t propertyListenerCount;
     pthread_mutex_t mutex;
     pthread_t renderThread;
     uint32_t stopRequested;
@@ -405,6 +413,7 @@ static void LC32SilentAudioRelease(LC32SilentAudioUnit *unit) {
     }
     unit->magic = 0;
     free(unit->renderNotifies);
+    free(unit->propertyListeners);
     pthread_mutex_destroy(&unit->mutex);
     free(unit);
 }
@@ -1027,7 +1036,7 @@ OSStatus AudioComponentInstanceDispose(AudioComponentInstance inInstance) {
     return noErr;
 }
 
-OSStatus AudioUnitSetProperty(AudioUnit inUnit, AudioUnitPropertyID inID,
+static OSStatus LC32AudioUnitSetProperty(AudioUnit inUnit, AudioUnitPropertyID inID,
                               AudioUnitScope inScope,
                               AudioUnitElement inElement,
                               const void *inData, UInt32 inDataSize) {
@@ -1145,6 +1154,84 @@ OSStatus AudioUnitSetProperty(AudioUnit inUnit, AudioUnitPropertyID inID,
     }
     pthread_mutex_unlock(&silent->mutex);
     return kAudioUnitErr_InvalidProperty;
+}
+
+OSStatus AudioUnitAddPropertyListener(AudioUnit unit, AudioUnitPropertyID property,
+        AudioUnitPropertyListenerProc proc, void *userData) {
+    LC32SilentAudioUnit *silent = LC32SilentAudioUnitForHandle(unit);
+    if(!silent || !proc) return kAudio_ParamError;
+    pthread_mutex_lock(&silent->mutex);
+    size_t count = silent->propertyListenerCount;
+    if(silent->disposed || count == SIZE_MAX / sizeof(LC32AudioPropertyListener)) {
+        pthread_mutex_unlock(&silent->mutex);
+        return kAudio_ParamError;
+    }
+    LC32AudioPropertyListener *listeners = realloc(silent->propertyListeners,
+        (count + 1) * sizeof(*listeners));
+    if(!listeners) { pthread_mutex_unlock(&silent->mutex); return kAudio_MemFullError; }
+    listeners[count] = (LC32AudioPropertyListener){property, proc, userData};
+    silent->propertyListeners = listeners;
+    silent->propertyListenerCount = count + 1;
+    pthread_mutex_unlock(&silent->mutex);
+    return noErr;
+}
+
+static OSStatus LC32RemovePropertyListener(AudioUnit unit, AudioUnitPropertyID property,
+        AudioUnitPropertyListenerProc proc, void *userData, BOOL matchUserData) {
+    LC32SilentAudioUnit *silent = LC32SilentAudioUnitForHandle(unit);
+    if(!silent || !proc) return kAudio_ParamError;
+    pthread_mutex_lock(&silent->mutex);
+    size_t remaining = 0;
+    for(size_t i = 0; i < silent->propertyListenerCount; ++i) {
+        LC32AudioPropertyListener listener = silent->propertyListeners[i];
+        if(listener.property != property || listener.proc != proc ||
+           (matchUserData && listener.userData != userData))
+            silent->propertyListeners[remaining++] = listener;
+    }
+    silent->propertyListenerCount = remaining;
+    pthread_mutex_unlock(&silent->mutex);
+    return noErr;
+}
+
+OSStatus AudioUnitRemovePropertyListener(AudioUnit unit, AudioUnitPropertyID property,
+        AudioUnitPropertyListenerProc proc) {
+    return LC32RemovePropertyListener(unit, property, proc, NULL, NO);
+}
+
+OSStatus AudioUnitRemovePropertyListenerWithUserData(AudioUnit unit,
+        AudioUnitPropertyID property, AudioUnitPropertyListenerProc proc, void *userData) {
+    return LC32RemovePropertyListener(unit, property, proc, userData, YES);
+}
+
+// Snapshot under the unit lock; guest callbacks may query properties, remove
+// themselves, or dispose the unit. No native thread invokes ARM32 pointers.
+static void LC32AudioNotifyProperty(LC32SilentAudioUnit *unit,
+        AudioUnitPropertyID property, AudioUnitScope scope, AudioUnitElement element) {
+    pthread_mutex_lock(&unit->mutex);
+    size_t count = unit->propertyListenerCount;
+    LC32AudioPropertyListener *snapshot = count ? malloc(count * sizeof(*snapshot)) : NULL;
+    if(snapshot) memcpy(snapshot, unit->propertyListeners, count * sizeof(*snapshot));
+    LC32SilentAudioRetain(unit);
+    pthread_mutex_unlock(&unit->mutex);
+    if(snapshot) {
+        for(size_t i = 0; i < count; ++i) {
+            pthread_mutex_lock(&unit->mutex);
+            BOOL disposed = unit->disposed;
+            pthread_mutex_unlock(&unit->mutex);
+            if(disposed) break;
+            if(snapshot[i].property == property)
+                snapshot[i].proc(snapshot[i].userData, (AudioUnit)unit, property, scope, element);
+        }
+        free(snapshot);
+    }
+    LC32SilentAudioRelease(unit);
+}
+
+OSStatus AudioUnitSetProperty(AudioUnit unit, AudioUnitPropertyID property,
+        AudioUnitScope scope, AudioUnitElement element, const void *data, UInt32 size) {
+    OSStatus result = LC32AudioUnitSetProperty(unit, property, scope, element, data, size);
+    if(result == noErr) LC32AudioNotifyProperty((LC32SilentAudioUnit *)unit, property, scope, element);
+    return result;
 }
 
 OSStatus AudioUnitGetProperty(AudioUnit inUnit, AudioUnitPropertyID inID,
@@ -1423,6 +1510,7 @@ OSStatus AudioUnitUninitialize(AudioUnit inUnit) {
         pthread_mutex_unlock(&silent->mutex);
         return noErr;
     }
+    BOOL wasRunning = __atomic_load_n(&silent->started, __ATOMIC_ACQUIRE) != 0;
     const OSStatus status = LC32SilentAudioStopLocked(silent);
     if(status != noErr) {
         pthread_mutex_unlock(&silent->mutex);
@@ -1430,6 +1518,8 @@ OSStatus AudioUnitUninitialize(AudioUnit inUnit) {
     }
     silent->initialized = NO;
     pthread_mutex_unlock(&silent->mutex);
+    if(wasRunning)
+        LC32AudioNotifyProperty(silent, kAudioOutputUnitProperty_IsRunning, kAudioUnitScope_Global, 0);
     return noErr;
 }
 
@@ -1494,6 +1584,7 @@ OSStatus AudioOutputUnitStart(AudioUnit ci) {
     }
     __atomic_store_n(&silent->started, 1, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&silent->mutex);
+    LC32AudioNotifyProperty(silent, kAudioOutputUnitProperty_IsRunning, kAudioUnitScope_Global, 0);
     return noErr;
 }
 
@@ -1502,8 +1593,11 @@ OSStatus AudioOutputUnitStop(AudioUnit ci) {
     if(!silent || silent->kind != LC32SilentAudioUnitKindRemoteIO)
         return kAudio_ParamError;
     pthread_mutex_lock(&silent->mutex);
+    BOOL wasRunning = __atomic_load_n(&silent->started, __ATOMIC_ACQUIRE) != 0;
     const OSStatus status = LC32SilentAudioStopLocked(silent);
     pthread_mutex_unlock(&silent->mutex);
+    if(status == noErr && wasRunning)
+        LC32AudioNotifyProperty(silent, kAudioOutputUnitProperty_IsRunning, kAudioUnitScope_Global, 0);
     return status;
 }
 
