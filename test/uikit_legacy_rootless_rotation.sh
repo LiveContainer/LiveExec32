@@ -20,21 +20,21 @@ while [ "$#" -gt 0 ]; do
         --keep) keep=1; shift ;;
         --sdk)
             [ "$#" -ge 2 ] || exit 2
-            case "$2" in 5|6.1|7|8|11) sdks="$sdks $2" ;; *) exit 2 ;; esac
+            case "$2" in 2|5|6.1|7|8|11) sdks="$sdks $2" ;; *) exit 2 ;; esac
             shift 2 ;;
         --case)
             [ "$#" -ge 2 ] || exit 2
             case "$2" in
-                rootless|explicit|modern|modern-explicit|modern-refresh|unregistered|manual|modal|manual-disabled|lifecycle|ownership|replacement)
+                rootless|explicit|modern|modern-explicit|modern-only|modern-refresh|unregistered|manual|manual-controller|modal|manual-disabled|lifecycle|ownership|replacement)
                     test_cases="$test_cases $2" ;;
                 *) exit 2 ;;
             esac
             shift 2 ;;
-        *) echo "usage: $0 [--device UDID] [--build-only] [--keep] [--sdk 5|6.1|7|8|11] [--case NAME]" >&2; exit 2 ;;
+        *) echo "usage: $0 [--device UDID] [--build-only] [--keep] [--sdk 2|5|6.1|7|8|11] [--case NAME]" >&2; exit 2 ;;
     esac
 done
-[ -n "$sdks" ] || sdks="5 6.1 7 8 11"
-[ -n "$test_cases" ] || test_cases="rootless explicit modern modern-explicit modern-refresh unregistered manual modal manual-disabled lifecycle ownership replacement"
+[ -n "$sdks" ] || sdks="2 5 6.1 7 8 11"
+[ -n "$test_cases" ] || test_cases="rootless explicit modern modern-explicit modern-only modern-refresh unregistered manual manual-controller modal manual-disabled lifecycle ownership replacement"
 case "$run_timeout" in ''|*[!0-9]*) echo "invalid timeout" >&2; exit 2 ;; esac
 [ "$run_timeout" -ge 1 ] && [ "$run_timeout" -le 60 ] || exit 2
 temp_base=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)

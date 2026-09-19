@@ -158,6 +158,18 @@ static uint32_t executableSDK(void) {
 @implementation RootlessRotationWindow
 @end
 
+@interface RootlessRotationGuestView : UIView
+@end
+@implementation RootlessRotationGuestView
+@end
+
+/* Marmalade-style owner: no old or modern rotation policy; the GL renderer
+ * turns its own contents inside a portrait view attached directly to UIWindow. */
+@interface RootlessRotationManualController : UIViewController
+@end
+@implementation RootlessRotationManualController
+@end
+
 /* Only hidden, dedicated probe windows use this subclass. Suppressing their
  * native update lets the deferred-work test count requests without asking the
  * compositor to rotate or modifying the visible fixture window. */
@@ -175,6 +187,18 @@ static uint32_t executableSDK(void) {
     }
 }
 @end
+
+static unsigned updateProbeCalls;
+static unsigned updateProbeRefreshes;
+static BOOL updateProbeArguments;
+static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, SEL selector,
+        UIInterfaceOrientation orientation, NSTimeInterval duration, BOOL force) {
+    (void)selector;
+    ++updateProbeCalls;
+    updateProbeRefreshes = window.refreshes;
+    updateProbeArguments = orientation == UIInterfaceOrientationLandscapeLeft &&
+        duration == 0.375 && force;
+}
 
 @interface RootlessRotationTrackingController : UIViewController
 @property(nonatomic) unsigned recordedQueries;
@@ -258,6 +282,27 @@ static uint32_t executableSDK(void) {
 @interface RootlessRotationRegisteredModernController : RootlessRotationNativeModernController
 @end
 @implementation RootlessRotationRegisteredModernController
+@end
+
+/* iOS 6 policy with the pre-iOS-8 lifecycle, but no deprecated policy query
+ * anywhere in the hierarchy (the Unity controller shape). */
+@interface RootlessRotationPolicyOnlyController : UIViewController
+@end
+@implementation RootlessRotationPolicyOnlyController
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    ++modernMaskQueries;
+    return UIInterfaceOrientationMaskLandscape;
+}
+- (BOOL)shouldAutorotate { return YES; }
+- (void)willRotateToInterfaceOrientation:(UIInterfaceOrientation)orientation
+        duration:(NSTimeInterval)duration {
+    ++willRotateCalls;
+    [super willRotateToInterfaceOrientation:orientation duration:duration];
+}
+- (void)didRotateFromInterfaceOrientation:(UIInterfaceOrientation)orientation {
+    ++didRotateCalls;
+    [super didRotateFromInterfaceOrientation:orientation];
+}
 @end
 
 /* A class can inherit a custom preference without implementing the modern
@@ -365,6 +410,8 @@ static uint32_t executableSDK(void) {
             RootlessRotationRegisteredModernController.class, NSSelectorFromString(modernSelectors[index]));
     LC32PrepareNativeLegacyRotationClass(RootlessRotationRegisteredModernController.class);
     LC32PrepareNativeLegacyRotationClass(RootlessRotationRegisteredModernController.class);
+    LC32PrepareNativeLegacyRotationClass(RootlessRotationPolicyOnlyController.class);
+    LC32PrepareNativeLegacyRotationClass(RootlessRotationManualController.class);
     for(NSUInteger index = 0; index < modernSelectors.count; ++index) {
         check("registered-modern-method-implementation-preserved",
             class_getMethodImplementation(RootlessRotationRegisteredModernController.class,
@@ -392,17 +439,23 @@ static uint32_t executableSDK(void) {
         controllerClass = RootlessRotationModernController.class;
     if([testCase isEqualToString:@"modern-explicit"])
         controllerClass = RootlessRotationRegisteredModernController.class;
+    if([testCase isEqualToString:@"modern-only"])
+        controllerClass = RootlessRotationPolicyOnlyController.class;
     if([testCase isEqualToString:@"unregistered"])
         controllerClass = RootlessRotationUnregisteredController.class;
+    if([testCase isEqualToString:@"manual-controller"])
+        controllerClass = RootlessRotationManualController.class;
     CGRect bounds = UIScreen.mainScreen.bounds;
     self.window = [[RootlessRotationWindow alloc] initWithFrame:bounds];
     self.controller = [[controllerClass alloc] init];
-    if(expectedEnabled && controllerClass == RootlessRotationLegacyController.class) {
+    if(expectedEnabled && self.controller && controllerClass == RootlessRotationLegacyController.class) {
         check("legacy-supported-mask", self.controller.supportedInterfaceOrientations ==
             UIInterfaceOrientationMaskLandscape);
         check("policy-query-does-not-probe-legacy-callback", legacyQueries == 0);
     }
     self.content = [[UIView alloc] initWithFrame:bounds];
+    if([testCase isEqualToString:@"manual-controller"])
+        [self.content addSubview:[[RootlessRotationGuestView alloc] initWithFrame:bounds]];
     self.initialContentFrame = self.content.frame;
     self.initialContentBounds = self.content.bounds;
     self.content.backgroundColor = UIColor.blueColor;
@@ -570,7 +623,9 @@ static uint32_t executableSDK(void) {
         ((void (*)(id, SEL, UIWindow *, UIInterfaceOrientation, CGSize))objc_msgSend)(
             subject, didSelector, window, oldOrientation, CGSizeMake(320, 480));
         const unsigned expectedCalls = expectedEnabled &&
-            cls == RootlessRotationLegacyController.class ? 1 : 0;
+            (cls == RootlessRotationLegacyController.class ||
+             cls == RootlessRotationModernController.class ||
+             cls == RootlessRotationRegisteredModernController.class) ? 1 : 0;
         printf("rootless-rotation-direct-lifecycle: class=%s expected=%u "
             "will-delta=%u did-delta=%u queries-delta=%u will-orientation=%ld "
             "did-orientation=%ld duration=%a\n", class_getName(cls), expectedCalls,
@@ -591,6 +646,47 @@ static uint32_t executableSDK(void) {
     }
     puts("rootless-rotation-direct-lifecycle-scope: callback forwarding only; "
          "this case does not claim an automatic compositor rotation");
+}
+- (void)checkRotationUpdateOrdering {
+    SEL originalSelector = sel_registerName("lc32_updateToInterfaceOrientation:duration:force:");
+    SEL selector = sel_registerName("_updateToInterfaceOrientation:duration:force:");
+    Method update = class_getInstanceMethod(UIWindow.class, selector);
+    Method original = class_getInstanceMethod(UIWindow.class, originalSelector);
+    check("rotation-update-entrypoints-present", update && original);
+    if(!update || !original) return;
+    Dl_info updateInfo = {0};
+    BOOL resolved = dladdr((const void *)method_getImplementation(update), &updateInfo) != 0;
+    check("rotation-update-hook-matches-sdk-gate", resolved &&
+        (updateInfo.dli_fbase == _dyld_get_image_header(0)) == expectedEnabled);
+    if(!expectedEnabled) return;
+    for(unsigned rootless = 0; rootless < 2; ++rootless)
+    for(Class cls in @[RootlessRotationLegacyController.class,
+            RootlessRotationPolicyOnlyController.class, RootlessRotationNativeModernController.class]) {
+        RootlessRotationRefreshWindow *window = [[RootlessRotationRefreshWindow alloc]
+            initWithFrame:CGRectMake(0, 0, 320, 480)];
+        UIViewController *controller = [[cls alloc] init];
+        controller.view = [[RootlessRotationGuestView alloc] initWithFrame:window.bounds];
+        if(!rootless) window.rootViewController = controller;
+        if(controller.view.superview != window) [window addSubview:controller.view];
+        window.recordRefreshes = YES;
+        window.refreshes = 0;
+        updateProbeCalls = 0;
+        IMP saved = method_setImplementation(original, (IMP)nativeOrientationUpdateProbe);
+        @try {
+            ((void (*)(id, SEL, UIInterfaceOrientation, NSTimeInterval, BOOL))objc_msgSend)(
+                window, selector, UIInterfaceOrientationLandscapeLeft, 0.375, YES);
+        } @finally {
+            method_setImplementation(original, saved);
+        }
+        BOOL guest = cls != RootlessRotationNativeModernController.class &&
+            (!rootless || cls == RootlessRotationPolicyOnlyController.class);
+        check("rotation-update-original-called-once", updateProbeCalls == 1);
+        check("rotation-update-arguments-preserved", updateProbeArguments);
+        check("rotation-update-backing-before-client", updateProbeRefreshes == (guest ? 1u : 0u));
+        check("rotation-update-backing-after-client", window.refreshes == (guest ? 2u : 0u));
+        window.recordRefreshes = NO;
+        window.hidden = YES;
+    }
 }
 - (void)checkModernNativePermission {
     SEL originalSelector = sel_registerName(
@@ -690,7 +786,7 @@ static uint32_t executableSDK(void) {
             printf("rootless-rotation-modern-settled-refresh: state=%s requests=%u guest-calls=disabled\n",
                 labels[index].UTF8String, windows[index].refreshes);
             check("modern-settled-backing-refresh-independent-of-guest-callback-permission",
-                windows[index].refreshes == (index == 0 ? 1u : 0u));
+                windows[index].refreshes == (index == 0 || index == 4 ? 1u : 0u));
             windows[index].refreshes = 0;
         }
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -698,7 +794,7 @@ static uint32_t executableSDK(void) {
                 printf("rootless-rotation-modern-refresh: state=%s requests=%u\n",
                     labels[index].UTF8String, windows[index].refreshes);
                 check("modern-refresh-only-current-attached-guest-root",
-                    windows[index].refreshes == (index == 0 ? 1u : 0u));
+                    windows[index].refreshes == (index == 0 || index == 4 ? 1u : 0u));
                 windows[index].recordRefreshes = NO;
             }
             check("modern-refresh-does-not-query-or-synthesize-legacy-callbacks",
@@ -772,8 +868,8 @@ static uint32_t executableSDK(void) {
                     if(!caught) @throw;
                 }
                 BOOL backingEligible = cls == RootlessRotationLegacyController.class ||
-                    (!rootless && (cls == RootlessRotationModernController.class ||
-                    cls == RootlessRotationRegisteredModernController.class));
+                    cls == RootlessRotationModernController.class ||
+                    cls == RootlessRotationRegisteredModernController.class;
                 printf("rootless-rotation-ownership-probe: class=%s rootless=%u exception=%d "
                     "orientation=%d transform=%d unrelated=%d/%d\n",
                     class_getName(cls), rootless, ownershipThrow, ownershipObservedOrientation,
@@ -855,13 +951,34 @@ static uint32_t executableSDK(void) {
     [self dumpState:"settled"];
     check("native-compositor-policy-unchanged",
         nativeRotationPolicy() == originalNativeRotationPolicy);
-    if([testCase isEqualToString:@"lifecycle"]) {
+    if([testCase isEqualToString:@"manual-controller"]) {
+        check("manual-controller-no-rotation-callbacks", legacyQueries == 0 &&
+            willRotateCalls == 0 && didRotateCalls == 0);
+        if(expectedEnabled) {
+            check("manual-controller-no-root-adoption", self.window.rootViewController == nil);
+            check("manual-controller-renderer-transform-preserved",
+                CGAffineTransformIsIdentity(self.content.transform));
+            check("manual-controller-renderer-bounds-preserved",
+                CGRectEqualToRect(self.content.bounds, self.initialContentBounds));
+            [self checkNativeBackingGeometry];
+        }
+    } else if([testCase isEqualToString:@"lifecycle"]) {
         [self checkDirectLifecycleForwarding];
     } else if([testCase isEqualToString:@"ownership"]) {
         [self checkScopedOwnership];
         [self checkModernNativePermission];
+        [self checkRotationUpdateOrdering];
     } else if([testCase isEqualToString:@"modern-refresh"]) {
         check("modern-refresh-probe-completed", self.completedRefreshProbe);
+    } else if([testCase isEqualToString:@"modern-only"]) {
+        check("modern-only-root-preserved", self.window.rootViewController == self.controller);
+        check("modern-only-policy-preserved", self.controller.supportedInterfaceOrientations ==
+            UIInterfaceOrientationMaskLandscape && self.controller.shouldAutorotate);
+        check("modern-only-no-legacy-policy-query", legacyQueries == 0);
+        if(expectedEnabled) {
+            check("modern-only-legacy-lifecycle-delivered", willRotateCalls > 0 && didRotateCalls > 0);
+            [self checkNativeBackingGeometry];
+        }
     } else if([testCase isEqualToString:@"modern-explicit"]) {
         check("modern-explicit-root-preserved", self.window.rootViewController == self.controller);
         check("modern-explicit-mask-preserved", self.controller.supportedInterfaceOrientations ==
@@ -871,8 +988,9 @@ static uint32_t executableSDK(void) {
             UIInterfaceOrientationLandscapeRight);
         RootlessRotationTrackingController *subject = (id)self.controller;
         check("modern-explicit-no-legacy-policy-queries", subject.recordedQueries == 0);
-        check("modern-explicit-no-synthetic-legacy-callbacks",
-            subject.recordedWillCalls == 0 && subject.recordedDidCalls == 0);
+        check("modern-explicit-legacy-lifecycle-matches-sdk",
+            expectedEnabled ? (subject.recordedWillCalls > 0 && subject.recordedDidCalls > 0) :
+                (subject.recordedWillCalls == 0 && subject.recordedDidCalls == 0));
         if(expectedEnabled) [self checkNativeBackingGeometry];
     } else if([testCase isEqualToString:@"modal"]) {
         check("modal-presented-root-preserved", self.window.rootViewController == self.controller);
@@ -963,13 +1081,14 @@ int main(int argc, char **argv) {
         for(int index = 1; index + 1 < argc; ++index) {
             if(!strcmp(argv[index], "--case")) testCase = @(argv[index + 1]);
         }
-        if(![@[@"rootless", @"explicit", @"modern", @"modern-explicit", @"modern-refresh", @"unregistered", @"manual",
+        if(![@[@"rootless", @"explicit", @"modern", @"modern-explicit", @"modern-only", @"modern-refresh", @"unregistered", @"manual", @"manual-controller",
                 @"modal", @"manual-disabled", @"lifecycle", @"ownership", @"replacement"]
                 containsObject:testCase]) return 2;
         manualRotation = [testCase isEqualToString:@"manual"] ||
             [testCase isEqualToString:@"manual-disabled"];
         explicitRootCase = [testCase isEqualToString:@"explicit"] ||
             [testCase isEqualToString:@"modern-explicit"] ||
+            [testCase isEqualToString:@"modern-only"] ||
             [testCase isEqualToString:@"modern-refresh"] ||
             [testCase isEqualToString:@"modal"] ||
             [testCase isEqualToString:@"manual-disabled"] ||
