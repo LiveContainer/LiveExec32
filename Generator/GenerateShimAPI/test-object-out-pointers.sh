@@ -145,6 +145,18 @@ check_output("+writePropertyList:toStream:format:options:error:", [4], plist)
 check_output("-dataWithPropertyList:format:options:error:", [3], plist)
 check_output("+dataWithPropertyList:format:options:error:", [3])
 
+# These UIKit lifecycle methods must stay in the shared manual adapter. A
+# generated end method would bypass expiration/duplicate-end bookkeeping.
+application = (root / "full/UIKit/UIApplication.m").read_text()
+for selector in (
+    "beginBackgroundTaskWithExpirationHandler:",
+    "beginBackgroundTaskWithName:",
+    "endBackgroundTask:",
+):
+    require(selector not in application, f"Manual background-task method was generated: {selector}")
+require("backgroundTimeRemaining" in application,
+        "Background-task filtering accidentally removed other UIApplication methods")
+
 for mode in ("captured", "runtime", "full"):
     log = (root / f"{mode}.log").read_text()
     summaries = re.findall(

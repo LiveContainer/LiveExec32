@@ -953,11 +953,15 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
     }
     if([className isEqualToString:@"UIApplication"] &&
        method.isInstanceMethod &&
-       [selector isEqualToString:
-           @"beginBackgroundTaskWithExpirationHandler:"]) {
+       ([selector isEqualToString:
+           @"beginBackgroundTaskWithExpirationHandler:"] ||
+        [selector isEqualToString:
+           @"beginBackgroundTaskWithName:expirationHandler:"] ||
+        [selector isEqualToString:@"endBackgroundTask:"])) {
         /* Legacy Apple LLVM can likewise omit the advertised signature for
          * this API's void(void) expiration callback.  Its manual adapter
-         * wraps that callback in a block whose ABI is known to LC32. */
+         * wraps that callback in a block whose ABI is known to LC32 and
+         * balances expired tasks left open by legacy clients. */
         return YES;
     }
     if([className isEqualToString:@"NSBundle"]) {
