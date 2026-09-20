@@ -1,5 +1,6 @@
 #ifndef LC32_UIKIT_COMPATIBILITY_H
 #define LC32_UIKIT_COMPATIBILITY_H
+#include "../../include/LC32UIKitCompatibilityConfig.h"
 
 #import <Foundation/Foundation.h>
 

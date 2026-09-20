@@ -5,6 +5,7 @@
 #import <objc/runtime.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include "../include/LC32UIKitCompatibilityConfig.h"
 
 @implementation UIApplication
 @end
@@ -16,7 +17,7 @@ static NSMutableDictionary *handlers;
 static NSMutableDictionary *endCounts;
 static NSString *lastName;
 static uint32_t nextIdentifier = 1;
-static BOOL failBegin;
+static BOOL failBegin, lastHandlerWasNil;
 static unsigned failures, checks, invalidEnds;
 
 uint64_t LC32CachedHostSelector(uint64_t *cache, SEL selector, BOOL superCall) {
@@ -32,6 +33,7 @@ uint64_t LC32InvokeHostSelector(uint64_t receiver, uint64_t command, ...) {
     if(command == 1) {
         lastName = (__bridge NSString *)(void *)(uintptr_t)va_arg(args, uint64_t);
         void (^handler)(void) = (__bridge id)(void *)(uintptr_t)va_arg(args, uint64_t);
+        lastHandlerWasNil = handler == nil;
         va_end(args);
         if(failBegin) return UIBackgroundTaskInvalid;
         uint32_t identifier = nextIdentifier++;
@@ -68,6 +70,7 @@ int main(void) {
         endCounts = [NSMutableDictionary new];
         UIApplication *app = [UIApplication new];
         __block unsigned calls = 0;
+#if LC32_UIKIT_COMPATIBILITY
         uint32_t logging = [app beginBackgroundTaskWithExpirationHandler:^{ calls++; }];
         check(logging != 0 && lastName == nil, "anonymous task starts normally");
         expire(logging);
@@ -120,6 +123,24 @@ int main(void) {
               "host refusal returns invalid without registering a task");
         [app endBackgroundTask:UIBackgroundTaskInvalid];
         check(handlers.count == 0 && invalidEnds == 0, "no leaked registrations or invalid native ends");
+#else
+        uint32_t logging = [app beginBackgroundTaskWithExpirationHandler:^{ calls++; }];
+        check(logging != 0 && !lastHandlerWasNil, "native callback is ABI-wrapped");
+        expire(logging);
+        check(calls == 1 && !endCounts[@(logging)] && handlers[@(logging)],
+              "native mode does not automatically end expired tasks");
+        [app endBackgroundTask:logging];
+        check([endCounts[@(logging)] intValue] == 1, "explicit end reaches native UIKit");
+        [app endBackgroundTask:logging];
+        check([endCounts[@(logging)] intValue] == 2 && invalidEnds == 1,
+              "native mode does not suppress duplicate end calls");
+        uint32_t nilHandler = [app beginBackgroundTaskWithName:@"native" expirationHandler:nil];
+        check(nilHandler != 0 && lastHandlerWasNil && [lastName isEqualToString:@"native"],
+              "native mode preserves nil callback and task name");
+        failBegin = YES;
+        check([app beginBackgroundTaskWithExpirationHandler:nil] == UIBackgroundTaskInvalid,
+              "native refusal is preserved");
+#endif
     }
     printf("%u/%u background-task checks passed\n", checks-failures, checks);
     return failures ? 1 : 0;

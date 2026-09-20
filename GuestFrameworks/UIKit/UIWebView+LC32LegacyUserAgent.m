@@ -1,5 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <LC32/LC32.h>
+#include "LC32UIKitCompatibility.h"
 
 /*
  * Older UIWebView releases added their User-Agent header before asking the
@@ -17,6 +18,7 @@
 @implementation UIWebView (LC32LegacyUserAgent)
 
 - (void)loadRequest:(NSURLRequest *)request {
+#if LC32_UIKIT_COMPATIBILITY
     if([request.URL.absoluteString isEqualToString:@"http://"]) {
         NSMutableURLRequest *probeRequest = [request mutableCopy];
         if(![probeRequest valueForHTTPHeaderField:@"User-Agent"]) {
@@ -37,6 +39,7 @@
         return;
     }
 
+#endif
     static uint64_t hostSelector __attribute__((aligned(8)));
     const uint64_t selector = LC32CachedHostSelector(
         &hostSelector, _cmd, NO);

@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include "LC32UIKitCompatibility.h"
+#if LC32_UIKIT_COMPATIBILITY
 
 static uint64_t LC32HostLegacyControllerOrientation;
 
@@ -45,3 +46,4 @@ static uint64_t LC32HostLegacyControllerOrientation;
 }
 
 @end
+#endif // LC32_UIKIT_COMPATIBILITY

@@ -1,4 +1,5 @@
 #import "LegacyNibLoading.h"
+#include "../../include/LC32UIKitCompatibilityConfig.h"
 
 // UIKit supplies this category at runtime. Keeping this adapter Foundation-only
 // also lets its exception filtering be tested without launching a UI process.
@@ -9,6 +10,7 @@
 
 NSArray *LC32LoadGuestNib(NSBundle *bundle, NSString *name,
                         id owner, NSDictionary *options) {
+#if LC32_UIKIT_COMPATIBILITY
     @try {
         return [bundle loadNibNamed:name owner:owner options:options];
     } @catch(NSException *exception) {
@@ -25,4 +27,7 @@ NSArray *LC32LoadGuestNib(NSBundle *bundle, NSString *name,
         }
         @throw;
     }
+#else
+    return [bundle loadNibNamed:name owner:owner options:options];
+#endif
 }

@@ -101,6 +101,59 @@ methods are available. The font regression also checks text-field alerts,
 titled/untitled action sheets, repeated animated/nonanimated dismissal,
 presenter visibility and preservation of the native window policy.
 
+### Compile without UIKit compatibility hooks
+
+Build **both halves** with `LC32_UIKIT_COMPATIBILITY=0` to try native UIKit
+behavior, including its low-SDK behavior, with the retained fixes listed below.
+The normal default is `1`.
+
+```bash
+gmake -C GuestMakefile LC32_UIKIT_COMPATIBILITY=0
+./GuestMakefile/pack-ramdisk.sh
+gmake LC32_UIKIT_COMPATIBILITY=0
+```
+
+For packaging, pass the same flag to your usual `gmake ... package` command.
+For runtime-only builds, use
+`gmake -C HostFrameworks/LC32 LC32_UIKIT_COMPATIBILITY=0` and install its
+shared framework **and** the rebuilt guest UIKit framework together.
+Rebuild/repack both halves with `=1` to restore compatibility. Build stamps
+track this setting so switching back cannot leave a cached opposite-mode link.
+
+Unlike the geometry-only environment switch above, this compiles out
+legacy rotation/window/canvas adaptations,
+orientation/status-bar policy overrides, the UIWebView User-Agent probe,
+optional-nib exception suppression, and automatic expired-background-task
+cleanup. Native failures and missing selectors may therefore return; this is
+an A/B diagnostic build.
+
+ARM32/ARM64 ABI forwarding, typed callback wrappers, guest resource routing,
+`loadView` recursion protection, and debugger/run-loop support remain active.
+The pre-iOS-11 nonfinite preferred-font repair also remains active, as does the
+pre-iOS-8 rational-edge layout fix for
+`_nsis_center:bounds:inEngine:forLayoutGuide:` ("Error in compatibility flow").
+The pre-iOS-8 keyboard/overlay hosting fix also stays enabled: only
+`UITrackingWindowView` and `UIInputSetContainerView` opt into
+`_hostsLayoutEngineAllowsTAMIC_NO`, avoiding the "Must translate autoresizing
+mask into constraints to have _setHostsLayoutEngine:YES" assertion without
+relaxing the ordinary `UIView` policy.
+The pre-iOS-8 alert presentation/layout/dismissal fix remains active too,
+preventing collapsed action labels and preserving the presenter after dismissal.
+These fixes retain their existing SDK gates and do not change the process SDK.
+`UIDevice.uniqueIdentifier` also remains available in both modes: it uses
+`identifierForVendor` when available and the persisted per-app UUID fallback
+otherwise, so disabling layout hooks does not change this legacy identifier.
+`LC32DisableLegacyAdMobNetworking` also remains active in both modes to prevent
+obsolete `GADBannerView` networking from starting.
+The switch does not disable MediaPlayer, Foundation, or other non-UIKit
+compatibility, or change the selected/effective SDK or LiveContainer Classic Mode.
+
+Run `gmake -C test check-uikit-compatibility-switch` for a no-device regression
+of both modes, including retained fix metadata and absence of optional hook
+metadata in the disabled build.
+After building both products, `sh test/uikit_compatibility_symbols.sh 0` audits
+the actual linked host and guest binaries (use `1` for the normal build).
+
 ## Build troubleshooting
 
 For a missing classic linker or incorrect ARM32 Thumb initializer pointers,

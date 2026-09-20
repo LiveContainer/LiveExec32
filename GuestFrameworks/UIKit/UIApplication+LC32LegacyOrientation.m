@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include "LC32UIKitCompatibility.h"
 
+#if LC32_UIKIT_COMPATIBILITY
 static pthread_once_t LC32LegacyOrientationOnce = PTHREAD_ONCE_INIT;
 static uint64_t LC32HostLegacyOrientation;
 static uint64_t LC32HostLegacyStatusBarOrientation;
@@ -37,8 +38,11 @@ static void LC32ForwardLegacyOrientation(
         (uint32_t)orientation, (uint32_t)0);
 }
 
+#endif
+
 @implementation UIApplication (LC32LegacyOrientation)
 
+#if LC32_UIKIT_COMPATIBILITY
 + (void)load {
     /* Most phone applications must keep the generated direct forwarder.
      * Install this override only for the fixed legacy canvases whose scene
@@ -80,6 +84,8 @@ static void LC32ForwardLegacyOrientation(
         self.host_self, selector, (uint64_t)0);
 }
 
+#endif // LC32_UIKIT_COMPATIBILITY
+
 - (void)setStatusBarOrientation:(UIInterfaceOrientation)orientation {
     /* GenerateShimAPI deliberately omits this obsolete forwarding shim.
      * Modern UIApplication ignores it, while LC32's host scene adapter must
@@ -89,7 +95,9 @@ static void LC32ForwardLegacyOrientation(
     const uint64_t selector = LC32CachedHostSelector(
         &hostSelector, _cmd, NO);
     const uint64_t hostSelf = self.host_self;
+#if LC32_UIKIT_COMPATIBILITY
     LC32ForwardLegacyOrientation(orientation);
+#endif
     LC32InvokeHostSelector(hostSelf, selector,
         (uint64_t)(int64_t)orientation, (uint64_t)0);
 }
@@ -100,7 +108,9 @@ static void LC32ForwardLegacyOrientation(
     const uint64_t selector = LC32CachedHostSelector(
         &hostSelector, _cmd, NO);
     const uint64_t hostSelf = self.host_self;
+#if LC32_UIKIT_COMPATIBILITY
     LC32ForwardLegacyOrientation(orientation);
+#endif
     LC32InvokeHostSelector(hostSelf, selector,
         (uint64_t)(int64_t)orientation,
         (uint64_t)(animated != NO), (uint64_t)0);

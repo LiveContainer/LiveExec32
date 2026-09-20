@@ -3036,15 +3036,17 @@ extern "C" void LC32UIKitPrepareGuestClass(Class cls) {
             guestLoadView, (IMP)&LC32GuestLoadView);
     }
 
-    if(LC32NativeLegacyRotationEnabled()) {
+    // Duration needs the ARM32 FP ABI even when UIKit policy is fully native.
+    if(LC32NativeLegacyRotationEnabled() || !LC32_UIKIT_COMPATIBILITY) {
         Method guestWillRotate = LC32ClassOwnMethod(cls,
             @selector(willRotateToInterfaceOrientation:duration:));
         if(guestWillRotate && method_getImplementation(guestWillRotate) ==
                 (IMP)&LC32InvokeGuestSelector) {
             method_setImplementation(guestWillRotate, (IMP)&LC32GuestWillRotate);
         }
-        LC32PrepareNativeLegacyRotationClass(cls);
     }
+#if LC32_UIKIT_COMPATIBILITY
+    if(LC32NativeLegacyRotationEnabled()) LC32PrepareNativeLegacyRotationClass(cls);
     if(!LC32UIKitLegacyCompatibilityEnabled()) return;
 
     auto addNativeAdapter = ^(SEL selector, IMP implementation) {
@@ -3105,7 +3107,7 @@ extern "C" void LC32UIKitPrepareGuestClass(Class cls) {
      * method wins because class_addMethod leaves an existing method intact. */
     addNativeAdapter(@selector(prefersStatusBarHidden),
         (IMP)&LC32LegacyPrefersStatusBarHidden);
-
+#endif
 }
 
 /* SVC 1002 forwards the first guest argument in r2, followed by r3 and the
@@ -3273,6 +3275,7 @@ extern "C" u32 LC32UIKitGetLegacyStatusBarOrientation(void) {
     return (u32)LC32FirstOrientationInMask(policy.declaredOrientations);
 }
 
+#if LC32_UIKIT_COMPATIBILITY
 @interface UIWindow (LC32LegacyRootViewController)
 - (void)lc32_makeKeyAndVisible;
 + (void)lc32_applicationDidBecomeActive:(NSNotification *)notification;
@@ -3319,6 +3322,8 @@ extern "C" u32 LC32UIKitGetLegacyStatusBarOrientation(void) {
 }
 
 @end
+
+#endif // LC32_UIKIT_COMPATIBILITY
 
 /*
  * Sentinel returned to the guest UIApplicationMain shim when the host run
@@ -3503,10 +3508,12 @@ int LC32_UIKit_UIApplicationMain(u32 r2, u32 r3, u32 sp) {
         return LC32RunDebuggerAwareMainRunLoop();
     }
     firstEntry = false;
+#if LC32_UIKIT_COMPATIBILITY
     if(LC32UIKitLegacyCompatibilityEnabled() || LC32NativeLegacyRotationEnabled()) {
         LC32GuestOrientationStartupCallbackDepth = LC32GuestCallbackDepth();
         LC32GuestOrientationStartupComplete.store(false, std::memory_order_release);
     }
+#endif
 
     int argc = r2;
     u32 guest_argv = r3;
@@ -3514,6 +3521,7 @@ int LC32_UIKit_UIApplicationMain(u32 r2, u32 r3, u32 sp) {
     NSString *delegateClassName = (id)Dynarmic_current_user_callbacks()->MemoryRead64(sp += 8);
 
     NSLog(@"UIApplicationMain(%d, 0x%x, %@, %@)\n", argc, guest_argv, principalClassName, delegateClassName);
+#if LC32_UIKIT_COMPATIBILITY
     static id launchObserver;
     if(LC32UIKitLegacyCompatibilityEnabled() || LC32NativeLegacyRotationEnabled()) {
         launchObserver = [NSNotificationCenter.defaultCenter
@@ -3526,6 +3534,7 @@ int LC32_UIKit_UIApplicationMain(u32 r2, u32 r3, u32 sp) {
         }];
     }
     (void)launchObserver;
+#endif
     char executableName[] = "exec";
     char *host_argv[] = {executableName, nullptr};
 
@@ -3731,14 +3740,18 @@ u32 LC32_UIKit_GetWindowRootViewController(
     UIWindow *window = reinterpret_cast<UIWindow *>(static_cast<uintptr_t>(
         windowLow | (static_cast<u64>(windowHigh) << 32)));
     UIViewController *controller;
+#if LC32_UIKIT_COMPATIBILITY
     if(LC32UIKitLegacyCompatibilityEnabled()) {
         NSNumber *legacyDirectRootState = objc_getAssociatedObject(
             window, LC32HideLegacyDirectGuestWindowRootKey);
         if(legacyDirectRootState.boolValue) return 0;
         controller = LC32GuestWindowRootViewController(window);
     } else {
+#endif
         controller = LC32NativeWindowRootViewController(window);
+#if LC32_UIKIT_COMPATIBILITY
     }
+#endif
     if(!controller) return 0;
     u32 guestController = controller.guest_selfOrNull;
     if(!guestController && Dynarmic_guest_thread_is_registered()) {
@@ -3756,6 +3769,7 @@ void LC32_UIKit_SetWindowRootViewController(
     UIViewController *controller = reinterpret_cast<UIViewController *>(
         static_cast<uintptr_t>(controllerAddress));
     if(!window) return;
+#if LC32_UIKIT_COMPATIBILITY
     if(!LC32UIKitLegacyCompatibilityEnabled()) {
         LC32NativeSetWindowRootViewController(window, controller);
         return;
@@ -3812,6 +3826,9 @@ void LC32_UIKit_SetWindowRootViewController(
          * keeps that foreign native-main callback from entering guest code. */
         dispatch_async(dispatch_get_main_queue(), setRoot);
     }
+#else
+    LC32NativeSetWindowRootViewController(window, controller);
+#endif
 }
 
 __END_DECLS

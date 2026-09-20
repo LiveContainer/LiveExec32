@@ -119,20 +119,23 @@ const CGFloat UIScrollViewDecelerationRateFast = 0.99f;
 NSRunLoopMode const UITrackingRunLoopMode = @"UITrackingRunLoopMode";
 
 static pthread_once_t LC32LegacyAdMobOnce = PTHREAD_ONCE_INIT;
+#if LC32_UIKIT_COMPATIBILITY
 static pthread_once_t LC32LegacyCompatibilityOnce = PTHREAD_ONCE_INIT;
 static BOOL LC32LegacyCompatibilityEnabled = YES;
+#endif
 static pthread_once_t LC32VoiceOverOnce = PTHREAD_ONCE_INIT;
 static uint64_t LC32HostUIAccessibilityIsVoiceOverRunning;
 static pthread_once_t LC32AccessibilityPostOnce = PTHREAD_ONCE_INIT;
 static uint64_t LC32HostUIAccessibilityPostNotification;
 static pthread_once_t LC32GuidedAccessOnce = PTHREAD_ONCE_INIT;
 static uint64_t LC32HostUIAccessibilityIsGuidedAccessEnabled;
+static pthread_once_t LC32LegacyUniqueIdentifierOnce = PTHREAD_ONCE_INIT;
+static NSString *LC32LegacyUniqueIdentifierFallback;
+#if LC32_UIKIT_COMPATIBILITY
 static pthread_once_t LC32LegacyCanvasOnce = PTHREAD_ONCE_INIT;
 static BOOL LC32LegacyIPadCanvasRequired;
 static BOOL LC32LegacyIPadStatusBarHidden;
 static BOOL LC32LegacyPhoneCanvasRequired;
-static pthread_once_t LC32LegacyUniqueIdentifierOnce = PTHREAD_ONCE_INIT;
-static NSString *LC32LegacyUniqueIdentifierFallback;
 
 static void LC32ResolveLegacyCompatibility(void) {
     const uint64_t getter = LC32Dlsym(
@@ -143,11 +146,16 @@ static void LC32ResolveLegacyCompatibility(void) {
         LC32LegacyCompatibilityEnabled = LC32InvokeHostCRet32(getter) != 0;
     }
 }
+#endif
 
 BOOL LC32GuestUIKitLegacyCompatibilityEnabled(void) {
+#if LC32_UIKIT_COMPATIBILITY
     pthread_once(&LC32LegacyCompatibilityOnce,
         LC32ResolveLegacyCompatibility);
     return LC32LegacyCompatibilityEnabled;
+#else
+    return NO;
+#endif
 }
 
 static void LC32ResolveLegacyUniqueIdentifierFallback(void) {
@@ -185,6 +193,7 @@ static void LC32ResolveLegacyUniqueIdentifierFallback(void) {
         ? identifier : @"00000000-0000-0000-0000-000000000000") copy];
 }
 
+#if LC32_UIKIT_COMPATIBILITY
 static void LC32ResolveLegacyCanvas(void) {
     if(!LC32GuestUIKitLegacyCompatibilityEnabled()) return;
     NSBundle *bundle = NSBundle.mainBundle;
@@ -223,6 +232,8 @@ static BOOL LC32RequiresFixedLandscapePhoneCanvas(void) {
     return LC32LegacyPhoneCanvasRequired;
 }
 
+#endif
+
 static CGRect LC32HostScreenRect(UIScreen *screen, SEL selector) {
     static uint64_t boundsSelector __attribute__((aligned(8)));
     static uint64_t applicationFrameSelector __attribute__((aligned(8)));
@@ -236,6 +247,7 @@ static CGRect LC32HostScreenRect(UIScreen *screen, SEL selector) {
     return LC32GuestCGRect(hostResult);
 }
 
+#if LC32_UIKIT_COMPATIBILITY
 static pthread_once_t LC32LegacyScreenCoordinatesOnce = PTHREAD_ONCE_INIT;
 static BOOL LC32UsesLegacyScreenCoordinates;
 
@@ -254,6 +266,8 @@ static BOOL LC32GuestUsesLegacyScreenCoordinates(void) {
         LC32ResolveLegacyScreenCoordinates);
     return LC32UsesLegacyScreenCoordinates;
 }
+
+#endif
 
 static void LC32ResolveVoiceOverFunction(void) {
     LC32HostUIAccessibilityIsVoiceOverRunning =
@@ -590,6 +604,7 @@ void UIImageWriteToSavedPhotosAlbum(UIImage *image,
 
 @implementation UIWindow (LC32MainThreadRootViewController)
 
+#if LC32_UIKIT_COMPATIBILITY
 - (void)addSubview:(UIView *)view {
     /* setRootViewController: already owns and installs this view. Some old
      * applications redundantly add it to the window immediately afterwards;
@@ -602,6 +617,7 @@ void UIImageWriteToSavedPhotosAlbum(UIImage *image,
     }
     [super addSubview:view];
 }
+#endif
 
 - (UIViewController *)rootViewController {
     pthread_once(&LC32UIKitGeometryOnce,
@@ -679,9 +695,11 @@ compatibleWithTraitCollection:nil];
 @implementation UIDevice (LC32LegacyUniqueIdentifier)
 
 - (UIUserInterfaceIdiom)userInterfaceIdiom {
+#if LC32_UIKIT_COMPATIBILITY
     if(LC32RequiresLegacyIPadCanvas()) {
         return UIUserInterfaceIdiomPad;
     }
+#endif
 
     static uint64_t hostSelector __attribute__((aligned(8)));
     const uint64_t selector = LC32CachedHostSelector(
@@ -710,6 +728,7 @@ compatibleWithTraitCollection:nil];
 
 - (CGRect)bounds {
     CGRect bounds = LC32HostScreenRect(self, _cmd);
+#if LC32_UIKIT_COMPATIBILITY
     /* Before iOS 8, UIScreen coordinates remained portrait-oriented.
      * Legacy landscape apps transpose this size themselves, so undo modern
      * UIKit's orientation-aware ordering while retaining point units. */
@@ -730,11 +749,13 @@ compatibleWithTraitCollection:nil];
          * it as a 480x320 landscape canvas. */
         bounds = CGRectMake(0, 0, 320, 480);
     }
+#endif
     return bounds;
 }
 
 - (CGRect)applicationFrame {
     CGRect frame = LC32HostScreenRect(self, _cmd);
+#if LC32_UIKIT_COMPATIBILITY
     if(LC32ScreenNeedsLegacyIPadCanvas(frame)) {
         /* iOS 3.x iPad applications laid out below a 20-point status bar.
          * Preserve it when visible; full-screen apps use -bounds instead. */
@@ -746,23 +767,28 @@ compatibleWithTraitCollection:nil];
             ? CGRectMake(0, 0, 320, 480)
             : CGRectMake(0, 20, 320, 460);
     }
+#endif
     return frame;
 }
 
 - (CGFloat)scale {
+#if LC32_UIKIT_COMPATIBILITY
     const CGRect bounds = LC32HostScreenRect(self, @selector(bounds));
     if(LC32ScreenNeedsLegacyIPadCanvas(bounds)) {
         return 1.0f;
     }
+#endif
 
     static uint64_t hostSelector __attribute__((aligned(8)));
     const uint64_t selector = LC32CachedHostSelector(
         &hostSelector, _cmd, NO);
     CGFloat scale = (CGFloat)LC32HostFloatingResult(LC32InvokeHostSelector(
         self.host_self, selector, (uint64_t)0));
+#if LC32_UIKIT_COMPATIBILITY
     if(LC32RequiresFixedLandscapePhoneCanvas() && scale > 2.0f) {
         scale = 2.0f;
     }
+#endif
     return scale;
 }
 

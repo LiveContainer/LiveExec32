@@ -3,7 +3,7 @@ LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash \
   check-guest-thumb-linker check-uikit-legacy-rootless-rotation-build \
   check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading \
   check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop \
-  check-foundation-ports-host
+  check-foundation-ports-host check-uikit-compatibility-switch
 LC32_HOST_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),\
   $(if $(strip $(filter-out $(LC32_HOST_TEST_GOALS),$(MAKECMDGOALS))),,1),)
 
@@ -35,7 +35,10 @@ BUILD_INFO_LOGGING_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/build-info-
   check-guest-thumb-linker check-uikit-legacy-rootless-rotation-build \
   check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading \
   check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop \
-  check-foundation-ports-host
+  check-foundation-ports-host check-uikit-compatibility-switch
+
+check-uikit-compatibility-switch:
+	sh ./uikit_compatibility_switch.sh
 check-mediaplayer-stop: $(MEDIAPLAYER_STOP_HOST_TEST)
 	"$(MEDIAPLAYER_STOP_HOST_TEST)"
 
@@ -52,7 +55,8 @@ check-uikit-background-tasks: $(UIKIT_BACKGROUND_TASKS_HOST_TEST)
 
 $(UIKIT_BACKGROUND_TASKS_HOST_TEST): uikit_background_tasks_host.m \
   background-task-stubs/UIKit/UIKit.h background-task-stubs/LC32/LC32.h \
-  ../GuestFrameworks/UIKit/UIApplication+LC32BlockCompatibility.m
+  ../GuestFrameworks/UIKit/UIApplication+LC32BlockCompatibility.m \
+  ../include/LC32UIKitCompatibilityConfig.h
 	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
 	$(HOST_CC) -Wall -Wextra -Werror \
 		-fobjc-arc -fblocks -Ibackground-task-stubs -framework Foundation \
@@ -83,7 +87,7 @@ check-legacy-nib-loading: $(LEGACY_NIB_LOADING_HOST_TEST)
 
 $(LEGACY_NIB_LOADING_HOST_TEST): legacy_nib_loading_host.mm \
   ../HostFrameworks/UIKit/LegacyNibLoading.mm \
-  ../HostFrameworks/UIKit/LegacyNibLoading.h
+  ../HostFrameworks/UIKit/LegacyNibLoading.h ../include/LC32UIKitCompatibilityConfig.h
 	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
 	$(HOST_CXX) $(HOST_CXXFLAGS) -fobjc-arc -fmodules \
 		-fmodules-cache-path="$(abspath ../.theos/module-cache)" \

@@ -1,4 +1,6 @@
 #import "LC32LegacyRotation.h"
+#include "../../include/LC32UIKitCompatibilityConfig.h"
+#if LC32_UIKIT_COMPATIBILITY
 #import <objc/message.h>
 #import <objc/runtime.h>
 #include <pthread.h>
@@ -486,3 +488,8 @@ extern "C" void LC32FinishNativeLegacyRotationStartup(void) {
     if(OrientationBit(orientation)) UpdateWindows(orientation, false);
 }
 @end
+#else
+extern "C" bool LC32NativeLegacyRotationEnabled(void) { return false; }
+extern "C" void LC32PrepareNativeLegacyRotationClass(Class) {}
+extern "C" void LC32FinishNativeLegacyRotationStartup(void) {}
+#endif // LC32_UIKIT_COMPATIBILITY

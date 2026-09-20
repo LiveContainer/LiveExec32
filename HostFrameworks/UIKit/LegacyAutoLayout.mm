@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include "../../include/LC32UIKitCompatibilityConfig.h"
 
 /* This dyld SPI is not declared by the public SDK headers. Use UIKit's
  * platform/version predicate rather than interpreting a missing SDK as 0. */
@@ -14,6 +15,7 @@ struct LC32DyldBuildVersion {
 extern "C" bool dyld_program_sdk_at_least(LC32DyldBuildVersion version);
 
 extern "C" uint32_t LC32UIKitLegacyCompatibilityEnabled(void) {
+#if LC32_UIKIT_COMPATIBILITY
     /* Read once before host/guest compatibility methods or observers are
      * installed: changing modes with a live hierarchy is unsafe. UIKit's
      * native pre-iOS-8 window compositor already handles legacy rotation.
@@ -28,6 +30,9 @@ extern "C" uint32_t LC32UIKitLegacyCompatibilityEnabled(void) {
         return dyld_program_sdk_at_least({PLATFORM_IOS, 0x00080000});
     }();
     return enabled;
+#else
+    return 0;
+#endif
 }
 
 static BOOL LC32EnableLegacyLayoutPolicy(id, SEL) {
@@ -46,7 +51,8 @@ static BOOL LC32EnableLegacyLayoutPolicy(id, SEL) {
      * "Error in compatibility flow". This delegate opt-in selects rational
      * edges consistently in both engine setup and result extraction, unlike
      * skipping the assertion or replacing only the exported helper (which
-     * UIKit also inlines). Keep every other linked-SDK behavior unchanged.
+     * UIKit also inlines). Keep this _nsis_center:bounds:inEngine:forLayoutGuide:
+     * crash fix active even when optional UIKit compatibility is disabled.
      *
      * Replace only UIView's base implementation: subclasses with their own
      * policy must retain it. Install before the first guest layout engine. */
@@ -63,7 +69,8 @@ static BOOL LC32EnableLegacyLayoutPolicy(id, SEL) {
      * translatesAutoresizingMaskIntoConstraints == NO, which the old host
      * invariant rejects when an overlay/keyboard opens in landscape. Opt
      * just those native classes into hosting without autoresizing constraints;
-     * do not change their authored constraints or relax the UIView default. */
+     * do not change their authored constraints or relax the UIView default.
+     * Retain this crash fix when optional UIKit compatibility is disabled. */
     selector = sel_registerName("_hostsLayoutEngineAllowsTAMIC_NO");
     for(NSString *className in @[@"UITrackingWindowView", @"UIInputSetContainerView"]) {
         Class hostClass = NSClassFromString(className);

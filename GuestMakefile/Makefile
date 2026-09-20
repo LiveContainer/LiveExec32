@@ -9,6 +9,7 @@ OPTFLAG = -O2
 GO_EASY_ON_ME = 1
 # High-volume Objective-C send tracing is compiled out unless explicitly enabled.
 LC32_OBJC_TRACE ?= 0
+LC32_UIKIT_COMPATIBILITY ?= 1
 
 # Theos normally serializes product targets and only parallelizes source files
 # within one framework.  Let the top-level guest build fan independent
@@ -165,7 +166,7 @@ QuartzCore_LDFLAGS = \
   -current_version 1.6.0
 
 # UIKit needs ARC for weak properties
-UIKit_CFLAGS = -fobjc-arc
+UIKit_CFLAGS = -fobjc-arc -DLC32_UIKIT_COMPATIBILITY=$(LC32_UIKIT_COMPATIBILITY)
 UIKit_FRAMEWORKS = LC32
 UIKit_LDFLAGS = \
   -compatibility_version 1.0.0 \

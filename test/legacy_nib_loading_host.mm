@@ -1,4 +1,5 @@
 #import "../HostFrameworks/UIKit/LegacyNibLoading.h"
+#include "../include/LC32UIKitCompatibilityConfig.h"
 #include <stdio.h>
 
 @interface LC32TestNibBundle : NSBundle
@@ -31,8 +32,15 @@ int main(void) {
         NSString *missing = @"Could not load NIB in bundle: 'test' with name 'Optional'";
         bundle.failure = [NSException exceptionWithName:NSInternalInconsistencyException
             reason:missing userInfo:nil];
+#if LC32_UIKIT_COMPATIBILITY
         check(LC32LoadGuestNib(bundle, @"Optional", nil, nil) == nil,
               "missing-optional-nib-returns-nil");
+#else
+        BOOL propagated = NO;
+        @try { LC32LoadGuestNib(bundle, @"Optional", nil, nil); }
+        @catch(NSException *actual) { propagated = actual == bundle.failure; }
+        check(propagated, "native-missing-nib-exception-preserved");
+#endif
         NSArray *failuresToPreserve = @[
             [NSException exceptionWithName:NSInvalidUnarchiveOperationException
                 reason:missing userInfo:nil],

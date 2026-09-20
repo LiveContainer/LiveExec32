@@ -3304,6 +3304,7 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
     }
 
     auto finishIndirectArguments = [&](u64 result) -> u64 {
+#if LC32_UIKIT_COMPATIBILITY
         /* Legacy controller overlays can apply portrait-window geometry in
          * several consecutive setters. Let UIKit reconcile it after the
          * complete guest operation, not between transform/bounds/center. */
@@ -3318,6 +3319,7 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
         } else if(selector == @selector(setAutoresizingMask:)) {
             LC32UIKitDidSetGuestAutoresizingMask(receiver);
         }
+#endif
         for(size_t index = 0; index < 9; index++) {
             if(sizedIndirectGuestStorage[index]) {
                 (void)Dynarmic_mem_1write(

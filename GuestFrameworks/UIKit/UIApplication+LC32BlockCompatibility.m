@@ -2,34 +2,46 @@
 #import <UIKit/UIKit.h>
 
 #include <pthread.h>
+#include "../../include/LC32UIKitCompatibilityConfig.h"
 
+#if LC32_UIKIT_COMPATIBILITY
 static pthread_mutex_t LC32BackgroundTaskMutex = PTHREAD_MUTEX_INITIALIZER;
 static NSMutableSet *LC32BackgroundTasks;
+#endif
 
 static UIBackgroundTaskIdentifier LC32BeginBackgroundTask(
         UIApplication *application, NSString *name, void (^handler)(void)) {
     __block UIBackgroundTaskIdentifier identifier = UIBackgroundTaskInvalid;
     void (^typedHandler)(void) = ^{
         if(handler) handler();
+#if LC32_UIKIT_COMPATIBILITY
         /* Some old analytics clients only log expiration. Release their
          * expired assertion so modern iOS can suspend, not kill, the guest.
          * endBackgroundTask: consumes the registration, making this a no-op
          * when the client's handler already ended the task itself. */
         [application endBackgroundTask:identifier];
+#endif
     };
 
     static uint64_t hostCommand __attribute__((aligned(8)));
     const uint64_t command = LC32CachedHostSelector(&hostCommand,
         @selector(beginBackgroundTaskWithName:expirationHandler:), NO);
+    // In native mode preserve nil handlers, but still marshal nonnil blocks
+    // through a typed ARM32 wrapper so their callback ABI remains valid.
+#if !LC32_UIKIT_COMPATIBILITY
+    if(!handler) typedHandler = nil;
+#endif
     identifier = (UIBackgroundTaskIdentifier)(uint32_t)LC32InvokeHostSelector(
         application.host_self, command, [name host_self],
         [typedHandler host_self], (uint64_t)0);
+#if LC32_UIKIT_COMPATIBILITY
     if(identifier != UIBackgroundTaskInvalid) {
         pthread_mutex_lock(&LC32BackgroundTaskMutex);
         if(!LC32BackgroundTasks) LC32BackgroundTasks = [NSMutableSet new];
         [LC32BackgroundTasks addObject:@(identifier)];
         pthread_mutex_unlock(&LC32BackgroundTaskMutex);
     }
+#endif
     return identifier;
 }
 
@@ -54,11 +66,13 @@ static UIBackgroundTaskIdentifier LC32BeginBackgroundTask(
 }
 
 - (void)endBackgroundTask:(UIBackgroundTaskIdentifier)identifier {
+#if LC32_UIKIT_COMPATIBILITY
     pthread_mutex_lock(&LC32BackgroundTaskMutex);
     const BOOL active = [LC32BackgroundTasks containsObject:@(identifier)];
     [LC32BackgroundTasks removeObject:@(identifier)];
     pthread_mutex_unlock(&LC32BackgroundTaskMutex);
     if(!active) return;
+#endif
 
     static uint64_t hostCommand __attribute__((aligned(8)));
     const uint64_t command = LC32CachedHostSelector(

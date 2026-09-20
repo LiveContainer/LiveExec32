@@ -3,6 +3,7 @@
 #include <dlfcn.h>
 #include "LC32FoundationBridgeABI.h"
 #include "LC32ObjCBridgeABI.h"
+#include "LC32UIKitCompatibilityConfig.h"
 #include "32bit.h"
 #include "dynarmic.h"
 
@@ -114,7 +115,8 @@ Class guest_objc_getClass_retHostClass(const char *name);
 u64 guest_objc_msgSend(int argc, u32 *args);
 BOOL host_hook_getClass(const char *name, Class *outClass);
 // Shared host/guest policy: native pre-iOS-8 processes use UIKit's compositor.
-// LC32_DISABLE_UIKIT_COMPATIBILITY=1 also disables adapters on modern hosts.
+// LC32_DISABLE_UIKIT_COMPATIBILITY=1 disables geometry adapters at runtime;
+// LC32_UIKIT_COMPATIBILITY=0 compiles out optional UIKit policy hooks in both halves.
 u32 LC32UIKitLegacyCompatibilityEnabled(void);
 // Lets framework bridges add native compatibility entry points after all
 // guest methods have been mirrored but before the class is registered.

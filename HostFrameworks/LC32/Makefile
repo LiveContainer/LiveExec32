@@ -9,6 +9,7 @@ OPTFLAG = -O2
 # Verbose bridge, loader, memory, and syscall traces are opt-in, independent
 # of optimization or debug symbols. Errors remain enabled in every build.
 LC32_DEBUG_LOGS ?= 0
+LC32_UIKIT_COMPATIBILITY ?= 1
 # The root app signs the embedded copy after its optional Catalyst rewrite.
 TARGET_CODESIGN =
 
@@ -77,7 +78,8 @@ LiveExec32Shared_FILES = \
 	../UIKit/LegacyRotation.mm ../UIKit/LegacyNibLoading.mm
 LiveExec32Shared_CFLAGS = \
 	-I. -I$(DYNARMIC_ROOT)/src -I../../include -DDYNARMIC_MASTER \
-	-I../../External/mini-gdbstub/include -DLC32_DEBUG_LOGS=$(LC32_DEBUG_LOGS)
+	-I../../External/mini-gdbstub/include -DLC32_DEBUG_LOGS=$(LC32_DEBUG_LOGS) \
+	-DLC32_UIKIT_COMPATIBILITY=$(LC32_UIKIT_COMPATIBILITY)
 LiveExec32Shared_CCFLAGS = -std=c++17
 crash_exception.mm_CFLAGS = -fobjc-arc
 ../UIKit/LegacyFonts.mm_CFLAGS = -fobjc-arc
@@ -111,6 +113,17 @@ internal-clean::
 	$(MAKE) -C ../../External/mini-gdbstub clean
 
 include $(THEOS_MAKE_PATH)/framework.mk
+
+# Reverting a flag can reuse cached objects without relinking in Theos.
+ifneq ($(strip $(THEOS_CURRENT_ARCH)),)
+LC32_UIKIT_BUILD_CONFIG := $(THEOS_OBJ_DIR)/.uikit-compatibility-config
+.PHONY: lc32-uikit-build-config-force
+$(LC32_UIKIT_BUILD_CONFIG): lc32-uikit-build-config-force
+	@mkdir -p "$(@D)"
+	@printf '%s\n' "LC32_UIKIT_COMPATIBILITY=$(LC32_UIKIT_COMPATIBILITY)" > "$@.tmp"
+	@if cmp -s "$@.tmp" "$@"; then rm -f "$@.tmp"; else mv -f "$@.tmp" "$@"; fi
+$(OBJ_FILES_TO_LINK): $(LC32_UIKIT_BUILD_CONFIG)
+endif
 
 # Theos otherwise treats its before-hook and internal framework build as
 # parallel siblings when explicit parallel mode is enabled. Dynarmic must
