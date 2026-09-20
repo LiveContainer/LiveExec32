@@ -109,6 +109,10 @@ simulator-only failure. Godzilla remains unfixed.
 
 ## Other issue status and source exclusions
 
+Update September 26: the [approved-source audit](skipped-game-sources-2026-09-26.md)
+found catalog copies of the titles excluded below. Their September 22 exclusions
+are retained here as history, not as a claim that approved copies are unavailable.
+
 - [#52 SpongeBob Marbles](https://github.com/LiveContainer/LiveExec32/issues/52):
   the missing `AudioQueueReset` is covered by `f01b6cc` and the AudioQueue
   regressions; this pass does not claim an end-to-end game retest.

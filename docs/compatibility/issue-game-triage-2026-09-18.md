@@ -110,6 +110,11 @@ reporter hypotheses, not diagnoses established by this pass.
 
 ## Skipped because the issue supplies another download source
 
+Update September 26: the user requested a fresh search through the approved
+catalogs. See the [approved-source audit](skipped-game-sources-2026-09-26.md)
+for newly eligible copies and the Cling Thing version mismatch. The exclusions
+below describe the original September 18 pass, not current source availability.
+
 | Issue | Game | Unapproved issue-provided download source |
 | --- | --- | --- |
 | [#42](https://github.com/LiveContainer/LiveExec32/issues/42) | Super Monkey Ball 1.3 | Direct archive.org IPA, in addition to a LegacyStore page |
