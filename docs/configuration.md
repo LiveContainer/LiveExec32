@@ -101,6 +101,17 @@ methods are available. The font regression also checks text-field alerts,
 titled/untitled action sheets, repeated animated/nonanimated dismissal,
 presenter visibility and preservation of the native window policy.
 
+With UIKit compatibility enabled, all six captured `setStatusBarOrientation:`
+forms record orientation intent for the existing host geometry adapter: the
+plain/animated forms, animation/duration, animation parameters, and both
+notification/fence forms (including `updateBlock:`). Each still forwards its
+original native selector and arguments; this does not restore selectors removed
+by the host OS or broaden the adapter's SDK/runtime policy. With the compile
+switch disabled they only forward the native call. Run
+`gmake -C test check-uikit-status-bar-orientation` to check both compile modes and
+runtime-policy gating, argument forwarding, and deferred block delivery against
+a recording host without launching a game.
+
 ### Compile without UIKit compatibility hooks
 
 Build **both halves** with `LC32_UIKIT_COMPATIBILITY=0` to try native UIKit

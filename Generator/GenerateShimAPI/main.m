@@ -1033,15 +1033,23 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
         [selector isEqualToString:@"imageWithCGImage:scale:orientation:"])) {
         return YES;
     }
-    /* Modern UIApplication accepts these deprecated selectors but no longer
-     * applies their orientation request. The manual guest adapter sends the
-     * intent to the host scene compatibility layer directly, keeping UIKit
-     * policy out of the generic Objective-C dispatcher. */
+    /* Every captured status-bar orientation setter has a manual guest adapter
+     * that records the intent for the host scene compatibility layer before
+     * preserving the native call. Do not also emit a generated implementation
+     * that can bypass it. Native selector availability is unchanged. */
     if([className isEqualToString:@"UIApplication"] &&
        method.isInstanceMethod &&
        ([selector isEqualToString:@"setStatusBarOrientation:"] ||
         [selector isEqualToString:
-            @"setStatusBarOrientation:animated:"])) {
+            @"setStatusBarOrientation:animated:"] ||
+        [selector isEqualToString:
+            @"setStatusBarOrientation:animation:duration:"] ||
+        [selector isEqualToString:
+            @"setStatusBarOrientation:animationParameters:"] ||
+        [selector isEqualToString:
+            @"setStatusBarOrientation:animationParameters:notifySpringBoardAndFence:"] ||
+        [selector isEqualToString:
+            @"setStatusBarOrientation:animationParameters:notifySpringBoardAndFence:updateBlock:"])) {
         return YES;
     }
     /* UIDevice uniqueIdentifier was removed from the host SDK (iOS 7), so

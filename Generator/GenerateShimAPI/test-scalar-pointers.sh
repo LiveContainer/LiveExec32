@@ -14,6 +14,7 @@ NSSTRING_SOURCE="$TEMP_ROOT/UIKit/NSString.m"
 UIDEVICE_SOURCE="$TEMP_ROOT/UIKit/UIDevice.m"
 UICOLOR_SOURCE="$TEMP_ROOT/UIKit/UIColor.m"
 CGIMAGE_SOURCE="$TEMP_ROOT/UIKit/LC32CGImageFixture.m"
+APPLICATION_SOURCE="$TEMP_ROOT/UIKit/UIApplication.m"
 
 require_line() {
     needle=$1
@@ -75,6 +76,13 @@ if grep -Fq -- '- (int)userInterfaceIdiom' "$UIDEVICE_SOURCE"; then
     echo "Manual UIDevice property adapter still has a generated method" >&2
     exit 1
 fi
+
+if grep -Eq '^[-+] .*setStatusBarOrientation:' "$APPLICATION_SOURCE"; then
+    echo "Manual UIApplication orientation adapters still have generated methods" >&2
+    exit 1
+fi
+require_line '- (int)statusBarOrientation {' "$APPLICATION_SOURCE"
+require_line '- (void)setStatusBarHidden:' "$APPLICATION_SOURCE"
 
 require_line '- (CGColorRef)CGColor {' "$UICOLOR_SOURCE"
 require_line \

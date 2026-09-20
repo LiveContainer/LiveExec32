@@ -38,6 +38,14 @@ check_symbol "$guest" '_UIApplicationMain' 1
 check_symbol "$guest" '_LC32DisableLegacyAdMobNetworking' 1
 check_symbol "$guest" '-[UIDevice(LC32LegacyUniqueIdentifier) uniqueIdentifier]' 1
 check_symbol "$guest" '_LC32ResolveLegacyUniqueIdentifierFallback' 1
+for selector in 'setStatusBarOrientation:' 'setStatusBarOrientation:animated:' \
+    'setStatusBarOrientation:animation:duration:' \
+    'setStatusBarOrientation:animationParameters:' \
+    'setStatusBarOrientation:animationParameters:notifySpringBoardAndFence:' \
+    'setStatusBarOrientation:animationParameters:notifySpringBoardAndFence:updateBlock:'; do
+    check_symbol "$guest" "-[UIApplication(LC32LegacyOrientation) $selector]" 1
+    check_symbol "$guest" "-[UIApplication $selector]" 0
+done
 check_symbol "$guest" '-[UIScreen(LC32LegacyCanvas) bounds]' 1
 check_symbol "$guest" '-[UIWebView(LC32LegacyUserAgent) loadRequest:]' 1
 echo "UIKit linked-product compatibility audit mode=$mode: PASS"

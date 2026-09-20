@@ -4,6 +4,28 @@
 <dict>
     <key>UIKit</key>
     <dict>
+        <key>UIApplication</key>
+        <dict>
+            <key>-</key>
+            <dict>
+                <key>setStatusBarOrientation:</key>
+                <string>v12@0:4i8</string>
+                <key>setStatusBarOrientation:animated:</key>
+                <string>v16@0:4i8c12</string>
+                <key>setStatusBarOrientation:animation:duration:</key>
+                <string>v24@0:4i8i12d16</string>
+                <key>setStatusBarOrientation:animationParameters:</key>
+                <string>v16@0:4i8@12</string>
+                <key>setStatusBarOrientation:animationParameters:notifySpringBoardAndFence:</key>
+                <string>v20@0:4i8@12c16</string>
+                <key>setStatusBarOrientation:animationParameters:notifySpringBoardAndFence:updateBlock:</key>
+                <string>v24@0:4i8@12c16@?20</string>
+                <key>statusBarOrientation</key>
+                <string>i8@0:4</string>
+                <key>setStatusBarHidden:withAnimation:</key>
+                <string>v16@0:4c8i12</string>
+            </dict>
+        </dict>
         <key>LC32ScalarPointerFixture</key>
         <dict>
             <key>-</key>

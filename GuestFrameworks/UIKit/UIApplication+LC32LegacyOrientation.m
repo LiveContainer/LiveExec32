@@ -116,4 +116,62 @@ static void LC32ForwardLegacyOrientation(
         (uint64_t)(animated != NO), (uint64_t)0);
 }
 
+- (void)setStatusBarOrientation:(UIInterfaceOrientation)orientation
+                     animation:(int)animation duration:(NSTimeInterval)duration {
+    static uint64_t hostSelector __attribute__((aligned(8)));
+    const uint64_t selector = LC32CachedHostSelector(&hostSelector, _cmd, NO);
+    const uint64_t hostSelf = self.host_self;
+#if LC32_UIKIT_COMPATIBILITY
+    LC32ForwardLegacyOrientation(orientation);
+#endif
+    LC32InvokeHostSelector(hostSelf, selector,
+        (uint64_t)(int64_t)orientation, (uint64_t)(int64_t)animation,
+        (double)duration, (uint64_t)0);
+}
+
+- (void)setStatusBarOrientation:(UIInterfaceOrientation)orientation
+           animationParameters:(id)parameters {
+    static uint64_t hostSelector __attribute__((aligned(8)));
+    const uint64_t selector = LC32CachedHostSelector(&hostSelector, _cmd, NO);
+    const uint64_t hostSelf = self.host_self;
+    const uint64_t hostParameters = [parameters host_self];
+#if LC32_UIKIT_COMPATIBILITY
+    LC32ForwardLegacyOrientation(orientation);
+#endif
+    LC32InvokeHostSelector(hostSelf, selector,
+        (uint64_t)(int64_t)orientation, hostParameters, (uint64_t)0);
+}
+
+- (void)setStatusBarOrientation:(UIInterfaceOrientation)orientation
+           animationParameters:(id)parameters notifySpringBoardAndFence:(BOOL)notify {
+    static uint64_t hostSelector __attribute__((aligned(8)));
+    const uint64_t selector = LC32CachedHostSelector(&hostSelector, _cmd, NO);
+    const uint64_t hostSelf = self.host_self;
+    const uint64_t hostParameters = [parameters host_self];
+#if LC32_UIKIT_COMPATIBILITY
+    LC32ForwardLegacyOrientation(orientation);
+#endif
+    LC32InvokeHostSelector(hostSelf, selector,
+        (uint64_t)(int64_t)orientation, hostParameters,
+        (uint64_t)(notify != NO), (uint64_t)0);
+}
+
+- (void)setStatusBarOrientation:(UIInterfaceOrientation)orientation
+           animationParameters:(id)parameters notifySpringBoardAndFence:(BOOL)notify
+                   updateBlock:(id)update {
+    static uint64_t hostSelector __attribute__((aligned(8)));
+    const uint64_t selector = LC32CachedHostSelector(&hostSelector, _cmd, NO);
+    const uint64_t hostSelf = self.host_self;
+    const uint64_t hostParameters = [parameters host_self];
+    // Preserve the existing NSBlock bridge and the block's actual signature;
+    // this orientation adapter must not guess its ABI or run it eagerly.
+    const uint64_t hostUpdate = [update host_self];
+#if LC32_UIKIT_COMPATIBILITY
+    LC32ForwardLegacyOrientation(orientation);
+#endif
+    LC32InvokeHostSelector(hostSelf, selector,
+        (uint64_t)(int64_t)orientation, hostParameters,
+        (uint64_t)(notify != NO), hostUpdate, (uint64_t)0);
+}
+
 @end
