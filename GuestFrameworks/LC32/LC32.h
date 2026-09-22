@@ -335,17 +335,6 @@ static inline NSRange LC32NarrowNSRange(LC32NSRange64 host) {
     return NSMakeRange((NSUInteger)host.location, (NSUInteger)host.length);
 }
 
-// NSInvocation receives a pointer to raw ARM32 argument storage. Unlike an
-// ordinary indirect argument, the pointed-to value has not yet been widened
-// or translated for the ARM64 host ABI; LC32InvokeHostSelector performs that
-// conversion using the invocation's method signature.
-static inline uint64_t LC32HostInvocationArgument(const void *storage) {
-    return storage
-        ? LC32_GUEST_INVOCATION_ARGUMENT_TAG |
-            (uint64_t)(uint32_t)(uintptr_t)storage
-        : 0;
-}
-
 // Floating Objective-C results are returned by the ARM64 host in FP
 // registers. The host bridge stores the result as IEEE-754 double bits so a
 // generated ARM32 shim can reconstruct it before narrowing to float/CGFloat.

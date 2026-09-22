@@ -79,11 +79,12 @@ _LC32InvokeHostMessageSixDoubles:
     ret
     .cfi_endproc
 
-// Signature-gated scalar callbacks capture the integer and FP banks before
+// Signature-gated callbacks capture the integer and FP banks before
 // any C/Objective-C bookkeeping can clobber caller-saved registers.
 // LC32ScalarCallbackFrame: integers[8] at 0, floating[8] at 64.
-.global _LC32InvokeGuestSelectorScalars
-_LC32InvokeGuestSelectorScalars:
+.macro LC32_VALUE_CALLBACK entry, helper
+.global \entry
+\entry:
     .cfi_startproc
     stp x29, x30, [sp, #-16]!
     .cfi_def_cfa_offset 16
@@ -101,7 +102,8 @@ _LC32InvokeGuestSelectorScalars:
     stp d4, d5, [sp, #96]
     stp d6, d7, [sp, #112]
     mov x0, sp
-    bl _LC32InvokeGuestSelectorScalarFrame
+    add x1, x29, #16 // original caller's stack arguments
+    bl \helper
     // C returns raw bits: integer/object values use x0, float/double values
     // use s0/d0. Setting both is harmless and requires no return-kind branch.
     fmov d0, x0
@@ -110,3 +112,7 @@ _LC32InvokeGuestSelectorScalars:
     .cfi_def_cfa sp, 0
     ret
     .cfi_endproc
+.endmacro
+
+LC32_VALUE_CALLBACK _LC32InvokeGuestSelectorScalars, _LC32InvokeGuestSelectorScalarFrame
+LC32_VALUE_CALLBACK _LC32InvokeGuestSelectorAggregates, _LC32InvokeGuestSelectorAggregateFrame

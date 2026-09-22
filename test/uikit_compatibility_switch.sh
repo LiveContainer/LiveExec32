@@ -22,21 +22,30 @@ for mode in 0 1; do
         -o "$workdir/nib-$mode"
     "$workdir/nib-$mode"
 
-    for unit in LegacyAutoLayout LegacyFonts LegacyAlerts LegacyRotation; do
+    for unit in LegacyAutoLayout LegacyFonts LegacyAlerts LegacyRotation GuestSelectorHooks; do
         xcrun --sdk iphoneos clang++ -arch arm64 -miphoneos-version-min=15.0 \
             -std=c++17 -fobjc-arc -Wno-deprecated-declarations \
             -DLC32_UIKIT_COMPATIBILITY="$mode" -I"$repo_root/include" \
+            -DDYNARMIC_MASTER -I"$repo_root/External/dynarmic/src" \
+            -I"$repo_root/External/mini-gdbstub/include" \
             -c "$repo_root/HostFrameworks/UIKit/$unit.mm" -o "$workdir/$unit.o"
         case "$unit" in
             LegacyAutoLayout|LegacyFonts|LegacyAlerts) expected=1 ;;
             *) expected=$mode ;;
         esac
-        if xcrun nm -U "$workdir/$unit.o" | grep -q 'OBJC_.*LC32'; then
+        pattern='OBJC_.*LC32'
+        if [ "$unit" = GuestSelectorHooks ]; then pattern='OBJC_CLASS_.*LC32GuestViewMutationHooks'; fi
+        if xcrun nm -U "$workdir/$unit.o" | grep -q "$pattern"; then
             test "$expected" = 1
         else
             test "$expected" = 0
         fi
         echo "PASS $unit hook metadata mode=$mode present=$expected"
+        if [ "$unit" = GuestSelectorHooks ]; then
+            xcrun nm -U "$workdir/$unit.o" | grep -Fq 'lc32_guestView]'
+            xcrun nm -U "$workdir/$unit.o" | grep -Fq 'lc32_guestLoadNibNamed:owner:options:]'
+            echo "PASS essential guest view/nib adapters retained mode=$mode"
+        fi
         if [ "$unit" = LegacyAutoLayout ]; then
             xcrun strings "$workdir/$unit.o" | grep -Fq '_forceLayoutEngineSolutionInRationalEdges'
             xcrun strings "$workdir/$unit.o" | grep -Fq '_hostsLayoutEngineAllowsTAMIC_NO'

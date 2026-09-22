@@ -16,8 +16,8 @@
     UINT64_C(0x4c43320100000000)
 #define LC32_GUEST_AGGREGATE_ARGUMENT_TAG \
     UINT64_C(0x4c43320200000000)
-#define LC32_GUEST_INVOCATION_ARGUMENT_TAG \
-    UINT64_C(0x4c43320300000000)
+/* 0x4c433203 was the retired NSInvocation pointer tag. Invocation shims now
+ * use explicit guest-storage methods; do not reuse this transport value. */
 #define LC32_GUEST_FLOATING_INDIRECT_ARGUMENT_TAG \
     UINT64_C(0x4c43320400000000)
 #define LC32_GUEST_SIZED_INDIRECT_ARGUMENT_TAG \

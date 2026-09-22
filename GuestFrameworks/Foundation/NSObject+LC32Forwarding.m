@@ -1,6 +1,7 @@
 #import <Foundation/Foundation+LC32.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
+#include <LC32PODType.h>
 
 #include <stdint.h>
 #include <stdio.h>
@@ -64,6 +65,11 @@ static unsigned LC32ForwardingTypeWords(const char *type, BOOL result) {
         case 'i': case 'I': case 'l': case 'L': case 'f':
         case '#': case ':': return 1;
         case '@': return type[1] == '?' ? UINT32_MAX : 1;
+        case '{': {
+            LC32PODType aggregate;
+            return !result && LC32PODStructType(type, 0, &aggregate)
+                ? (aggregate.size + 3) / 4 : UINT32_MAX;
+        }
         default: return UINT32_MAX;
     }
 }

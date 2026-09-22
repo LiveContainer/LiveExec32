@@ -58,6 +58,9 @@ u32 LC32GuestObjectForOwnedHostObject(CFTypeRef object);
 // Objective-C equivalent of LC32GuestObjectForOwnedHostObject. The caller
 // transfers a +1 result from an alloc/new/copy/mutableCopy method family.
 u32 LC32GuestObjectForOwnedHostObjectAddress(u64 object);
+// Borrowed conversion; the native autorelease lifetime and reverse-mapping
+// pin supply ownership, without adding a paired guest/native autorelease.
+u32 LC32GuestObjectForBorrowedHostResult(id object);
 // SVC 1019 host half. A non-sentinel result is an opaque pending-retain token.
 LC32HostWeakRetainResult LC32TryRetainHostWeakReference(u32 guest_object);
 // SVC 1021 commits or rolls back the token's exact native +1.
@@ -92,6 +95,9 @@ u64 LC32CreateHostBlock(u32 guest_block);
 u32 LC32HostToGuestArgument(char *type, u64 value);
 u64 LC32GuestToHostReturnType(char *type, u64 value);
 u64 LC32InvokeGuestSelector(id self, SEL _cmd, u64 arg2, u64 arg3, u64 arg4, u64 arg5, u64 arg6, u64 arg7, ...);
+// Typed void(id) callback; retains receiver/argument across the synchronous
+// executor when called from a native thread without a guest JIT.
+void LC32InvokeGuestObjectCallback(id receiver, SEL selector, id argument);
 u32 guest_dlsym(const char *host_name);
 u32 guest_free(u32 guest_ptr);
 u32 guest_class_copyIvarList(u32 guest_cls, unsigned int *outCount);

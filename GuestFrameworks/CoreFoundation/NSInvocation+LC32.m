@@ -15,7 +15,7 @@
     static uint64_t hostSelector __attribute__((aligned(8)));
     const uint64_t selector = LC32CachedHostSelector(&hostSelector, _cmd, NO);
     LC32InvokeHostSelector(self.host_self, selector,
-        LC32HostInvocationArgument(argumentLocation),
+        (uint64_t)(uintptr_t)argumentLocation,
         (uint64_t)(uint32_t)index, (uint64_t)0);
 }
 
@@ -23,14 +23,14 @@
     static uint64_t hostSelector __attribute__((aligned(8)));
     const uint64_t selector = LC32CachedHostSelector(&hostSelector, _cmd, NO);
     LC32InvokeHostSelector(self.host_self, selector,
-        LC32HostInvocationArgument(returnLocation), (uint64_t)0);
+        (uint64_t)(uintptr_t)returnLocation, (uint64_t)0);
 }
 
 - (void)setReturnValue:(void *)returnLocation {
     static uint64_t hostSelector __attribute__((aligned(8)));
     const uint64_t selector = LC32CachedHostSelector(&hostSelector, _cmd, NO);
     LC32InvokeHostSelector(self.host_self, selector,
-        LC32HostInvocationArgument(returnLocation), (uint64_t)0);
+        (uint64_t)(uintptr_t)returnLocation, (uint64_t)0);
 }
 
 - (void)setArgument:(void *)argumentLocation atIndex:(NSInteger)index {
@@ -39,7 +39,7 @@
         &hostSelector, _cmd, NO);
     LC32InvokeHostSelector(
         self.host_self, selector,
-        LC32HostInvocationArgument(argumentLocation),
+        (uint64_t)(uintptr_t)argumentLocation,
         (uint64_t)(uint32_t)index, (uint64_t)0);
 }
 

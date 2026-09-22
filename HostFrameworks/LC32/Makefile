@@ -65,8 +65,9 @@ LiveExec32Shared_FILES = \
 	dynarmic_memory.cpp dynarmic_callbacks.cpp dynarmic_thread_state.cpp \
 	dynarmic_native_jit.cpp dynarmic_psynch.cpp dynarmic_workqueue.cpp \
 	dynarmic_core.cpp filesystem.cpp variables.cpp ap_getparents.c target.c \
-	bridge.mm block_bridge.mm bridge.s log.m \
+	bridge.mm host_selector_hooks.mm block_bridge.mm bridge.s log.m \
 	../Foundation/Foundation.mm ../Foundation/NSString.mm ../Foundation/MachPort.mm \
+	../Foundation/NSInvocation.mm ../Foundation/NSNotificationCenter.mm \
 	../CoreFoundation/CoreFoundation.mm ../CFNetwork/CFNetwork.mm \
 	../Security/Security.mm ../CoreGraphics/CoreGraphics.mm \
 	../ImageIO/ImageIO.mm \
@@ -75,7 +76,7 @@ LiveExec32Shared_FILES = \
 	../Accelerate/Accelerate.mm \
 	../OpenAL/OpenAL.mm ../OpenGLES/OpenGLES.mm ../UIKit/UIKit.mm \
 	../UIKit/LegacyAutoLayout.mm ../UIKit/LegacyFonts.mm ../UIKit/LegacyAlerts.mm \
-	../UIKit/LegacyRotation.mm ../UIKit/LegacyNibLoading.mm
+	../UIKit/LegacyRotation.mm ../UIKit/LegacyNibLoading.mm ../UIKit/GuestSelectorHooks.mm
 LiveExec32Shared_CFLAGS = \
 	-I. -I$(DYNARMIC_ROOT)/src -I../../include -DDYNARMIC_MASTER \
 	-I../../External/mini-gdbstub/include -DLC32_DEBUG_LOGS=$(LC32_DEBUG_LOGS) \

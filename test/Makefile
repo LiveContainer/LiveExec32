@@ -4,7 +4,7 @@ LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash \
   check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading \
   check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop \
   check-foundation-ports-host check-uikit-compatibility-switch check-uikit-status-bar-orientation \
-  check-guest-install
+  check-guest-install check-host-selector-hooks
 LC32_HOST_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),\
   $(if $(strip $(filter-out $(LC32_HOST_TEST_GOALS),$(MAKECMDGOALS))),,1),)
 
@@ -37,7 +37,14 @@ BUILD_INFO_LOGGING_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/build-info-
   check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading \
   check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop \
   check-foundation-ports-host check-uikit-compatibility-switch check-uikit-status-bar-orientation \
-  check-guest-install
+  check-guest-install check-host-selector-hooks
+
+check-host-selector-hooks:
+	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
+	$(HOST_CXX) $(HOST_CXXFLAGS) -fobjc-arc -framework Foundation \
+		host_selector_hooks.mm ../HostFrameworks/LC32/host_selector_hooks.mm \
+		-o "$(HOST_TEST_OUTPUT_DIR)/host-selector-hooks"
+	"$(HOST_TEST_OUTPUT_DIR)/host-selector-hooks"
 
 check-guest-install:
 	sh ./guest_install.sh
@@ -377,6 +384,7 @@ $(eval $(call lc32_guest_test,lc32-nsvalue-bytes,nsvalue_bytes.m,Foundation Quar
 $(eval $(call lc32_guest_test,lc32-notification-selector,notification_selector.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-foundation-not-found,foundation_not_found.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-nsproxy-bridge,nsproxy_bridge.m,Foundation LC32))
+$(eval $(call lc32_guest_test,lc32-forwarding-structs,forwarding_structs.m,Foundation CoreGraphics LC32))
 $(eval $(call lc32_guest_test,lc32-host-self-sidetable-race,host_self_sidetable_race.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-nullable-guest-cstring,nullable_guest_cstring.c,LC32))
 $(eval $(call lc32_guest_test,lc32-native-proxy-release,native_proxy_release.m,Foundation LC32))
