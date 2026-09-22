@@ -1671,29 +1671,39 @@ OSStatus AudioConverterFillComplexBuffer(
 }
 
 OSStatus AudioQueueFlush(AudioQueueRef inAQ) {
-    return inAQ ? noErr : kAudio_ParamError;
+    if(!inAQ) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(LC32AudioToolboxOpAudioQueueFlush,
+        LC32_AUDIO_U32((uintptr_t)inAQ));
+}
+
+OSStatus AudioQueueReset(AudioQueueRef inAQ) {
+    if(!inAQ) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(LC32AudioToolboxOpAudioQueueReset,
+        LC32_AUDIO_U32((uintptr_t)inAQ));
 }
 
 OSStatus AudioQueueSetOfflineRenderFormat(
         AudioQueueRef inAQ,
         const AudioStreamBasicDescription *inFormat,
         const AudioChannelLayout *inLayout) {
-    (void)inAQ;
-    (void)inFormat;
-    (void)inLayout;
-    return kAudio_ParamError;
+    if(!inAQ) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioQueueSetOfflineRenderFormat,
+        LC32_AUDIO_U32((uintptr_t)inAQ),
+        LC32_AUDIO_U32((uintptr_t)inFormat),
+        LC32_AUDIO_U32((uintptr_t)inLayout));
 }
 
 OSStatus AudioQueueOfflineRender(AudioQueueRef inAQ,
                                  const AudioTimeStamp *inTimestamp,
                                  AudioQueueBufferRef ioBuffer,
                                  UInt32 inNumberFrames) {
-    (void)inTimestamp;
-    (void)inNumberFrames;
-    if(!inAQ || !ioBuffer) return kAudio_ParamError;
-    ioBuffer->mAudioDataByteSize = 0;
-    ioBuffer->mPacketDescriptionCount = 0;
-    return kAudio_ParamError;
+    if(!inAQ || !ioBuffer || !inTimestamp) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioQueueOfflineRender,
+        LC32_AUDIO_U32((uintptr_t)inAQ),
+        LC32_AUDIO_U32((uintptr_t)inTimestamp),
+        LC32_AUDIO_U32((uintptr_t)ioBuffer), LC32_AUDIO_U32(inNumberFrames));
 }
 
 // TODO: remaining AudioServices forwarding
@@ -1902,6 +1912,15 @@ OSStatus AudioQueueGetProperty(AudioQueueRef inAQ, AudioQueuePropertyID inID, vo
         LC32_AUDIO_U32((uintptr_t)ioDataSize));
 }
 
+OSStatus AudioQueueGetPropertySize(AudioQueueRef inAQ,
+        AudioQueuePropertyID inID, UInt32 *outDataSize) {
+    if(!inAQ || !outDataSize) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioQueueGetPropertySize,
+        LC32_AUDIO_U32((uintptr_t)inAQ), LC32_AUDIO_U32(inID),
+        LC32_AUDIO_U32((uintptr_t)outDataSize));
+}
+
 OSStatus AudioQueueNewInput(const AudioStreamBasicDescription * inFormat, AudioQueueInputCallback inCallbackProc, void * inUserData, CFRunLoopRef inCallbackRunLoop, CFStringRef inCallbackRunLoopMode, UInt32 inFlags, AudioQueueRef * outAQ) {
     if(outAQ) *outAQ = NULL;
     if(!inFormat || !inCallbackProc || !outAQ) return kAudio_ParamError;
@@ -2013,6 +2032,26 @@ OSStatus AudioQueueCreateTimeline(AudioQueueRef inAQ,
         LC32_AUDIO_U32((uintptr_t)outTimeline));
 }
 
+OSStatus AudioQueueDeviceTranslateTime(AudioQueueRef inAQ,
+        const AudioTimeStamp *inTime, AudioTimeStamp *outTime) {
+    if(!inAQ || !inTime || !outTime) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioQueueDeviceTranslateTime,
+        LC32_AUDIO_U32((uintptr_t)inAQ),
+        LC32_AUDIO_U32((uintptr_t)inTime),
+        LC32_AUDIO_U32((uintptr_t)outTime));
+}
+
+OSStatus AudioQueueDeviceGetNearestStartTime(AudioQueueRef inAQ,
+        AudioTimeStamp *ioRequestedStartTime, UInt32 inFlags) {
+    if(!inAQ || !ioRequestedStartTime) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioQueueDeviceGetNearestStartTime,
+        LC32_AUDIO_U32((uintptr_t)inAQ),
+        LC32_AUDIO_U32((uintptr_t)ioRequestedStartTime),
+        LC32_AUDIO_U32(inFlags));
+}
+
 OSStatus AudioQueueDisposeTimeline(AudioQueueRef inAQ,
                                    AudioQueueTimelineRef inTimeline) {
     if(!inAQ || !inTimeline) return kAudio_ParamError;
@@ -2049,14 +2088,19 @@ OSStatus AudioQueueEnqueueBufferWithParameters(
         const AudioQueueParameterEvent *inParamValues,
         const AudioTimeStamp *inStartTime,
         AudioTimeStamp *outActualStartTime) {
-    if(outActualStartTime)
-        memset(outActualStartTime, 0, sizeof(*outActualStartTime));
-    if(inTrimFramesAtStart || inTrimFramesAtEnd || inNumParamValues ||
-       inParamValues || inStartTime) {
-        return kAudio_UnimplementedError;
-    }
-    return AudioQueueEnqueueBuffer(inAQ, inBuffer, inNumPacketDescs,
-        inPacketDescs);
+    if(!inAQ || !inBuffer || (inNumParamValues && !inParamValues))
+        return kAudio_ParamError;
+    const LC32AudioQueueEnqueueParameters parameters = {
+        inTrimFramesAtStart, inTrimFramesAtEnd, inNumParamValues,
+        (uint32_t)(uintptr_t)inParamValues, (uint32_t)(uintptr_t)inStartTime,
+        (uint32_t)(uintptr_t)outActualStartTime,
+    };
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioQueueEnqueueBufferWithParameters,
+        LC32_AUDIO_U32((uintptr_t)inAQ),
+        LC32_AUDIO_U32((uintptr_t)inBuffer), LC32_AUDIO_U32(inNumPacketDescs),
+        LC32_AUDIO_U32((uintptr_t)inPacketDescs),
+        LC32_AUDIO_U32((uintptr_t)&parameters));
 }
 
 OSStatus AudioQueuePrime(AudioQueueRef inAQ,
@@ -2094,6 +2138,15 @@ OSStatus AudioQueueSetParameter(AudioQueueRef inAQ,
         LC32AudioToolboxOpAudioQueueSetParameter,
         LC32_AUDIO_U32((uintptr_t)inAQ), LC32_AUDIO_U32(inParamID),
         LC32_AUDIO_U32(representation.bits));
+}
+
+OSStatus AudioQueueGetParameter(AudioQueueRef inAQ,
+        AudioQueueParameterID inParamID, AudioQueueParameterValue *outValue) {
+    if(!inAQ || !outValue) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioQueueGetParameter,
+        LC32_AUDIO_U32((uintptr_t)inAQ), LC32_AUDIO_U32(inParamID),
+        LC32_AUDIO_U32((uintptr_t)outValue));
 }
 
 OSStatus AudioSessionInitialize(CFRunLoopRef inRunLoop, CFStringRef inRunLoopMode, AudioSessionInterruptionListener inInterruptionListener, void * inClientData) {
@@ -2319,6 +2372,68 @@ OSStatus AudioFileClose(AudioFileID audioFile) {
     return (OSStatus)LC32_AUDIO_CALL(
         LC32AudioToolboxOpAudioFileClose,
         LC32_AUDIO_U32((uintptr_t)audioFile));
+}
+
+#pragma mark Audio File Stream Services
+
+OSStatus AudioFileStreamOpen(void *clientData,
+        AudioFileStream_PropertyListenerProc propertyListener,
+        AudioFileStream_PacketsProc packetsProc, AudioFileTypeID hint,
+        AudioFileStreamID *outStream) {
+    if(outStream) *outStream = NULL;
+    if(!propertyListener || !packetsProc || !outStream)
+        return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(LC32AudioToolboxOpAudioFileStreamOpen,
+        LC32_AUDIO_U32((uintptr_t)clientData),
+        LC32_AUDIO_U32((uintptr_t)propertyListener),
+        LC32_AUDIO_U32((uintptr_t)packetsProc), LC32_AUDIO_U32(hint),
+        LC32_AUDIO_U32((uintptr_t)outStream));
+}
+
+OSStatus AudioFileStreamParseBytes(AudioFileStreamID stream, UInt32 size,
+        const void *bytes, AudioFileStreamParseFlags flags) {
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioFileStreamParseBytes,
+        LC32_AUDIO_U32((uintptr_t)stream), LC32_AUDIO_U32(size),
+        LC32_AUDIO_U32((uintptr_t)bytes), LC32_AUDIO_U32(flags));
+}
+
+OSStatus AudioFileStreamGetPropertyInfo(AudioFileStreamID stream,
+        AudioFileStreamPropertyID property, UInt32 *size, Boolean *writable) {
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioFileStreamGetPropertyInfo,
+        LC32_AUDIO_U32((uintptr_t)stream), LC32_AUDIO_U32(property),
+        LC32_AUDIO_U32((uintptr_t)size),
+        LC32_AUDIO_U32((uintptr_t)writable));
+}
+
+OSStatus AudioFileStreamGetProperty(AudioFileStreamID stream,
+        AudioFileStreamPropertyID property, UInt32 *size, void *data) {
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioFileStreamGetProperty,
+        LC32_AUDIO_U32((uintptr_t)stream), LC32_AUDIO_U32(property),
+        LC32_AUDIO_U32((uintptr_t)size), LC32_AUDIO_U32((uintptr_t)data));
+}
+
+OSStatus AudioFileStreamSeek(AudioFileStreamID stream, SInt64 packetOffset,
+        SInt64 *byteOffset, AudioFileStreamSeekFlags *flags) {
+    return (OSStatus)LC32_AUDIO_CALL(LC32AudioToolboxOpAudioFileStreamSeek,
+        LC32_AUDIO_U32((uintptr_t)stream), (uint64_t)packetOffset,
+        LC32_AUDIO_U32((uintptr_t)byteOffset),
+        LC32_AUDIO_U32((uintptr_t)flags));
+}
+
+OSStatus AudioFileStreamSetProperty(AudioFileStreamID stream,
+        AudioFileStreamPropertyID property, UInt32 size, const void *data) {
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioFileStreamSetProperty,
+        LC32_AUDIO_U32((uintptr_t)stream), LC32_AUDIO_U32(property),
+        LC32_AUDIO_U32(size), LC32_AUDIO_U32((uintptr_t)data));
+}
+
+OSStatus AudioFileStreamClose(AudioFileStreamID stream) {
+    return (OSStatus)LC32_AUDIO_CALL(LC32AudioToolboxOpAudioFileStreamClose,
+        LC32_AUDIO_U32((uintptr_t)stream));
 }
 
 #pragma mark Extended Audio File Services

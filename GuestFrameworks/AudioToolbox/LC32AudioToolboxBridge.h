@@ -23,6 +23,16 @@ typedef struct {
     uint64_t slots[LC32AudioToolboxMaxSlots];
 } LC32AudioToolboxCall;
 
+/* Optional enqueue arguments use guest addresses, never native pointers. */
+typedef struct {
+    uint32_t trimStart;
+    uint32_t trimEnd;
+    uint32_t parameterCount;
+    uint32_t parameters;
+    uint32_t startTime;
+    uint32_t actualStartTime;
+} LC32AudioQueueEnqueueParameters;
+
 typedef enum : uint32_t {
     LC32AudioToolboxOpExtAudioFileOpenURL = 1,
     LC32AudioToolboxOpExtAudioFileDispose = 2,
@@ -76,6 +86,22 @@ typedef enum : uint32_t {
     LC32AudioToolboxOpAudioConverterDispose = 45,
     LC32AudioToolboxOpAudioConverterFillComplexBuffer = 46,
     LC32AudioToolboxOpExtAudioFileWrapAudioFileID = 47,
+    LC32AudioToolboxOpAudioFileStreamOpen = 48,
+    LC32AudioToolboxOpAudioFileStreamParseBytes = 49,
+    LC32AudioToolboxOpAudioFileStreamGetPropertyInfo = 50,
+    LC32AudioToolboxOpAudioFileStreamGetProperty = 51,
+    LC32AudioToolboxOpAudioFileStreamSeek = 52,
+    LC32AudioToolboxOpAudioFileStreamSetProperty = 53,
+    LC32AudioToolboxOpAudioFileStreamClose = 54,
+    LC32AudioToolboxOpAudioQueueReset = 55,
+    LC32AudioToolboxOpAudioQueueFlush = 56,
+    LC32AudioToolboxOpAudioQueueGetParameter = 57,
+    LC32AudioToolboxOpAudioQueueGetPropertySize = 58,
+    LC32AudioToolboxOpAudioQueueDeviceTranslateTime = 59,
+    LC32AudioToolboxOpAudioQueueDeviceGetNearestStartTime = 60,
+    LC32AudioToolboxOpAudioQueueEnqueueBufferWithParameters = 61,
+    LC32AudioToolboxOpAudioQueueSetOfflineRenderFormat = 62,
+    LC32AudioToolboxOpAudioQueueOfflineRender = 63,
 } LC32AudioToolboxOpcode;
 
 #endif

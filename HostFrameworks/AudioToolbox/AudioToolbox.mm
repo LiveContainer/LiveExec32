@@ -958,9 +958,9 @@ void MarkOutputAudioQueueBuffersAvailable(
     }
 }
 
-void ScheduleDeferredAudioQueueStop(
+void ScheduleDeferredAudioQueueControl(
         std::shared_ptr<AudioQueueEntry> entry,
-        Boolean immediate) {
+        Boolean immediate, bool reset = false) {
     dispatch_async(dispatch_get_global_queue(
             DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         {
@@ -976,13 +976,14 @@ void ScheduleDeferredAudioQueueStop(
 
         AudioQueueUse queueUse(entry);
         if(!queueUse) return;
-        const OSStatus status = AudioQueueStop(queueUse.queue(), immediate);
-        if(status == noErr && immediate)
+        const OSStatus status = reset ? AudioQueueReset(queueUse.queue())
+            : AudioQueueStop(queueUse.queue(), immediate);
+        if(status == noErr && immediate && !reset)
             MarkOutputAudioQueueBuffersAvailable(entry);
         if(status != noErr) {
             fprintf(stderr,
-                "LC32: deferred AudioQueueStop failed with status %d\n",
-                static_cast<int>(status));
+                "LC32: deferred AudioQueue%s failed with status %d\n",
+                reset ? "Reset" : "Stop", static_cast<int>(status));
         }
     });
 }
@@ -2788,8 +2789,8 @@ OSStatus DispatchAudioQueueAllocateBuffer(
 }
 
 OSStatus DispatchAudioQueueEnqueueBuffer(
-        const LC32AudioToolboxCall &call) {
-    if(!RequireSlots(call, 4)) return kAudio_ParamError;
+        const LC32AudioToolboxCall &call, bool withParameters = false) {
+    if(!RequireSlots(call, withParameters ? 5 : 4)) return kAudio_ParamError;
     auto entry = FindAudioQueue(SlotU32(call, 0));
     AudioQueueUse queueUse(entry);
     auto buffer = FindAudioQueueBuffer(entry, SlotU32(call, 1));
@@ -2802,6 +2803,24 @@ OSStatus DispatchAudioQueueEnqueueBuffer(
         return kAudioQueueErr_InvalidBuffer;
     }
     AudioQueueRef queue = queueUse.queue();
+
+    LC32AudioQueueEnqueueParameters options = {};
+    AudioTimeStamp start = {}, actualStart = {};
+    std::vector<AudioQueueParameterEvent> parameters;
+    if(withParameters) {
+        static_assert(sizeof(LC32AudioQueueEnqueueParameters) == 24);
+        static_assert(sizeof(AudioQueueParameterEvent) == 8);
+        if(entry->direction != AudioQueueDirection::Output ||
+           !ReadGuestBytes(SlotU32(call, 4), sizeof(options), &options) ||
+           options.parameterCount > kMaximumPropertyBytes /
+                sizeof(AudioQueueParameterEvent)) return kAudio_ParamError;
+        parameters.resize(options.parameterCount);
+        if(!ReadGuestBytes(options.parameters,
+                parameters.size() * sizeof(AudioQueueParameterEvent),
+                parameters.data()) ||
+           (options.startTime && !ReadGuestBytes(options.startTime,
+                sizeof(start), &start))) return kAudio_ParamError;
+    }
 
     GuestAudioQueueBuffer mirror = {};
     if(!ReadGuestBytes(buffer->guestBuffer, sizeof(mirror), &mirror) ||
@@ -2900,11 +2919,91 @@ OSStatus DispatchAudioQueueEnqueueBuffer(
 
     buffer->nativeBuffer->mAudioDataByteSize = mirror.audioDataByteSize;
     buffer->nativeBuffer->mPacketDescriptionCount = embeddedPacketCount;
-    const OSStatus status = AudioQueueEnqueueBuffer(queue,
-        buffer->nativeBuffer, externalPacketCount,
-        packetDescriptions.get());
+    const OSStatus status = withParameters
+        ? AudioQueueEnqueueBufferWithParameters(queue, buffer->nativeBuffer,
+            externalPacketCount, packetDescriptions.get(),
+            options.trimStart, options.trimEnd, options.parameterCount,
+            parameters.empty() ? nullptr : parameters.data(),
+            options.startTime ? &start : nullptr,
+            options.actualStartTime ? &actualStart : nullptr)
+        : AudioQueueEnqueueBuffer(queue, buffer->nativeBuffer,
+            externalPacketCount, packetDescriptions.get());
     if(status != noErr) buffer->outputEnqueued = false;
+    if(status == noErr && options.actualStartTime &&
+       !WriteGuestBytes(options.actualStartTime, sizeof(actualStart), &actualStart))
+        return kAudio_ParamError;
     return status;
+}
+
+OSStatus DispatchAudioQueueSetOfflineRenderFormat(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 3)) return kAudio_ParamError;
+    AudioQueueUse queueUse(FindAudioQueue(SlotU32(call, 0)));
+    if(!queueUse) return kAudio_ParamError;
+    AudioStreamBasicDescription format = {};
+    if(SlotU32(call, 1)) {
+        if(!ReadGuestBytes(SlotU32(call, 1), sizeof(format), &format))
+            return kAudio_ParamError;
+        format.mReserved = 0;
+    }
+    // AudioChannelLayout has fixed-width fields on both ABIs, followed by
+    // a variable number of 20-byte AudioChannelDescriptions.
+    std::vector<uint8_t> layout;
+    if(SlotU32(call, 2)) {
+        constexpr size_t headerSize = offsetof(AudioChannelLayout, mChannelDescriptions);
+        static_assert(headerSize == 12 && sizeof(AudioChannelDescription) == 20);
+        u32 header[3] = {};
+        if(!ReadGuestBytes(SlotU32(call, 2), headerSize, header) ||
+           header[2] > (kMaximumPropertyBytes - headerSize) /
+                sizeof(AudioChannelDescription)) return kAudio_ParamError;
+        layout.resize(headerSize + header[2] * sizeof(AudioChannelDescription));
+        if(!ReadGuestBytes(SlotU32(call, 2), layout.size(), layout.data()))
+            return kAudio_ParamError;
+    }
+    AudioToolboxGuestHostCallQuiescence quiescence;
+    return AudioQueueSetOfflineRenderFormat(queueUse.queue(),
+        SlotU32(call, 1) ? &format : nullptr, layout.empty() ? nullptr :
+            reinterpret_cast<const AudioChannelLayout *>(layout.data()));
+}
+
+OSStatus DispatchAudioQueueOfflineRender(const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 4)) return kAudio_ParamError;
+    auto entry = FindAudioQueue(SlotU32(call, 0));
+    AudioQueueUse queueUse(entry);
+    auto buffer = FindAudioQueueBuffer(entry, SlotU32(call, 2));
+    if(!queueUse || !buffer) return kAudioQueueErr_InvalidBuffer;
+    AudioTimeStamp time = {};
+    GuestAudioQueueBuffer mirror = {};
+    if(!ReadGuestBytes(SlotU32(call, 1), sizeof(time), &time) ||
+       !ReadGuestBytes(buffer->guestBuffer, sizeof(mirror), &mirror) ||
+       mirror.audioData != buffer->guestAudioData ||
+       mirror.audioDataBytesCapacity != buffer->audioDataCapacity ||
+       mirror.packetDescriptions != buffer->guestPacketDescriptions ||
+       mirror.packetDescriptionCapacity != buffer->packetDescriptionCapacity)
+        return kAudioQueueErr_InvalidBuffer;
+    std::unique_lock<std::mutex> lock(buffer->stateMutex);
+    if(buffer->outputEnqueued) return kAudioQueueErr_BufferInQueue;
+    OSStatus status;
+    {
+        AudioToolboxGuestHostCallQuiescence quiescence;
+        status = AudioQueueOfflineRender(queueUse.queue(), &time,
+            buffer->nativeBuffer, SlotU32(call, 3));
+    }
+    if(status != noErr) return status;
+    const auto native = buffer->nativeBuffer;
+    if(native->mAudioDataByteSize > buffer->audioDataCapacity ||
+       native->mPacketDescriptionCount > buffer->packetDescriptionCapacity ||
+       !WriteGuestBytes(buffer->guestAudioData, native->mAudioDataByteSize,
+            native->mAudioData) ||
+       !WriteGuestBytes(buffer->guestPacketDescriptions,
+            native->mPacketDescriptionCount * sizeof(AudioStreamPacketDescription),
+            native->mPacketDescriptions) ||
+       !WriteGuestU32(buffer->guestBuffer +
+            offsetof(GuestAudioQueueBuffer, audioDataByteSize), native->mAudioDataByteSize) ||
+       !WriteGuestU32(buffer->guestBuffer +
+            offsetof(GuestAudioQueueBuffer, packetDescriptionCount), native->mPacketDescriptionCount))
+        return kAudio_ParamError;
+    return noErr;
 }
 
 OSStatus DispatchAudioQueueFreeBuffer(
@@ -2993,6 +3092,36 @@ OSStatus DispatchAudioQueueSetProperty(
     }
     return AudioQueueSetProperty(queue, property, byteCount
         ? bytes.data() : nullptr, byteCount);
+}
+
+OSStatus DispatchAudioQueueGetPropertySize(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 3) || !SlotU32(call, 2))
+        return kAudio_ParamError;
+    if(!IsRawAudioQueueProperty(SlotU32(call, 1)))
+        return kAudioQueueErr_InvalidProperty;
+    AudioQueueUse queueUse(FindAudioQueue(SlotU32(call, 0)));
+    if(!queueUse) return kAudio_ParamError;
+    UInt32 size = 0;
+    const OSStatus status = AudioQueueGetPropertySize(
+        queueUse.queue(), SlotU32(call, 1), &size);
+    if(status == noErr && !WriteGuestU32(SlotU32(call, 2), size))
+        return kAudio_ParamError;
+    return status;
+}
+
+OSStatus DispatchAudioQueueGetParameter(const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 3) || !SlotU32(call, 2))
+        return kAudio_ParamError;
+    AudioQueueUse queueUse(FindAudioQueue(SlotU32(call, 0)));
+    if(!queueUse) return kAudio_ParamError;
+    AudioQueueParameterValue value = 0;
+    const OSStatus status = AudioQueueGetParameter(
+        queueUse.queue(), SlotU32(call, 1), &value);
+    if(status == noErr &&
+       !WriteGuestBytes(SlotU32(call, 2), sizeof(value), &value))
+        return kAudio_ParamError;
+    return status;
 }
 
 OSStatus DispatchAudioQueueSetParameter(
@@ -3253,6 +3382,42 @@ OSStatus DispatchAudioQueueGetCurrentTime(
     return noErr;
 }
 
+OSStatus DispatchAudioQueueDeviceTranslateTime(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 3) || !SlotU32(call, 2))
+        return kAudio_ParamError;
+    AudioQueueUse queueUse(FindAudioQueue(SlotU32(call, 0)));
+    if(!queueUse) return kAudio_ParamError;
+    AudioTimeStamp input = {}, output = {};
+    // Native translation uses the output flags to select the representation.
+    // Copy both timestamps before writing so in-place translation also works.
+    if(!ReadGuestBytes(SlotU32(call, 1), sizeof(input), &input) ||
+       !ReadGuestBytes(SlotU32(call, 2), sizeof(output), &output))
+        return kAudio_ParamError;
+    const OSStatus status = AudioQueueDeviceTranslateTime(
+        queueUse.queue(), &input, &output);
+    if(status == noErr &&
+       !WriteGuestBytes(SlotU32(call, 2), sizeof(output), &output))
+        return kAudio_ParamError;
+    return status;
+}
+
+OSStatus DispatchAudioQueueDeviceGetNearestStartTime(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 3)) return kAudio_ParamError;
+    AudioQueueUse queueUse(FindAudioQueue(SlotU32(call, 0)));
+    if(!queueUse) return kAudio_ParamError;
+    AudioTimeStamp time = {};
+    if(!ReadGuestBytes(SlotU32(call, 1), sizeof(time), &time))
+        return kAudio_ParamError;
+    const OSStatus status = AudioQueueDeviceGetNearestStartTime(
+        queueUse.queue(), &time, SlotU32(call, 2));
+    if(status == noErr &&
+       !WriteGuestBytes(SlotU32(call, 1), sizeof(time), &time))
+        return kAudio_ParamError;
+    return status;
+}
+
 OSStatus DispatchAudioQueueStart(const LC32AudioToolboxCall &call) {
     if(!RequireSlots(call, 2)) return kAudio_ParamError;
     auto entry = FindAudioQueue(SlotU32(call, 0));
@@ -3316,7 +3481,7 @@ OSStatus DispatchAudioQueueStop(const LC32AudioToolboxCall &call) {
            entry->disposing || !entry->queue) return kAudio_ParamError;
         if(entry->activeCallbacks &&
            AudioQueueGuestCallbackIsOnCurrentThread(SlotU32(call, 0))) {
-            ScheduleDeferredAudioQueueStop(entry, immediate);
+            ScheduleDeferredAudioQueueControl(entry, immediate);
             return noErr;
         }
     }
@@ -3333,6 +3498,33 @@ OSStatus DispatchAudioQueuePause(const LC32AudioToolboxCall &call) {
     auto entry = FindAudioQueue(SlotU32(call, 0));
     AudioQueueUse queueUse(entry);
     return queueUse ? AudioQueuePause(queueUse.queue()) : kAudio_ParamError;
+}
+
+OSStatus DispatchAudioQueueReset(const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 1)) return kAudio_ParamError;
+    auto entry = FindAudioQueue(SlotU32(call, 0));
+    AudioQueueUse queueUse(entry);
+    if(!queueUse) return kAudio_ParamError;
+    if(AudioQueueGuestCallbackIsOnCurrentThread(entry->token)) {
+        // The logical guest callback may be on the callback executor rather
+        // than CoreAudio's thread. Waiting for that native callback here
+        // would wait for ourselves, just as with Stop/Dispose.
+        ScheduleDeferredAudioQueueControl(entry, true, true);
+        return noErr;
+    }
+    // Reset returns queued buffers through the normal callback bridge, which
+    // releases their ownership before invoking the guest. Native Reset also
+    // supplies EnqueueDuringReset if a callback tries to enqueue prematurely.
+    AudioToolboxGuestHostCallQuiescence quiescence;
+    return AudioQueueReset(queueUse.queue());
+}
+
+OSStatus DispatchAudioQueueFlush(const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 1)) return kAudio_ParamError;
+    AudioQueueUse queueUse(FindAudioQueue(SlotU32(call, 0)));
+    if(!queueUse) return kAudio_ParamError;
+    AudioToolboxGuestHostCallQuiescence quiescence;
+    return AudioQueueFlush(queueUse.queue());
 }
 
 OSStatus DispatchAudioQueueDispose(const LC32AudioToolboxCall &call) {
@@ -3398,6 +3590,297 @@ OSStatus DispatchAudioQueueDispose(const LC32AudioToolboxCall &call) {
     }
     ClearAudioQueueBuffers(entry);
     if(status != noErr) QuarantineAudioQueue(entry);
+    return status;
+}
+
+// File-stream callbacks are synchronous with ParseBytes. They may query the
+// same parser, so keep them on the calling guest thread and allow property
+// re-entry. Never expose native stream handles or callback buffers to ARM32.
+struct AudioFileStreamEntry {
+    AudioFileStreamID stream = nullptr;
+    u32 token = 0;
+    u32 clientData = 0;
+    u32 propertyListener = 0;
+    u32 packetsProc = 0;
+    bool parsing = false;
+    bool closed = false;
+    OSStatus callbackError = noErr;
+    std::recursive_mutex mutex;
+
+    ~AudioFileStreamEntry() {
+        if(stream) AudioFileStreamClose(stream);
+    }
+};
+
+std::mutex audioFileStreamsMutex;
+std::unordered_map<u32, std::shared_ptr<AudioFileStreamEntry>> audioFileStreams;
+u32 nextAudioFileStreamToken = 1;
+
+std::shared_ptr<AudioFileStreamEntry> FindAudioFileStream(u32 token) {
+    std::lock_guard<std::mutex> lock(audioFileStreamsMutex);
+    auto it = audioFileStreams.find(token);
+    return it == audioFileStreams.end() ? nullptr : it->second;
+}
+
+void AudioFileStreamPropertyBridge(void *context, AudioFileStreamID,
+        AudioFileStreamPropertyID property, AudioFileStreamPropertyFlags *flags) {
+    auto *entry = static_cast<AudioFileStreamEntry *>(context);
+    if(entry->closed || entry->callbackError) return;
+    GuestAudioFileCallbackStorage storage(0);
+    if(!storage || !WriteGuestU32(storage.actualCount(), *flags)) {
+        entry->callbackError = kAudio_MemFullError;
+        return;
+    }
+    u32 args[] = {entry->clientData, entry->token, property,
+                  storage.actualCount()};
+    LC32InvokeGuestC(entry->propertyListener, false, 4, args);
+    u32 updatedFlags = 0;
+    if(!ReadGuestU32(storage.actualCount(), updatedFlags)) {
+        entry->callbackError = kAudio_ParamError;
+        return;
+    }
+    *flags = static_cast<AudioFileStreamPropertyFlags>(updatedFlags);
+}
+
+void AudioFileStreamPacketsBridge(void *context, UInt32 byteCount,
+        UInt32 packetCount, const void *data,
+        AudioStreamPacketDescription *descriptions) {
+    auto *entry = static_cast<AudioFileStreamEntry *>(context);
+    if(entry->closed || entry->callbackError) return;
+    const uint64_t alignedBytes = (uint64_t{byteCount} + 7) & ~uint64_t{7};
+    const uint64_t descriptionBytes = descriptions
+        ? uint64_t{packetCount} * sizeof(GuestAudioStreamPacketDescription) : 0;
+    if(alignedBytes + descriptionBytes > kMaximumAudioBytes) {
+        entry->callbackError = kAudio_ParamError;
+        return;
+    }
+    GuestAudioFileCallbackStorage storage(
+        static_cast<u32>(alignedBytes + descriptionBytes));
+    if(!storage) {
+        entry->callbackError = kAudio_MemFullError;
+        return;
+    }
+    const u32 guestDescriptions = descriptions
+        ? storage.payload() + static_cast<u32>(alignedBytes) : 0;
+    // Packet-description fields and stride are identical on the two ABIs
+    // (asserted above); the pointers and their ownership are not.
+    if(!WriteGuestBytes(storage.payload(), byteCount, data) ||
+       !WriteGuestBytes(guestDescriptions, descriptionBytes, descriptions)) {
+        entry->callbackError = kAudio_ParamError;
+        return;
+    }
+    u32 args[] = {entry->clientData, byteCount, packetCount,
+                  storage.payload(), guestDescriptions};
+    LC32InvokeGuestC(entry->packetsProc, false, 5, args);
+}
+
+OSStatus DispatchAudioFileStreamOpen(const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 5) || !SlotU32(call, 1) || !SlotU32(call, 2) ||
+       !WriteGuestU32(SlotU32(call, 4), 0)) return kAudio_ParamError;
+    auto entry = std::make_shared<AudioFileStreamEntry>();
+    entry->clientData = SlotU32(call, 0);
+    entry->propertyListener = SlotU32(call, 1);
+    entry->packetsProc = SlotU32(call, 2);
+    const OSStatus status = AudioFileStreamOpen(entry.get(),
+        AudioFileStreamPropertyBridge, AudioFileStreamPacketsBridge,
+        SlotU32(call, 3), &entry->stream);
+    if(status != noErr) return status;
+    {
+        std::lock_guard<std::mutex> lock(audioFileStreamsMutex);
+        do {
+            entry->token = nextAudioFileStreamToken++;
+        } while(!entry->token || audioFileStreams.count(entry->token));
+        audioFileStreams.emplace(entry->token, entry);
+    }
+    if(WriteGuestU32(SlotU32(call, 4), entry->token)) return noErr;
+    std::lock_guard<std::mutex> lock(audioFileStreamsMutex);
+    audioFileStreams.erase(entry->token);
+    return kAudio_ParamError;
+}
+
+struct AudioFileStreamParseScope {
+    AudioFileStreamEntry &entry;
+    explicit AudioFileStreamParseScope(AudioFileStreamEntry &value) : entry(value) {
+        entry.parsing = true;
+        entry.callbackError = noErr;
+    }
+    ~AudioFileStreamParseScope() {
+        entry.parsing = false;
+        // Closing from a callback invalidates the guest token immediately,
+        // but the native parser must survive until ParseBytes has unwound.
+        if(entry.closed && entry.stream) {
+            AudioFileStreamClose(entry.stream);
+            entry.stream = nullptr;
+        }
+    }
+};
+
+OSStatus DispatchAudioFileStreamParseBytes(const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 4) || !Dynarmic_guest_thread_is_registered())
+        return kAudio_ParamError;
+    auto entry = FindAudioFileStream(SlotU32(call, 0));
+    const u32 size = SlotU32(call, 1);
+    if(!entry || size > kMaximumAudioBytes) return kAudio_ParamError;
+    std::vector<uint8_t> bytes(size ? size : 1);
+    if(!ReadGuestBytes(SlotU32(call, 2), size, bytes.data()))
+        return kAudio_ParamError;
+    std::lock_guard<std::recursive_mutex> lock(entry->mutex);
+    if(entry->closed) return kAudio_ParamError;
+    if(entry->parsing) return kAudioFileStreamError_IllegalOperation;
+    AudioFileStreamParseScope scope(*entry);
+    const OSStatus status = AudioFileStreamParseBytes(entry->stream, size,
+        bytes.data(), static_cast<AudioFileStreamParseFlags>(SlotU32(call, 3)));
+    return status == noErr ? entry->callbackError : status;
+}
+
+// Only these two POD properties have different element strides. All other
+// supported properties contain fixed-width scalars/bytes, never host pointers.
+bool AudioFileStreamPropertyLayout(u32 property, u32 &guestStride,
+                                  u32 &hostStride) {
+    guestStride = hostStride = 1;
+    switch(property) {
+        case kAudioFileStreamProperty_FormatList:
+            guestStride = 44;
+            hostStride = sizeof(AudioFormatListItem);
+            return true;
+        case kAudioFileStreamProperty_PacketToFrame:
+        case kAudioFileStreamProperty_FrameToPacket:
+            guestStride = 20;
+            hostStride = sizeof(AudioFramePacketTranslation);
+            return true;
+        case kAudioFileStreamProperty_ReadyToProducePackets:
+        case kAudioFileStreamProperty_FileFormat:
+        case kAudioFileStreamProperty_DataFormat:
+        case kAudioFileStreamProperty_MagicCookieData:
+        case kAudioFileStreamProperty_AudioDataByteCount:
+        case kAudioFileStreamProperty_AudioDataPacketCount:
+        case kAudioFileStreamProperty_MaximumPacketSize:
+        case kAudioFileStreamProperty_DataOffset:
+        case kAudioFileStreamProperty_ChannelLayout:
+        case kAudioFileStreamProperty_PacketToByte:
+        case kAudioFileStreamProperty_ByteToPacket:
+        case kAudioFileStreamProperty_PacketTableInfo:
+        case kAudioFileStreamProperty_PacketSizeUpperBound:
+        case kAudioFileStreamProperty_AverageBytesPerPacket:
+        case kAudioFileStreamProperty_BitRate:
+            return true;
+        default:
+            // InfoDictionary requires CF object ownership, not a byte copy.
+            return false;
+    }
+}
+
+static_assert(offsetof(AudioFormatListItem, mChannelLayoutTag) == 40);
+static_assert(offsetof(AudioFramePacketTranslation, mFrameOffsetInPacket) == 16);
+static_assert(sizeof(AudioBytePacketTranslation) == 24);
+static_assert(sizeof(AudioFilePacketTableInfo) == 16);
+
+OSStatus DispatchAudioFileStreamProperty(const LC32AudioToolboxCall &call,
+                                        LC32AudioToolboxOpcode opcode) {
+    if(!RequireSlots(call, 4)) return kAudio_ParamError;
+    auto entry = FindAudioFileStream(SlotU32(call, 0));
+    if(!entry) return kAudio_ParamError;
+    const u32 property = SlotU32(call, 1);
+    u32 guestStride = 0, hostStride = 0;
+    if(!AudioFileStreamPropertyLayout(property, guestStride, hostStride))
+        return kAudioFileStreamError_UnsupportedProperty;
+    std::lock_guard<std::recursive_mutex> lock(entry->mutex);
+    if(entry->closed) return kAudio_ParamError;
+    if(opcode == LC32AudioToolboxOpAudioFileStreamGetPropertyInfo) {
+        UInt32 size = 0;
+        Boolean writable = false;
+        OSStatus status = AudioFileStreamGetPropertyInfo(entry->stream,
+            property, &size, &writable);
+        if(status != noErr) return status;
+        if(size % hostStride) return kAudioFileStreamError_BadPropertySize;
+        size = size / hostStride * guestStride;
+        if((SlotU32(call, 2) && !WriteGuestU32(SlotU32(call, 2), size)) ||
+           (SlotU32(call, 3) &&
+            !WriteGuestBytes(SlotU32(call, 3), sizeof(writable), &writable)))
+            return kAudio_ParamError;
+        return noErr;
+    }
+    const bool setting = opcode == LC32AudioToolboxOpAudioFileStreamSetProperty;
+    u32 size = SlotU32(call, 2);
+    if(!setting && !ReadGuestU32(SlotU32(call, 2), size)) return kAudio_ParamError;
+    if(size > kMaximumPropertyBytes || (size && !SlotU32(call, 3)) ||
+       uint64_t{SlotU32(call, 3)} + size > uint64_t{UINT32_MAX} + 1)
+        return kAudio_ParamError;
+    if(size % guestStride) return kAudioFileStreamError_BadPropertySize;
+    const u32 nativeSize = size / guestStride * hostStride;
+    std::vector<uint8_t> bytes(nativeSize ? nativeSize : 1);
+    const bool translation = property == kAudioFileStreamProperty_PacketToFrame ||
+        property == kAudioFileStreamProperty_FrameToPacket ||
+        property == kAudioFileStreamProperty_PacketToByte ||
+        property == kAudioFileStreamProperty_ByteToPacket;
+    if(setting || translation) {
+        if(guestStride == hostStride) {
+            if(!ReadGuestBytes(SlotU32(call, 3), size, bytes.data()))
+                return kAudio_ParamError;
+        } else {
+            for(u32 source = 0, dest = 0; source < size;
+                source += guestStride, dest += hostStride) {
+                if(!ReadGuestBytes(SlotU32(call, 3) + source, guestStride,
+                        bytes.data() + dest)) return kAudio_ParamError;
+            }
+        }
+    }
+    if(setting) return AudioFileStreamSetProperty(entry->stream, property,
+        nativeSize, bytes.data());
+    UInt32 returnedSize = nativeSize;
+    OSStatus status = AudioFileStreamGetProperty(entry->stream, property,
+        &returnedSize, bytes.data());
+    if(returnedSize % hostStride) return kAudioFileStreamError_BadPropertySize;
+    const u32 guestSize = returnedSize / hostStride * guestStride;
+    if(!WriteGuestU32(SlotU32(call, 2), guestSize)) return kAudio_ParamError;
+    if(status == noErr) {
+        if(returnedSize > nativeSize) return kAudio_ParamError;
+        if(guestStride == hostStride) {
+            if(!WriteGuestBytes(SlotU32(call, 3), guestSize, bytes.data()))
+                return kAudio_ParamError;
+        } else {
+            for(u32 source = 0, dest = 0; source < returnedSize;
+                source += hostStride, dest += guestStride) {
+                if(!WriteGuestBytes(SlotU32(call, 3) + dest, guestStride,
+                        bytes.data() + source)) return kAudio_ParamError;
+            }
+        }
+    }
+    return status;
+}
+
+OSStatus DispatchAudioFileStreamSeek(const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 4)) return kAudio_ParamError;
+    auto entry = FindAudioFileStream(SlotU32(call, 0));
+    u32 flags = 0;
+    if(!entry || !ReadGuestU32(SlotU32(call, 3), flags) || !SlotU32(call, 2))
+        return kAudio_ParamError;
+    std::lock_guard<std::recursive_mutex> lock(entry->mutex);
+    if(entry->closed) return kAudio_ParamError;
+    SInt64 offset = 0;
+    auto nativeFlags = static_cast<AudioFileStreamSeekFlags>(flags);
+    const OSStatus status = AudioFileStreamSeek(entry->stream,
+        static_cast<SInt64>(call.slots[1]), &offset, &nativeFlags);
+    if(status == noErr &&
+       (!WriteGuestBytes(SlotU32(call, 2), sizeof(offset), &offset) ||
+        !WriteGuestU32(SlotU32(call, 3), nativeFlags))) return kAudio_ParamError;
+    return status;
+}
+
+OSStatus DispatchAudioFileStreamClose(const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 1)) return kAudio_ParamError;
+    auto entry = FindAudioFileStream(SlotU32(call, 0));
+    if(!entry) return kAudio_ParamError;
+    std::lock_guard<std::recursive_mutex> lock(entry->mutex);
+    if(entry->closed) return kAudio_ParamError;
+    entry->closed = true;
+    {
+        std::lock_guard<std::mutex> mapLock(audioFileStreamsMutex);
+        audioFileStreams.erase(entry->token);
+    }
+    if(entry->parsing) return noErr;
+    const OSStatus status = AudioFileStreamClose(entry->stream);
+    entry->stream = nullptr;
     return status;
 }
 
@@ -3514,6 +3997,19 @@ extern "C" u32 LC32_AudioToolbox_Dispatch(u32 opcode, u32 guestCall, u32) {
             return static_cast<u32>(PublishAudioFile(
                 file, SlotU32(call, 6), std::move(context)));
         }
+        case LC32AudioToolboxOpAudioFileStreamOpen:
+            return static_cast<u32>(DispatchAudioFileStreamOpen(call));
+        case LC32AudioToolboxOpAudioFileStreamParseBytes:
+            return static_cast<u32>(DispatchAudioFileStreamParseBytes(call));
+        case LC32AudioToolboxOpAudioFileStreamGetPropertyInfo:
+        case LC32AudioToolboxOpAudioFileStreamGetProperty:
+        case LC32AudioToolboxOpAudioFileStreamSetProperty:
+            return static_cast<u32>(DispatchAudioFileStreamProperty(call,
+                static_cast<LC32AudioToolboxOpcode>(opcode)));
+        case LC32AudioToolboxOpAudioFileStreamSeek:
+            return static_cast<u32>(DispatchAudioFileStreamSeek(call));
+        case LC32AudioToolboxOpAudioFileStreamClose:
+            return static_cast<u32>(DispatchAudioFileStreamClose(call));
         case LC32AudioToolboxOpAudioFileGetProperty:
             return static_cast<u32>(DispatchAudioFileGetProperty(call));
         case LC32AudioToolboxOpAudioFileReadBytes:
@@ -3579,6 +4075,12 @@ extern "C" u32 LC32_AudioToolbox_Dispatch(u32 opcode, u32 guestCall, u32) {
         case LC32AudioToolboxOpAudioQueueEnqueueBuffer:
             return static_cast<u32>(
                 DispatchAudioQueueEnqueueBuffer(call));
+        case LC32AudioToolboxOpAudioQueueEnqueueBufferWithParameters:
+            return static_cast<u32>(DispatchAudioQueueEnqueueBuffer(call, true));
+        case LC32AudioToolboxOpAudioQueueSetOfflineRenderFormat:
+            return static_cast<u32>(DispatchAudioQueueSetOfflineRenderFormat(call));
+        case LC32AudioToolboxOpAudioQueueOfflineRender:
+            return static_cast<u32>(DispatchAudioQueueOfflineRender(call));
         case LC32AudioToolboxOpAudioQueueFreeBuffer:
             return static_cast<u32>(DispatchAudioQueueFreeBuffer(call));
         case LC32AudioToolboxOpAudioQueueGetProperty:
@@ -3588,6 +4090,15 @@ extern "C" u32 LC32_AudioToolbox_Dispatch(u32 opcode, u32 guestCall, u32) {
         case LC32AudioToolboxOpAudioQueueSetParameter:
             return static_cast<u32>(
                 DispatchAudioQueueSetParameter(call));
+        case LC32AudioToolboxOpAudioQueueGetParameter:
+            return static_cast<u32>(DispatchAudioQueueGetParameter(call));
+        case LC32AudioToolboxOpAudioQueueGetPropertySize:
+            return static_cast<u32>(DispatchAudioQueueGetPropertySize(call));
+        case LC32AudioToolboxOpAudioQueueDeviceTranslateTime:
+            return static_cast<u32>(DispatchAudioQueueDeviceTranslateTime(call));
+        case LC32AudioToolboxOpAudioQueueDeviceGetNearestStartTime:
+            return static_cast<u32>(
+                DispatchAudioQueueDeviceGetNearestStartTime(call));
         case LC32AudioToolboxOpAudioQueueAddPropertyListener:
             return static_cast<u32>(
                 DispatchAudioQueueAddPropertyListener(call));
@@ -3620,6 +4131,10 @@ extern "C" u32 LC32_AudioToolbox_Dispatch(u32 opcode, u32 guestCall, u32) {
             return static_cast<u32>(DispatchAudioQueueStop(call));
         case LC32AudioToolboxOpAudioQueuePause:
             return static_cast<u32>(DispatchAudioQueuePause(call));
+        case LC32AudioToolboxOpAudioQueueReset:
+            return static_cast<u32>(DispatchAudioQueueReset(call));
+        case LC32AudioToolboxOpAudioQueueFlush:
+            return static_cast<u32>(DispatchAudioQueueFlush(call));
         case LC32AudioToolboxOpAudioQueueDispose:
             return static_cast<u32>(DispatchAudioQueueDispose(call));
         case LC32AudioToolboxOpRemoteIOOutputStart:
