@@ -353,6 +353,7 @@ $(eval $(call lc32_guest_test,lc32-corefoundation-write-stream,corefoundation_wr
 $(eval $(call lc32_guest_test,lc32-coremedia-time-values,coremedia_time_values.c,CoreMedia CoreFoundation Foundation))
 $(eval $(call lc32_guest_test,lc32-corevideo-buffers,corevideo_buffers.m,CoreVideo CoreFoundation Foundation OpenGLES))
 $(eval $(call lc32_guest_test,lc32-coredata-merge-policy,coredata_merge_policy.m,CoreData Foundation CoreFoundation LC32))
+$(eval $(call lc32_guest_test,lc32-coredata-dynamic-accessors,coredata_dynamic_accessors.m,CoreData Foundation CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-cxx-lifecycle,cxx_lifecycle.mm,Foundation UIKit LC32))
 $(eval $(call lc32_guest_test,lc32-data-bytes,data_bytes.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-fast-enumeration,fast_enumeration.m,Foundation))
