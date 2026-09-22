@@ -8,7 +8,9 @@
 #import <OpenGLES/ES3/gl.h>
 #import <OpenGLES/ES3/glext.h>
 #import <QuartzCore/CAEAGLLayer.h>
+#import <QuartzCore/CATransaction.h>
 #import <objc/runtime.h>
+#include <pthread.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -2288,6 +2290,13 @@ size_t VertexAttribElementCount(GLenum pname) {
         [fallback release];
         result = [self lc32_renderbufferStorage:target
                                     fromDrawable:drawable];
+    }
+    if(result && drawableLayer && !pthread_main_np()) {
+        // Storage publishes the drawable's image queue through Core Animation.
+        // Legacy render threads often have no run loop to commit that implicit
+        // transaction, leaving valid GL frames invisible. Flush once at storage
+        // creation/reallocation, not at every presentRenderbuffer: call.
+        [CATransaction flush];
     }
     return result;
 }
