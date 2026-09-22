@@ -26,7 +26,7 @@ Build with Theos, CMake, and Boost 1.57 or newer. See the
 git submodule update --init --recursive
 gmake -C GuestMakefile generate-shims
 gmake -C GuestMakefile
-./GuestMakefile/pack-ramdisk.sh
+gmake -C GuestMakefile install
 gmake
 ```
 

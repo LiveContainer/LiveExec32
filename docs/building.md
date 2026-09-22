@@ -88,8 +88,13 @@ Apple's source archive; the guest root includes that license at
 Set up the guest root filesystem and install the built shim frameworks:
 
 ```bash
-./GuestMakefile/pack-ramdisk.sh
+gmake -C GuestMakefile install
 ```
+
+This target runs `GuestMakefile/pack-ramdisk.sh` on the existing build products;
+it does not build a Theos package or install anything on a device. Use
+`gmake -C GuestMakefile all install` to build first and then pack, including
+with parallel make. The script can still be run directly.
 
 On the first run this downloads the iOS 10.3.3 restore ramdisk component
 (`058-75249-062.dmg`) from Apple's IPSW, verifies its pinned checksum,

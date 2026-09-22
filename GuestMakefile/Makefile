@@ -1,3 +1,20 @@
+ifneq ($(filter install,$(MAKECMDGOALS)),)
+# Guest installation means populating RootFS, never Theos package/device install.
+# Dispatch before including Theos so its double-colon install hooks cannot run.
+# Delegate any other goals together, once, and finish them before packing (-j too).
+LC32_GUEST_PREINSTALL_GOALS := $(filter-out install,$(MAKECMDGOALS))
+.PHONY: install $(LC32_GUEST_PREINSTALL_GOALS)
+install: $(LC32_GUEST_PREINSTALL_GOALS)
+	./pack-ramdisk.sh
+
+ifneq ($(strip $(LC32_GUEST_PREINSTALL_GOALS)),)
+.PHONY: lc32-before-pack-ramdisk
+$(LC32_GUEST_PREINSTALL_GOALS): lc32-before-pack-ramdisk
+lc32-before-pack-ramdisk:
+	+$(MAKE) -f "$(firstword $(MAKEFILE_LIST))" $(LC32_GUEST_PREINSTALL_GOALS)
+endif
+else
+
 ARCHS := armv7s
 TARGET := iphone:clang:16.5:10.3
 FINALPACKAGE = 1
@@ -265,3 +282,5 @@ ifeq ($(_THEOS_CURRENT_OPERATION), compile)
   _THEOS_INTERNAL_LDFLAGS := $(subst -lobjc,,$(_THEOS_INTERNAL_LDFLAGS))
 endif
 endif
+
+endif # install dispatcher

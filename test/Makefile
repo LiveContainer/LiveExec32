@@ -3,7 +3,8 @@ LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash \
   check-guest-thumb-linker check-uikit-legacy-rootless-rotation-build \
   check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading \
   check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop \
-  check-foundation-ports-host check-uikit-compatibility-switch check-uikit-status-bar-orientation
+  check-foundation-ports-host check-uikit-compatibility-switch check-uikit-status-bar-orientation \
+  check-guest-install
 LC32_HOST_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),\
   $(if $(strip $(filter-out $(LC32_HOST_TEST_GOALS),$(MAKECMDGOALS))),,1),)
 
@@ -35,7 +36,11 @@ BUILD_INFO_LOGGING_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/build-info-
   check-guest-thumb-linker check-uikit-legacy-rootless-rotation-build \
   check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading \
   check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop \
-  check-foundation-ports-host check-uikit-compatibility-switch check-uikit-status-bar-orientation
+  check-foundation-ports-host check-uikit-compatibility-switch check-uikit-status-bar-orientation \
+  check-guest-install
+
+check-guest-install:
+	sh ./guest_install.sh
 
 check-uikit-status-bar-orientation:
 	sh ./uikit_status_bar_orientation.sh

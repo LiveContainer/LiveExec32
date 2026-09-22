@@ -120,7 +120,7 @@ The normal default is `1`.
 
 ```bash
 gmake -C GuestMakefile LC32_UIKIT_COMPATIBILITY=0
-./GuestMakefile/pack-ramdisk.sh
+gmake -C GuestMakefile install
 gmake LC32_UIKIT_COMPATIBILITY=0
 ```
 
