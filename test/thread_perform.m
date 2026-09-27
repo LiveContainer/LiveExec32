@@ -21,6 +21,11 @@ static BOOL sameThreadSyncCallbackPassed;
 static BOOL asyncCallbackPassed;
 static BOOL syncCallbackPassed;
 static BOOL syncCallbackCompleted;
+static BOOL pointerCallbackPassed;
+static BOOL beforeStartCallbackPassed;
+static BOOL beforeStartSyncCallbackPassed;
+static uint32_t beforeStartWaitReturned;
+static dispatch_semaphore_t beforeStartSubmitSemaphore;
 
 static BOOL LC32ExerciseBridgeOnCurrentThread(void) {
     NSString *text = [NSString stringWithFormat:@"%d", 1234];
@@ -49,6 +54,9 @@ static BOOL LC32CallbackArrivedOnWorker(NSString *marker,
 - (void)receiveSameThreadSyncMarker:(NSString *)marker;
 - (void)receiveAsyncMarker:(NSString *)marker;
 - (void)receiveSyncMarker:(NSString *)marker;
+- (void)receivePointerMarker:(NSString **)marker;
+- (void)receiveBeforeStartMarker:(NSString *)marker;
+- (void)receiveBeforeStartSyncMarker:(NSString *)marker;
 @end
 
 @implementation LC32ThreadPerformProbe
@@ -112,8 +120,36 @@ static BOOL LC32CallbackArrivedOnWorker(NSString *marker,
     __atomic_store_n(&stopWorker, 1, __ATOMIC_RELEASE);
 }
 
+/* Fragger's audio loader declares id* but passes an object using the
+ * performSelector API. That API's object ABI, not this encoding, wins. */
+- (void)receivePointerMarker:(NSString **)marker {
+    pointerCallbackPassed =
+        _cmd == @selector(receivePointerMarker:) &&
+        LC32CallbackArrivedOnWorker((NSString *)marker, @"pointer-marker");
+}
+
+- (void)receiveBeforeStartMarker:(NSString *)marker {
+    beforeStartCallbackPassed = LC32CallbackArrivedOnWorker(
+        marker, @"before-start-marker");
+}
+
+- (void)receiveBeforeStartSyncMarker:(NSString *)marker {
+    beforeStartSyncCallbackPassed = LC32CallbackArrivedOnWorker(
+        marker, @"before-start-sync-marker");
+}
+
 @end
 
+static void *LC32SubmitBeforeStart(void *target) {
+    @autoreleasepool {
+        dispatch_semaphore_signal(beforeStartSubmitSemaphore);
+        [(id)target performSelector:@selector(receiveBeforeStartSyncMarker:)
+                         onThread:expectedWorkerThread
+                       withObject:@"before-start-sync-marker" waitUntilDone:YES];
+        __atomic_store_n(&beforeStartWaitReturned, 1, __ATOMIC_RELEASE);
+    }
+    return NULL;
+}
 
 static BOOL LC32WaitForWorkerToFinish(NSThread *thread) {
     for(unsigned int attempt = 0; attempt < 500; attempt++) {
@@ -135,6 +171,7 @@ int main(void) {
         (void)pthread_threadid_np(NULL, &mainThreadID);
         workerReadySemaphore = dispatch_semaphore_create(0);
         asyncCallbackSemaphore = dispatch_semaphore_create(0);
+        beforeStartSubmitSemaphore = dispatch_semaphore_create(0);
 
         LC32ThreadPerformProbe *probe =
             [LC32ThreadPerformProbe new];
@@ -172,6 +209,16 @@ int main(void) {
                   selector:@selector(runWorker:)
                     object:nil];
         expectedWorkerThread = worker;
+        [probe performSelector:@selector(receiveBeforeStartMarker:)
+                     onThread:worker withObject:@"before-start-marker"
+                waitUntilDone:NO];
+        pthread_t submitter;
+        if(pthread_create(&submitter, NULL, LC32SubmitBeforeStart, probe)) return 1;
+        dispatch_semaphore_wait(beforeStartSubmitSemaphore,
+            dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+        [NSThread sleepForTimeInterval:0.05];
+        const BOOL waitedBeforeStart =
+            !__atomic_load_n(&beforeStartWaitReturned, __ATOMIC_ACQUIRE);
         [worker start];
 
         const long readyWait = dispatch_semaphore_wait(
@@ -181,10 +228,16 @@ int main(void) {
             worker.isExecuting && !worker.isFinished;
         printf("perform-selector-worker-ready: %s\n",
             readyPassed ? "PASS" : "FAIL");
+        pthread_join(submitter, NULL);
 
         BOOL asyncPassed = NO;
         BOOL syncPassed = NO;
         if(readyPassed) {
+            [probe performSelector:@selector(receivePointerMarker:)
+                         onThread:worker withObject:@"pointer-marker"
+                    waitUntilDone:YES];
+            printf("perform-selector-pointer-declaration: %s\n",
+                pointerCallbackPassed ? "PASS" : "FAIL");
             [probe performSelector:@selector(receiveAsyncMarker:)
                          onThread:worker
                        withObject:@"async-marker"
@@ -219,6 +272,12 @@ int main(void) {
             LC32WaitForWorkerToFinish(worker);
         printf("perform-selector-worker-finished: %s\n",
             finishedPassed ? "PASS" : "FAIL");
+        printf("perform-selector-before-start: %s\n",
+            beforeStartCallbackPassed ? "PASS" : "FAIL");
+        const BOOL beforeStartSyncPassed = waitedBeforeStart &&
+            beforeStartSyncCallbackPassed && beforeStartWaitReturned;
+        printf("perform-selector-sync-before-start: %s\n",
+            beforeStartSyncPassed ? "PASS" : "FAIL");
 
         [worker release];
         [probe release];
@@ -227,11 +286,14 @@ int main(void) {
         if(finishedPassed) {
             dispatch_release(asyncCallbackSemaphore);
             dispatch_release(workerReadySemaphore);
+            dispatch_release(beforeStartSubmitSemaphore);
         }
 
         return sameThreadAsyncCallbackPassed &&
             sameThreadSyncCallbackPassed &&
-            readyPassed && asyncPassed && syncPassed &&
+            readyPassed && pointerCallbackPassed && beforeStartCallbackPassed &&
+            beforeStartSyncPassed &&
+            asyncPassed && syncPassed &&
             finishedPassed ? 0 : 1;
     }
 }

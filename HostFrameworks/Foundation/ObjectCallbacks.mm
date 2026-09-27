@@ -3,7 +3,7 @@
 #include <mutex>
 #include <unordered_map>
 
-static SEL LC32NotificationCallbackSelector(id observer, SEL selector) {
+static SEL LC32ObjectCallbackSelector(id observer, SEL selector) {
     if(!observer || !selector) return selector;
     Class cls = object_getClass(observer);
     Method method = class_getInstanceMethod(cls, selector);
@@ -21,11 +21,10 @@ static SEL LC32NotificationCallbackSelector(id observer, SEL selector) {
     free(result);
     if(!needsAdapter) return selector;
 
-    /* NotificationCenter always sends one NSNotification object, regardless
-     * of a callback's declared argument type. Some legacy libraries declared
-     * an unused int* instead. Install a private, correctly typed selector for
-     * this registration rather than changing that method or interpreting
-     * arbitrary pointers as objects in the general callback trampoline.
+    /* NotificationCenter and performSelector:...withObject: always send one
+     * object, regardless of the callback's declared argument type. Legacy
+     * libraries sometimes declare int* or id* instead. Use a private, typed
+     * selector at these API boundaries, not a general pointer conversion.
      *
      * Keep the original observer, center, name and sender: native weak
      * storage, duplicate registrations and removeObserver: filters continue
@@ -41,14 +40,14 @@ static SEL LC32NotificationCallbackSelector(id observer, SEL selector) {
     if(existing != classAliases.end()) return existing->second;
 
     IMP implementation = imp_implementationWithBlock(
-        ^(id target, NSNotification *notification) {
-            LC32InvokeGuestObjectCallback(target, selector, notification);
+        ^(id target, id argument) {
+            LC32InvokeGuestObjectCallback(target, selector, argument);
         });
     if(!implementation) abort();
     SEL alias;
     do {
         char name[64];
-        snprintf(name, sizeof(name), "__lc32_notification_%llu:",
+        snprintf(name, sizeof(name), "__lc32_object_callback_%llu:",
             (unsigned long long)++nextAlias);
         alias = sel_registerName(name);
     } while(!class_addMethod(cls, alias, implementation, "v24@0:8@16"));
@@ -69,10 +68,34 @@ static SEL LC32NotificationCallbackSelector(id observer, SEL selector) {
 
 - (void)lc32_guestAddObserver:(id)observer selector:(SEL)selector
         name:(NSNotificationName)name object:(id)object {
-    selector = LC32NotificationCallbackSelector(observer, selector);
+    selector = LC32ObjectCallbackSelector(observer, selector);
     const SEL original = @selector(addObserver:selector:name:object:);
     using AddObserver = void (*)(id, SEL, id, SEL, NSNotificationName, id);
     ((AddObserver)LC32NativeHostMethod(self, original))(self, original,
         observer, selector, name, object);
+}
+@end
+
+@interface NSObject (LC32GuestThreadPerforming)
+- (void)lc32_guestPerformSelector:(SEL)selector onThread:(NSThread *)thread
+    withObject:(id)object waitUntilDone:(BOOL)wait modes:(NSArray *)modes;
+@end
+
+@implementation NSObject (LC32GuestThreadPerforming)
++ (void)load {
+    LC32RegisterHostSelectorHook(self,
+        @selector(performSelector:onThread:withObject:waitUntilDone:modes:),
+        {@selector(lc32_guestPerformSelector:onThread:withObject:waitUntilDone:modes:),
+         nullptr});
+}
+
+- (void)lc32_guestPerformSelector:(SEL)selector onThread:(NSThread *)thread
+        withObject:(id)object waitUntilDone:(BOOL)wait modes:(NSArray *)modes {
+    selector = LC32ObjectCallbackSelector(self, selector);
+    const SEL original =
+        @selector(performSelector:onThread:withObject:waitUntilDone:modes:);
+    using Perform = void (*)(id, SEL, SEL, NSThread *, id, BOOL, NSArray *);
+    ((Perform)LC32NativeHostMethod(self, original))(
+        self, original, selector, thread, object, wait, modes);
 }
 @end

@@ -32,8 +32,9 @@ guest override.
   `uint32_t`, not native pointers. Struct fields retain the existing ARM32/native
   layout conversion. The invocation pointer tag is retired; its value is not
   reused. Host and guest products should be deployed together.
-- `HostFrameworks/Foundation/NSNotificationCenter.mm`: the legacy misdeclared
-  notification callback adapter. The generic bridge retains the shared
+- `HostFrameworks/Foundation/ObjectCallbacks.mm`: the legacy misdeclared
+  notification and cross-thread `performSelector:…withObject:` callback adapter.
+  The generic bridge retains the shared
   synchronous `void(id)` guest callback executor, including foreign threads.
 - `HostFrameworks/UIKit/GuestSelectorHooks.mm`: optional-nib behavior, the
   per-receiver recursive `view` guard, and post-call UIView geometry,

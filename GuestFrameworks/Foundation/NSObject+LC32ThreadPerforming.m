@@ -5,6 +5,8 @@
 extern BOOL LC32NSThreadNativeModeEnabled(void);
 extern BOOL LC32NSThreadIsCurrentThread(NSThread *thread);
 extern uint64_t LC32NSThreadHostThread(NSThread *thread);
+extern BOOL LC32NSThreadQueuePerformBeforeStart(NSThread *thread, id target,
+    SEL selector, id object, BOOL wait, NSArray *modes);
 
 static NSArray *LC32CommonRunLoopModes(void) {
     return [NSArray arrayWithObject:NSRunLoopCommonModes];
@@ -17,7 +19,7 @@ static NSArray *LC32CommonRunLoopModes(void) {
              withObject:(id)object
           waitUntilDone:(BOOL)wait
                   modes:(NSArray<NSString *> *)modes {
-    if(!selector || !thread) return;
+    if(!selector || !thread || modes.count == 0) return;
 
     /*
      * Keep same-thread delivery tied to a guest request.  Forwarding this
@@ -45,6 +47,9 @@ static NSArray *LC32CommonRunLoopModes(void) {
             "cross-thread performSelector requires native guest threads");
         return;
     }
+
+    if(LC32NSThreadQueuePerformBeforeStart(
+            thread, self, selector, object, wait, modes)) return;
 
     const uint64_t hostThread = LC32NSThreadHostThread(thread);
     if(!hostThread) {

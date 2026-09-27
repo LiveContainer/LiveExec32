@@ -8,6 +8,53 @@
 #include <stdlib.h>
 #include <time.h>
 
+/* Native NSThread accepts queued performs before -start. Keep their guest
+ * ownership until the real native thread exists, then hand them to its run
+ * loop. Do not run them inline in -start or on the submitting thread. */
+@interface LC32PendingThreadPerform : NSObject {
+@public
+    id target;
+    id object;
+    SEL selector;
+    NSArray *modes;
+    LC32PendingThreadPerform *next;
+    pthread_mutex_t lock;
+    pthread_cond_t completed;
+    BOOL done;
+}
+- (void)lc32_fire:(id)unused;
+@end
+
+@implementation LC32PendingThreadPerform
+- (instancetype)init {
+    self = [super init];
+    if(self) {
+        pthread_mutex_init(&lock, NULL);
+        pthread_cond_init(&completed, NULL);
+    }
+    return self;
+}
+- (void)lc32_fire:(id)unused {
+    (void)unused;
+    @try {
+        ((void (*)(id, SEL, id))objc_msgSend)(target, selector, object);
+    } @finally {
+        pthread_mutex_lock(&lock);
+        done = YES;
+        pthread_cond_broadcast(&completed);
+        pthread_mutex_unlock(&lock);
+    }
+}
+- (void)dealloc {
+    [target release];
+    [object release];
+    [modes release];
+    pthread_cond_destroy(&completed);
+    pthread_mutex_destroy(&lock);
+    [super dealloc];
+}
+@end
+
 typedef struct {
     pthread_mutex_t lock;
     pthread_cond_t ready;
@@ -28,6 +75,8 @@ typedef struct {
     BOOL executing;
     BOOL finished;
     BOOL cancelled;
+    LC32PendingThreadPerform *pendingHead;
+    LC32PendingThreadPerform *pendingTail;
 } LC32NSThreadState;
 
 static pthread_once_t LC32NSThreadKeyOnce = PTHREAD_ONCE_INIT;
@@ -63,6 +112,11 @@ static LC32NSThreadState *LC32NSThreadCreateState(void) {
 static void LC32NSThreadDestroyState(LC32NSThreadState *state) {
     if(!state) return;
     const uint64_t hostThread = state->hostThread;
+    while(state->pendingHead) {
+        LC32PendingThreadPerform *request = state->pendingHead;
+        state->pendingHead = request->next;
+        [request release];
+    }
     if(state->ownsTarget) [state->target release];
     [state->object release];
     [state->block release];
@@ -102,6 +156,23 @@ static uint64_t LC32HostNSThread(SEL selector) {
 static void LC32NSThreadPublishHostThread(
         LC32NSThreadState *state, uint64_t hostThread) {
     if(!state || !hostThread) return;
+    pthread_mutex_lock(&state->lock);
+    LC32PendingThreadPerform *pending = state->pendingHead;
+    state->pendingHead = state->pendingTail = nil;
+    pthread_mutex_unlock(&state->lock);
+    /* Install earlier requests before publishing the host thread to later
+     * submitters. Native performing retains each request through delivery. */
+    while(pending) {
+        LC32PendingThreadPerform *next = pending->next;
+        static uint64_t performSelector __attribute__((aligned(8)));
+        LC32InvokeHostSelector(pending.host_self,
+            LC32CachedHostSelector(&performSelector,
+                @selector(performSelector:onThread:withObject:waitUntilDone:modes:), NO),
+            LC32GetHostSelector(@selector(lc32_fire:)), hostThread,
+            (uint64_t)0, (uint64_t)NO, [pending->modes host_self], (uint64_t)0);
+        [pending release];
+        pending = next;
+    }
     pthread_mutex_lock(&state->lock);
     if(!state->hostThread) {
         state->hostThread = hostThread;
@@ -532,4 +603,39 @@ uint64_t LC32NSThreadHostThread(NSThread *thread) {
     const uint64_t hostThread = state->hostThread;
     pthread_mutex_unlock(&state->lock);
     return hostThread;
+}
+
+BOOL LC32NSThreadQueuePerformBeforeStart(NSThread *thread, id target,
+        SEL selector, id object, BOOL wait, NSArray *modes) {
+    if(!thread || !thread->_lc32State) return NO;
+    LC32NSThreadState *state = thread->_lc32State;
+    pthread_mutex_lock(&state->lock);
+    const BOOL started = state->started;
+    pthread_mutex_unlock(&state->lock);
+    if(started) return NO;
+
+    LC32PendingThreadPerform *request = [LC32PendingThreadPerform new];
+    request->target = [target retain];
+    request->object = [object retain];
+    request->selector = selector;
+    request->modes = [modes copy];
+    /* The queue's reference is independent of the caller's wait lifetime. */
+    [request retain];
+    pthread_mutex_lock(&state->lock);
+    const BOOL queued = !state->started;
+    if(queued) {
+        if(state->pendingTail) state->pendingTail->next = request;
+        else state->pendingHead = request;
+        state->pendingTail = request;
+    }
+    pthread_mutex_unlock(&state->lock);
+    if(!queued) [request release];
+    if(queued && wait) {
+        pthread_mutex_lock(&request->lock);
+        while(!request->done)
+            pthread_cond_wait(&request->completed, &request->lock);
+        pthread_mutex_unlock(&request->lock);
+    }
+    [request release];
+    return queued;
 }

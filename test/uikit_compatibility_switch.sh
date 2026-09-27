@@ -44,13 +44,15 @@ for mode in 0 1; do
         if [ "$unit" = GuestSelectorHooks ]; then
             xcrun nm -U "$workdir/$unit.o" | grep -Fq 'lc32_guestView]'
             xcrun nm -U "$workdir/$unit.o" | grep -Fq 'lc32_guestLoadNibNamed:owner:options:]'
-            echo "PASS essential guest view/nib adapters retained mode=$mode"
+            xcrun nm -U "$workdir/$unit.o" | grep -Fq 'lc32_guestShow]'
+            echo "PASS essential guest view/nib/alert adapters retained mode=$mode"
         fi
         if [ "$unit" = LegacyAutoLayout ]; then
             xcrun strings "$workdir/$unit.o" | grep -Fq '_forceLayoutEngineSolutionInRationalEdges'
             xcrun strings "$workdir/$unit.o" | grep -Fq '_hostsLayoutEngineAllowsTAMIC_NO'
             xcrun strings "$workdir/$unit.o" | grep -Fq 'UITrackingWindowView'
             xcrun strings "$workdir/$unit.o" | grep -Fq 'UIInputSetContainerView'
+            xcrun strings "$workdir/$unit.o" | grep -Fq '_UIAlertControllerPhoneTVMacView'
             echo "PASS rational-edge and scoped overlay hosting fixes retained mode=$mode"
         fi
     done

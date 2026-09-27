@@ -44,6 +44,28 @@
 }
 @end
 
+@interface UIAlertView (LC32GuestAlertPresentation)
+- (void)lc32_guestShow;
+@end
+
+@implementation UIAlertView (LC32GuestAlertPresentation)
++ (void)load {
+    LC32RegisterHostSelectorHook(self, @selector(show), {@selector(lc32_guestShow), nullptr});
+}
+
+- (void)lc32_guestShow {
+    // Some legacy games report loading/network errors from a worker thread.
+    // Modern alert windows must attach to their scene on the main thread.
+    // Schedule only guest show requests; native UIKit calls remain untouched.
+    void (^show)(void) = ^{
+        const SEL original = @selector(show);
+        ((void (*)(id, SEL))LC32NativeHostMethod(self, original))(self, original);
+    };
+    if(NSThread.isMainThread) show();
+    else dispatch_async(dispatch_get_main_queue(), show);
+}
+@end
+
 #if LC32_UIKIT_COMPATIBILITY
 @interface LC32GuestViewMutationHooks : NSObject
 @end

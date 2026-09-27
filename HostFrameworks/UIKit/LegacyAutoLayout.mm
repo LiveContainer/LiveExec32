@@ -65,14 +65,15 @@ static BOOL LC32EnableLegacyLayoutPolicy(id, SEL) {
     }
 
     /* Legacy UIWindow rotation explicitly makes its root an engine host.
-     * UIKit's modern text-effects and remote-keyboard roots have
+     * UIKit's modern text-effects, remote-keyboard, and alert roots have
      * translatesAutoresizingMaskIntoConstraints == NO, which the old host
      * invariant rejects when an overlay/keyboard opens in landscape. Opt
      * just those native classes into hosting without autoresizing constraints;
      * do not change their authored constraints or relax the UIView default.
      * Retain this crash fix when optional UIKit compatibility is disabled. */
     selector = sel_registerName("_hostsLayoutEngineAllowsTAMIC_NO");
-    for(NSString *className in @[@"UITrackingWindowView", @"UIInputSetContainerView"]) {
+    for(NSString *className in @[@"UITrackingWindowView", @"UIInputSetContainerView",
+                                 @"_UIAlertControllerPhoneTVMacView"]) {
         Class hostClass = NSClassFromString(className);
         method = hostClass ? class_getInstanceMethod(hostClass, selector) : NULL;
         if(method) {
