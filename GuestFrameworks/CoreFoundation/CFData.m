@@ -1,7 +1,9 @@
 #import <CoreFoundation/CoreFoundation+LC32.h>
+#import "LC32CFAllocator.h"
 
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
 
 extern UInt8 *LC32GetMutableDataGuestBytes(NSMutableData *data);
 extern BOOL LC32ReserveMutableDataGuestCapacity(NSMutableData *data,
@@ -30,17 +32,36 @@ CFDataRef CFDataCreate(CFAllocatorRef allocator, const UInt8 *bytes,
         LC32_CF_U32((uintptr_t)bytes), LC32_CF_U32(length));
 }
 
+typedef struct {
+    CFAllocatorRef allocator;
+    const UInt8 *bytes;
+} LC32CFDataBytesOwner;
+
+static void LC32CFDataReleaseBytes(LC32CFDataBytesOwner *owner, Boolean consumed) {
+    if(consumed) CFAllocatorDeallocate(owner->allocator, (void *)owner->bytes);
+    if(!LC32CFAllocatorIsBuiltin(owner->allocator)) CFRelease(owner->allocator);
+    free(owner);
+}
+
 CFDataRef CFDataCreateWithBytesNoCopy(CFAllocatorRef allocator,
                                       const UInt8 *bytes, CFIndex length,
                                       CFAllocatorRef bytesDeallocator) {
-    /*
-     * A host CFData cannot own an ARM address.  Copying here preserves the
-     * bytes and, importantly, never lets a native deallocator free guest
-     * memory.  The only observable difference is the documented no-copy
-     * optimization.
-     */
-    (void)bytesDeallocator;
-    return CFDataCreate(allocator, bytes, length);
+    (void)allocator;
+    if(!LC32CFDataValidLength(length) || (length && !bytes)) return NULL;
+    if(bytesDeallocator == kCFAllocatorNull)
+        return CFDataCreate(allocator, bytes, length);
+    LC32CFDataBytesOwner *owner = malloc(sizeof(*owner));
+    if(!owner) return NULL;
+    owner->allocator = bytesDeallocator;
+    owner->bytes = bytes;
+    if(!LC32CFAllocatorIsBuiltin(bytesDeallocator)) CFRetain(bytesDeallocator);
+    /* Host storage remains a copy; the original ARM32 buffer and allocator
+     * are released exactly once when that native data's storage dies. The
+     * dispatcher consumes owner on failure too, without freeing the bytes. */
+    return (CFDataRef)LC32_CF_CALL(LC32CoreFoundationOpDataCreateWithBytesNoCopy,
+        LC32_CF_U32((uintptr_t)bytes), LC32_CF_U32(length),
+        LC32_CF_U32((uintptr_t)LC32CFDataReleaseBytes),
+        LC32_CF_U32((uintptr_t)owner));
 }
 
 CFDataRef CFDataCreateCopy(CFAllocatorRef allocator, CFDataRef data) {

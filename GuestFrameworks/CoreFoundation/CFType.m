@@ -1,4 +1,5 @@
 #import <CoreFoundation/CoreFoundation+LC32.h>
+#import "LC32CFAllocator.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -9,6 +10,8 @@ static CFTypeID LC32KnownTypeID(LC32CoreFoundationKnownType type) {
 }
 
 CFTypeID CFGetTypeID(CFTypeRef object) {
+    if(object && LC32CFAllocatorIsBuiltin((CFAllocatorRef)object))
+        return CFAllocatorGetTypeID();
     return object ? (CFTypeID)LC32_CF_CALL(
         LC32CoreFoundationOpGetTypeID, LC32_CF_HOST(object)) : 0;
 }
@@ -104,26 +107,6 @@ CFHashCode CFHash(CFTypeRef object) {
 CFAllocatorRef CFGetAllocator(CFTypeRef object) {
     (void)object;
     return kCFAllocatorSystemDefault;
-}
-
-void *CFAllocatorAllocate(CFAllocatorRef allocator, CFIndex size,
-                          CFOptionFlags hint) {
-    (void)hint;
-    if(allocator == kCFAllocatorNull || size <= 0) return NULL;
-
-    /*
-     * The shim's built-in allocator constants are guest-side identities.
-     * Their storage must likewise come from the guest heap: returning a host
-     * allocation here would expose an unusable 64-bit pointer to ARM32 code.
-     * Custom CFAllocator objects are not currently constructible by this
-     * shim, so any non-null, non-null-allocator value uses the same heap.
-     */
-    return malloc((size_t)size);
-}
-
-void CFAllocatorDeallocate(CFAllocatorRef allocator, void *ptr) {
-    if(!ptr || allocator == kCFAllocatorNull) return;
-    free(ptr);
 }
 
 Boolean CFBooleanGetValue(CFBooleanRef boolean) {

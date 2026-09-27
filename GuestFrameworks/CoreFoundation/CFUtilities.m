@@ -1,6 +1,7 @@
 #import <CoreFoundation/CoreFoundation+LC32.h>
 
 #include <stddef.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -581,9 +582,13 @@ Boolean CFNumberGetValue(CFNumberRef number, CFNumberType type,
 }
 
 @interface LC32CFLocalNotificationObserver : NSObject {
+@public
     CFNotificationCenterRef _center;
     const void *_observer;
     CFNotificationCallback _callback;
+    NSString *_name;
+    const void *_object;
+    LC32CFLocalNotificationObserver *_next;
 }
 - (instancetype)initWithCenter:(CFNotificationCenterRef)center
                        observer:(const void *)observer
@@ -613,7 +618,15 @@ Boolean CFNumberGetValue(CFNumberRef number, CFNumberType type,
         (CFDictionaryRef)notification.userInfo);
 }
 
+- (void)dealloc {
+    [_name release];
+    [super dealloc];
+}
+
 @end
+
+static pthread_mutex_t LC32CFNotificationLock = PTHREAD_MUTEX_INITIALIZER;
+static LC32CFLocalNotificationObserver *LC32CFNotificationObservers;
 
 CFNotificationCenterRef CFNotificationCenterGetLocalCenter(void) {
     return (CFNotificationCenterRef)[NSNotificationCenter defaultCenter];
@@ -631,19 +644,51 @@ void CFNotificationCenterAddObserver(
     LC32CFLocalNotificationObserver *trampoline =
         [[LC32CFLocalNotificationObserver alloc]
             initWithCenter:center observer:observer callback:callback];
+    trampoline->_name = [(NSString *)name copy];
+    trampoline->_object = object;
+    pthread_mutex_lock(&LC32CFNotificationLock);
     [(NSNotificationCenter *)center
         addObserver:trampoline
            selector:@selector(lc32_handleNotification:)
                name:(NSString *)name
              object:(id)object];
+    trampoline->_next = LC32CFNotificationObservers;
+    LC32CFNotificationObservers = trampoline;
+    pthread_mutex_unlock(&LC32CFNotificationLock);
+}
 
-    /*
-     * CF's selector-style registration remains active until explicitly
-     * removed. Flappy does not import the removal API, so retain the small
-     * trampoline for the same lifetime instead of relying on the host's
-     * modern weak-observer implementation.
-     */
-    (void)trampoline;
+void CFNotificationCenterRemoveObserver(CFNotificationCenterRef center,
+        const void *observer, CFNotificationName name, const void *object) {
+    if(!center) center = CFNotificationCenterGetLocalCenter();
+    LC32CFLocalNotificationObserver *removed = nil;
+    pthread_mutex_lock(&LC32CFNotificationLock);
+    LC32CFLocalNotificationObserver **link = &LC32CFNotificationObservers;
+    while(*link) {
+        LC32CFLocalNotificationObserver *entry = *link;
+        if(entry->_center == center && entry->_observer == observer &&
+           (!name || [entry->_name isEqualToString:(NSString *)name]) &&
+           (!object || entry->_object == object)) {
+            [(NSNotificationCenter *)center removeObserver:entry];
+            *link = entry->_next;
+            entry->_next = removed;
+            removed = entry;
+        } else {
+            link = &entry->_next;
+        }
+    }
+    pthread_mutex_unlock(&LC32CFNotificationLock);
+    /* Native callbacks may still own a mirror while a post is in flight.
+     * Drop only the registry's +1, outside its lock. */
+    while(removed) {
+        LC32CFLocalNotificationObserver *next = removed->_next;
+        [removed release];
+        removed = next;
+    }
+}
+
+void CFNotificationCenterRemoveEveryObserver(CFNotificationCenterRef center,
+                                            const void *observer) {
+    CFNotificationCenterRemoveObserver(center, observer, NULL, NULL);
 }
 
 void CFNotificationCenterPostNotification(

@@ -516,6 +516,8 @@ CFTypeID KnownTypeID(uint32_t typeValue) {
             return CFRunLoopTimerGetTypeID();
         case LC32CoreFoundationTypeSocket:
             return CFSocketGetTypeID();
+        case LC32CoreFoundationTypeAllocator:
+            return CFAllocatorGetTypeID();
     }
     return 0;
 }
@@ -585,6 +587,42 @@ bool InvokeGuestVoidFunction(u32 function, const u32 *arguments,
         descriptor.arguments[index].value = arguments[index];
     }
     return Dynarmic_submit_guest_function_callback(&descriptor);
+}
+
+/* Native allocator objects own context metadata only. All allocator memory
+ * operations stay in the guest heap through CFAllocator.m; a guest callback
+ * pointer or allocation is never handed to native CoreFoundation. */
+struct AllocatorContext {
+    LC32CFAllocatorContext32 guest = {};
+    bool ownsInfo = false;
+};
+
+void ReleaseAllocatorContext(const void *opaque) {
+    auto *context = static_cast<const AllocatorContext *>(opaque);
+    if(context->ownsInfo && context->guest.release) {
+        const u32 arguments[] = {context->guest.info};
+        if(!InvokeGuestVoidFunction(context->guest.release, arguments, 1))
+            fprintf(stderr, "LC32: could not release CFAllocator context\n");
+    }
+    delete context;
+}
+
+struct DataBytesContext {
+    u32 guestRelease, guestOwner;
+    bool consumed = false;
+};
+
+void ReleaseDataBytesOwner(u32 function, u32 owner, bool consumed) {
+    const u32 arguments[] = {owner, consumed ? 1u : 0u};
+    if(!InvokeGuestVoidFunction(function, arguments, 2))
+        fprintf(stderr, "LC32: could not release CFData guest bytes owner\n");
+}
+
+void ReleaseDataBytesContext(const void *opaque) {
+    auto *context = static_cast<const DataBytesContext *>(opaque);
+    ReleaseDataBytesOwner(context->guestRelease, context->guestOwner,
+        context->consumed);
+    delete context;
 }
 
 struct ReadStreamClientContext {
@@ -2967,6 +3005,107 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
                 }
             }
             return 1;
+        }
+        case LC32CoreFoundationOpStringTokenizerCreate:
+        case LC32CoreFoundationOpStringTokenizerCopyBestStringLanguage: {
+            const bool create = opcodeValue == LC32CoreFoundationOpStringTokenizerCreate;
+            if(!RequireSlots(call, create ? 5 : 3)) return 0;
+            CFStringRef string = SlotHostObject<CFStringRef>(call, 0);
+            CFRange range = CFRangeMake(SlotS32(call, 1), SlotS32(call, 2));
+            if(!string || range.location < 0 || range.length < 0 ||
+               range.location > CFStringGetLength(string) ||
+               range.length > CFStringGetLength(string) - range.location) return 0;
+            CFTypeRef result = create
+                ? (CFTypeRef)CFStringTokenizerCreate(kCFAllocatorDefault, string, range,
+                    SlotU32(call, 3), SlotHostObject<CFLocaleRef>(call, 4))
+                : (CFTypeRef)CFStringTokenizerCopyBestStringLanguage(string, range);
+            return result ? GuestForCreatedObject(result) : 0;
+        }
+        case LC32CoreFoundationOpStringTokenizerAdvanceToNextToken: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFStringTokenizerRef tokenizer = SlotHostObject<CFStringTokenizerRef>(call, 0);
+            return tokenizer ? static_cast<u32>(CFStringTokenizerAdvanceToNextToken(tokenizer)) : 0;
+        }
+        case LC32CoreFoundationOpStringTokenizerGetCurrentTokenRange: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFStringTokenizerRef tokenizer = SlotHostObject<CFStringTokenizerRef>(call, 0);
+            return tokenizer && WriteGuestStringRange(SlotU32(call, 1),
+                CFStringTokenizerGetCurrentTokenRange(tokenizer));
+        }
+        case LC32CoreFoundationOpAllocatorCreate: {
+            if(!RequireSlots(call, 1)) return 0;
+            auto *context = new(std::nothrow) AllocatorContext;
+            if(!context) return 0;
+            if(Dynarmic_mem_1read(SlotU32(call, 0), sizeof(context->guest),
+                    reinterpret_cast<char *>(&context->guest)) != 0 ||
+               context->guest.version != 0) {
+                delete context;
+                return 0;
+            }
+            CFAllocatorContext native = {};
+            native.info = context;
+            native.release = ReleaseAllocatorContext;
+            CFAllocatorRef allocator = CFAllocatorCreate(kCFAllocatorDefault, &native);
+            if(!allocator) { delete context; return 0; }
+            /* Keep context alive even if proxy creation consumes the owned
+             * native result on failure. Only success transfers guest info. */
+            CFRetain(allocator);
+            const u32 guest = GuestForCreatedObject(allocator);
+            context->ownsInfo = guest != 0;
+            CFRelease(allocator);
+            return guest;
+        }
+        case LC32CoreFoundationOpAllocatorGetContext: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFAllocatorRef allocator = SlotHostObject<CFAllocatorRef>(call, 0);
+            if(!allocator) return 0;
+            CFAllocatorContext native = {};
+            CFAllocatorGetContext(allocator, &native);
+            if(native.release != ReleaseAllocatorContext || !native.info) return 0;
+            auto *context = static_cast<AllocatorContext *>(native.info);
+            return Dynarmic_mem_1write(SlotU32(call, 1), sizeof(context->guest),
+                reinterpret_cast<char *>(&context->guest)) == 0;
+        }
+        case LC32CoreFoundationOpDataCreateWithBytesNoCopy: {
+            if(!RequireSlots(call, 4)) return 0;
+            const u32 release = SlotU32(call, 2), owner = SlotU32(call, 3);
+            std::vector<UInt8> bytes;
+            if(!ReadGuestBytes(SlotU32(call, 0), SlotU32(call, 1), bytes)) {
+                ReleaseDataBytesOwner(release, owner, false);
+                return 0;
+            }
+            void *storage = malloc(bytes.empty() ? 1 : bytes.size());
+            auto *context = new(std::nothrow) DataBytesContext{release, owner};
+            if(!storage || !context) {
+                free(storage);
+                delete context;
+                ReleaseDataBytesOwner(release, owner, false);
+                return 0;
+            }
+            if(!bytes.empty()) memcpy(storage, bytes.data(), bytes.size());
+            CFAllocatorContext native = {};
+            native.info = context;
+            native.release = ReleaseDataBytesContext;
+            native.deallocate = [](void *pointer, void *) { free(pointer); };
+            CFAllocatorRef deallocator = CFAllocatorCreate(kCFAllocatorDefault, &native);
+            if(!deallocator) {
+                free(storage);
+                ReleaseDataBytesContext(context);
+                return 0;
+            }
+            CFDataRef data = CFDataCreateWithBytesNoCopy(kCFAllocatorDefault,
+                static_cast<const UInt8 *>(storage), bytes.size(), deallocator);
+            u32 guest = 0;
+            if(data) {
+                guest = GuestForCreatedObject(data);
+                context->consumed = guest != 0;
+            } else {
+                free(storage);
+            }
+            /* Local ownership keeps context valid even if conversion failed
+             * and destroyed data. Its release consumes the guest owner too. */
+            CFRelease(deallocator);
+            return guest;
         }
         case LC32CoreFoundationOpDataCreate: {
             if(!RequireSlots(call, 2)) return 0;

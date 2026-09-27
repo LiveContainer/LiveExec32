@@ -14,6 +14,11 @@ typedef struct {
     uint64_t slots[LC32CoreFoundationMaxSlots];
 } LC32CoreFoundationCall;
 
+typedef struct {
+    uint32_t version, info, retain, release, copyDescription;
+    uint32_t allocate, reallocate, deallocate, preferredSize;
+} LC32CFAllocatorContext32;
+
 typedef enum : uint32_t {
     LC32CoreFoundationOpArrayCreateMutable = 1,
     LC32CoreFoundationOpDictionaryCreateMutable = 2,
@@ -368,6 +373,14 @@ typedef enum : uint32_t {
     LC32CoreFoundationOpArraySetValueAtIndex = 1204,
     LC32CoreFoundationOpArrayGetValueAtIndex = 1205,
     LC32CoreFoundationOpArrayExchangeValuesAtIndices = 1206,
+
+    LC32CoreFoundationOpAllocatorCreate = 1300,
+    LC32CoreFoundationOpAllocatorGetContext = 1301,
+    LC32CoreFoundationOpDataCreateWithBytesNoCopy = 1302,
+    LC32CoreFoundationOpStringTokenizerCreate = 1400,
+    LC32CoreFoundationOpStringTokenizerAdvanceToNextToken = 1401,
+    LC32CoreFoundationOpStringTokenizerGetCurrentTokenRange = 1402,
+    LC32CoreFoundationOpStringTokenizerCopyBestStringLanguage = 1403,
 } LC32CoreFoundationOpcode;
 
 typedef enum : uint32_t {
@@ -400,6 +413,7 @@ typedef enum : uint32_t {
     LC32CoreFoundationTypeRunLoopSource = 17,
     LC32CoreFoundationTypeRunLoopTimer = 18,
     LC32CoreFoundationTypeSocket = 19,
+    LC32CoreFoundationTypeAllocator = 20,
 } LC32CoreFoundationKnownType;
 
 #endif
