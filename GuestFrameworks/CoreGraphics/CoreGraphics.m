@@ -129,6 +129,11 @@ CGColorSpaceRef CGColorSpaceCreateDeviceGray(void) {
         LC32CoreGraphicsOpColorSpaceCreateDeviceGray);
 }
 
+CGColorSpaceRef CGColorSpaceCreateWithName(CFStringRef name) {
+    return name ? (CGColorSpaceRef)LC32_CG_CALL(
+        LC32CoreGraphicsOpColorSpaceCreateWithName, LC32_CG_HOST(name)) : NULL;
+}
+
 CGColorSpaceModel CGColorSpaceGetModel(CGColorSpaceRef space) {
     return space ? (CGColorSpaceModel)(int32_t)LC32_CG_CALL(
         LC32CoreGraphicsOpColorSpaceGetModel,
@@ -256,6 +261,24 @@ CGFontRef CGFontRetain(CGFontRef font) {
     return font ? (CGFontRef)CFRetain(font) : NULL;
 }
 
+CGFontRef CGFontCreateWithFontName(CFStringRef name) {
+    return name ? (CGFontRef)LC32_CG_CALL(
+        LC32CoreGraphicsOpFontCreateWithFontName, LC32_CG_HOST(name)) : NULL;
+}
+
+size_t CGFontGetNumberOfGlyphs(CGFontRef font) {
+    return font ? (size_t)LC32_CG_CALL(
+        LC32CoreGraphicsOpFontGetNumberOfGlyphs, LC32_CG_HOST(font)) : 0;
+}
+
+CGFloat CGFontGetItalicAngle(CGFontRef font) {
+    const uint32_t bits = font ? LC32_CG_CALL(
+        LC32CoreGraphicsOpFontGetItalicAngle, LC32_CG_HOST(font)) : 0;
+    float value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
 void CGFontRelease(CGFontRef font) {
     if(font) CFRelease(font);
 }
@@ -275,6 +298,7 @@ CFDataRef CGFontCopyTableForTag(CGFontRef font, uint32_t tag) {
 LC32_CG_FONT_METRIC(GetUnitsPerEm)
 LC32_CG_FONT_METRIC(GetAscent)
 LC32_CG_FONT_METRIC(GetDescent)
+LC32_CG_FONT_METRIC(GetLeading)
 LC32_CG_FONT_METRIC(GetCapHeight)
 LC32_CG_FONT_METRIC(GetXHeight)
 
@@ -286,6 +310,14 @@ bool CGFontGetGlyphAdvances(CGFontRef font, const CGGlyph *glyphs,
     return LC32_CG_CALL(LC32CoreGraphicsOpFontGetGlyphAdvances,
         LC32_CG_HOST(font), LC32_CG_U32((uintptr_t)glyphs),
         LC32_CG_U32(count), LC32_CG_U32((uintptr_t)advances)) != 0;
+}
+
+bool CGFontGetGlyphBBoxes(CGFontRef font, const CGGlyph *glyphs,
+                           size_t count, CGRect *bounds) {
+    if(!font || (count && (!glyphs || !bounds))) return false;
+    return LC32_CG_CALL(LC32CoreGraphicsOpFontGetGlyphBBoxes,
+        LC32_CG_HOST(font), LC32_CG_U32((uintptr_t)glyphs), LC32_CG_U32(count),
+        LC32_CG_U32((uintptr_t)bounds)) != 0;
 }
 
 #pragma mark CGImage
@@ -347,6 +379,28 @@ size_t CGBitmapContextGetBytesPerRow(CGContextRef context) {
     return context ? (size_t)LC32_CG_CALL(
         LC32CoreGraphicsOpBitmapContextGetBytesPerRow,
         LC32_CG_HOST(context)) : 0;
+}
+
+size_t CGBitmapContextGetWidth(CGContextRef context) {
+    return context ? (size_t)LC32_CG_CALL(
+        LC32CoreGraphicsOpBitmapContextGetWidth, LC32_CG_HOST(context)) : 0;
+}
+
+size_t CGBitmapContextGetHeight(CGContextRef context) {
+    return context ? (size_t)LC32_CG_CALL(
+        LC32CoreGraphicsOpBitmapContextGetHeight, LC32_CG_HOST(context)) : 0;
+}
+
+void CGContextFlush(CGContextRef context) {
+    if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextFlush, LC32_CG_HOST(context));
+}
+
+void CGContextShowGlyphsAtPositions(CGContextRef context, const CGGlyph *glyphs,
+                                    const CGPoint *positions, size_t count) {
+    if(context && glyphs && positions && count)
+        LC32_CG_CALL(LC32CoreGraphicsOpContextShowGlyphsAtPositions,
+            LC32_CG_HOST(context), LC32_CG_U32((uintptr_t)glyphs),
+            LC32_CG_U32((uintptr_t)positions), LC32_CG_U32(count));
 }
 
 void *CGBitmapContextGetData(CGContextRef context) {
@@ -758,6 +812,17 @@ void CGContextSetShouldSubpixelQuantizeFonts(CGContextRef context, bool should) 
         LC32CoreGraphicsOpContextSetShouldSubpixelQuantizeFonts,
         LC32_CG_HOST(context), LC32_CG_U32(should));
 }
+
+#define LC32_CG_FONT_OPTION(name) \
+    void CGContext##name(CGContextRef context, bool enabled) { \
+        if(context) LC32_CG_CALL(LC32CoreGraphicsOpContext##name, \
+            LC32_CG_HOST(context), LC32_CG_U32(enabled)); \
+    }
+LC32_CG_FONT_OPTION(SetAllowsFontSmoothing)
+LC32_CG_FONT_OPTION(SetAllowsFontSubpixelQuantization)
+LC32_CG_FONT_OPTION(SetShouldSmoothFonts)
+LC32_CG_FONT_OPTION(SetShouldSubpixelPositionFonts)
+#undef LC32_CG_FONT_OPTION
 
 void CGContextSetTextPosition(CGContextRef context, CGFloat x, CGFloat y) {
     if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextSetTextPosition,

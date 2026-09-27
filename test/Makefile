@@ -418,6 +418,7 @@ $(eval $(call lc32_guest_test,lc32-coregraphics-gradient,coregraphics_gradient.c
 $(eval $(call lc32_guest_test,lc32-quartzcore-transform,quartzcore_transform.c,QuartzCore CoreGraphics))
 $(eval $(call lc32_guest_test,lc32-coretext-bridge,coretext_bridge.m,CoreText CoreGraphics CoreFoundation Foundation))
 $(eval $(call lc32_guest_test,lc32-coretext-font-descriptor,coretext_font_descriptor.c,CoreText CoreFoundation Foundation))
+$(eval $(call lc32_guest_test,lc32-coretext-graphics-font,coretext_graphics_font.c,CoreText CoreGraphics CoreFoundation Foundation))
 $(eval $(call lc32_guest_test,lc32-openal-smoke,openal_smoke.c,OpenAL))
 $(eval $(call lc32_guest_test,lc32-opengles-smoke,opengles_smoke.m opengles_es1_smoke.m opengles_es3_smoke.m,Foundation OpenGLES QuartzCore))
 
@@ -669,7 +670,7 @@ frameworks:
 # link tests through the one normalized full framework build above instead of
 # starting overlapping recursive builds for several framework goals.
 SYMBOL_TESTS := lc32-openal-smoke lc32-opengles-smoke lc32-accelerate-vdsp \
-  lc32-security-secitem lc32-coretext-font-descriptor \
+  lc32-security-secitem lc32-coretext-font-descriptor lc32-coretext-graphics-font \
   lc32-coregraphics-bitmap lc32-quartzcore-transform \
   lc32-uikit-accessibility lc32-mobilecoreservices-uti lc32-cfnetwork-http \
   lc32-foundation-zone lc32-corefoundation-low-risk \
@@ -684,7 +685,7 @@ lc32-coremedia-time-values: coremedia-time-values-framework
 check-coremedia-time-values: lc32-coremedia-time-values
 check-corevideo: lc32-corevideo-buffers
 check-accelerate: lc32-accelerate-vdsp
-check-coretext: lc32-coretext-font-descriptor
+check-coretext: lc32-coretext-font-descriptor lc32-coretext-graphics-font
 	./coretext_font_descriptor_symbols.sh \
 		"$(GUEST_FRAMEWORK_DIR)/CoreText.framework/CoreText"
 check-graphics-symbols: lc32-coregraphics-bitmap lc32-quartzcore-transform \

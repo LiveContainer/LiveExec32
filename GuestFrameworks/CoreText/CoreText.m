@@ -63,6 +63,12 @@ static double LC32CoreTextResultDouble(
     return value;
 }
 
+static CGRect LC32CoreTextResultRect(const LC32CoreTextRect32 *rect) {
+    return CGRectMake(LC32CoreTextResultFloat(rect->x),
+        LC32CoreTextResultFloat(rect->y), LC32CoreTextResultFloat(rect->width),
+        LC32CoreTextResultFloat(rect->height));
+}
+
 #define LC32_CT_CALL0(opcode) \
     LC32CoreTextDispatch((opcode), NULL, 0)
 #define LC32_CT_CALL(opcode, ...) \
@@ -115,6 +121,160 @@ CTFontRef CTFontCreateUIFontForLanguage(CTFontUIFontType uiType,
     return (CTFontRef)LC32_CT_CALL(
         LC32CoreTextOpFontCreateUIFontForLanguage,
         LC32_CT_U32(uiType), LC32_CT_F32(size), LC32_CT_HOST(language));
+}
+
+CTFontRef CTFontCreateWithGraphicsFont(CGFontRef font, CGFloat size,
+                                       const CGAffineTransform *matrix,
+                                       CTFontDescriptorRef attributes) {
+    if(!font) return NULL;
+    return (CTFontRef)LC32_CT_CALL(LC32CoreTextOpFontCreateWithGraphicsFont,
+        LC32_CT_HOST(font), LC32_CT_F32(size), LC32_CT_U32(matrix != NULL),
+        matrix ? LC32_CT_F32(matrix->a) : 0,
+        matrix ? LC32_CT_F32(matrix->b) : 0,
+        matrix ? LC32_CT_F32(matrix->c) : 0,
+        matrix ? LC32_CT_F32(matrix->d) : 0,
+        matrix ? LC32_CT_F32(matrix->tx) : 0,
+        matrix ? LC32_CT_F32(matrix->ty) : 0,
+        LC32_CT_HOST(attributes));
+}
+
+CGFontRef CTFontCopyGraphicsFont(CTFontRef font, CTFontDescriptorRef *attributes) {
+    if(attributes) *attributes = NULL;
+    if(!font) return NULL;
+    uint64_t hostAttributes = 0;
+    CGFontRef result = (CGFontRef)LC32_CT_CALL(
+        LC32CoreTextOpFontCopyGraphicsFont, LC32_CT_HOST(font),
+        LC32_CT_U32(attributes ? (uintptr_t)&hostAttributes : 0));
+    if(attributes)
+        *attributes = (CTFontDescriptorRef)LC32HostToGuestOwnedObject(hostAttributes);
+    return result;
+}
+
+CFStringRef CTFontCopyFamilyName(CTFontRef font) {
+    return font ? (CFStringRef)LC32_CT_CALL(
+        LC32CoreTextOpFontCopyFamilyName, LC32_CT_HOST(font)) : NULL;
+}
+
+CTFontDescriptorRef CTFontCopyFontDescriptor(CTFontRef font) {
+    return font ? (CTFontDescriptorRef)LC32_CT_CALL(
+        LC32CoreTextOpFontCopyFontDescriptor, LC32_CT_HOST(font)) : NULL;
+}
+
+CTFontRef CTFontCreateCopyWithAttributes(CTFontRef font, CGFloat size,
+        const CGAffineTransform *matrix, CTFontDescriptorRef attributes) {
+    if(!font) return NULL;
+    return (CTFontRef)LC32_CT_CALL(LC32CoreTextOpFontCreateCopyWithAttributes,
+        LC32_CT_HOST(font), LC32_CT_F32(size), LC32_CT_U32(matrix != NULL),
+        matrix ? LC32_CT_F32(matrix->a) : 0,
+        matrix ? LC32_CT_F32(matrix->b) : 0,
+        matrix ? LC32_CT_F32(matrix->c) : 0,
+        matrix ? LC32_CT_F32(matrix->d) : 0,
+        matrix ? LC32_CT_F32(matrix->tx) : 0,
+        matrix ? LC32_CT_F32(matrix->ty) : 0, LC32_CT_HOST(attributes));
+}
+
+void CTFontDrawGlyphs(CTFontRef font, const CGGlyph *glyphs,
+        const CGPoint *positions, size_t count, CGContextRef context) {
+    if(!font || !context || (count && (!glyphs || !positions))) return;
+    LC32_CT_CALL(LC32CoreTextOpFontDrawGlyphs, LC32_CT_HOST(font),
+        LC32_CT_U32((uintptr_t)glyphs), LC32_CT_U32((uintptr_t)positions),
+        LC32_CT_U32(count), LC32_CT_HOST(context));
+}
+
+double CTLineGetPenOffsetForFlush(CTLineRef line, CGFloat flush, double width) {
+    double result = 0;
+    if(line) LC32_CT_CALL(LC32CoreTextOpLineGetPenOffsetForFlush,
+        LC32_CT_HOST(line), LC32_CT_F32(flush), LC32CoreTextDouble(width),
+        LC32_CT_U32((uintptr_t)&result));
+    return result;
+}
+
+CFIndex CTTypesetterSuggestLineBreak(CTTypesetterRef typesetter,
+                                    CFIndex startIndex, double width) {
+    return typesetter ? (CFIndex)LC32_CT_CALL(
+        LC32CoreTextOpTypesetterSuggestLineBreak, LC32_CT_HOST(typesetter),
+        LC32_CT_INDEX(startIndex), LC32CoreTextDouble(width)) : 0;
+}
+
+#define LC32_CT_RUN_ARRAY(name, type, opcode) \
+    void name(CTRunRef run, CFRange range, type *buffer) { \
+        if(run && buffer && range.location >= 0 && range.length >= 0) \
+            LC32_CT_CALL(opcode, LC32_CT_HOST(run), \
+                LC32_CT_INDEX(range.location), LC32_CT_INDEX(range.length), \
+                LC32_CT_U32((uintptr_t)buffer)); \
+    }
+LC32_CT_RUN_ARRAY(CTRunGetGlyphs, CGGlyph, LC32CoreTextOpRunGetGlyphs)
+LC32_CT_RUN_ARRAY(CTRunGetPositions, CGPoint, LC32CoreTextOpRunGetPositions)
+LC32_CT_RUN_ARRAY(CTRunGetAdvances, CGSize, LC32CoreTextOpRunGetAdvances)
+LC32_CT_RUN_ARRAY(CTRunGetStringIndices, CFIndex, LC32CoreTextOpRunGetStringIndices)
+#undef LC32_CT_RUN_ARRAY
+
+#define LC32_CT_FONT_METRIC(name, opcode) \
+    CGFloat name(CTFontRef font) { \
+        return font ? LC32CoreTextResultFloat(LC32_CT_CALL( \
+            opcode, LC32_CT_HOST(font))) : 0; \
+    }
+LC32_CT_FONT_METRIC(CTFontGetAscent, LC32CoreTextOpFontGetAscent)
+LC32_CT_FONT_METRIC(CTFontGetDescent, LC32CoreTextOpFontGetDescent)
+LC32_CT_FONT_METRIC(CTFontGetLeading, LC32CoreTextOpFontGetLeading)
+LC32_CT_FONT_METRIC(CTFontGetSize, LC32CoreTextOpFontGetSize)
+LC32_CT_FONT_METRIC(CTFontGetSlantAngle, LC32CoreTextOpFontGetSlantAngle)
+LC32_CT_FONT_METRIC(CTFontGetUnderlineThickness, LC32CoreTextOpFontGetUnderlineThickness)
+#undef LC32_CT_FONT_METRIC
+
+CTFontSymbolicTraits CTFontGetSymbolicTraits(CTFontRef font) {
+    return font ? (CTFontSymbolicTraits)LC32_CT_CALL(
+        LC32CoreTextOpFontGetSymbolicTraits, LC32_CT_HOST(font)) : 0;
+}
+
+CFIndex CTFontGetGlyphCount(CTFontRef font) {
+    return font ? (CFIndex)LC32_CT_CALL(
+        LC32CoreTextOpFontGetGlyphCount, LC32_CT_HOST(font)) : 0;
+}
+
+bool CTFontGetGlyphsForCharacters(CTFontRef font, const UniChar *characters,
+                                  CGGlyph *glyphs, CFIndex count) {
+    if(!font || !characters || !glyphs || count < 0) return false;
+    return LC32_CT_CALL(LC32CoreTextOpFontGetGlyphsForCharacters,
+        LC32_CT_HOST(font), LC32_CT_U32((uintptr_t)characters),
+        LC32_CT_U32((uintptr_t)glyphs), LC32_CT_INDEX(count)) != 0;
+}
+
+double CTFontGetAdvancesForGlyphs(CTFontRef font, CTFontOrientation orientation,
+                                  const CGGlyph *glyphs, CGSize *advances,
+                                  CFIndex count) {
+    if(!font || !glyphs || count < 0) return 0;
+    uint64_t resultBits = 0;
+    LC32_CT_CALL(LC32CoreTextOpFontGetAdvancesForGlyphs,
+        LC32_CT_HOST(font), LC32_CT_U32(orientation),
+        LC32_CT_U32((uintptr_t)glyphs), LC32_CT_U32((uintptr_t)advances),
+        LC32_CT_INDEX(count), LC32_CT_U32((uintptr_t)&resultBits));
+    double result;
+    memcpy(&result, &resultBits, sizeof(result));
+    return result;
+}
+
+CGRect CTFontGetBoundingRectsForGlyphs(CTFontRef font, CTFontOrientation orientation,
+                                       const CGGlyph *glyphs, CGRect *rects,
+                                       CFIndex count) {
+    LC32CoreTextRect32 result = {};
+    if(font && glyphs && count >= 0)
+        LC32_CT_CALL(LC32CoreTextOpFontGetBoundingRectsForGlyphs,
+            LC32_CT_HOST(font), LC32_CT_U32(orientation),
+            LC32_CT_U32((uintptr_t)glyphs), LC32_CT_U32((uintptr_t)rects),
+            LC32_CT_INDEX(count), LC32_CT_U32((uintptr_t)&result));
+    return LC32CoreTextResultRect(&result);
+}
+
+CTTypesetterRef CTTypesetterCreateWithAttributedString(CFAttributedStringRef string) {
+    return string ? (CTTypesetterRef)LC32_CT_CALL(
+        LC32CoreTextOpTypesetterCreateWithAttributedString, LC32_CT_HOST(string)) : NULL;
+}
+
+CTLineRef CTTypesetterCreateLine(CTTypesetterRef typesetter, CFRange range) {
+    return typesetter ? (CTLineRef)LC32_CT_CALL(LC32CoreTextOpTypesetterCreateLine,
+        LC32_CT_HOST(typesetter), LC32_CT_INDEX(range.location),
+        LC32_CT_INDEX(range.length)) : NULL;
 }
 
 void CTFrameDraw(CTFrameRef frame, CGContextRef context) {
@@ -205,6 +365,19 @@ void CTLineDraw(CTLineRef line, CGContextRef context) {
 CFArrayRef CTLineGetGlyphRuns(CTLineRef line) {
     return line ? (CFArrayRef)LC32_CT_CALL(
         LC32CoreTextOpLineGetGlyphRuns, LC32_CT_HOST(line)) : NULL;
+}
+
+CFIndex CTLineGetGlyphCount(CTLineRef line) {
+    return line ? (CFIndex)LC32_CT_CALL(
+        LC32CoreTextOpLineGetGlyphCount, LC32_CT_HOST(line)) : 0;
+}
+
+CGRect CTLineGetImageBounds(CTLineRef line, CGContextRef context) {
+    LC32CoreTextRect32 bounds = {};
+    if(line)
+        LC32_CT_CALL(LC32CoreTextOpLineGetImageBounds, LC32_CT_HOST(line),
+            LC32_CT_HOST(context), LC32_CT_U32((uintptr_t)&bounds));
+    return LC32CoreTextResultRect(&bounds);
 }
 
 CGFloat CTLineGetOffsetForStringIndex(CTLineRef line, CFIndex charIndex,
@@ -340,14 +513,33 @@ const CGPoint *CTRunGetPositionsPtr(CTRunRef run) {
     if(!run) return NULL;
     const uint32_t count = LC32_CT_CALL(LC32CoreTextOpRunCopyPositions,
         LC32_CT_HOST(run), 0, 0);
-    if(!count || count > UINT32_MAX / sizeof(CGPoint)) return NULL;
+    if(!count || count > LC32CoreTextMaximumGlyphs) return NULL;
 
+    // A run is immutable. Reserve separate, stable regions for both pointer
+    // accessors so asking for glyphs never overwrites the returned positions.
     CGPoint *positions = LC32GetAssociatedGuestBuffer(
-        (id)run, count * (uint32_t)sizeof(*positions));
+        (id)run, count * (uint32_t)(sizeof(CGPoint) + sizeof(CGGlyph)));
     if(!positions) return NULL;
     return LC32_CT_CALL(LC32CoreTextOpRunCopyPositions,
         LC32_CT_HOST(run), LC32_CT_U32((uintptr_t)positions),
         LC32_CT_U32(count)) ? positions : NULL;
+}
+
+CFIndex CTRunGetGlyphCount(CTRunRef run) {
+    return run ? (CFIndex)LC32_CT_CALL(
+        LC32CoreTextOpRunGetGlyphCount, LC32_CT_HOST(run)) : 0;
+}
+
+const CGGlyph *CTRunGetGlyphsPtr(CTRunRef run) {
+    const CFIndex count = CTRunGetGlyphCount(run);
+    if(count <= 0 || count > LC32CoreTextMaximumGlyphs) return NULL;
+    char *storage = LC32GetAssociatedGuestBuffer((id)run,
+        (uint32_t)count * (uint32_t)(sizeof(CGPoint) + sizeof(CGGlyph)));
+    if(!storage) return NULL;
+    CGGlyph *glyphs = (CGGlyph *)(storage + count * sizeof(CGPoint));
+    return LC32_CT_CALL(LC32CoreTextOpRunCopyGlyphs,
+        LC32_CT_HOST(run), LC32_CT_U32((uintptr_t)glyphs),
+        LC32_CT_INDEX(count)) ? glyphs : NULL;
 }
 
 CTRunStatus CTRunGetStatus(CTRunRef run) {

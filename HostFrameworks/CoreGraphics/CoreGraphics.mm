@@ -461,6 +461,12 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             if(!colorSpace) return 0;
             return LC32GuestObjectForOwnedHostObject(colorSpace);
         }
+        case LC32CoreGraphicsOpColorSpaceCreateWithName: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CFStringRef name = SlotHostObject<CFStringRef>(call, 0);
+            CGColorSpaceRef colorSpace = name ? CGColorSpaceCreateWithName(name) : nullptr;
+            return colorSpace ? LC32GuestObjectForOwnedHostObject(colorSpace) : 0;
+        }
         case LC32CoreGraphicsOpColorSpaceRelease: {
             if(!RequireCoreGraphicsSlots(call, 1)) return 0;
             return 0;
@@ -678,10 +684,23 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             CFRelease(table);
             return data ? LC32GuestObjectForOwnedHostObject(data) : 0;
         }
+        case LC32CoreGraphicsOpFontCreateWithFontName: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CFStringRef name = SlotHostObject<CFStringRef>(call, 0);
+            CGFontRef font = name ? CGFontCreateWithFontName(name) : nullptr;
+            return font ? LC32GuestObjectForOwnedHostObject(font) : 0;
+        }
+        case LC32CoreGraphicsOpFontGetItalicAngle: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGFontRef font = SlotHostObject<CGFontRef>(call, 0);
+            return font ? ReturnCGFloat(CGFontGetItalicAngle(font)) : 0;
+        }
         case LC32CoreGraphicsOpFontGetUnitsPerEm:
         case LC32CoreGraphicsOpFontGetAscent:
         case LC32CoreGraphicsOpFontGetDescent:
         case LC32CoreGraphicsOpFontGetCapHeight:
+        case LC32CoreGraphicsOpFontGetLeading:
+        case LC32CoreGraphicsOpFontGetNumberOfGlyphs:
         case LC32CoreGraphicsOpFontGetXHeight: {
             if(!RequireCoreGraphicsSlots(call, 1)) return 0;
             CGFontRef font = SlotHostObject<CGFontRef>(call, 0);
@@ -696,12 +715,17 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
                     value = CGFontGetDescent(font); break;
                 case LC32CoreGraphicsOpFontGetCapHeight:
                     value = CGFontGetCapHeight(font); break;
+                case LC32CoreGraphicsOpFontGetLeading:
+                    value = CGFontGetLeading(font); break;
+                case LC32CoreGraphicsOpFontGetNumberOfGlyphs:
+                    return static_cast<u32>(CGFontGetNumberOfGlyphs(font));
                 default:
                     value = CGFontGetXHeight(font); break;
             }
             return static_cast<u32>(value);
         }
-        case LC32CoreGraphicsOpFontGetGlyphAdvances: {
+        case LC32CoreGraphicsOpFontGetGlyphAdvances:
+        case LC32CoreGraphicsOpFontGetGlyphBBoxes: {
             if(!RequireCoreGraphicsSlots(call, 4)) return 0;
             CGFontRef font = SlotHostObject<CGFontRef>(call, 0);
             const u32 guestGlyphs = SlotU32(call, 1);
@@ -713,7 +737,8 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             static_assert(sizeof(CGGlyph) == 2 && sizeof(int) == 4,
                 "CGFont glyphs and advances must match the ARM32 ABI");
             const size_t glyphBytes = count * sizeof(CGGlyph);
-            const size_t advanceBytes = count * sizeof(int);
+            const bool wantsBounds = opcode == LC32CoreGraphicsOpFontGetGlyphBBoxes;
+            const size_t advanceBytes = count * (wantsBounds ? 4 * sizeof(float) : sizeof(int));
             if(!guestGlyphs || !guestAdvances ||
                static_cast<uint64_t>(guestGlyphs) + glyphBytes >
                    static_cast<uint64_t>(UINT32_MAX) + 1 ||
@@ -721,11 +746,23 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
                    static_cast<uint64_t>(UINT32_MAX) + 1) return 0;
 
             std::vector<CGGlyph> glyphs(count);
-            std::vector<int> advances(count);
             if(Dynarmic_mem_1read(guestGlyphs, glyphBytes,
-                    reinterpret_cast<char *>(glyphs.data())) != 0 ||
-               !CGFontGetGlyphAdvances(font, glyphs.data(), count,
-                   advances.data())) return 0;
+                    reinterpret_cast<char *>(glyphs.data())) != 0) return 0;
+            if(wantsBounds) {
+                std::vector<CGRect> bounds(count);
+                if(!CGFontGetGlyphBBoxes(font, glyphs.data(), count, bounds.data())) return 0;
+                std::vector<float> narrowed(count * 4);
+                for(size_t i = 0; i < count; ++i) {
+                    narrowed[i * 4] = bounds[i].origin.x;
+                    narrowed[i * 4 + 1] = bounds[i].origin.y;
+                    narrowed[i * 4 + 2] = bounds[i].size.width;
+                    narrowed[i * 4 + 3] = bounds[i].size.height;
+                }
+                return Dynarmic_mem_1write(guestAdvances, advanceBytes,
+                    reinterpret_cast<char *>(narrowed.data())) == 0;
+            }
+            std::vector<int> advances(count);
+            if(!CGFontGetGlyphAdvances(font, glyphs.data(), count, advances.data())) return 0;
             return Dynarmic_mem_1write(guestAdvances, advanceBytes,
                 reinterpret_cast<char *>(advances.data())) == 0;
         }
@@ -991,6 +1028,14 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             CGImageRef image = CGBitmapContextCreateImage(context);
             return image ? LC32GuestObjectForOwnedHostObject(image) : 0;
         }
+        case LC32CoreGraphicsOpBitmapContextGetWidth:
+        case LC32CoreGraphicsOpBitmapContextGetHeight: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            if(!context) return 0;
+            return static_cast<u32>(opcode == LC32CoreGraphicsOpBitmapContextGetWidth
+                ? CGBitmapContextGetWidth(context) : CGBitmapContextGetHeight(context));
+        }
         case LC32CoreGraphicsOpBitmapContextGetBytesPerRow: {
             if(!RequireCoreGraphicsSlots(call, 1)) return 0;
             CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
@@ -1051,6 +1096,23 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             SyncBitmapBacking(context, FindBitmapBacking(context));
             return 1;
         }
+        case LC32CoreGraphicsOpContextShowGlyphsAtPositions: {
+            if(!RequireCoreGraphicsSlots(call, 4)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            const u32 guestGlyphs = SlotU32(call, 1);
+            const size_t count = SlotU32(call, 3);
+            std::vector<CGPoint> positions;
+            if(!context || !guestGlyphs || count > kMaximumFontGlyphs ||
+               static_cast<uint64_t>(guestGlyphs) + count * sizeof(CGGlyph) >
+                   static_cast<uint64_t>(UINT32_MAX) + 1 ||
+               !ReadGuestPoints(SlotU32(call, 2), count, positions)) return 0;
+            std::vector<CGGlyph> glyphs(count);
+            if(Dynarmic_mem_1read(guestGlyphs, count * sizeof(CGGlyph),
+                    reinterpret_cast<char *>(glyphs.data())) != 0) return 0;
+            CGContextShowGlyphsAtPositions(context, glyphs.data(), positions.data(), count);
+            SyncBitmapBacking(context, FindBitmapBacking(context));
+            return 1;
+        }
         case LC32CoreGraphicsOpContextBeginTransparencyLayer: {
             if(!RequireCoreGraphicsSlots(call, 2)) return 0;
             CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
@@ -1075,6 +1137,7 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
         case LC32CoreGraphicsOpContextBeginPath:
         case LC32CoreGraphicsOpContextClosePath:
         case LC32CoreGraphicsOpContextClip:
+        case LC32CoreGraphicsOpContextFlush:
         case LC32CoreGraphicsOpContextFillPath:
         case LC32CoreGraphicsOpContextStrokePath: {
             if(!RequireCoreGraphicsSlots(call, 1)) return 0;
@@ -1095,6 +1158,10 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
                     break;
                 case LC32CoreGraphicsOpContextClip:
                     CGContextClip(context);
+                    break;
+                case LC32CoreGraphicsOpContextFlush:
+                    CGContextFlush(context);
+                    SyncBitmapBacking(context, FindBitmapBacking(context));
                     break;
                 case LC32CoreGraphicsOpContextFillPath:
                     CGContextFillPath(context);
@@ -1451,16 +1518,28 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             return 1;
         }
         case LC32CoreGraphicsOpContextSetAllowsFontSubpixelPositioning:
+        case LC32CoreGraphicsOpContextSetAllowsFontSmoothing:
+        case LC32CoreGraphicsOpContextSetAllowsFontSubpixelQuantization:
+        case LC32CoreGraphicsOpContextSetShouldSmoothFonts:
+        case LC32CoreGraphicsOpContextSetShouldSubpixelPositionFonts:
         case LC32CoreGraphicsOpContextSetShouldSubpixelQuantizeFonts: {
             if(!RequireCoreGraphicsSlots(call, 2)) return 0;
             CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
             const u32 enabled = SlotU32(call, 1);
             if(!context || enabled > 1) return 0;
-            if(static_cast<LC32CoreGraphicsOpcode>(opcode) ==
-                    LC32CoreGraphicsOpContextSetAllowsFontSubpixelPositioning)
-                CGContextSetAllowsFontSubpixelPositioning(context, enabled != 0);
-            else
-                CGContextSetShouldSubpixelQuantizeFonts(context, enabled != 0);
+            switch(opcode) {
+                case LC32CoreGraphicsOpContextSetAllowsFontSubpixelPositioning:
+                    CGContextSetAllowsFontSubpixelPositioning(context, enabled != 0); break;
+                case LC32CoreGraphicsOpContextSetAllowsFontSmoothing:
+                    CGContextSetAllowsFontSmoothing(context, enabled != 0); break;
+                case LC32CoreGraphicsOpContextSetAllowsFontSubpixelQuantization:
+                    CGContextSetAllowsFontSubpixelQuantization(context, enabled != 0); break;
+                case LC32CoreGraphicsOpContextSetShouldSmoothFonts:
+                    CGContextSetShouldSmoothFonts(context, enabled != 0); break;
+                case LC32CoreGraphicsOpContextSetShouldSubpixelPositionFonts:
+                    CGContextSetShouldSubpixelPositionFonts(context, enabled != 0); break;
+                default: CGContextSetShouldSubpixelQuantizeFonts(context, enabled != 0); break;
+            }
             return 1;
         }
         case LC32CoreGraphicsOpContextSetShouldAntialias: {

@@ -44,6 +44,20 @@ audit_image "$FRAMEWORK_DIR/CoreGraphics.framework/CoreGraphics" \
     CGColorRetain \
     CGColorCreateCopy \
     CGColorSpaceGetNumberOfComponents \
+    CGColorSpaceCreateWithName \
+    CGBitmapContextGetWidth \
+    CGBitmapContextGetHeight \
+    CGContextFlush \
+    CGContextSetAllowsFontSmoothing \
+    CGContextSetAllowsFontSubpixelQuantization \
+    CGContextSetShouldSmoothFonts \
+    CGContextSetShouldSubpixelPositionFonts \
+    CGContextShowGlyphsAtPositions \
+    CGFontCreateWithFontName \
+    CGFontGetGlyphBBoxes \
+    CGFontGetItalicAngle \
+    CGFontGetLeading \
+    CGFontGetNumberOfGlyphs \
     CGImageCreate \
     CGImageGetDataProvider \
     CGPathGetBoundingBox \

@@ -139,6 +139,20 @@ typedef enum : uint32_t {
     LC32CoreGraphicsOpPathAddEllipseInRect = 121,
     LC32CoreGraphicsOpContextSetAlpha = 122,
     LC32CoreGraphicsOpPathAddQuadCurveToPoint = 123,
+    LC32CoreGraphicsOpColorSpaceCreateWithName = 124,
+    LC32CoreGraphicsOpBitmapContextGetWidth = 125,
+    LC32CoreGraphicsOpBitmapContextGetHeight = 126,
+    LC32CoreGraphicsOpContextFlush = 127,
+    LC32CoreGraphicsOpContextSetAllowsFontSmoothing = 128,
+    LC32CoreGraphicsOpContextSetAllowsFontSubpixelQuantization = 129,
+    LC32CoreGraphicsOpContextSetShouldSmoothFonts = 130,
+    LC32CoreGraphicsOpContextSetShouldSubpixelPositionFonts = 131,
+    LC32CoreGraphicsOpContextShowGlyphsAtPositions = 132,
+    LC32CoreGraphicsOpFontCreateWithFontName = 133,
+    LC32CoreGraphicsOpFontGetGlyphBBoxes = 134,
+    LC32CoreGraphicsOpFontGetItalicAngle = 135,
+    LC32CoreGraphicsOpFontGetLeading = 136,
+    LC32CoreGraphicsOpFontGetNumberOfGlyphs = 137,
 } LC32CoreGraphicsOpcode;
 
 #endif

@@ -17,6 +17,39 @@ static int buffer_has_nonzero_byte(const uint8_t *bytes, size_t count) {
     return 0;
 }
 
+static int test_named_color_spaces(void) {
+    CFMutableStringRef name = CFStringCreateMutableCopy(
+        kCFAllocatorDefault, 0, kCGColorSpaceGenericRGB);
+    CGColorSpaceRef rgb = CGColorSpaceCreateWithName(name);
+    CFRelease(name);
+    CGColorSpaceRef gray = CGColorSpaceCreateWithName(kCGColorSpaceGenericGray);
+    CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    int failures = report("named-color-space-models", rgb && gray && srgb &&
+        CGColorSpaceGetModel(rgb) == kCGColorSpaceModelRGB &&
+        CGColorSpaceGetNumberOfComponents(rgb) == 3 &&
+        CGColorSpaceGetModel(gray) == kCGColorSpaceModelMonochrome &&
+        CGColorSpaceGetNumberOfComponents(gray) == 1 &&
+        CGColorSpaceGetModel(srgb) == kCGColorSpaceModelRGB);
+    CGColorSpaceRef unknown = CGColorSpaceCreateWithName(CFSTR("LC32UnknownColorSpace"));
+    failures += report("named-color-space-unknown", unknown == NULL &&
+        CGColorSpaceCreateWithName(NULL) == NULL);
+    uint8_t pixels[4 * 4 * 4] = {};
+    CGContextRef context = rgb ? CGBitmapContextCreate(pixels, 4, 4, 8, 16,
+        rgb, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big) : NULL;
+    CGColorSpaceRelease(rgb);
+    CGColorSpaceRelease(gray);
+    CGColorSpaceRelease(srgb);
+    CGColorSpaceRelease(unknown);
+    if(context) {
+        CGContextSetRGBFillColor(context, 1, 0, 0, 1);
+        CGContextFillRect(context, CGRectMake(0, 0, 4, 4));
+        CGContextRelease(context);
+    }
+    failures += report("named-color-space-bitmap-lifetime", context &&
+        buffer_has_nonzero_byte(pixels, sizeof(pixels)));
+    return failures;
+}
+
 static int test_antialiasing(CGColorSpaceRef rgb) {
     uint8_t pixels[4 * 4 * 4] = {};
     CGContextRef context = CGBitmapContextCreate(pixels, 4, 4, 8, 16, rgb,
@@ -47,7 +80,7 @@ static int test_antialiasing(CGColorSpaceRef rgb) {
 }
 
 int main(void) {
-    int failures = 0;
+    int failures = test_named_color_spaces();
     uint8_t pixels[4 * 4 * 4] = {};
     uint8_t maskPixels[4 * 4] = {};
 

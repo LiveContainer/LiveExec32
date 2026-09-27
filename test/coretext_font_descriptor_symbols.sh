@@ -14,6 +14,35 @@ SYMBOLS=$(nm -gjU "$FRAMEWORK")
 for SYMBOL in \
     _CTFontCreateUIFontForLanguage \
     _CTFontCreateWithFontDescriptor \
+    _CTFontCreateWithGraphicsFont \
+    _CTFontCopyGraphicsFont \
+    _CTFontCopyFamilyName \
+    _CTFontCopyFontDescriptor \
+    _CTFontCreateCopyWithAttributes \
+    _CTFontDrawGlyphs \
+    _CTFontGetUnderlineThickness \
+    _CTLineGetPenOffsetForFlush \
+    _CTTypesetterSuggestLineBreak \
+    _CTRunGetGlyphs \
+    _CTRunGetPositions \
+    _CTRunGetAdvances \
+    _CTRunGetStringIndices \
+    _CTFontGetAdvancesForGlyphs \
+    _CTFontGetAscent \
+    _CTFontGetBoundingRectsForGlyphs \
+    _CTFontGetDescent \
+    _CTFontGetGlyphCount \
+    _CTFontGetGlyphsForCharacters \
+    _CTFontGetLeading \
+    _CTFontGetSize \
+    _CTFontGetSlantAngle \
+    _CTFontGetSymbolicTraits \
+    _CTTypesetterCreateLine \
+    _CTTypesetterCreateWithAttributedString \
+    _CTLineGetGlyphCount \
+    _CTLineGetImageBounds \
+    _CTRunGetGlyphCount \
+    _CTRunGetGlyphsPtr \
     _CTFontDescriptorCreateWithAttributes \
     _CTFrameGetPath \
     _CTRunGetPositionsPtr \

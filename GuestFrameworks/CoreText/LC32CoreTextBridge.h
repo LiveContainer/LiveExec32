@@ -7,6 +7,7 @@ enum {
     LC32CoreTextABIVersion = 1,
     LC32CoreTextMaxSlots = 16,
     LC32CoreTextMaximumParagraphSettings = 64,
+    LC32CoreTextMaximumGlyphs = 1024 * 1024,
 };
 
 typedef struct {
@@ -21,6 +22,10 @@ typedef struct {
     uint32_t first;
     uint32_t second;
 } LC32CoreTextPair32;
+
+typedef struct {
+    uint32_t x, y, width, height;
+} LC32CoreTextRect32;
 
 typedef struct {
     uint32_t valueLow;
@@ -69,6 +74,35 @@ typedef enum : uint32_t {
     LC32CoreTextOpFrameGetPath = 23,
     LC32CoreTextOpRunCopyPositions = 24,
     LC32CoreTextOpRunGetStatus = 25,
+    LC32CoreTextOpFontCreateWithGraphicsFont = 26,
+    LC32CoreTextOpFontCopyGraphicsFont = 27,
+    LC32CoreTextOpTypesetterCreateWithAttributedString = 28,
+    LC32CoreTextOpTypesetterCreateLine = 29,
+    LC32CoreTextOpFontGetAscent = 30,
+    LC32CoreTextOpFontGetDescent = 31,
+    LC32CoreTextOpFontGetLeading = 32,
+    LC32CoreTextOpFontGetSize = 33,
+    LC32CoreTextOpFontGetSlantAngle = 34,
+    LC32CoreTextOpFontGetSymbolicTraits = 35,
+    LC32CoreTextOpFontGetGlyphCount = 36,
+    LC32CoreTextOpFontGetGlyphsForCharacters = 37,
+    LC32CoreTextOpFontGetAdvancesForGlyphs = 38,
+    LC32CoreTextOpFontGetBoundingRectsForGlyphs = 39,
+    LC32CoreTextOpLineGetGlyphCount = 40,
+    LC32CoreTextOpLineGetImageBounds = 41,
+    LC32CoreTextOpRunGetGlyphCount = 42,
+    LC32CoreTextOpRunCopyGlyphs = 43,
+    LC32CoreTextOpFontCopyFamilyName = 44,
+    LC32CoreTextOpFontCopyFontDescriptor = 45,
+    LC32CoreTextOpFontCreateCopyWithAttributes = 46,
+    LC32CoreTextOpFontGetUnderlineThickness = 47,
+    LC32CoreTextOpFontDrawGlyphs = 48,
+    LC32CoreTextOpLineGetPenOffsetForFlush = 49,
+    LC32CoreTextOpRunGetGlyphs = 50,
+    LC32CoreTextOpRunGetPositions = 51,
+    LC32CoreTextOpRunGetAdvances = 52,
+    LC32CoreTextOpRunGetStringIndices = 53,
+    LC32CoreTextOpTypesetterSuggestLineBreak = 54,
 } LC32CoreTextOpcode;
 
 #endif
