@@ -374,6 +374,10 @@ $(eval $(call lc32_test,lc32-foundation-null-utf8,foundation_null_utf8.m,Foundat
 $(eval $(call lc32_guest_test,lc32-foundation-constants,foundation_constants.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-foundation-zone,foundation_zone.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-guest-proxy-lifetime,guest_proxy_lifetime.m,Foundation LC32))
+$(eval $(call lc32_guest_test,lc32-host-class-publication,host_class_publication.m,Foundation LC32))
+host_class_publication.m_CFLAGS := -O2
+$(eval $(call lc32_guest_test,lc32-storekit-delegate,storekit_delegate.m,Foundation StoreKit))
+$(eval $(call lc32_guest_test,lc32-uikit-menu-classes,uikit_menu_classes.m,Foundation UIKit))
 $(eval $(call lc32_guest_test,lc32-kvo-bridge,kvo_bridge.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-kvc-ivar-ownership,kvc_ivar_ownership.m kvc_ivar_ownership_arc.m,Foundation UIKit CoreGraphics LC32))
 kvc_ivar_ownership.m_CFLAGS := -fno-objc-arc

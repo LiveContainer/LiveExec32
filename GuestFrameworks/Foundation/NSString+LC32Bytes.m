@@ -17,6 +17,16 @@ static void LC32ResolveStringGetBytesHostFunction(void) {
         LC32Dlsym("LC32_Foundation_StringGetBytes", YES);
 }
 
+static id LC32InitializeStringWithHostData(NSString *receiver, NSData *data,
+                                          NSStringEncoding encoding) {
+    static uint64_t hostSelector __attribute__((aligned(8)));
+    const uint64_t selector = LC32CachedHostSelector(
+        &hostSelector, @selector(initWithData:encoding:), NO);
+    const uint64_t hostResult = LC32InvokeHostSelector(receiver.host_self,
+        selector, data.host_self, (uint64_t)encoding, (uint64_t)0);
+    return LC32AdoptHostInitializerResult(receiver, hostResult);
+}
+
 @implementation NSString (LC32Bytes)
 
 - (void)getCharacters:(unichar *)buffer range:(NSRange)range {
@@ -102,12 +112,22 @@ allowLossyConversion:(BOOL)allowLossyConversion
     /*
      * Native Foundation cannot dereference an ARM32 address.  NSData's
      * manual constructor copies the bytes through the guest-memory bridge;
-     * the generated initWithData:encoding: shim can then initialize this
+     * the native initWithData:encoding: method can then initialize this
      * exact class-cluster placeholder and adopt its native result safely.
      */
     NSData *data = [NSData dataWithBytes:bytes length:length];
     if(!data) return LC32DisposeFailedInit(self);
-    return [self initWithData:data encoding:encoding];
+    return LC32InitializeStringWithHostData(self, data, encoding);
+}
+
+- (instancetype)initWithData:(NSData *)data encoding:(NSStringEncoding)encoding {
+    // Decode the guest-visible contents, including guest NSData subclasses
+    // and legacy callers that write through a cast of immutable -bytes.
+    // Snapshot at this read boundary; never mutate native immutable storage.
+    NSData *snapshot = data
+        ? [NSData dataWithBytes:data.bytes length:data.length] : nil;
+    if(data && !snapshot) return LC32DisposeFailedInit(self);
+    return LC32InitializeStringWithHostData(self, snapshot, encoding);
 }
 
 - (instancetype)initWithBytesNoCopy:(void *)bytes

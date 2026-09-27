@@ -125,6 +125,44 @@ static BOOL testDeprecatedCString(void) {
     return passed;
 }
 
+static BOOL testDataInputBytes(void) {
+    // Boomlings builds an AES key by changing the buffer returned by -bytes
+    // on dataUsingEncoding:'s immutable result, then decoding it as a string.
+    // This is an intentional legacy-API misuse regression, not recommended
+    // NSData usage. The decoder must read the bytes visible to the guest.
+    NSData *data = [@"legacy data input" dataUsingEncoding:NSUTF8StringEncoding];
+    unsigned char *bytes = (unsigned char *)(uintptr_t)data.bytes;
+    if(!bytes) return NO;
+    bytes[0] = 'L';
+    NSString *first = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    BOOL passed = [first isEqualToString:@"Legacy data input"];
+    [first release];
+    bytes[1] = 'E';
+    NSMutableString *second = [[NSMutableString alloc]
+        initWithData:data encoding:NSUTF8StringEncoding];
+    [second appendString:@"!"];
+    passed &= [second isEqualToString:@"LEgacy data input!"];
+    [second release];
+    printf("string-data-guest-visible-bytes: %s\n", passed ? "PASS" : "FAIL");
+    const unsigned char utf16[] = {'A', 0, 0, 0, 0xac, 0x20};
+    NSString *unicode = [[NSString alloc] initWithData:
+        [NSData dataWithBytes:utf16 length:sizeof(utf16)]
+        encoding:NSUTF16LittleEndianStringEncoding];
+    NSString *empty = [[NSString alloc] initWithData:[NSData data]
+        encoding:NSUTF8StringEncoding];
+    const unsigned char invalid = 0xff;
+    NSString *rejected = [[NSString alloc] initWithData:
+        [NSData dataWithBytes:&invalid length:1] encoding:NSUTF8StringEncoding];
+    BOOL decodingPassed = unicode.length == 3 &&
+        [unicode characterAtIndex:0] == 'A' && [unicode characterAtIndex:1] == 0 &&
+        [unicode characterAtIndex:2] == 0x20ac && empty && empty.length == 0 && !rejected;
+    [unicode release];
+    [empty release];
+    [rejected release];
+    printf("string-data-encoding-empty-and-invalid: %s\n", decodingPassed ? "PASS" : "FAIL");
+    return passed && decodingPassed;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     NSAutoreleasePool *pool = [NSAutoreleasePool new];
@@ -203,10 +241,11 @@ int main(void) {
 
     const BOOL wideCStringPassed = testLegacyWideCStringPadding();
     const BOOL deprecatedCStringPassed = testDeprecatedCString();
+    const BOOL dataInputPassed = testDataInputBytes();
 
     [pool drain];
     return !(utf8Passed && latin1Passed && charactersPassed &&
              allCharactersPassed && utf32Passed && emptyUTF32Passed &&
              noCopyPassed && longUnicodePassed && wideCStringPassed &&
-             deprecatedCStringPassed);
+             deprecatedCStringPassed && dataInputPassed);
 }

@@ -331,7 +331,8 @@ bool parseFormat(NSString *format, ParsedFormat &parsed) {
 
         // CFString treats these unsupported conversions as literal text and
         // does not consume even dynamic width/precision arguments.
-        if(conversion == 'b' || conversion == 'B' || conversion == 'I') continue;
+        if(conversion == 'b' || conversion == 'B' || conversion == 'I' ||
+           conversion == '&') continue;
 
         // A precision makes %s/%S bounded, while our guest pointer copier
         // currently scans for a terminator. Fail instead of reading beyond a

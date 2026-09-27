@@ -195,6 +195,7 @@ Security_CFLAGS = -Wno-nonnull
 # These SDK headers require ARC for weak Objective-C properties.
 MapKit_CFLAGS = -fobjc-arc
 StoreKit_CFLAGS = -fobjc-arc
+../GuestFrameworks/StoreKit/SKRequest+LC32Delegate.m_CFLAGS = -fno-objc-arc
 WatchKit_CFLAGS = -fobjc-arc
 WebKit_CFLAGS = -fobjc-arc
 

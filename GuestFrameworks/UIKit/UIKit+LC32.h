@@ -2,6 +2,18 @@
 #import <CoreGraphics/CoreGraphics+LC32.h>
 #import <UIKit/UIKit.h>
 
+// These native menu objects can appear as legacy responder callback arguments.
+// The iOS 10 SDK has no declarations; an undeclared @implementation would
+// silently make a root class with none of NSObject's bridge methods.
+#if !__has_include(<UIKit/UIMenuElement.h>)
+@interface UIMenuElement : NSObject
+@end
+#endif
+#if !__has_include(<UIKit/UICommand.h>)
+@interface UICommand : UIMenuElement
+@end
+#endif
+
 typedef struct UIEdgeInsets_64 {
     CGFloat_64 top, left, bottom, right;
 } UIEdgeInsets_64;

@@ -5801,6 +5801,15 @@ Class guest_objc_getClass_retHostClass(const char *name) {
     subclass = objc_getClass(superclassName.hostPtr);
     if(!subclass) return nil;
 
+    /* allocateClassPair does not reserve the name until registerClassPair.
+     * Concurrent guest threads must share one fully prepared native class.
+     * Resolve the superclass first; metadata preparation may recursively
+     * resolve other guest classes on this thread. lookUpClass deliberately
+     * bypasses the missing-class hook when rechecking under the lock. */
+    static std::recursive_mutex publicationMutex;
+    std::lock_guard<std::recursive_mutex> lock(publicationMutex);
+    if(Class existing = objc_lookUpClass(name)) return existing;
+
     // Now we can construct the class
     Class outClass = objc_allocateClassPair(subclass, name, 0);
     if(!outClass) return nil;
@@ -5819,10 +5828,10 @@ Class guest_objc_getClass_retHostClass(const char *name) {
     // resolve methods and register a dynamic resolver
     [LC32ObjCMethodResolver registerClass:outClass];
     LC32UIKitPrepareGuestClass(outClass);
-    // register to objc
-    objc_registerClassPair(outClass);
     [outClass setGuestClass:YES];
     [(id)object_getClass(outClass) setGuestClass:YES];
+    // Publish only after all bridge metadata is ready.
+    objc_registerClassPair(outClass);
     return outClass;
 }
 

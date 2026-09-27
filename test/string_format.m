@@ -89,6 +89,15 @@ int main(void) {
                     [NSString stringWithFormat:@"%I/%@", @"after"], @"I/after");
     failed += check("unknown-I-dynamic-width-non-consuming",
                     [NSString stringWithFormat:@"%*.*I/%@", @"after"], @"*.*I/after");
+    failed += check("unknown-ampersand-query",
+                    [NSString stringWithFormat:@"%&hash=%@", @"abc123"],
+                    @"&hash=abc123");
+    failed += check("unknown-ampersand-dynamic-non-consuming",
+                    [NSString stringWithFormat:@"%*.*&/%@/%d", @"after", 17],
+                    @"*.*&/after/17");
+    failed += check("unknown-ampersand-positional",
+                    [NSString stringWithFormat:@"%&/%2$@/%1$d", 7, @"after"],
+                    @"&/after/7");
 #pragma clang diagnostic pop
 
     NSString *embeddedNUL =
