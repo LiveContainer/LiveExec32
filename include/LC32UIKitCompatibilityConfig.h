@@ -1,6 +1,7 @@
 #pragma once
 
-// Build both halves with 0 for native UIKit policy plus retained fixes.
+// Build guest UIKit with 0 for native UIKit policy plus retained fixes.
+// The host build inherits the mode through the generated guest override.h.
 // Keep font/layout/alert fixes, legacy identifier/AdMob shims,
 // ABI/resource forwarding and debugger support independent of this flag.
 #ifndef LC32_UIKIT_COMPATIBILITY

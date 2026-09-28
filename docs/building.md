@@ -26,6 +26,11 @@ gmake -C GuestMakefile generate-shims
 gmake -C GuestMakefile
 ```
 
+The guest UIKit build writes `LC32_UIKIT_COMPATIBILITY` (default `1`) to
+`GuestMakefile/.theos/override.h`, which host builds include automatically.
+Repack the guest after changing the setting before building the host app.
+See [UIKit compatibility configuration](configuration.md#compile-without-uikit-compatibility-hooks).
+
 With GNU Make 4.3 or newer, independent frameworks and their source files are
 built through the shared jobserver; pass `-jN` to cap concurrency. Guest
 frameworks also share the SDK's MRC/ARC Clang module contexts, keeping a

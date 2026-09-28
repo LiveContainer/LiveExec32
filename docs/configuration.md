@@ -114,22 +114,28 @@ a recording host without launching a game.
 
 ### Compile without UIKit compatibility hooks
 
-Build **both halves** with `LC32_UIKIT_COMPATIBILITY=0` to try native UIKit
+Set `LC32_UIKIT_COMPATIBILITY=0` when building the **guest** to try native UIKit
 behavior, including its low-SDK behavior, with the retained fixes listed below.
-The normal default is `1`.
+Guest builds default to `1`. After a successful UIKit build,
+`GuestMakefile/.theos/override.h` records the setting. Host builds include that
+header automatically; do not set the flag separately on the host.
 
 ```bash
 gmake -C GuestMakefile LC32_UIKIT_COMPATIBILITY=0
 gmake -C GuestMakefile install
-gmake LC32_UIKIT_COMPATIBILITY=0
+gmake
 ```
 
-For packaging, pass the same flag to your usual `gmake ... package` command.
-For runtime-only builds, use
-`gmake -C HostFrameworks/LC32 LC32_UIKIT_COMPATIBILITY=0` and install its
-shared framework **and** the rebuilt guest UIKit framework together.
-Rebuild/repack both halves with `=1` to restore compatibility. Build stamps
-track this setting so switching back cannot leave a cached opposite-mode link.
+Your usual `gmake ... package` command and direct
+`gmake -C HostFrameworks/LC32` builds inherit the same setting. Header changes
+rebuild the host automatically, including switches back to a previous mode.
+Rebuild/repack the guest with `=1`, then build the host, to restore compatibility.
+
+The generated header is ignored by Git and requires a guest UIKit build before
+the first host build (or after cleaning the guest). It overrides host-side
+definitions. The guest build does not rebuild or install the host automatically;
+repack the guest and deploy both halves together. There is no packed-binary
+inspection or runtime mode check.
 
 Unlike the geometry-only environment switch above, this compiles out
 legacy rotation/window/canvas adaptations,
