@@ -10,6 +10,7 @@
 
 extern int run_opengles_es1_smoke(void);
 extern int run_opengles_es3_smoke(void);
+extern int run_opengles_drawable_smoke(void);
 
 static int failures;
 
@@ -555,6 +556,7 @@ int main(void) {
 
         failures += run_opengles_es1_smoke();
         failures += run_opengles_es3_smoke();
+        failures += run_opengles_drawable_smoke();
 
         EAGLContext *context =
             [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES2];

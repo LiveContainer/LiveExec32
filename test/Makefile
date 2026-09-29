@@ -424,7 +424,9 @@ $(eval $(call lc32_guest_test,lc32-coretext-bridge,coretext_bridge.m,CoreText Co
 $(eval $(call lc32_guest_test,lc32-coretext-font-descriptor,coretext_font_descriptor.c,CoreText CoreFoundation Foundation))
 $(eval $(call lc32_guest_test,lc32-coretext-graphics-font,coretext_graphics_font.c,CoreText CoreGraphics CoreFoundation Foundation))
 $(eval $(call lc32_guest_test,lc32-openal-smoke,openal_smoke.c,OpenAL))
-$(eval $(call lc32_guest_test,lc32-opengles-smoke,opengles_smoke.m opengles_es1_smoke.m opengles_es3_smoke.m,Foundation OpenGLES QuartzCore))
+$(eval $(call lc32_guest_test,lc32-opengles-smoke,opengles_smoke.m opengles_es1_smoke.m opengles_es3_smoke.m opengles_drawable_smoke.m,Foundation OpenGLES QuartzCore))
+$(eval $(call lc32_guest_test,lc32-opengles-drawable,opengles_drawable_smoke.m,Foundation OpenGLES QuartzCore))
+lc32-opengles-drawable_CFLAGS += -DLC32_DRAWABLE_STANDALONE=1
 
 # UIKit and aggregate-argument bridges.
 $(eval $(call lc32_guest_test,lc32-guest-fp-return,guest_fp_return.m,Foundation UIKit LC32))
@@ -673,7 +675,7 @@ frameworks:
 # Symbol checks consume framework products directly.  Route their focused
 # link tests through the one normalized full framework build above instead of
 # starting overlapping recursive builds for several framework goals.
-SYMBOL_TESTS := lc32-openal-smoke lc32-opengles-smoke lc32-accelerate-vdsp \
+SYMBOL_TESTS := lc32-openal-smoke lc32-opengles-smoke lc32-opengles-drawable lc32-accelerate-vdsp \
   lc32-security-secitem lc32-coretext-font-descriptor lc32-coretext-graphics-font \
   lc32-coregraphics-bitmap lc32-quartzcore-transform \
   lc32-uikit-accessibility lc32-mobilecoreservices-uti lc32-cfnetwork-http \

@@ -1038,6 +1038,103 @@ bool CurrentContextIsES1() {
     return context.API == kEAGLRenderingAPIOpenGLES1;
 }
 
+static const void *drawableRenderbuffersKey = &drawableRenderbuffersKey;
+
+// The sharegroup owns names; weak values do not keep layers (or their views)
+// alive. Callers serialize access with the sharegroup's Objective-C lock.
+NSMapTable<NSNumber *, CAEAGLLayer *> *DrawableRenderbuffers(
+        EAGLSharegroup *sharegroup, bool create = false) {
+    NSMapTable *buffers = objc_getAssociatedObject(
+        sharegroup, drawableRenderbuffersKey);
+    if(!buffers && create) {
+        buffers = [NSMapTable strongToWeakObjectsMapTable];
+        objc_setAssociatedObject(sharegroup, drawableRenderbuffersKey,
+            buffers, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return buffers;
+}
+
+void ForgetDrawableRenderbuffers(GLsizei count, const GLuint *names) {
+    EAGLSharegroup *sharegroup = EAGLContext.currentContext.sharegroup;
+    @synchronized(sharegroup) {
+        NSMapTable *buffers = DrawableRenderbuffers(sharegroup);
+        for(GLsizei index = 0; index < count; ++index)
+            [buffers removeObjectForKey:@(names[index])];
+    }
+}
+
+void ForgetBoundDrawableRenderbuffer(GLenum target) {
+    if(target != GL_RENDERBUFFER) return;
+    GLint buffer = 0;
+    glGetIntegerv(GL_RENDERBUFFER_BINDING, &buffer);
+    const GLuint name = buffer;
+    ForgetDrawableRenderbuffers(1, &name);
+}
+
+void BindDrawableRenderbuffer(GLuint buffer) {
+    if(CurrentContextIsES1()) glBindRenderbufferOES(GL_RENDERBUFFER_OES, buffer);
+    else glBindRenderbuffer(GL_RENDERBUFFER, buffer);
+}
+
+BOOL ReconcileDrawableStorage(EAGLContext *context, NSUInteger target,
+        id<EAGLDrawable> drawable, CAEAGLLayer *layer, BOOL result) {
+    // Only guest-owned contexts have their GL object lifetimes tracked below.
+    // Never change another current context's binding on a failed EAGL call.
+    if(target != GL_RENDERBUFFER || context != EAGLContext.currentContext ||
+            !context.guest_selfOrNull) return result;
+    GLint binding = 0;
+    glGetIntegerv(GL_RENDERBUFFER_BINDING, &binding);
+    if(!binding) return result;
+    const GLuint buffer = binding;
+    EAGLSharegroup *sharegroup = context.sharegroup;
+    @synchronized(sharegroup) {
+        NSMapTable<NSNumber *, CAEAGLLayer *> *buffers =
+            DrawableRenderbuffers(sharegroup, result && layer);
+        GLuint previous = 0;
+        if(layer) {
+            for(NSNumber *name in buffers) {
+                if(name.unsignedIntValue != buffer &&
+                        [buffers objectForKey:name] == layer) {
+                    previous = name.unsignedIntValue;
+                    break;
+                }
+            }
+        }
+        NSString *format = layer.drawableProperties[kEAGLDrawablePropertyColorFormat];
+        if(!result && layer && (!format ||
+                [format isEqual:kEAGLColorFormatRGBA8] ||
+                [format isEqual:kEAGLColorFormatRGB565])) {
+            if(previous && (CurrentContextIsES1()
+                    ? glIsRenderbufferOES(previous) : glIsRenderbuffer(previous))) {
+                // Old engines can allocate a fresh buffer on every layout,
+                // leaving the layer attached to its predecessor. Release only
+                // that known attachment, not the object or the framebuffer.
+                BOOL released = NO;
+                BindDrawableRenderbuffer(previous);
+                @try {
+                    released = [context lc32_renderbufferStorage:target
+                                                   fromDrawable:nil];
+                } @finally {
+                    BindDrawableRenderbuffer(buffer);
+                }
+                if(released) {
+                    [buffers removeObjectForKey:@(previous)];
+                    result = [context lc32_renderbufferStorage:target
+                                                 fromDrawable:drawable];
+                }
+            }
+        }
+        if(result) {
+            // Also retire the old record when native EAGL accepted the
+            // replacement directly, without needing our release/retry.
+            if(previous) [buffers removeObjectForKey:@(previous)];
+            [buffers removeObjectForKey:@(buffer)];
+            if(layer) [buffers setObject:layer forKey:@(buffer)];
+        }
+    }
+    return result;
+}
+
 uintptr_t CurrentGLSharegroupKey() {
     EAGLContext *context = EAGLContext.currentContext;
     EAGLSharegroup *sharegroup = context.sharegroup;
@@ -2291,6 +2388,8 @@ size_t VertexAttribElementCount(GLenum pname) {
         result = [self lc32_renderbufferStorage:target
                                     fromDrawable:drawable];
     }
+    result = ReconcileDrawableStorage(self, target, drawable, drawableLayer,
+        result);
     if(result && drawableLayer && !pthread_main_np()) {
         // Storage publishes the drawable's image queue through Core Animation.
         // Legacy render threads often have no run loop to commit that implicit
@@ -2497,15 +2596,11 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
                     glDeleteFramebuffers(n, v);
                 });
         case LC32OpenGLESOpDeleteRenderbuffers:
-            if(CurrentContextIsES1()) {
-                return DispatchObjectInputArray(call,
-                    [](GLsizei n, const GLuint *v) {
-                        glDeleteRenderbuffersOES(n, v);
-                    });
-            }
             return DispatchObjectInputArray(call,
                 [](GLsizei n, const GLuint *v) {
-                    glDeleteRenderbuffers(n, v);
+                    ForgetDrawableRenderbuffers(n, v);
+                    if(CurrentContextIsES1()) glDeleteRenderbuffersOES(n, v);
+                    else glDeleteRenderbuffers(n, v);
                 });
         case LC32OpenGLESOpDeleteTextures:
             return DispatchObjectInputArray(call, [](GLsizei n, const GLuint *v) { glDeleteTextures(n, v); });
@@ -2750,12 +2845,17 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
         case LC32OpenGLESOpReleaseShaderCompiler: REQUIRE(0); glReleaseShaderCompiler(); return 0;
         case LC32OpenGLESOpRenderbufferStorage:
             REQUIRE(4);
+            ForgetBoundDrawableRenderbuffer(U(0));
             if(CurrentContextIsES1())
                 glRenderbufferStorageOES(U(0), U(1), I(2), I(3));
             else
                 glRenderbufferStorage(U(0), U(1), I(2), I(3));
             return 0;
-        case LC32OpenGLESOpRenderbufferStorageMultisampleAPPLE: REQUIRE(5); glRenderbufferStorageMultisampleAPPLE(U(0), I(1), U(2), I(3), I(4)); return 0;
+        case LC32OpenGLESOpRenderbufferStorageMultisampleAPPLE:
+            REQUIRE(5);
+            ForgetBoundDrawableRenderbuffer(U(0));
+            glRenderbufferStorageMultisampleAPPLE(U(0), I(1), U(2), I(3), I(4));
+            return 0;
         case LC32OpenGLESOpResolveMultisampleFramebufferAPPLE: REQUIRE(0); glResolveMultisampleFramebufferAPPLE(); return 0;
         case LC32OpenGLESOpResumeTransformFeedback:
             REQUIRE(0); glResumeTransformFeedback(); return 0;
@@ -2897,7 +2997,11 @@ extern "C" uint32_t LC32_OpenGLES_Dispatch(uint32_t opcode,
         case LC32OpenGLESOpFramebufferRenderbufferOES: REQUIRE(4); glFramebufferRenderbufferOES(U(0), U(1), U(2), U(3)); return 0;
         case LC32OpenGLESOpGenRenderbuffersOES:
             return DispatchObjectOutputArray(call, [](GLsizei n, GLuint *v) { glGenRenderbuffersOES(n, v); });
-        case LC32OpenGLESOpRenderbufferStorageOES: REQUIRE(4); glRenderbufferStorageOES(U(0), U(1), I(2), I(3)); return 0;
+        case LC32OpenGLESOpRenderbufferStorageOES:
+            REQUIRE(4);
+            ForgetBoundDrawableRenderbuffer(U(0));
+            glRenderbufferStorageOES(U(0), U(1), I(2), I(3));
+            return 0;
         default:
             break;
     }
