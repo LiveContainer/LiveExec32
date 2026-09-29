@@ -195,7 +195,7 @@ static void LC32ResolveLegacyUniqueIdentifierFallback(void) {
 
 #if LC32_UIKIT_COMPATIBILITY
 static void LC32ResolveLegacyCanvas(void) {
-    if(!LC32GuestUIKitLegacyCompatibilityEnabled()) return;
+    const BOOL compatibility = LC32GuestUIKitLegacyCompatibilityEnabled();
     NSBundle *bundle = NSBundle.mainBundle;
     NSDictionary *info = bundle.infoDictionary;
     const uint64_t getter = LC32Dlsym(
@@ -204,9 +204,12 @@ static void LC32ResolveLegacyCanvas(void) {
         ? LC32InvokeHostCRet32(getter) : 0;
     const LC32LegacyIPadCanvasKind canvasKind =
         LC32BundleLegacyIPadCanvasKind(bundle, sdkVersion);
-    LC32LegacyIPadCanvasRequired =
-        canvasKind != LC32LegacyIPadCanvasNone;
-    LC32LegacyPhoneCanvasRequired = getter &&
+    const uint64_t canvasGetter = LC32Dlsym(
+        "LC32UIKitLegacyIPadCanvasEnabled", YES);
+    LC32LegacyIPadCanvasRequired = canvasGetter
+        ? LC32InvokeHostCRet32(canvasGetter) != 0
+        : compatibility && canvasKind != LC32LegacyIPadCanvasNone;
+    LC32LegacyPhoneCanvasRequired = compatibility && getter &&
         LC32BundleUsesFixedLandscapePhoneCanvas(bundle, sdkVersion);
     LC32LegacyIPadStatusBarHidden = [[info objectForKey:
         @"UIStatusBarHidden"] boolValue];
@@ -610,7 +613,8 @@ void UIImageWriteToSavedPhotosAlbum(UIImage *image,
      * applications redundantly add it to the window immediately afterwards;
      * moving it out of LiveExec32's compatibility container would violate
      * UIKit's controller-parent invariant. */
-    if(LC32GuestUIKitLegacyCompatibilityEnabled()) {
+    if(LC32GuestUIKitLegacyCompatibilityEnabled() ||
+            LC32RequiresLegacyIPadCanvas()) {
         UIViewController *rootController = self.rootViewController;
         if(view && rootController.isViewLoaded &&
                 rootController.view == view && view.superview != self) return;

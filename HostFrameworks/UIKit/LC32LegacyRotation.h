@@ -15,6 +15,8 @@ void LC32FinishNativeLegacyRotationStartup(void);
 /* Supplied by the emulator: native layout callbacks can arrive before the
  * guest renderer is initialized or on a thread without a guest CPU context. */
 BOOL LC32NativeLegacyRotationCanCallGuest(void);
+/* Resolve an emulator-owned canvas container without exposing it to guests. */
+UIViewController *LC32NativeLegacyRotationContentController(UIViewController *controller);
 
 #ifdef __cplusplus
 }

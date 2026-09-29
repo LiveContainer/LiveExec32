@@ -135,6 +135,9 @@ UIViewController *ControllerForWindow(UIWindow *window, bool forBacking = false)
     if(!window) return nil;
     UIViewController *root = NativeRoot(window);
     if(root) {
+        if(NativePresented(root) && !forBacking) return nil;
+        root = LC32NativeLegacyRotationContentController(root);
+        if(!root) return nil; // The native canvas is installed before its guest.
         // Low-SDK UIKit still rotates a modern-policy root's view in portrait
         // window coordinates. It needs the same inverse backing rotation, but
         // must retain its modern policy without deprecated policy queries.
@@ -374,15 +377,17 @@ extern "C" void LC32FinishNativeLegacyRotationStartup(void) {
 - (void)lc32_rotationWindow:(UIWindow *)window willRotateToInterfaceOrientation:(UIInterfaceOrientation)orientation
         duration:(NSTimeInterval)duration newSize:(CGSize)size {
     [self lc32_rotationWindow:window willRotateToInterfaceOrientation:orientation duration:duration newSize:size];
-    if(RegisteredClass(object_getClass(self)) && startupFinished && LC32NativeLegacyRotationCanCallGuest())
-        [self willRotateToInterfaceOrientation:orientation duration:duration];
+    UIViewController *controller = LC32NativeLegacyRotationContentController(self);
+    if(RegisteredClass(object_getClass(controller)) && startupFinished && LC32NativeLegacyRotationCanCallGuest())
+        [controller willRotateToInterfaceOrientation:orientation duration:duration];
 }
 
 - (void)lc32_rotationWindow:(UIWindow *)window didRotateFromInterfaceOrientation:(UIInterfaceOrientation)orientation
         oldSize:(CGSize)size {
     [self lc32_rotationWindow:window didRotateFromInterfaceOrientation:orientation oldSize:size];
-    if(RegisteredClass(object_getClass(self)) && startupFinished && LC32NativeLegacyRotationCanCallGuest())
-        [self didRotateFromInterfaceOrientation:orientation];
+    UIViewController *controller = LC32NativeLegacyRotationContentController(self);
+    if(RegisteredClass(object_getClass(controller)) && startupFinished && LC32NativeLegacyRotationCanCallGuest())
+        [controller didRotateFromInterfaceOrientation:orientation];
 }
 @end
 

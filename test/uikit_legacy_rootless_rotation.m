@@ -18,6 +18,19 @@
  * for the bridge's classification of guest-created controller classes. */
 static BOOL guestCallsAllowed = YES;
 BOOL LC32NativeLegacyRotationCanCallGuest(void) { return guestCallsAllowed; }
+/* Stand in for UIKit.mm's native iPad-on-phone container. The production
+ * rotation unit must resolve its guest without registering the wrapper class. */
+@interface RootlessRotationCanvasController : UIViewController
+@property(nonatomic, strong) UIViewController *guestContentController;
+@end
+@implementation RootlessRotationCanvasController
+- (BOOL)shouldAutomaticallyForwardRotationMethods { return NO; }
+@end
+UIViewController *LC32NativeLegacyRotationContentController(UIViewController *controller) {
+    if([controller isKindOfClass:RootlessRotationCanvasController.class])
+        return ((RootlessRotationCanvasController *)controller).guestContentController;
+    return controller;
+}
 
 static int failures;
 static unsigned legacyQueries;
@@ -610,25 +623,38 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
     NSArray<Class> *classes = @[RootlessRotationLegacyController.class,
         RootlessRotationModernController.class, RootlessRotationRegisteredModernController.class,
         RootlessRotationUnregisteredController.class, RootlessRotationNativeModernController.class];
+    for(unsigned wrapped = 0; wrapped < 2; ++wrapped)
     for(Class cls in classes) {
         RootlessRotationTrackingController *subject = [[cls alloc] init];
         UIWindow *window = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, 320, 480)];
         subject.view = [[UIView alloc] initWithFrame:window.bounds];
-        window.rootViewController = subject;
+        UIViewController *recipient = subject;
+        if(wrapped) {
+            RootlessRotationCanvasController *canvas = [RootlessRotationCanvasController new];
+            // Exercise the real installation order: the root is briefly empty.
+            window.rootViewController = canvas;
+            [canvas addChildViewController:subject];
+            [canvas.view addSubview:subject.view];
+            [subject didMoveToParentViewController:canvas];
+            canvas.guestContentController = subject;
+            recipient = canvas;
+        } else {
+            window.rootViewController = subject;
+        }
         const unsigned queriesBefore = subject.recordedQueries;
         const unsigned willBefore = subject.recordedWillCalls;
         const unsigned didBefore = subject.recordedDidCalls;
         ((void (*)(id, SEL, UIWindow *, UIInterfaceOrientation, NSTimeInterval, CGSize))objc_msgSend)(
-            subject, willSelector, window, newOrientation, duration, CGSizeMake(480, 320));
+            recipient, willSelector, window, newOrientation, duration, CGSizeMake(480, 320));
         ((void (*)(id, SEL, UIWindow *, UIInterfaceOrientation, CGSize))objc_msgSend)(
-            subject, didSelector, window, oldOrientation, CGSizeMake(320, 480));
+            recipient, didSelector, window, oldOrientation, CGSizeMake(320, 480));
         const unsigned expectedCalls = expectedEnabled &&
             (cls == RootlessRotationLegacyController.class ||
              cls == RootlessRotationModernController.class ||
              cls == RootlessRotationRegisteredModernController.class) ? 1 : 0;
-        printf("rootless-rotation-direct-lifecycle: class=%s expected=%u "
+        printf("rootless-rotation-direct-lifecycle: class=%s wrapped=%u expected=%u "
             "will-delta=%u did-delta=%u queries-delta=%u will-orientation=%ld "
-            "did-orientation=%ld duration=%a\n", class_getName(cls), expectedCalls,
+            "did-orientation=%ld duration=%a\n", class_getName(cls), wrapped, expectedCalls,
             subject.recordedWillCalls - willBefore, subject.recordedDidCalls - didBefore,
             subject.recordedQueries - queriesBefore, (long)subject.recordedWillOrientation,
             (long)subject.recordedDidOrientation, subject.recordedDuration);
@@ -642,6 +668,19 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
             check("lifecycle-did-old-orientation-forwarded", subject.recordedDidOrientation == oldOrientation);
             check("lifecycle-double-duration-forwarded-exactly", subject.recordedDuration == duration);
         }
+        const unsigned willAfter = subject.recordedWillCalls;
+        const unsigned didAfter = subject.recordedDidCalls;
+        guestCallsAllowed = NO;
+        @try {
+            ((void (*)(id, SEL, UIWindow *, UIInterfaceOrientation, NSTimeInterval, CGSize))objc_msgSend)(
+                recipient, willSelector, window, newOrientation, duration, CGSizeMake(480, 320));
+            ((void (*)(id, SEL, UIWindow *, UIInterfaceOrientation, CGSize))objc_msgSend)(
+                recipient, didSelector, window, oldOrientation, CGSizeMake(320, 480));
+        } @finally {
+            guestCallsAllowed = YES;
+        }
+        check("lifecycle-retains-guest-context-guard", subject.recordedWillCalls == willAfter &&
+            subject.recordedDidCalls == didAfter);
         window.hidden = YES;
     }
     puts("rootless-rotation-direct-lifecycle-scope: callback forwarding only; "
@@ -659,15 +698,25 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
     check("rotation-update-hook-matches-sdk-gate", resolved &&
         (updateInfo.dli_fbase == _dyld_get_image_header(0)) == expectedEnabled);
     if(!expectedEnabled) return;
-    for(unsigned rootless = 0; rootless < 2; ++rootless)
+    for(unsigned layout = 0; layout < 3; ++layout)
     for(Class cls in @[RootlessRotationLegacyController.class,
             RootlessRotationPolicyOnlyController.class, RootlessRotationNativeModernController.class]) {
+        const BOOL rootless = layout == 1;
         RootlessRotationRefreshWindow *window = [[RootlessRotationRefreshWindow alloc]
             initWithFrame:CGRectMake(0, 0, 320, 480)];
         UIViewController *controller = [[cls alloc] init];
         controller.view = [[RootlessRotationGuestView alloc] initWithFrame:window.bounds];
-        if(!rootless) window.rootViewController = controller;
-        if(controller.view.superview != window) [window addSubview:controller.view];
+        if(layout == 2) {
+            RootlessRotationCanvasController *canvas = [RootlessRotationCanvasController new];
+            window.rootViewController = canvas;
+            [canvas addChildViewController:controller];
+            [canvas.view addSubview:controller.view];
+            [controller didMoveToParentViewController:canvas];
+            canvas.guestContentController = controller;
+        } else {
+            if(!rootless) window.rootViewController = controller;
+            if(controller.view.superview != window) [window addSubview:controller.view];
+        }
         window.recordRefreshes = YES;
         window.refreshes = 0;
         updateProbeCalls = 0;

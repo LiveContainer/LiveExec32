@@ -124,6 +124,9 @@ BOOL host_hook_getClass(const char *name, Class *outClass);
 // LC32_DISABLE_UIKIT_COMPATIBILITY=1 disables geometry adapters at runtime;
 // LC32_UIKIT_COMPATIBILITY=0 compiles out optional UIKit policy hooks in both halves.
 u32 LC32UIKitLegacyCompatibilityEnabled(void);
+// iPad-on-phone canvas virtualization is independent of the process SDK's
+// rotation policy. Native iPadOS windows do not use this adapter.
+u32 LC32UIKitLegacyIPadCanvasEnabled(void);
 // Lets framework bridges add native compatibility entry points after all
 // guest methods have been mirrored but before the class is registered.
 void LC32UIKitPrepareGuestClass(Class cls);
