@@ -4,7 +4,8 @@ LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash \
   check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading \
   check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop \
   check-foundation-ports-host check-uikit-compatibility-switch check-uikit-status-bar-orientation \
-  check-guest-install check-host-selector-hooks check-uikit-screen-metrics-host
+  check-guest-install check-host-selector-hooks check-uikit-screen-metrics-host \
+  check-systemconfiguration-host
 LC32_HOST_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),\
   $(if $(strip $(filter-out $(LC32_HOST_TEST_GOALS),$(MAKECMDGOALS))),,1),)
 
@@ -41,6 +42,21 @@ BUILD_INFO_LOGGING_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/build-info-
 
 check-uikit-screen-metrics-host:
 	sh ./uikit_screen_metrics_host.sh
+
+.PHONY: check-systemconfiguration-host
+check-systemconfiguration-host:
+	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
+	$(HOST_CC) -fblocks -fno-objc-arc -Wall -Wextra -Werror \
+		-Wno-deprecated-declarations -Wno-nonnull \
+		-framework Foundation -framework SystemConfiguration \
+		systemconfiguration_reachability.m \
+		../GuestFrameworks/SystemConfiguration/SystemConfiguration.m \
+		-o "$(HOST_TEST_OUTPUT_DIR)/systemconfiguration-reachability"
+	"$(HOST_TEST_OUTPUT_DIR)/systemconfiguration-reachability"
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -Isystemconfiguration-stubs \
+		-framework Foundation systemconfiguration_copy_host.mm \
+		-o "$(HOST_TEST_OUTPUT_DIR)/systemconfiguration-copy"
+	"$(HOST_TEST_OUTPUT_DIR)/systemconfiguration-copy"
 
 check-host-selector-hooks:
 	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
@@ -337,6 +353,8 @@ $(eval $(call lc32_guest_test,lc32-cfdictionary-callbacks,cfdictionary_callbacks
 $(eval $(call lc32_guest_test,lc32-cfset-callbacks,cfset_callbacks.m,Foundation CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-cfnetwork-http,cfnetwork_http.m,CFNetwork CoreFoundation Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-cfnetwork-host-resolution,cfnetwork_host_resolution.m,CFNetwork CoreFoundation Foundation))
+$(eval $(call lc32_guest_test,lc32-systemconfiguration,systemconfiguration_reachability.m,SystemConfiguration Foundation CoreFoundation))
+lc32-systemconfiguration_CFLAGS := -Wno-nonnull -DLC32_TEST_COPY_QUERIES=1
 $(eval $(call lc32_guest_test,lc32-collection-object-buffers,collection_object_buffers.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-class-cluster-reuse,class_cluster_reuse.m,Foundation CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-guest-input-stream,guest_input_stream.m,Foundation LC32))

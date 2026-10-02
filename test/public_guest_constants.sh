@@ -80,6 +80,13 @@ sed '/^$/d' "$work/CFNetwork.raw" > "$work/CFNetwork.filtered"
 LC_ALL=C sort -u "$work/CFNetwork.filtered" \
     > "$work/CFNetwork.expected"
 cat > "$work/SystemConfiguration.expected" <<'EOF'
+CNCopyCurrentNetworkInfo
+CNCopySupportedInterfaces
+SCDynamicStoreCopyComputerName
+SCDynamicStoreCopyLocalHostName
+SCDynamicStoreCopyLocation
+SCDynamicStoreCopyProxies
+SCNetworkReachabilitySetDispatchQueue
 kCFErrorDomainSystemConfiguration
 kCNNetworkInfoKeyBSSID
 kCNNetworkInfoKeySSID
@@ -93,10 +100,10 @@ audit CoreMedia "$work/CoreMedia.expected" 251
 audit AddressBook "$work/AddressBook.expected" 90
 audit AudioToolbox "$work/AudioToolbox.expected" 26
 audit CFNetwork "$work/CFNetwork.expected" 183
-audit SystemConfiguration "$work/SystemConfiguration.expected" 4
+audit SystemConfiguration "$work/SystemConfiguration.expected" 11
 
-if [ "$total" -ne 812 ]; then
-    echo "Public guest symbol baseline changed: expected 812, got $total" >&2
+if [ "$total" -ne 819 ]; then
+    echo "Public guest symbol baseline changed: expected 819, got $total" >&2
     exit 1
 fi
 echo "Public guest symbol audit: PASS ($total exports)"

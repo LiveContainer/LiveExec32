@@ -4,6 +4,9 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <dispatch/dispatch.h>
+#include <pthread.h>
+#include "LC32SystemConfigurationBridge.h"
 
 static const SCNetworkReachabilityFlags LC32ReachableFlags =
     kSCNetworkReachabilityFlagsReachable;
@@ -19,8 +22,20 @@ CFErrorRef SCCopyLastError(void) {
         kCFErrorDomainSystemConfiguration, SCError(), NULL);
 }
 
+static pthread_key_t errorKey;
+static pthread_once_t errorOnce = PTHREAD_ONCE_INIT;
+static void createErrorKey(void) { pthread_key_create(&errorKey, NULL); }
+void LC32SCSetError(int status) {
+    pthread_once(&errorOnce, createErrorKey);
+    pthread_setspecific(errorKey, (void *)(intptr_t)status);
+}
 int SCError(void) {
-    return kSCStatusOK;
+    pthread_once(&errorOnce, createErrorKey);
+    return (int)(intptr_t)pthread_getspecific(errorKey);
+}
+static Boolean invalidArgument(void) {
+    LC32SCSetError(kSCStatusInvalidArgument);
+    return false;
 }
 
 const char *SCErrorString(int status) {
@@ -68,16 +83,6 @@ Boolean CNMarkPortalOffline(CFStringRef interfaceName) {
     return false;
 }
 
-CFArrayRef CNCopySupportedInterfaces(void) {
-    return CFArrayCreate(kCFAllocatorDefault, NULL, 0,
-                         &kCFTypeArrayCallBacks);
-}
-
-CFDictionaryRef CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
-    (void)interfaceName;
-    return NULL;
-}
-
 typedef struct LC32SCNetworkReachabilityRegistration {
     CFRunLoopRef runLoop;
     CFRunLoopMode mode;
@@ -92,29 +97,39 @@ typedef struct LC32SCNetworkReachabilityRegistration {
     LC32SCNetworkReachabilityRegistration *_registrations;
     BOOL _scheduled;
     BOOL _initialCallbackPending;
+    dispatch_queue_t _dispatchQueue;
+    uint64_t _dispatchGeneration;
 }
-- (void)lc32_deliverInitialReachability;
+- (void)lc32_deliverInitialReachability:(uint64_t)generation;
 @end
 
 @implementation LC32SCNetworkReachability
 
-- (void)lc32_deliverInitialReachability {
-    _initialCallbackPending = NO;
-    if(!_scheduled || !_callback) return;
-
+- (void)lc32_deliverInitialReachability:(uint64_t)generation {
     /*
      * The callback may unschedule the last run-loop source or replace its
      * context. Keep both the reachability object and a retained context
      * snapshot alive until that callback returns.
      */
     [self retain];
-    SCNetworkReachabilityCallBack callback = _callback;
-    const void *info = _context.info;
-    CFAllocatorRetainCallBack retainInfo = _context.retain;
-    CFAllocatorReleaseCallBack releaseInfo = _context.release;
-    if(retainInfo && info) info = retainInfo(info);
-    callback((SCNetworkReachabilityRef)self, LC32ReachableFlags,
-             (void *)info);
+    SCNetworkReachabilityCallBack callback = NULL;
+    const void *info = NULL;
+    CFAllocatorReleaseCallBack releaseInfo = NULL;
+    @synchronized(self) {
+        // Old queued work must not consume a newly scheduled notification.
+        if(_scheduled && (generation ? (_dispatchQueue &&
+                generation == _dispatchGeneration) : !_dispatchQueue)) {
+            _initialCallbackPending = NO;
+            callback = _callback;
+            info = _context.info;
+            if(callback && _context.retain && info) {
+                info = _context.retain(info);
+                releaseInfo = _context.release;
+            }
+        }
+    }
+    if(callback) callback((SCNetworkReachabilityRef)self,
+                          LC32ReachableFlags, (void *)info);
     if(releaseInfo && info) releaseInfo(info);
     [self release];
 }
@@ -146,7 +161,19 @@ typedef struct LC32SCNetworkReachabilityRegistration {
 @end
 
 static void LC32SCNetworkReachabilitySourcePerform(void *info) {
-    [(LC32SCNetworkReachability *)info lc32_deliverInitialReachability];
+    [(LC32SCNetworkReachability *)info lc32_deliverInitialReachability:0];
+}
+
+typedef struct {
+    LC32SCNetworkReachability *target;
+    uint64_t generation;
+} LC32SCNetworkReachabilityWork;
+
+static void LC32SCNetworkReachabilityDispatchPerform(void *info) {
+    LC32SCNetworkReachabilityWork *work = info;
+    [work->target lc32_deliverInitialReachability:work->generation];
+    [work->target release];
+    free(work);
 }
 
 static LC32SCNetworkReachabilityRegistration *
@@ -167,9 +194,20 @@ LC32SCNetworkReachabilityFindRegistration(
 
 static void LC32SCNetworkReachabilitySignalInitial(
         LC32SCNetworkReachability *reachability) {
-    if(!reachability->_callback || !reachability->_source ||
-       !reachability->_registrations ||
+    // Called with the target's lock held; delivery snapshots the context under
+    // that same lock but invokes user code outside it (including cancellation).
+    if(!reachability->_callback || !reachability->_scheduled ||
        reachability->_initialCallbackPending) {
+        return;
+    }
+    if(reachability->_dispatchQueue) {
+        LC32SCNetworkReachabilityWork *work = malloc(sizeof(*work));
+        if(!work) return;
+        work->target = [reachability retain];
+        work->generation = reachability->_dispatchGeneration;
+        reachability->_initialCallbackPending = YES;
+        dispatch_async_f(reachability->_dispatchQueue, work,
+                         LC32SCNetworkReachabilityDispatchPerform);
         return;
     }
     reachability->_initialCallbackPending = YES;
@@ -215,7 +253,7 @@ CFTypeID SCNetworkReachabilityGetTypeID(void) {
 Boolean SCNetworkReachabilityGetFlags(
         SCNetworkReachabilityRef target,
         SCNetworkReachabilityFlags *flags) {
-    if(!target || !flags) return false;
+    if(!target || !flags) return invalidArgument();
     *flags = LC32ReachableFlags;
     return true;
 }
@@ -224,119 +262,161 @@ Boolean SCNetworkReachabilitySetCallback(
         SCNetworkReachabilityRef target,
         SCNetworkReachabilityCallBack callback,
         SCNetworkReachabilityContext *context) {
-    if(!target) return false;
+    if(!target) return invalidArgument();
     LC32SCNetworkReachability *reachability =
         (LC32SCNetworkReachability *)target;
 
-    SCNetworkReachabilityContext newContext = {};
-    if(callback && context) {
-        if(context->version != 0) {
-            return false;
+    @synchronized(reachability) {
+        SCNetworkReachabilityContext newContext = {};
+        if(callback && context) {
+            if(context->version != 0) {
+                return invalidArgument();
+            }
+            newContext = *context;
+            if(context->retain && context->info) {
+                newContext.info = (void *)context->retain(context->info);
+            }
         }
-        newContext = *context;
-        if(context->retain && context->info) {
-            newContext.info = (void *)context->retain(context->info);
-        }
+
+        /* Retain the replacement before releasing the installed context. The
+         * caller is allowed to re-register the exact same info pointer after
+         * relinquishing its own reference. */
+        const SCNetworkReachabilityContext oldContext = reachability->_context;
+        reachability->_callback = callback;
+        reachability->_context = newContext;
+        if(oldContext.release && oldContext.info)
+            oldContext.release(oldContext.info);
+
+        if(callback) LC32SCNetworkReachabilitySignalInitial(reachability);
+        return true;
     }
-
-    /* Retain the replacement before releasing the installed context. The
-     * caller is allowed to re-register the exact same info pointer after
-     * relinquishing its own reference. */
-    const SCNetworkReachabilityContext oldContext = reachability->_context;
-    reachability->_callback = callback;
-    reachability->_context = newContext;
-    if(oldContext.release && oldContext.info)
-        oldContext.release(oldContext.info);
-
-    if(callback) LC32SCNetworkReachabilitySignalInitial(reachability);
-    return true;
 }
 
 Boolean SCNetworkReachabilityScheduleWithRunLoop(
         SCNetworkReachabilityRef target, CFRunLoopRef runLoop,
         CFStringRef runLoopMode) {
-    if(!target || !runLoop || !runLoopMode) return false;
+    if(!target || !runLoop || !runLoopMode) return invalidArgument();
     LC32SCNetworkReachability *reachability =
         (LC32SCNetworkReachability *)target;
-    if(LC32SCNetworkReachabilityFindRegistration(
-            reachability, runLoop, runLoopMode)) {
+    @synchronized(reachability) {
+        if(reachability->_dispatchQueue) return invalidArgument();
+        if(LC32SCNetworkReachabilityFindRegistration(
+                reachability, runLoop, runLoopMode)) {
+            return true;
+        }
+
+        LC32SCNetworkReachabilityRegistration *registration =
+            calloc(1, sizeof(*registration));
+        if(!registration) return false;
+        registration->runLoop = (CFRunLoopRef)CFRetain(runLoop);
+        registration->mode = CFRetain(runLoopMode);
+
+        if(!reachability->_source) {
+            CFRunLoopSourceContext sourceContext = {
+                .version = 0,
+                .info = reachability,
+                .retain = CFRetain,
+                .release = CFRelease,
+                .perform = LC32SCNetworkReachabilitySourcePerform,
+            };
+            reachability->_source = CFRunLoopSourceCreate(
+                kCFAllocatorDefault, 0, &sourceContext);
+            if(!reachability->_source) {
+                CFRelease(registration->runLoop);
+                CFRelease(registration->mode);
+                free(registration);
+                return false;
+            }
+        }
+
+        registration->next = reachability->_registrations;
+        reachability->_registrations = registration;
+        reachability->_scheduled = YES;
+        CFRunLoopAddSource(runLoop, reachability->_source, runLoopMode);
+
+        /*
+         * Native SystemConfiguration delivers reachability changes from the
+         * scheduled run loop; it never re-enters the caller before this function
+         * returns. Legacy clients may record their registration only after this
+         * call, so an inline callback can recursively schedule the same target.
+         * Signal a source installed in the caller's exact run-loop mode instead.
+         */
+        LC32SCNetworkReachabilitySignalInitial(reachability);
         return true;
     }
-
-    LC32SCNetworkReachabilityRegistration *registration =
-        calloc(1, sizeof(*registration));
-    if(!registration) return false;
-    registration->runLoop = (CFRunLoopRef)CFRetain(runLoop);
-    registration->mode = CFRetain(runLoopMode);
-
-    if(!reachability->_source) {
-        CFRunLoopSourceContext sourceContext = {
-            .version = 0,
-            .info = reachability,
-            .retain = CFRetain,
-            .release = CFRelease,
-            .perform = LC32SCNetworkReachabilitySourcePerform,
-        };
-        reachability->_source = CFRunLoopSourceCreate(
-            kCFAllocatorDefault, 0, &sourceContext);
-        if(!reachability->_source) {
-            CFRelease(registration->runLoop);
-            CFRelease(registration->mode);
-            free(registration);
-            return false;
-        }
-    }
-
-    registration->next = reachability->_registrations;
-    reachability->_registrations = registration;
-    reachability->_scheduled = YES;
-    CFRunLoopAddSource(runLoop, reachability->_source, runLoopMode);
-
-    /*
-     * Native SystemConfiguration delivers reachability changes from the
-     * scheduled run loop; it never re-enters the caller before this function
-     * returns. Legacy clients may record their registration only after this
-     * call, so an inline callback can recursively schedule the same target.
-     * Signal a source installed in the caller's exact run-loop mode instead.
-     */
-    LC32SCNetworkReachabilitySignalInitial(reachability);
-    return true;
 }
 
 Boolean SCNetworkReachabilityUnscheduleFromRunLoop(
         SCNetworkReachabilityRef target, CFRunLoopRef runLoop,
         CFStringRef runLoopMode) {
-    if(!target || !runLoop || !runLoopMode) return false;
+    if(!target || !runLoop || !runLoopMode) return invalidArgument();
     LC32SCNetworkReachability *reachability =
         (LC32SCNetworkReachability *)target;
-    LC32SCNetworkReachabilityRegistration **link =
-        &reachability->_registrations;
-    while(*link) {
-        LC32SCNetworkReachabilityRegistration *registration = *link;
-        if(registration->runLoop != runLoop ||
-           (registration->mode != runLoopMode &&
-            !CFEqual(registration->mode, runLoopMode))) {
-            link = &registration->next;
-            continue;
+    // The last source owns a reference. Keep target alive through lock exit.
+    [reachability retain];
+    @synchronized(reachability) {
+        if(reachability->_dispatchQueue) {
+            [reachability release];
+            return invalidArgument();
         }
-        CFRunLoopRemoveSource(runLoop, reachability->_source, runLoopMode);
-        *link = registration->next;
-        CFRelease(registration->runLoop);
-        CFRelease(registration->mode);
-        free(registration);
-        break;
-    }
+        LC32SCNetworkReachabilityRegistration **link =
+            &reachability->_registrations;
+        while(*link) {
+            LC32SCNetworkReachabilityRegistration *registration = *link;
+            if(registration->runLoop != runLoop ||
+               (registration->mode != runLoopMode &&
+                !CFEqual(registration->mode, runLoopMode))) {
+                link = &registration->next;
+                continue;
+            }
+            CFRunLoopRemoveSource(runLoop, reachability->_source, runLoopMode);
+            *link = registration->next;
+            CFRelease(registration->runLoop);
+            CFRelease(registration->mode);
+            free(registration);
+            break;
+        }
 
-    reachability->_scheduled = reachability->_registrations != NULL;
-    if(!reachability->_scheduled && reachability->_source) {
-        /* Breaking the source-context retain can release target, so keep the
-         * receiver alive until this API call has completely unwound. */
-        [reachability retain];
-        CFRunLoopSourceRef source = reachability->_source;
-        reachability->_source = NULL;
-        reachability->_initialCallbackPending = NO;
-        CFRunLoopSourceInvalidate(source);
-        CFRelease(source);
+        reachability->_scheduled = reachability->_registrations != NULL;
+        if(!reachability->_scheduled && reachability->_source) {
+            CFRunLoopSourceRef source = reachability->_source;
+            reachability->_source = NULL;
+            reachability->_initialCallbackPending = NO;
+            CFRunLoopSourceInvalidate(source);
+            CFRelease(source);
+        }
+    }
+    [reachability release];
+    return true;
+}
+
+Boolean SCNetworkReachabilitySetDispatchQueue(
+        SCNetworkReachabilityRef target, dispatch_queue_t queue) {
+    if(!target) return invalidArgument();
+    LC32SCNetworkReachability *reachability = (id)target;
+    dispatch_queue_t oldQueue = NULL;
+    @synchronized(reachability) {
+        if(queue) {
+            // A target has one scheduling mechanism. Cancel before switching
+            // queues, just as with native SystemConfiguration.
+            if(reachability->_scheduled) return invalidArgument();
+            dispatch_retain(queue);
+            [reachability retain]; // scheduling ownership, until NULL
+            reachability->_dispatchQueue = queue;
+            reachability->_scheduled = YES;
+            if(!++reachability->_dispatchGeneration)
+                ++reachability->_dispatchGeneration;
+            LC32SCNetworkReachabilitySignalInitial(reachability);
+        } else {
+            oldQueue = reachability->_dispatchQueue;
+            if(!oldQueue) return invalidArgument();
+            reachability->_dispatchQueue = NULL;
+            reachability->_scheduled = NO;
+            reachability->_initialCallbackPending = NO;
+        }
+    }
+    if(oldQueue) {
+        dispatch_release(oldQueue);
         [reachability release];
     }
     return true;

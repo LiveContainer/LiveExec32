@@ -71,6 +71,7 @@ LiveExec32Shared_FILES = \
 	../Foundation/NSInvocation.mm ../Foundation/ObjectCallbacks.mm \
 	../CoreFoundation/CoreFoundation.mm ../CFNetwork/CFNetwork.mm \
 	../Security/Security.mm ../CoreGraphics/CoreGraphics.mm \
+	../SystemConfiguration/SystemConfiguration.mm \
 	../ImageIO/ImageIO.mm \
 	../CoreText/CoreText.mm ../CoreMedia/CoreMedia.mm ../CoreVideo/CoreVideo.mm \
 	../AudioToolbox/AudioToolbox.mm \
