@@ -1341,6 +1341,74 @@ guest_mach_msg_trap(u32 guest_msg,
             }
             break;
         }
+        case 3814: { // vm_remap (ARM32 vm_map.defs)
+            struct __attribute__((packed, aligned(4))) Request {
+                mach_msg_header_t Head;
+                mach_msg_body_t Body;
+                mach_msg_port_descriptor_t sourceTask;
+                NDR_record_t NDR;
+                u32 address, size, mask;
+                int flags;
+                u32 source;
+                boolean_t copy;
+                vm_inherit_t inheritance;
+            };
+            struct __attribute__((packed, aligned(4))) Reply {
+                mach_msg_header_t Head;
+                NDR_record_t NDR;
+                kern_return_t RetCode;
+                u32 address;
+                vm_prot_t current, maximum;
+            };
+            static_assert(sizeof(Request) == 76);
+            static_assert(sizeof(Reply) == 48);
+            if(rcv_size < sizeof(mig_reply_error_t)) {
+                host_header->msgh_size = sizeof(mig_reply_error_t);
+                result = MACH_RCV_TOO_LARGE;
+                break;
+            }
+            kern_return_t code = MIG_BAD_ARGUMENTS;
+            u32 address = 0;
+            vm_prot_t protection = VM_PROT_NONE;
+            if(send_size == sizeof(Request) && (request_bits & MACH_MSGH_BITS_COMPLEX)) {
+                const Request request = *reinterpret_cast<const Request *>(host_msg);
+                if(request.Body.msgh_descriptor_count == 1 &&
+                        request.sourceTask.type == MACH_MSG_PORT_DESCRIPTOR &&
+                        request.sourceTask.disposition == MACH_MSG_TYPE_COPY_SEND &&
+                        !memcmp(&request.NDR, &NDR_record, sizeof(NDR_record))) {
+                    code = KERN_INVALID_ARGUMENT;
+                    if(request.Head.msgh_request_port == mach_task_self() &&
+                            request.sourceTask.name == mach_task_self() &&
+                            request.inheritance >= VM_INHERIT_SHARE &&
+                            request.inheritance <= VM_INHERIT_NONE) {
+                        // Preflight before installing an alias that the caller
+                        // could not receive (and therefore could not release).
+                        if(rcv_size < sizeof(Reply)) {
+                            host_header->msgh_size = sizeof(Reply);
+                            result = MACH_RCV_TOO_LARGE;
+                            break;
+                        }
+                        address = request.address;
+                        code = Dynarmic_vm_remap(&address, request.size,
+                            request.mask, request.flags, request.source,
+                            request.copy, &protection);
+                    }
+                }
+            }
+            auto *reply = reinterpret_cast<Reply *>(host_msg);
+            reply->NDR = NDR_record;
+            reply->RetCode = code;
+            host_header->msgh_size = sizeof(mig_reply_error_t);
+            if(code == KERN_SUCCESS) {
+                reply->address = address;
+                reply->current = protection;
+                // Maximum permissions are not separately tracked in the
+                // guest map. Report the conservative source permissions.
+                reply->maximum = protection;
+                host_header->msgh_size = sizeof(Reply);
+            }
+            break;
+        }
         case 3825: { // mach_make_memory_entry_64
             struct __attribute__((packed, aligned(4)))
                     MakeMemoryEntryRequest32 {

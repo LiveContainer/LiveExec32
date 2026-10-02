@@ -286,6 +286,9 @@ u32 Dynarmic_mmap(u32 address, u64 size, int protection, int flags,
                  int fildes, u64 off, u64 mask = DYN_PAGE_MASK,
                  bool purgable = false);
 int Dynarmic_mprotect(u64 address, u64 size, int perms);
+/* Page-aligned, shared data aliases in the guest's own address space. */
+kern_return_t Dynarmic_vm_remap(u32 *address, u32 size, u32 mask,
+    int flags, u32 source, boolean_t copy, vm_prot_t *protection);
 /* Returns a Darwin errno value, or zero on success. */
 int Dynarmic_mremap_encrypted(u32 start, u32 length, u32 cryptid,
                               u32 cpu_type, u32 cpu_subtype,

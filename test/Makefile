@@ -302,6 +302,7 @@ $(eval $(call lc32_test,lc32-sysctl-size-query,sysctl_size_query.c,))
 $(eval $(call lc32_test,lc32-thread-suspend,thread_suspend.c,))
 $(eval $(call lc32_test,lc32-vm-allocate-collision,vm_allocate_collision.c,))
 $(eval $(call lc32_test,lc32-vm-copy,vm_copy.c,))
+$(eval $(call lc32_test,lc32-vm-remap,vm_remap.c,))
 $(eval $(call lc32_test,lc32-vm-read-overwrite,vm_copy.c,))
 lc32-vm-read-overwrite_CFLAGS := -DLC32_TEST_VM_READ_OVERWRITE
 $(eval $(call lc32_test,lc32-vm-memory-entry,vm_memory_entry.c,))

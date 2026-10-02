@@ -970,6 +970,74 @@ u32 Dynarmic_mmap(
     return address;
 }
 
+kern_return_t Dynarmic_vm_remap(u32 *address, u32 size, u32 mask,
+        int flags, u32 source, boolean_t copy, vm_prot_t *protection) {
+    // A memcpy cannot implement shared aliases (notably mirrored ring buffers).
+    // COW, unaligned extraction and executable aliases need separate support.
+    if(copy || (source & DYN_PAGE_MASK)) return KERN_NOT_SUPPORTED;
+    const u64 alignment = u64(mask) | DYN_PAGE_MASK;
+    const bool anywhere = (flags & VM_FLAGS_ANYWHERE) != 0;
+    const bool overwrite = (flags & VM_FLAGS_OVERWRITE) != 0;
+    if((flags & ~(VM_FLAGS_ANYWHERE | VM_FLAGS_OVERWRITE)) ||
+            (anywhere && overwrite) || (alignment & (alignment + 1)))
+        return KERN_INVALID_ARGUMENT;
+    const u64 length = (u64(size) + DYN_PAGE_MASK) & ~u64(DYN_PAGE_MASK);
+    const u64 destination = anywhere ? 0 : (*address & ~u64(DYN_PAGE_MASK));
+    if(!length) return KERN_INVALID_ARGUMENT;
+    if(!GuestAddressRangeIsValid32(source, length)) return KERN_INVALID_ADDRESS;
+    if(!GuestAddressRangeIsValid32(destination, length) ||
+            (!anywhere && (destination < DYN_PAGE_SIZE || (destination & alignment))))
+        return KERN_NO_SPACE;
+
+    std::unique_lock<std::recursive_mutex> lock(guestVmMutex);
+    khash_t(memory) *memory = sharedHandle.memory;
+    if(!memory) return KERN_INVALID_ADDRESS;
+    std::vector<struct memory_page> pages;
+    try { pages.resize(length / DYN_PAGE_SIZE); }
+    catch(const std::exception &) { return KERN_RESOURCE_SHORTAGE; }
+    vm_prot_t commonProtection = VM_PROT_ALL;
+    for(size_t index = 0; index < pages.size(); ++index) {
+        const khiter_t key = kh_get(memory, memory, u64(source) + index * DYN_PAGE_SIZE);
+        if(key == kh_end(memory) || !kh_value(memory, key) ||
+                !kh_value(memory, key)->addr) return KERN_INVALID_ADDRESS;
+        pages[index] = *kh_value(memory, key);
+        if(!pages[index].backing || (pages[index].perms & PROT_EXEC))
+            return KERN_NOT_SUPPORTED;
+        commonProtection &= pages[index].perms;
+    }
+    if(!anywhere && !overwrite) {
+        for(u64 page = destination; page < destination + length; page += DYN_PAGE_SIZE)
+            if(kh_get(memory, memory, page) != kh_end(memory)) return KERN_NO_SPACE;
+    }
+
+    std::vector<GuestPageReservation> reservations;
+    const u64 mapped = Dynarmic_mem_reserve(destination, length, !anywhere,
+        alignment, &reservations);
+    if(mapped == UINT64_MAX) return KERN_NO_SPACE;
+    // Retain every source first: an overlapping overwrite may release the
+    // original mappings while later pages still refer to those same backings.
+    for(const auto &page : pages) ++page.backing->references;
+    InvalidateGuestMemoryLookupCaches();
+    for(size_t index = 0; index < pages.size(); ++index) {
+        const u64 guestAddress = mapped + index * DYN_PAGE_SIZE;
+        t_memory_page page = kh_value(memory, kh_get(memory, memory, guestAddress));
+        t_memory_backing previous = page->backing;
+        *page = pages[index];
+        page->enforceDataPermissions = true;
+        const u64 tableIndex = guestAddress >> DYN_PAGE_BITS;
+        if(sharedHandle.page_table && tableIndex < sharedHandle.num_page_table_entries)
+            __atomic_store_n(&sharedHandle.page_table[tableIndex],
+                GuestPageTablePointer(guestAddress, page), __ATOMIC_RELEASE);
+        ReleaseMemoryBackingReference(previous);
+    }
+    reservations.clear();
+    *address = static_cast<u32>(mapped);
+    *protection = commonProtection;
+    lock.unlock();
+    InvalidateAllGuestJits(*address, static_cast<size_t>(length));
+    return KERN_SUCCESS;
+}
+
 int Dynarmic_mprotect(u64 address, u64 size, int perms) {
     std::unique_lock<std::recursive_mutex> lock(
         guestVmMutex);
