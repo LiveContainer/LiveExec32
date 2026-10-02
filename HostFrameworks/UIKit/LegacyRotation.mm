@@ -314,6 +314,8 @@ void Swizzle(Class cls, SEL original, SEL replacement) {
     }
     method_exchangeImplementations(method, class_getInstanceMethod(cls, replacement));
 }
+
+BOOL LegacyApplicationStatusBarPolicy(id, SEL) { return NO; }
 } // namespace
 
 extern "C" bool LC32NativeLegacyRotationEnabled(void) {
@@ -391,6 +393,22 @@ extern "C" void LC32FinishNativeLegacyRotationStartup(void) {
 }
 @end
 
+@interface UIScreen (LC32NativeLegacyRotation)
+- (CGRect)lc32_applicationFrameForInterfaceOrientation:(UIInterfaceOrientation)orientation
+    usingStatusbarHeight:(CGFloat)height ignoreStatusBar:(BOOL)ignore;
+@end
+
+@implementation UIScreen (LC32NativeLegacyRotation)
+- (CGRect)lc32_applicationFrameForInterfaceOrientation:(UIInterfaceOrientation)orientation
+        usingStatusbarHeight:(CGFloat)height ignoreStatusBar:(BOOL)ignore {
+    // Legacy controller bounds/center still use the default status-bar height
+    // when the bar is hidden. Keep that nonexistent inset out of both queries;
+    // shrinking just the renderer desynchronizes its projection and touches.
+    return [self lc32_applicationFrameForInterfaceOrientation:orientation
+        usingStatusbarHeight:height ignoreStatusBar:ignore || UIApplication.sharedApplication.statusBarHidden];
+}
+@end
+
 @interface UIWindow (LC32NativeLegacyRotation)
 - (void)lc32_updateToInterfaceOrientation:(UIInterfaceOrientation)orientation
     duration:(NSTimeInterval)duration force:(BOOL)force;
@@ -448,6 +466,20 @@ extern "C" void LC32FinishNativeLegacyRotationStartup(void) {
 }
 + (void)load {
     if(!LC32NativeLegacyRotationEnabled()) return;
+    // Controller-managed status bars were introduced in iOS 7. Modern UIKit
+    // defaults to them even for older guests, losing UIStatusBarHidden and
+    // UIApplication's setters. Preserve an explicit opt-in/out in the bundle.
+    if(!dyld_program_sdk_at_least({2, 0x00070000}) &&
+            ![NSBundle.mainBundle objectForInfoDictionaryKey:
+                @"UIViewControllerBasedStatusBarAppearance"]) {
+        Method method = class_getInstanceMethod(objc_getClass("UIApplication"),
+            sel_registerName("_viewControllerBasedStatusBarAppearance"));
+        if(method) method_setImplementation(method, (IMP)LegacyApplicationStatusBarPolicy);
+    }
+    // Do not initialize UIScreen while the runtime itself is being dlopened.
+    Swizzle(objc_getClass("UIScreen"),
+        sel_registerName("_applicationFrameForInterfaceOrientation:usingStatusbarHeight:ignoreStatusBar:"),
+        @selector(lc32_applicationFrameForInterfaceOrientation:usingStatusbarHeight:ignoreStatusBar:));
     Swizzle(self, sel_registerName("_updateToInterfaceOrientation:duration:force:"),
         @selector(lc32_updateToInterfaceOrientation:duration:force:));
     Swizzle(self, sel_registerName("_configureRootLayer:sceneTransformLayer:transformLayer:"),

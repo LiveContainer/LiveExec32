@@ -22,7 +22,7 @@ for mode in 0 1; do
         -o "$workdir/nib-$mode"
     "$workdir/nib-$mode"
 
-    for unit in LegacyAutoLayout LegacyFonts LegacyAlerts LegacyRotation GuestSelectorHooks; do
+    for unit in LegacyAutoLayout LegacyFonts LegacyAlerts LegacyRotation GuestSelectorHooks GuestScreenMetrics; do
         xcrun --sdk iphoneos clang++ -arch arm64 -miphoneos-version-min=15.0 \
             -std=c++17 -fobjc-arc -Wno-deprecated-declarations \
             -DLC32_UIKIT_COMPATIBILITY="$mode" -I"$repo_root/include" \

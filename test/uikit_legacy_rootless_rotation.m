@@ -65,6 +65,86 @@ static void check(const char *name, BOOL passed) {
     failures += !passed;
 }
 
+static BOOL frameProbeHidden, frameProbeIgnore;
+static UIInterfaceOrientation frameProbeOrientation;
+static CGFloat frameProbeHeight;
+static unsigned frameProbeCalls;
+static BOOL statusBarHiddenProbe(id object, SEL selector) {
+    (void)object; (void)selector;
+    return frameProbeHidden;
+}
+static CGRect applicationFrameProbe(id object, SEL selector,
+        UIInterfaceOrientation orientation, CGFloat height, BOOL ignore) {
+    (void)object; (void)selector;
+    ++frameProbeCalls;
+    frameProbeOrientation = orientation;
+    frameProbeHeight = height;
+    frameProbeIgnore = ignore;
+    return CGRectMake(1, 2, 345, 678);
+}
+static void checkHiddenStatusBarFrame(void) {
+    SEL policySelector = sel_registerName("_viewControllerBasedStatusBarAppearance");
+    Method policyMethod = class_getInstanceMethod(UIApplication.class, policySelector);
+    NSNumber *explicitPolicy = [NSBundle.mainBundle objectForInfoDictionaryKey:
+        @"UIViewControllerBasedStatusBarAppearance"];
+    const uint32_t sdk = [[NSBundle.mainBundle objectForInfoDictionaryKey:@"LC32ExpectedSDK"] unsignedIntValue];
+    const BOOL applicationDefault = expectedEnabled && sdk < 0x70000 && !explicitPolicy;
+    Dl_info policyInfo = {0};
+    check("statusbar-policy-entrypoint", policyMethod != NULL);
+    if(policyMethod) {
+        BOOL resolved = dladdr((const void *)method_getImplementation(policyMethod), &policyInfo) != 0;
+        check("statusbar-policy-hook-scope", resolved &&
+            (policyInfo.dli_fbase == _dyld_get_image_header(0)) == applicationDefault);
+        if(applicationDefault || explicitPolicy) {
+            BOOL controllerManaged = ((BOOL (*)(id, SEL))objc_msgSend)(UIApplication.sharedApplication, policySelector);
+            check("statusbar-policy-default-or-explicit", controllerManaged ==
+                (explicitPolicy ? explicitPolicy.boolValue : NO));
+        }
+        if(applicationDefault) {
+            UIApplication *application = UIApplication.sharedApplication;
+            check("statusbar-initial-hidden", application.isStatusBarHidden);
+            [application setStatusBarHidden:NO];
+            check("statusbar-legacy-show", !application.isStatusBarHidden);
+            [application setStatusBarHidden:YES];
+            check("statusbar-legacy-hide", application.isStatusBarHidden);
+        }
+    }
+    SEL selector = sel_registerName("_applicationFrameForInterfaceOrientation:usingStatusbarHeight:ignoreStatusBar:");
+    SEL savedSelector = sel_registerName("lc32_applicationFrameForInterfaceOrientation:usingStatusbarHeight:ignoreStatusBar:");
+    Method native = class_getInstanceMethod(UIScreen.class, expectedEnabled ? savedSelector : selector);
+    Method hidden = class_getInstanceMethod(UIApplication.class, @selector(isStatusBarHidden));
+    check("statusbar-native-entrypoints-present", native && hidden);
+    if(!native || !hidden) return;
+    // Replace only the saved native method while making synchronous probes.
+    // SDK 11 must bypass the wrapper; legacy SDKs must preserve all arguments
+    // except the hidden-bar inset. Restore both methods before yielding.
+    IMP originalNative = method_setImplementation(native, (IMP)applicationFrameProbe);
+    IMP originalHidden = method_setImplementation(hidden, (IMP)statusBarHiddenProbe);
+    @try {
+        for(unsigned isHidden = 0; isHidden < 2; ++isHidden) {
+            frameProbeHidden = isHidden;
+            for(unsigned ignore = 0; ignore < 2; ++ignore) {
+                for(UIInterfaceOrientation orientation = 1; orientation <= 4; ++orientation) {
+                    frameProbeCalls = 0;
+                    CGRect frame = ((CGRect (*)(id, SEL, UIInterfaceOrientation, CGFloat, BOOL))objc_msgSend)(
+                        UIScreen.mainScreen, selector, orientation, 23.5, ignore);
+                    check("statusbar-original-called-once", frameProbeCalls == 1);
+                    check("statusbar-arguments-preserved", frameProbeOrientation == orientation &&
+                        frameProbeHeight == 23.5);
+                    check("statusbar-hidden-inset-matches-sdk", frameProbeIgnore ==
+                        (ignore || (expectedEnabled && isHidden)));
+                    check("statusbar-native-frame-preserved", CGRectEqualToRect(frame, CGRectMake(1, 2, 345, 678)));
+                }
+            }
+        }
+    } @finally {
+        method_setImplementation(native, originalNative);
+        method_setImplementation(hidden, originalHidden);
+    }
+    check("statusbar-original-methods-restored", method_getImplementation(native) == originalNative &&
+        method_getImplementation(hidden) == originalHidden);
+}
+
 static id nativeObjectGetter(id object, const char *name) {
     SEL selector = sel_registerName(name);
     return [object respondsToSelector:selector]
@@ -1011,6 +1091,8 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
                 CGRectEqualToRect(self.content.bounds, self.initialContentBounds));
             [self checkNativeBackingGeometry];
         }
+    } else if([testCase isEqualToString:@"statusbar"]) {
+        checkHiddenStatusBarFrame();
     } else if([testCase isEqualToString:@"lifecycle"]) {
         [self checkDirectLifecycleForwarding];
     } else if([testCase isEqualToString:@"ownership"]) {
@@ -1131,7 +1213,7 @@ int main(int argc, char **argv) {
             if(!strcmp(argv[index], "--case")) testCase = @(argv[index + 1]);
         }
         if(![@[@"rootless", @"explicit", @"modern", @"modern-explicit", @"modern-only", @"modern-refresh", @"unregistered", @"manual", @"manual-controller",
-                @"modal", @"manual-disabled", @"lifecycle", @"ownership", @"replacement"]
+                @"modal", @"manual-disabled", @"lifecycle", @"ownership", @"replacement", @"statusbar"]
                 containsObject:testCase]) return 2;
         manualRotation = [testCase isEqualToString:@"manual"] ||
             [testCase isEqualToString:@"manual-disabled"];

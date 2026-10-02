@@ -12,12 +12,17 @@ build_only=0
 keep=0
 sdks=
 test_cases=
+statusbar_policy=default
 run_timeout=${LC32_ROOTLESS_ROTATION_TIMEOUT:-30}
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --device) [ "$#" -ge 2 ] || exit 2; device=$2; shift 2 ;;
         --build-only) build_only=1; keep=1; shift ;;
         --keep) keep=1; shift ;;
+        --statusbar-policy)
+            [ "$#" -ge 2 ] || exit 2
+            case "$2" in default|YES|NO) statusbar_policy=$2 ;; *) exit 2 ;; esac
+            shift 2 ;;
         --sdk)
             [ "$#" -ge 2 ] || exit 2
             case "$2" in 2|5|6.1|7|8|11) sdks="$sdks $2" ;; *) exit 2 ;; esac
@@ -25,16 +30,16 @@ while [ "$#" -gt 0 ]; do
         --case)
             [ "$#" -ge 2 ] || exit 2
             case "$2" in
-                rootless|explicit|modern|modern-explicit|modern-only|modern-refresh|unregistered|manual|manual-controller|modal|manual-disabled|lifecycle|ownership|replacement)
+                rootless|explicit|modern|modern-explicit|modern-only|modern-refresh|unregistered|manual|manual-controller|modal|manual-disabled|lifecycle|ownership|replacement|statusbar)
                     test_cases="$test_cases $2" ;;
                 *) exit 2 ;;
             esac
             shift 2 ;;
-        *) echo "usage: $0 [--device UDID] [--build-only] [--keep] [--sdk 2|5|6.1|7|8|11] [--case NAME]" >&2; exit 2 ;;
+        *) echo "usage: $0 [--device UDID] [--build-only] [--keep] [--sdk 2|5|6.1|7|8|11] [--case NAME] [--statusbar-policy default|YES|NO]" >&2; exit 2 ;;
     esac
 done
 [ -n "$sdks" ] || sdks="2 5 6.1 7 8 11"
-[ -n "$test_cases" ] || test_cases="rootless explicit modern modern-explicit modern-only modern-refresh unregistered manual manual-controller modal manual-disabled lifecycle ownership replacement"
+[ -n "$test_cases" ] || test_cases="rootless explicit modern modern-explicit modern-only modern-refresh unregistered manual manual-controller modal manual-disabled lifecycle ownership replacement statusbar"
 case "$run_timeout" in ''|*[!0-9]*) echo "invalid timeout" >&2; exit 2 ;; esac
 [ "$run_timeout" -ge 1 ] && [ "$run_timeout" -le 60 ] || exit 2
 temp_base=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)
@@ -92,6 +97,9 @@ for sdk in $sdks; do
     plutil -insert UIDeviceFamily -json '[1,2]' "$plist"
     plutil -insert CFBundleSupportedPlatforms -json '["iPhoneSimulator"]' "$plist"
     plutil -insert UIStatusBarHidden -bool YES "$plist"
+    if [ "$statusbar_policy" != default ]; then
+        plutil -insert UIViewControllerBasedStatusBarAppearance -bool "$statusbar_policy" "$plist"
+    fi
     plutil -insert UISupportedInterfaceOrientations -json \
         '["UIInterfaceOrientationLandscapeRight","UIInterfaceOrientationLandscapeLeft"]' "$plist"
     plutil -insert LC32ExpectedSDK -integer "$sdk_value" "$plist"

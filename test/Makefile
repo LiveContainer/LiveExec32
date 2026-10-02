@@ -4,7 +4,7 @@ LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash \
   check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading \
   check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop \
   check-foundation-ports-host check-uikit-compatibility-switch check-uikit-status-bar-orientation \
-  check-guest-install check-host-selector-hooks
+  check-guest-install check-host-selector-hooks check-uikit-screen-metrics-host
 LC32_HOST_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),\
   $(if $(strip $(filter-out $(LC32_HOST_TEST_GOALS),$(MAKECMDGOALS))),,1),)
 
@@ -37,7 +37,10 @@ BUILD_INFO_LOGGING_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/build-info-
   check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading \
   check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop \
   check-foundation-ports-host check-uikit-compatibility-switch check-uikit-status-bar-orientation \
-  check-guest-install check-host-selector-hooks
+  check-guest-install check-host-selector-hooks check-uikit-screen-metrics-host
+
+check-uikit-screen-metrics-host:
+	sh ./uikit_screen_metrics_host.sh
 
 check-host-selector-hooks:
 	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
