@@ -24,6 +24,24 @@ constexpr uint32_t kMaximumSetEntries = 1024u * 1024u;
 constexpr uint32_t kMaximumReadStreamBytes = 64u * 1024u * 1024u;
 constexpr uint32_t kMaximumWriteStreamBytes = 64u * 1024u * 1024u;
 
+class RunLoopGuestHostCallQuiescence {
+public:
+    RunLoopGuestHostCallQuiescence()
+        : active_(Dynarmic_guest_host_call_quiescence_begin()) {}
+
+    ~RunLoopGuestHostCallQuiescence() {
+        if(active_) Dynarmic_guest_host_call_quiescence_end();
+    }
+
+    RunLoopGuestHostCallQuiescence(
+        const RunLoopGuestHostCallQuiescence &) = delete;
+    RunLoopGuestHostCallQuiescence &operator=(
+        const RunLoopGuestHostCallQuiescence &) = delete;
+
+private:
+    bool active_;
+};
+
 bool ReadCoreFoundationCall(u32 guestAddress,
                             LC32CoreFoundationCall &call) {
     struct {
@@ -2515,14 +2533,20 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             CFRunLoopRemoveTimer(runLoop, timer, mode);
             return 1;
         }
-        case LC32CoreFoundationOpRunLoopRun:
+        case LC32CoreFoundationOpRunLoopRun: {
             if(!RequireSlots(call, 0)) return 0;
+            // The native loop may wait indefinitely. Publish stable guest
+            // registers so thread_suspend need not wait for it to return;
+            // the callback entry gate still honors guest suspension.
+            RunLoopGuestHostCallQuiescence quiescence;
             CFRunLoopRun();
             return 1;
+        }
         case LC32CoreFoundationOpRunLoopRunInMode: {
             if(!RequireSlots(call, 3)) return 0;
             CFRunLoopMode mode =
                 SlotHostObject<CFRunLoopMode>(call, 0);
+            RunLoopGuestHostCallQuiescence quiescence;
             return mode ? static_cast<u32>(static_cast<int32_t>(
                 CFRunLoopRunInMode(mode, SlotDouble(call, 1),
                     SlotU32(call, 2) != 0))) : 0;

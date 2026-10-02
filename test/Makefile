@@ -373,6 +373,7 @@ $(eval $(call lc32_guest_test,lc32-corefoundation-read-stream,corefoundation_rea
 $(eval $(call lc32_guest_test,lc32-corefoundation-run-loop,corefoundation_run_loop.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-run-loop-source,corefoundation_run_loop_source.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-run-loop-timer,corefoundation_run_loop_timer.m,Foundation CoreFoundation))
+$(eval $(call lc32_guest_test,lc32-corefoundation-runloop-suspend,corefoundation_runloop_suspend.c,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-socket,corefoundation_socket.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-stream-host,corefoundation_stream_host.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-string-character-set,corefoundation_string_character_set.m,Foundation CoreFoundation))
@@ -595,7 +596,7 @@ ABI_TESTS := \
 AUDIO_TESTS := $(filter lc32-audio-%,$(TOOL_NAME))
 COREFOUNDATION_TESTS := $(filter lc32-corefoundation-%,$(TOOL_NAME))
 GRAPHICS_TESTS := $(filter lc32-coregraphics-% lc32-quartzcore-% lc32-coretext-% lc32-corevideo-% lc32-openal-% lc32-opengles-%,$(TOOL_NAME))
-THREADING_TESTS := lc32-native-pthread-smoke lc32-ownership-publication-race lc32-thread-modes lc32-thread-perform lc32-thread-suspend lc32-thread-suspend-hostcall
+THREADING_TESTS := lc32-native-pthread-smoke lc32-ownership-publication-race lc32-thread-modes lc32-thread-perform lc32-thread-suspend lc32-thread-suspend-hostcall lc32-corefoundation-runloop-suspend
 UIKIT_TESTS := $(filter lc32-uikit-%,$(TOOL_NAME)) lc32-guest-fp-return lc32-guest-host-aggregate-arguments lc32-scalar-pointer-bridge lc32-text-input-traits
 
 include $(THEOS_MAKE_PATH)/tool.mk
