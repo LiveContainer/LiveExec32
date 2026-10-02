@@ -5,7 +5,7 @@ LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash \
   check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop \
   check-foundation-ports-host check-uikit-compatibility-switch check-uikit-status-bar-orientation \
   check-guest-install check-host-selector-hooks check-uikit-screen-metrics-host \
-  check-systemconfiguration-host
+  check-systemconfiguration-host check-coremedia-sample-buffers-host
 LC32_HOST_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),\
   $(if $(strip $(filter-out $(LC32_HOST_TEST_GOALS),$(MAKECMDGOALS))),,1),)
 
@@ -42,6 +42,14 @@ BUILD_INFO_LOGGING_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/build-info-
 
 check-uikit-screen-metrics-host:
 	sh ./uikit_screen_metrics_host.sh
+
+.PHONY: check-coremedia-sample-buffers-host
+check-coremedia-sample-buffers-host:
+	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -Wno-deprecated-declarations \
+		-Icoremedia-stubs -framework Foundation -framework CoreMedia -framework CoreVideo \
+		coremedia_sample_buffers_host.mm -o "$(HOST_TEST_OUTPUT_DIR)/coremedia-sample-buffers"
+	"$(HOST_TEST_OUTPUT_DIR)/coremedia-sample-buffers"
 
 .PHONY: check-systemconfiguration-host
 check-systemconfiguration-host:
@@ -384,6 +392,10 @@ $(eval $(call lc32_guest_test,lc32-corefoundation-url-common,corefoundation_url_
 $(eval $(call lc32_guest_test,lc32-corefoundation-uuid,corefoundation_uuid.c,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-write-stream,corefoundation_write_stream.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-coremedia-time-values,coremedia_time_values.c,CoreMedia CoreFoundation Foundation))
+$(eval $(call lc32_guest_test,lc32-coremedia-sample-buffers,coremedia_sample_buffers.m,CoreMedia CoreFoundation Foundation))
+lc32-coremedia-sample-buffers_CFLAGS := -Wno-nonnull
+$(eval $(call lc32_guest_test,lc32-avassetwriter-recording,avassetwriter_recording.m,AVFoundation CoreMedia CoreVideo CoreGraphics Foundation))
+lc32-avassetwriter-recording_CFLAGS := -Wno-deprecated-declarations
 $(eval $(call lc32_guest_test,lc32-corevideo-buffers,corevideo_buffers.m,CoreVideo CoreFoundation Foundation OpenGLES))
 $(eval $(call lc32_guest_test,lc32-coredata-merge-policy,coredata_merge_policy.m,CoreData Foundation CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-coredata-dynamic-accessors,coredata_dynamic_accessors.m,CoreData Foundation CoreFoundation LC32))
@@ -703,7 +715,8 @@ SYMBOL_TESTS := lc32-openal-smoke lc32-opengles-smoke lc32-opengles-drawable lc3
   lc32-coregraphics-bitmap lc32-quartzcore-transform \
   lc32-uikit-accessibility lc32-mobilecoreservices-uti lc32-cfnetwork-http \
   lc32-foundation-zone lc32-corefoundation-low-risk \
-  lc32-coremedia-time-values lc32-corevideo-buffers lc32-gamecontroller-snapshot
+  lc32-coremedia-time-values lc32-coremedia-sample-buffers lc32-avassetwriter-recording \
+  lc32-corevideo-buffers lc32-gamecontroller-snapshot
 $(SYMBOL_TESTS): frameworks
 
 check-openal: lc32-openal-smoke

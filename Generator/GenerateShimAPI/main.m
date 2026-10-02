@@ -11,6 +11,8 @@
 
 typedef NS_ENUM(NSUInteger, LC32KnownStruct) {
     LC32KnownStructNone,
+    LC32KnownStructCMTime,
+    LC32KnownStructCMTimeRange,
     LC32KnownStructCGAffineTransform,
     LC32KnownStructCGPoint,
     LC32KnownStructCGRect,
@@ -43,6 +45,11 @@ static BOOL LC32EncodingIsOpaqueCFObjectPointer(const char *encoding) {
     if(LC32EncodingRepresentsCGColorRef(encoding) ||
        LC32EncodingRepresentsCGImageRef(encoding)) return YES;
 
+    // CoreMedia's opaque CF types do not use the __CF naming convention.
+    // Keep this explicit: other opaque structures may be raw guest memory.
+    if(!strcmp(encoding, "^{opaqueCMSampleBuffer=}") ||
+       !strcmp(encoding, "^{opaqueCMFormatDescription=}")) return YES;
+
     const char *name = encoding + 2;
     static const char *const prefixes[] = {
         "__C3D", "__CF", "__CLClient", "__CN", "__CT", "__CV",
@@ -58,6 +65,13 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
     if(!encoding) return LC32KnownStructNone;
 
     while(*encoding && strchr("rnNoORVA", *encoding)) encoding++;
+    // Old SDKs encode these typedefs anonymously. All fields have fixed
+    // widths, so the 24/48-byte layouts are identical on ARM32 and ARM64.
+    if(!strcmp(encoding, "{?=qiIq}") || !strcmp(encoding, "{CMTime=qiIq}"))
+        return LC32KnownStructCMTime;
+    if(!strcmp(encoding, "{?={?=qiIq}{?=qiIq}}") ||
+       !strcmp(encoding, "{CMTimeRange={CMTime=qiIq}{CMTime=qiIq}}"))
+        return LC32KnownStructCMTimeRange;
     if(!strncmp(encoding, "{CGAffineTransform=", sizeof("{CGAffineTransform=") - 1)) {
         return LC32KnownStructCGAffineTransform;
     }
@@ -80,6 +94,10 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
     return LC32KnownStructNone;
 }
 
+static BOOL LC32KnownStructHasFixedLayout(LC32KnownStruct type) {
+    return type == LC32KnownStructCMTime || type == LC32KnownStructCMTimeRange;
+}
+
 @interface MethodParameter : NSObject
 @property(nonatomic, retain) NSString *name;
 @property(nonatomic, retain) NSString *type;
@@ -95,6 +113,9 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
 // FIXME: will need to parse header to return correctly. On 64bit, NS*Integer and CGFloat are not distinguishable from 32bit
 + (NSString *)readableTypeForSignature:(const char *)signature {
     if(!signature || !*signature) return @"?";
+    const LC32KnownStruct knownStruct = LC32KnownStructForEncoding(signature);
+    if(knownStruct == LC32KnownStructCMTime) return @"CMTime";
+    if(knownStruct == LC32KnownStructCMTimeRange) return @"CMTimeRange";
     if(LC32EncodingRepresentsCGColorRef(signature)) return @"CGColorRef";
     if(LC32EncodingRepresentsCGImageRef(signature)) return @"CGImageRef";
     if(LC32EncodingIsOpaqueCFObjectPointer(signature)) {
@@ -331,6 +352,10 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
 
     const LC32KnownStruct knownStruct =
         LC32KnownStructForEncoding(self.signature);
+    if(LC32KnownStructHasFixedLayout(knownStruct)) {
+        return [NSString stringWithFormat:@"%1$@ host_arg%2$d = guest_arg%2$d;",
+            self.type, self.index];
+    }
     if(knownStruct == LC32KnownStructNSRange) {
         return [NSString stringWithFormat:
             @"LC32NSRange64 host_arg%1$d = LC32WidenNSRange(guest_arg%1$d);",
@@ -676,7 +701,10 @@ static BOOL LC32MethodReturnsNotFoundIndex(NSString *className,
     if(self.method.returnType[0] == 'v') {
         [call appendString:@"(void)LC32InvokeHostSelector(self.host_self, host_cmd"];
     } else if(self.method.returnType[0] == '{') {
-        if(LC32KnownStructForEncoding(self.method.returnType) ==
+        if(LC32KnownStructHasFixedLayout(
+                LC32KnownStructForEncoding(self.method.returnType))) {
+            [call appendFormat:@"%@ host_ret = {0}; LC32InvokeHostSelector(self.host_self, host_cmd, &host_ret, sizeof(host_ret)", self.returnType];
+        } else if(LC32KnownStructForEncoding(self.method.returnType) ==
                 LC32KnownStructNSRange) {
             [call appendString:
                 @"LC32NSRange64 host_ret; LC32InvokeHostSelector(self.host_self, host_cmd, &host_ret, sizeof(host_ret)"];
@@ -762,6 +790,7 @@ static BOOL LC32MethodReturnsNotFoundIndex(NSString *className,
 
     const LC32KnownStruct knownStruct =
         LC32KnownStructForEncoding(self.method.returnType);
+    if(LC32KnownStructHasFixedLayout(knownStruct)) return @"return host_ret;";
     if(knownStruct == LC32KnownStructNSRange) {
         return @"return LC32NarrowNSRange(host_ret);";
     }
@@ -805,6 +834,13 @@ static BOOL LC32MethodReturnsNotFoundIndex(NSString *className,
 static BOOL LC32MethodHasManualAdapter(NSString *className,
                                       LC32ObjCMethod *method) {
     NSString *selector = method.selectorString;
+    if([className isEqualToString:@"AVAssetImageGenerator"] &&
+       method.isInstanceMethod &&
+       [selector isEqualToString:@"copyCGImageAtTime:actualTime:error:"]) {
+        // The CMTime pointer is one synchronous output, not an arbitrary
+        // struct array. Its manual adapter supplies bounded native storage.
+        return YES;
+    }
     if([className isEqualToString:@"NSPropertyListSerialization"] &&
        !method.isInstanceMethod) {
         // Preserve the CF-backed adapters, including the legacy owned
@@ -1242,6 +1278,7 @@ static BOOL LC32MethodHasIndirectObjectBuffer(NSString *className,
     [string appendFormat:@"#import <%1$@/%1$@.h>\n", self.imagePath.lastPathComponent];
     [string appendFormat:@"#endif\n"];
     [string appendFormat:@"#import <LC32/LC32.h>\n"];
+    [string appendString:@"#import <CoreMedia/CoreMedia.h>\n"];
     [string appendFormat:@"#import <CoreGraphics/CoreGraphics+LC32.h>\n"];
     [string appendFormat:@"#import <UIKit/UIKit+LC32.h>\n"];
     [string appendString:

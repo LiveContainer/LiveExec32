@@ -88,6 +88,8 @@ extern "C" LC32HostMessageFourDoubles LC32InvokeHostMessageFourDoubles(
     const LC32HostMessageInvocation *invocation);
 extern "C" LC32_SixDoubles LC32InvokeHostMessageSixDoubles(
     const LC32HostMessageInvocation *invocation);
+extern "C" void LC32InvokeHostMessageIndirect(
+    const LC32HostMessageInvocation *invocation, void *result);
 
 static id LC32RetainOwnedHostObject(id object);
 
@@ -3231,6 +3233,7 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
     } returnKind = HostReturnKind::Integer;
     bool returnsBlock = false;
     bool returnsNSRange = false;
+    unsigned indirectStructReturnSize = 0;
     if(hasMethodSignature) {
         char *returnType = copyReturnType();
         if(returnType) {
@@ -3247,6 +3250,11 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
             returnsBlock = unqualifiedType[0] == '@' &&
                 unqualifiedType[1] == '?';
             returnsNSRange = LC32NativeNSRangeType(unqualifiedType);
+            LC32PODType pod = {};
+            if(LC32PODStructType(unqualifiedType, true, &pod) &&
+                    pod.size > 16 && !LC32PODHomogeneousFloat(&pod)) {
+                indirectStructReturnSize = pod.size;
+            }
             free(returnType);
         }
     }
@@ -3316,6 +3324,22 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
     auto invokeStruct = [&](bool invokeSuper, u64 target) {
         const LC32HostMessageInvocation invocation =
             makeHostMessageInvocation(invokeSuper, target);
+        if(indirectStructReturnSize) {
+            if(structLen != indirectStructReturnSize) {
+                printf("LC32: invalid indirect struct return size %u for selector %s\n",
+                       structLen, sel_getName(selector));
+                return;
+            }
+            // AAPCS64 returns non-HFA aggregates larger than 16 bytes via
+            // x8, including CMTime (24) and CMTimeRange (48). Copy back the
+            // signature's exact size; do not infer FP layout from byte count.
+            alignas(16) std::array<u8, LC32PODMaxSize> result = {};
+            LC32GuestHostCallQuiescence quiescence;
+            LC32InvokeHostMessageIndirect(&invocation, result.data());
+            quiescence.finish();
+            (void)Dynarmic_mem_1write(structPtr, structLen, (char *)result.data());
+            return;
+        }
         if(returnsNSRange) {
             if(structLen != sizeof(LC32HostMessageTwoU64)) {
                 printf("LC32: invalid NSRange return size %u for selector %s\n",

@@ -27,6 +27,11 @@ _LC32_objc_msgSendSuper_stret:
 //   16  selector
 //   24  integerArguments[9]
 //   96  floatingArguments[8]
+.global _LC32InvokeHostMessageIndirect
+_LC32InvokeHostMessageIndirect:
+    mov x8, x1 // native return storage; the shared trampoline preserves x8
+    b _LC32InvokeHostMessageInteger
+
 .global _LC32InvokeHostMessageInteger
 .global _LC32InvokeHostMessageFloat
 .global _LC32InvokeHostMessageDouble

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>AVFoundation</key><dict>
+    <key>LC32MediaTimeFixture</key><dict><key>-</key><dict>
+        <key>frameDuration</key><string>{?=qiIq}8@0:4</string>
+        <key>setFrameDuration:</key><string>v32@0:4{?=qiIq}8</string>
+        <key>timeRange</key><string>{?={?=qiIq}{?=qiIq}}8@0:4</string>
+        <key>setTimeRange:</key><string>v56@0:4{?={?=qiIq}{?=qiIq}}8</string>
+        <key>namedTime</key><string>{CMTime=qiIq}8@0:4</string>
+        <key>namedRange</key><string>{CMTimeRange={CMTime=qiIq}{CMTime=qiIq}}8@0:4</string>
+        <key>setTransform:atTime:</key><string>v56@0:4{CGAffineTransform=ffffff}8{?=qiIq}32</string>
+        <key>setOpacityRampFromStartOpacity:toEndOpacity:timeRange:</key><string>v64@0:4f8f12{?={?=qiIq}{?=qiIq}}16</string>
+        <key>appendPixelBuffer:withPresentationTime:</key><string>c36@0:4^{__CVBuffer=}8{?=qiIq}12</string>
+        <key>appendSampleBuffer:</key><string>c12@0:4^{opaqueCMSampleBuffer=}8</string>
+        <key>copyNextSampleBuffer</key><string>^{opaqueCMSampleBuffer=}8@0:4</string>
+        <key>formatDescription</key><string>^{opaqueCMFormatDescription=}8@0:4</string>
+    </dict></dict>
+    <key>LC32UnknownMediaFixture</key><dict><key>-</key><dict>
+        <key>setOtherValue:</key><string>v32@0:4{?=qiiq}8</string>
+        <key>setOtherPointer:</key><string>v12@0:4^{opaqueCMPrivateData=}8</string>
+    </dict></dict>
+    <key>AVAssetImageGenerator</key><dict><key>-</key><dict>
+        <key>initWithAsset:</key><string>@12@0:4@8</string>
+        <key>copyCGImageAtTime:actualTime:error:</key><string>^{CGImage=}40@0:4{?=qiIq}8^{?=qiIq}32^@36</string>
+    </dict></dict>
+</dict></dict></plist>

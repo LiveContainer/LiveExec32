@@ -6,7 +6,7 @@
 
 enum {
     LC32CoreMediaABIVersion = 1,
-    LC32CoreMediaMaxSlots = 2,
+    LC32CoreMediaMaxSlots = 12,
 };
 
 typedef struct {
@@ -24,14 +24,14 @@ typedef struct {
 } LC32CoreMediaTime;
 
 #ifdef __cplusplus
-static_assert(sizeof(LC32CoreMediaCall) == 24 &&
+static_assert(sizeof(LC32CoreMediaCall) == 104 &&
               offsetof(LC32CoreMediaCall, slots) == 8,
               "CoreMedia request layout must match the ARM32 guest");
 static_assert(sizeof(LC32CoreMediaTime) == 24 &&
               offsetof(LC32CoreMediaTime, epoch) == 16,
               "CoreMedia time layout must match the ARM32 guest");
 #else
-_Static_assert(sizeof(LC32CoreMediaCall) == 24 &&
+_Static_assert(sizeof(LC32CoreMediaCall) == 104 &&
                offsetof(LC32CoreMediaCall, slots) == 8,
                "CoreMedia request layout must match the ARM64 host");
 _Static_assert(sizeof(LC32CoreMediaTime) == 24 &&
@@ -44,6 +44,10 @@ typedef enum : uint32_t {
     LC32CMSampleBufferGetPresentationTimeStamp,
     LC32CMSampleBufferGetTypeID,
     LC32CMSampleBufferIsValid,
+    LC32CMAudioFormatDescriptionCreate,
+    LC32CMSampleBufferCreate,
+    LC32CMSampleBufferSetDataBufferFromAudioBufferList,
+    LC32CMSampleBufferSetDataReady,
 } LC32CoreMediaOpcode;
 
 #endif
