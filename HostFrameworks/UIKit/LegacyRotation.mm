@@ -131,6 +131,28 @@ UIViewController *NativePresented(UIViewController *controller) {
     return getter(controller, @selector(presentedViewController));
 }
 
+UIViewController *BackingContentController(UIViewController *controller) {
+    // Native navigation/tab containers rotate their own root view on behalf
+    // of the guest inside. They need the same portrait backing, but must keep
+    // ownership of policy and lifecycle dispatch. Do not traverse guest
+    // containers, inactive children, or arbitrary view-controller hierarchies.
+    using Getter = UIViewController *(*)(id, SEL);
+    while(controller && !RegisteredClass(object_getClass(controller))) {
+        if([controller isKindOfClass:UINavigationController.class]) {
+            static Getter getter = (Getter)class_getMethodImplementation(
+                UINavigationController.class, @selector(topViewController));
+            controller = getter(controller, @selector(topViewController));
+        } else if([controller isKindOfClass:UITabBarController.class]) {
+            static Getter getter = (Getter)class_getMethodImplementation(
+                UITabBarController.class, @selector(selectedViewController));
+            controller = getter(controller, @selector(selectedViewController));
+        } else {
+            return nil;
+        }
+    }
+    return controller;
+}
+
 UIViewController *ControllerForWindow(UIWindow *window, bool forBacking = false) {
     if(!window) return nil;
     UIViewController *root = NativeRoot(window);
@@ -142,7 +164,7 @@ UIViewController *ControllerForWindow(UIWindow *window, bool forBacking = false)
         // window coordinates. It needs the same inverse backing rotation, but
         // must retain its modern policy without deprecated policy queries.
         Class cls = object_getClass(root);
-        return forBacking ? (RegisteredClass(cls) ? root : nil) :
+        return forBacking ? (BackingContentController(root) ? root : nil) :
             (!NativePresented(root) && UsesLegacyRotationPolicy(cls) ? root : nil);
     }
     UIViewController *candidate = nil;
@@ -281,8 +303,9 @@ void UpdateWindow(UIWindow *window, UIInterfaceOrientation orientation,
             // game attaches its controller. UIKit then only lays out the new
             // client, without a will/did pair. Supply that initial lifecycle
             // before the next guest frame can perform a competing manual turn.
+            // Native containers already dispatch their children's lifecycle.
             SEL current = sel_registerName("interfaceOrientation");
-            bool initialSync = initializing &&
+            bool initialSync = initializing && RegisteredClass(object_getClass(controller)) &&
                 ((UIInterfaceOrientation (*)(id, SEL))objc_msgSend)(window, current) == orientation;
             if(initialSync) [controller willRotateToInterfaceOrientation:orientation duration:0];
             ((void (*)(id, SEL, UIInterfaceOrientation, NSTimeInterval, BOOL))objc_msgSend)(
@@ -371,7 +394,8 @@ extern "C" void LC32FinishNativeLegacyRotationStartup(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIViewController *controller = pendingController;
         UIWindow *target = pendingWindow;
-        if(controller && target && ControllerForWindow(target, true) == controller)
+        if(controller && target &&
+                BackingContentController(ControllerForWindow(target, true)) == controller)
             UpdateWindow(target, PreferredOrientation(), true);
     });
 }

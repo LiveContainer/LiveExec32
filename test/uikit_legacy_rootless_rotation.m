@@ -377,6 +377,42 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
 @implementation RootlessRotationRegisteredModernController
 @end
 
+/* Active native containers, plus hidden-stack, unselected-tab, and arbitrary
+ * containment negatives. Only the active registered content grants backing. */
+static UIViewController *backingProbeContainer(UIViewController *content, unsigned layout) {
+    if(layout == 2) {
+        RootlessRotationCanvasController *canvas = [RootlessRotationCanvasController new];
+        [canvas addChildViewController:content];
+        [canvas.view addSubview:content.view];
+        [content didMoveToParentViewController:canvas];
+        canvas.guestContentController = content;
+        return canvas;
+    }
+    if(layout == 3 || layout == 4 || layout == 5) {
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:content];
+        nav.navigationBarHidden = YES;
+        if(layout == 5) [nav setViewControllers:@[content, [RootlessRotationNativeModernController new]]];
+        if(layout != 4) return nav;
+        UITabBarController *tabs = [UITabBarController new];
+        tabs.viewControllers = @[nav];
+        return tabs;
+    }
+    if(layout == 6) {
+        UITabBarController *tabs = [UITabBarController new];
+        tabs.viewControllers = @[content, [RootlessRotationNativeModernController new]];
+        tabs.selectedIndex = 1;
+        return tabs;
+    }
+    if(layout == 7) {
+        UIViewController *container = [UIViewController new];
+        [container addChildViewController:content];
+        [container.view addSubview:content.view];
+        [content didMoveToParentViewController:container];
+        return container;
+    }
+    return content;
+}
+
 /* iOS 6 policy with the pre-iOS-8 lifecycle, but no deprecated policy query
  * anywhere in the hierarchy (the Unity controller shape). */
 @interface RootlessRotationPolicyOnlyController : UIViewController
@@ -778,7 +814,7 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
     check("rotation-update-hook-matches-sdk-gate", resolved &&
         (updateInfo.dli_fbase == _dyld_get_image_header(0)) == expectedEnabled);
     if(!expectedEnabled) return;
-    for(unsigned layout = 0; layout < 3; ++layout)
+    for(unsigned layout = 0; layout < 8; ++layout)
     for(Class cls in @[RootlessRotationLegacyController.class,
             RootlessRotationPolicyOnlyController.class, RootlessRotationNativeModernController.class]) {
         const BOOL rootless = layout == 1;
@@ -786,13 +822,8 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
             initWithFrame:CGRectMake(0, 0, 320, 480)];
         UIViewController *controller = [[cls alloc] init];
         controller.view = [[RootlessRotationGuestView alloc] initWithFrame:window.bounds];
-        if(layout == 2) {
-            RootlessRotationCanvasController *canvas = [RootlessRotationCanvasController new];
-            window.rootViewController = canvas;
-            [canvas addChildViewController:controller];
-            [canvas.view addSubview:controller.view];
-            [controller didMoveToParentViewController:canvas];
-            canvas.guestContentController = controller;
+        if(layout >= 2) {
+            window.rootViewController = backingProbeContainer(controller, layout);
         } else {
             if(!rootless) window.rootViewController = controller;
             if(controller.view.superview != window) [window addSubview:controller.view];
@@ -807,7 +838,7 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
         } @finally {
             method_setImplementation(original, saved);
         }
-        BOOL guest = cls != RootlessRotationNativeModernController.class &&
+        BOOL guest = layout < 5 && cls != RootlessRotationNativeModernController.class &&
             (!rootless || cls == RootlessRotationPolicyOnlyController.class);
         check("rotation-update-original-called-once", updateProbeCalls == 1);
         check("rotation-update-arguments-preserved", updateProbeArguments);
@@ -868,7 +899,8 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
         [self finish];
         return;
     }
-    NSArray<NSString *> *labels = @[@"attached", @"replaced", @"detached", @"native", @"rootless", @"unloaded"];
+    NSArray<NSString *> *labels = @[@"attached", @"replaced", @"detached", @"native", @"rootless", @"unloaded",
+        @"navigation", @"navigation-replaced"];
     NSMutableArray<RootlessRotationRefreshWindow *> *windows = [NSMutableArray array];
     NSMutableArray<RootlessRotationTrackingController *> *controllers = [NSMutableArray array];
     for(NSUInteger index = 0; index < labels.count; ++index) {
@@ -878,10 +910,14 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
             RootlessRotationRegisteredModernController.class;
         RootlessRotationTrackingController *controller = [[cls alloc] init];
         controller.view = [[UIView alloc] initWithFrame:window.bounds];
-        if(index == 4) [window addSubview:controller.view];
+        if(index >= 6) window.rootViewController = backingProbeContainer(controller, 3);
+        else if(index == 4) [window addSubview:controller.view];
         else window.rootViewController = controller;
         /* Hidden windows need explicit attachment on some UIKit versions. */
-        if(controller.view.superview != window) [window addSubview:controller.view];
+        if(index >= 6) {
+            [window addSubview:window.rootViewController.view];
+            [window.rootViewController.view addSubview:controller.view];
+        } else if(controller.view.superview != window) [window addSubview:controller.view];
         [windows addObject:window];
         [controllers addObject:controller];
     }
@@ -898,6 +934,8 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
         }
         check("modern-refresh-original-move-imp-restored", method_getImplementation(original) == saved);
         windows[1].rootViewController = [[RootlessRotationNativeModernController alloc] init];
+        [(UINavigationController *)windows[7].rootViewController
+            setViewControllers:@[[RootlessRotationNativeModernController new]]];
         [controllers[2].view removeFromSuperview];
         [controllers[5] setView:nil];
         for(RootlessRotationRefreshWindow *window in windows) {
@@ -915,7 +953,7 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
             printf("rootless-rotation-modern-settled-refresh: state=%s requests=%u guest-calls=disabled\n",
                 labels[index].UTF8String, windows[index].refreshes);
             check("modern-settled-backing-refresh-independent-of-guest-callback-permission",
-                windows[index].refreshes == (index == 0 || index == 4 ? 1u : 0u));
+                windows[index].refreshes == (index == 0 || index == 4 || index == 6 ? 1u : 0u));
             windows[index].refreshes = 0;
         }
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -923,7 +961,7 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
                 printf("rootless-rotation-modern-refresh: state=%s requests=%u\n",
                     labels[index].UTF8String, windows[index].refreshes);
                 check("modern-refresh-only-current-attached-guest-root",
-                    windows[index].refreshes == (index == 0 || index == 4 ? 1u : 0u));
+                    windows[index].refreshes == (index == 0 || index == 4 || index == 6 ? 1u : 0u));
                 windows[index].recordRefreshes = NO;
             }
             check("modern-refresh-does-not-query-or-synthesize-legacy-callbacks",
@@ -965,13 +1003,14 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
     NSArray<Class> *classes = @[RootlessRotationLegacyController.class,
         RootlessRotationModernController.class, RootlessRotationRegisteredModernController.class,
         RootlessRotationUnregisteredController.class, RootlessRotationNativeModernController.class];
-    for(unsigned rootless = 0; rootless < 2; ++rootless) for(Class cls in classes) {
+    for(unsigned layout = 0; layout < 8; ++layout) for(Class cls in classes) {
+        const BOOL rootless = layout == 1;
         UIWindow *window = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, 320, 480)];
         UIWindow *otherWindow = [[UIWindow alloc] initWithFrame:window.frame];
         UIViewController *controller = [[cls alloc] init];
         controller.view = [[UIView alloc] initWithFrame:window.bounds];
         if(rootless) [window addSubview:controller.view];
-        else window.rootViewController = controller;
+        else window.rootViewController = backingProbeContainer(controller, layout);
         const BOOL nativeOrientation = nativeBoolGetter(window, "_windowOwnsInterfaceOrientation");
         const BOOL nativeTransform = nativeBoolGetter(window, "_windowOwnsInterfaceOrientationTransform");
         CALayer *root = CALayer.layer;
@@ -996,12 +1035,12 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
                     caught = [exception.name isEqualToString:@"LC32OwnershipProbe"];
                     if(!caught) @throw;
                 }
-                BOOL backingEligible = cls == RootlessRotationLegacyController.class ||
+                BOOL backingEligible = layout < 5 && (cls == RootlessRotationLegacyController.class ||
                     cls == RootlessRotationModernController.class ||
-                    cls == RootlessRotationRegisteredModernController.class;
-                printf("rootless-rotation-ownership-probe: class=%s rootless=%u exception=%d "
+                    cls == RootlessRotationRegisteredModernController.class);
+                printf("rootless-rotation-ownership-probe: class=%s layout=%u exception=%d "
                     "orientation=%d transform=%d unrelated=%d/%d\n",
-                    class_getName(cls), rootless, ownershipThrow, ownershipObservedOrientation,
+                    class_getName(cls), layout, ownershipThrow, ownershipObservedOrientation,
                     ownershipObservedTransform, ownershipObservedOtherOrientation,
                     ownershipObservedOtherTransform);
                 check("ownership-original-called-once", ownershipCalls == 1);

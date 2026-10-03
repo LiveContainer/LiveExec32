@@ -674,3 +674,80 @@ stopped before runtime loading are not the settled control above.
 Original simulator game settings and saves are restored; test saves are retained
 beside the evidence. Temporary app/runtime symlinks and fixture installations
 are removed. Debuggers detached; no Mac keyboard/mouse automation was used.
+
+## Cling Thing 1.2 — native navigation-container backing (2026-10-03)
+
+The user reports an upside-down menu on the real phone with the runtime used
+for the Road Warrior retest. At their request, this investigation ran in the
+simulator. Only the installed **Cling Thing 1.2, build 65** app bundle was
+copied from the phone; its ARMv7 slice is unencrypted and declares **SDK 7.0**.
+The phone's runtime, game settings, and saves were not changed.
+
+LiveContainer created `LCAppInfo.plist` automatically for the new simulator
+bundle. Testing used **Classic Mode + original SDK 7** on the iPhone 17 Pro Max
+/ iOS 27 simulator, with an isolated runtime. The baseline shared-framework
+UUID was `26AE70AB-C41C-3C6A-9D94-B4A547960C34`, matching the last phone build;
+guest UIKit also matches the current build. The LC-compatible simulator
+launcher is used instead of the CLI fixture's non-dlopenable executable.
+
+The simulator reproduced a **sideways, clipped menu**, not an exact 180-degree
+reproduction of the phone report. LLDB confirms SDK `0x70000`, native
+legacy rotation enabled, and this hierarchy:
+
+```
+UIWindow
+  UINavigationController (native root)
+    CCDirectorDisplayLink (guest child)
+      CCGLView / CAEAGLLayer
+```
+
+`LegacyRotation.mm` recognized registered guest roots and direct-window
+renderers, but not a guest inside a native navigation controller. UIKit rotates
+the navigation view in portrait window coordinates, while the missing backing
+classification skips the corresponding inverse compositor rotation.
+
+The fix resolves active content through native navigation and tab containers
+for **backing eligibility only**. UIKit retains the actual root, orientation
+policy, and lifecycle dispatch. Deferred attachment work revalidates the active
+child; native containers do not receive synthetic initial guest callbacks.
+Inactive navigation entries, unselected tabs, arbitrary containers, native-only
+content, and the existing SDK/build gates retain their previous behavior.
+No new swizzle, game-name check, fixed angle, or touch-coordinate hook is added.
+
+Validation:
+
+- Compiled candidate UUID: `8D5F9441-CCFA-3C93-A07F-163C95EC9039`. The menu is
+  upright after a portrait cold launch, both landscape turns, a return turn,
+  and a cold launch already in landscape. These are compiled-runtime retests,
+  not results from the earlier temporary debugger classification experiment.
+- Native container-ownership and lifecycle fixtures pass on **iPhone and iPad**
+  for **SDK 7 and 11** (eight launches), including native/inactive-container
+  negatives and before/after
+  backing-refresh ordering. Two additional iPad SDK-7/11 runs cover deferred
+  attachment and navigation-child replacement.
+- Shared-framework build, compatibility-off/on compile checks, and
+  `git diff --check` pass. Test fixture apps were uninstalled by their runners.
+- The simulator still changes Classic Mode viewport extent/placement across
+  rotations (320×568 portrait-window bounds become 440×956); the artwork
+  remains upright but shifts within that viewport. This is not a full layout,
+  touch, gameplay, or real-device certification. No touch tests were performed.
+
+Evidence: `tmp/cling-sim.nBaprF/`, especially `portrait-current.png`,
+`portrait-geometry.log`, `candidate-settled.png`, `candidate-left.png`,
+`candidate-right.png`, `candidate-return-left.png`,
+`candidate-cold-landscape-right.png`, `candidate-geometry.log`, and the three
+`container-*-tests.log` files. The copied game and isolated candidate runtime
+remain available in simulator LC. All LLDB sessions detached; rotation used
+idb rather than Mac keyboard/mouse input.
+
+### iPhone 15 Pro Max follow-up
+
+The later USB-connected phone retest still had baseline runtime UUID
+`945B498F-E952-397A-9770-A46A8021CBDB`, without the container-backing fix.
+Its title screen reproduced rotated and clipped. Installing the Cling-only
+candidate `8D5F9441-CCFA-3C93-A07F-163C95EC9039` with a native iOS load command
+and relaunching produced an upright, fully visible title menu on iOS 26.1.
+The prior framework is backed up on the phone; game settings and saves were
+not changed. This is a title-screen check, not a gameplay or all-orientations
+certification. Before/after USB screenshots are
+`tmp/sheep-ios15.EuLbZv/cling-15pm-before.png` and `cling-15pm-fixed.png`.
