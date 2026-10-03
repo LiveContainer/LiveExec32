@@ -171,3 +171,89 @@ available; cleanup verification is in `tmp/ipad-canvas-20260928/cleanup.log`.
 Task LLDB sessions detached/exited, and only the two task-owned idb companions
 were stopped. Unrelated debugger/companion processes were left alone.
 No changes were pushed.
+
+## iOS 15 follow-up: white drawable, 2026-10-03
+
+Sheep Mania / PuzzleIslands 1.0.2 on the iPhone 6s Plus (iOS 15.4.1),
+standalone original-SDK launch, had a separate first-allocation failure:
+`renderbufferStorage:fromDrawable:` reported `invalid property values`, with
+zero renderbuffer dimensions and `GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT`
+(`0x8cd6`). The only visible window contained the game's EAGLView; no Game Center
+presentation remained over it. Music and the render loop continued.
+
+iOS 15 EAGL compares color-format values with its native constant objects by
+identity. Our existing normalization substituted the correct constant, but
+Core Animation retained the old properties dictionary because its replacement
+compared equal by value. The stored RGBA8 string still belonged to the guest
+bridge. In-process tracing confirmed that setting the canonical dictionary
+again failed, while clearing it before setting the same dictionary succeeded.
+The retained-backing value was already the native `__NSCFBoolean` and stayed
+enabled in the successful test; removing it was not necessary.
+
+The existing storage hook now clears the properties dictionary only when
+normalization changes the color-format object, then installs the normalized
+properties. No new swizzle, game-name check, SDK switch, or per-frame work was
+added. The diagnostic game run reached a complete framebuffer (`0x8cd5`), valid
+414×736 storage/viewport, successful presents and no GL errors through sampled
+frame 1200. The user confirmed rendering resumed.
+
+`test/opengles_drawable_properties.m` loads the built host framework and invokes
+its actual normalization hook with a storage sink and real CAEAGLLayers. It
+checks distinct-but-equal RGBA8/RGB565 strings, unchanged canonical dictionaries,
+unrelated properties, invalid formats, nil drawables and one backend call per
+request. This property test does not require a GPU or claim to test rendering.
+The old iOS 15 framework reproduces stale identity (`--expect-stale`); the fixed
+framework passes on iOS 15 and the iPhone/iPad iOS 27 simulators. Run with
+`sh test/opengles_drawable_properties.sh --device UDID /absolute/path/to/LiveExec32Shared`;
+`--platform iphoneos` builds a signed device probe without installing it.
+
+The normal framework (UUID `E4145446-2676-3FB2-86AE-374C3A3632D4`) replaced the
+temporary diagnostic build on the 6s. Local evidence is under
+`tmp/sheep-ios15.EuLbZv/`: `window-trace3.log`, `window-trace5.log`,
+`frame300-trace5.png`, and the simulator property-regression logs.
+
+### Clipping resolved by disabling TrollPad
+
+The user reports cut-off content after rendering resumes. The standalone
+window and EAGLView expand from their archived 320×480 bounds to 414×736, while
+the engine hard-codes `glScissor(0, 0, 320, 480)` in `PMGraphics::rendererBegin`
+and uses 480 in `setClip`'s Y conversion. The larger viewport therefore scales
+the drawing beyond its unchanged scissor region. A cold-launch attempt with
+LiveContainer's `__ActivateAsClassic = 1` option still yielded 414×736 on this
+device; its completion timed out despite starting the process. No global GL
+coordinate/input patch or persistent launch setting was applied.
+
+The device screenshot command supplied by the user subsequently confirmed the
+menu is clipped across its top and right edges (`sheep-device-cutoff.png` in
+the same evidence directory), not just surrounded by unused margins. The
+screen also has an iPad-style multitasking control. `TrollPadSB` and `TrollPadUI`
+are installed on the 6s; the local TrollPad source forces portrait applications
+to be Medusa-capable and enables the multitasking control. The user subsequently
+disabled TrollPad and confirmed the clipping disappeared with the same runtime.
+No additional canvas, scissor or touch-coordinate fix was needed. The agent did
+not change tweak settings or restart SpringBoard.
+
+The earlier missing delayed-presentation selector repair remains separate.
+Previously reported Game Center notification/relaunch crashes are not certified
+fixed by this drawable change.
+
+### Intermittent Play-button audio crash
+
+After disabling TrollPad, the user reported one crash on Play, then a successful
+second attempt without a runtime change. `PuzzleIslands-2026-10-03-100704.ips`
+and `play-crash.old.log` in the same evidence directory identify a separate
+guest SIGSEGV: a 16-bit read from `0x1c` in
+`PMAudioModulePlayer::UpdateTick()`, reached through `Update()`,
+`PMAudioDriver::UpdateInternal()` and the game's audio pthread.
+
+The installed ARMv6 binary's tick loop reloads the current module from
+`player + 0x20` and reads its 16-bit channel count at `module + 0x1c`
+(`0x9f322`–`0x9f328`). Its earlier null check is in `Update()`, before the tick
+call. The stop path clears that same module field. The log also captures
+another guest callback halted in `PMAudioStreamProxy::Stop()` with its caller
+in `PMAudioStreamPlayer::StopAll()`. This strongly suggests overlapping audio
+stop/update operations during the Play transition. It does not yet establish
+whether native guest parallelism exposes an original game race or a runtime
+synchronization defect; the conflicting write has not been captured live.
+No audio workaround or scheduling change has been applied. The successful
+retry is not a regression pass for this intermittent failure.

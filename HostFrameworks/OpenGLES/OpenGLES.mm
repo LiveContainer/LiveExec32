@@ -2366,6 +2366,14 @@ size_t VertexAttribElementCount(GLenum pname) {
             }
             normalized[normalizedKey] = normalizedValue;
         }
+        // Core Animation can keep an equal-valued properties dictionary,
+        // retaining the guest's color-format string instead of our native
+        // constant. EAGL on iOS 15 compares those values by identity. Force
+        // replacement only when normalization changes the color-format object.
+        if(properties[kEAGLDrawablePropertyColorFormat] !=
+                normalized[kEAGLDrawablePropertyColorFormat]) {
+            drawableLayer.drawableProperties = nil;
+        }
         drawableLayer.drawableProperties = normalized;
     }
 

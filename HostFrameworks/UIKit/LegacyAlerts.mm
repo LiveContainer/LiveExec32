@@ -8,6 +8,14 @@
 #include <stdint.h>
 #include <string.h>
 
+@interface UIViewController (LC32LegacyPresentation)
+- (void)presentViewController:(UIViewController *)presented
+              withTransition:(int)transition completion:(void (^)(void))completion;
+- (void)_windowControllerBasedPresentViewController:(UIViewController *)presented
+                                    withTransition:(int)transition completion:(void (^)(void))completion;
+- (void)_didFinishDismissTransition:(UIViewController *)dismissed;
+@end
+
 struct LC32AlertBuildVersion { uint32_t platform, version; };
 extern "C" bool dyld_program_sdk_at_least(LC32AlertBuildVersion version);
 
@@ -101,6 +109,26 @@ BOOL BuiltinAnimatesAlert(id animator) {
 }
 
 BOOL UseAlertPresentationController(id, SEL) { return YES; }
+
+void ResumeLegacyPresentation(UIViewController *self, SEL, UIViewController *presented,
+                              int transition, void (^completion)(void)) {
+    [self presentViewController:presented withTransition:transition completion:completion];
+}
+
+void RestoreDelayedPresentation(void) {
+    Class controller = UIViewController.class;
+    SEL resume = @selector(_windowControllerBasedPresentViewController:withTransition:completion:);
+    if([controller instancesRespondToSelector:resume]) return;
+    Method present = class_getInstanceMethod(controller,
+        @selector(presentViewController:withTransition:completion:));
+    if(!present) return;
+    // iOS 15 inlined the old method into presentViewController:withTransition:
+    // completion:, but its delayed-presentation branch still builds an
+    // NSInvocation for the removed selector (e.g. Game Center authentication).
+    // Restore only that entry point, including its native argument encoding.
+    class_addMethod(controller, resume, (IMP)ResumeLegacyPresentation,
+        method_getTypeEncoding(present));
+}
 
 void Present(id self, SEL selector, UIViewController *presented, BOOL animated,
              void (^completion)(void)) {
@@ -205,7 +233,7 @@ bool PrepareHooks(void) {
        !Prepare(builtinDelegate, builtin, "delegate", "@", {}, nativeImage) ||
        !Prepare(builtinDuration, builtin, "durationForTransition:", @encode(CGFloat), {"i"}, nativeImage) ||
        !Prepare(builtinAnimator, builtin, "animateTransition:", "v", {"@"}, nativeImage)) return false;
-    if(class_getInstanceMethod(controller, sel_registerName("_didFinishDismissTransition:")) &&
+    if([controller instancesRespondToSelector:@selector(_didFinishDismissTransition:)] &&
        !Prepare(finishDismissWithController, controller, "_didFinishDismissTransition:", "v", {"@"}, nativeImage))
         return false;
     return true;
@@ -217,6 +245,9 @@ bool PrepareHooks(void) {
 @implementation LC32LegacyAlerts
 + (void)load {
     if(dyld_program_sdk_at_least({PLATFORM_IOS, 0x00080000})) return;
+    // This missing-selector repair does not depend on the alert-specific
+    // presentation/layout hooks being available on this UIKit release.
+    RestoreDelayedPresentation();
     // Presentation, layout and dismissal are a matched native flow. Install
     // nothing if this UIKit version (or an earlier hook) lacks a prerequisite.
     if(!PrepareHooks()) return;
