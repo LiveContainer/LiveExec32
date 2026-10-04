@@ -4,6 +4,7 @@
 #include <libroot.h>
 #include <limits.h>
 #include <mach-o/loader.h>
+#include <mach-o/dyld.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -19,6 +20,10 @@ extern uint32_t dyld_get_active_platform(void);
 __attribute__((used, section("__TEXT,__lc32shim")))
 static const char LC32InjectedShimMarker[] =
     "LiveExec32InjectedShim:1";
+
+/* The standalone packager rejects launchers predating bundled RootFS support. */
+__attribute__((used, section("__TEXT,__lc32standalone")))
+static const char LC32StandaloneMarker[] = "LiveExec32Standalone:1";
 
 static bool FormatFrameworkPath(
         char *path, size_t capacity,
@@ -106,7 +111,7 @@ static void ConfigureDynarmicCodeMemoryMode(void) {
 }
 
 static bool ConfigureInjectedEnvironment(
-        char installedLauncherPath[PATH_MAX]) {
+        char runtimeLauncherPath[PATH_MAX]) {
     char guestHome[PATH_MAX];
     const char *currentHome = getenv("HOME");
     if(currentHome == NULL || currentHome[0] != '/' ||
@@ -115,26 +120,45 @@ static bool ConfigureInjectedEnvironment(
         snprintf(guestHome, sizeof(guestHome), "%s", "/var/mobile");
     }
 
-    const char *resolvedLauncherPath = libroot_dyn_jbrootpath(
-        "/Applications/LiveExec32.app/LiveExec32",
-        installedLauncherPath);
-    if(resolvedLauncherPath == NULL || resolvedLauncherPath[0] == '\0') {
+    /* A self-contained bundle must not depend on the jailbreak installation.
+     * Resolve the actual process executable, not a possibly relative argv[0]. */
+    char executablePath[PATH_MAX];
+    uint32_t executablePathSize = sizeof(executablePath);
+    char rootPath[PATH_MAX];
+    char frameworkPath[PATH_MAX];
+    bool bundledRuntime = false;
+    if(_NSGetExecutablePath(executablePath, &executablePathSize) == 0 &&
+            realpath(executablePath, runtimeLauncherPath) != NULL) {
+        const char *slash = strrchr(runtimeLauncherPath, '/');
+        if(slash != NULL) {
+            const int directoryLength = (int)(slash - runtimeLauncherPath);
+            const int rootLength = snprintf(rootPath, sizeof(rootPath),
+                "%.*s/RootFS", directoryLength, runtimeLauncherPath);
+            const int frameworkLength = snprintf(frameworkPath, sizeof(frameworkPath),
+                "%.*s/Frameworks/LiveExec32Shared.framework/LiveExec32Shared",
+                directoryLength, runtimeLauncherPath);
+            bundledRuntime = rootLength >= 0 && (size_t)rootLength < sizeof(rootPath) &&
+                frameworkLength >= 0 && (size_t)frameworkLength < sizeof(frameworkPath) &&
+                access(rootPath, R_OK | X_OK) == 0 && access(frameworkPath, R_OK) == 0;
+        }
+    }
+    if(!bundledRuntime && libroot_dyn_jbrootpath(
+            "/Applications/LiveExec32.app/LiveExec32", runtimeLauncherPath) == NULL) {
         fprintf(stderr,
             "LC32: could not resolve the installed launcher path\n");
         return false;
     }
 
-    const char *lastSlash = strrchr(installedLauncherPath, '/');
-    if(lastSlash == NULL || lastSlash == installedLauncherPath) {
-        fprintf(stderr, "LC32: installed launcher path is invalid\n");
+    const char *lastSlash = strrchr(runtimeLauncherPath, '/');
+    if(lastSlash == NULL || lastSlash == runtimeLauncherPath) {
+        fprintf(stderr, "LC32: runtime launcher path is invalid\n");
         return false;
     }
-    char rootPath[PATH_MAX];
     const int rootPathLength = snprintf(
         rootPath, sizeof(rootPath), "%.*s/RootFS",
-        (int)(lastSlash - installedLauncherPath), installedLauncherPath);
+        (int)(lastSlash - runtimeLauncherPath), runtimeLauncherPath);
     if(rootPathLength < 0 || (size_t)rootPathLength >= sizeof(rootPath)) {
-        fprintf(stderr, "LC32: installed RootFS path is too long\n");
+        fprintf(stderr, "LC32: runtime RootFS path is too long\n");
         return false;
     }
 
@@ -175,9 +199,9 @@ int main(int argc, char *argv[], char *envp[]) {
     const bool injectedLauncher =
         strncmp(executableName, "LiveExec32", 10) != 0;
 
-    char installedLauncherPath[PATH_MAX] = {0};
+    char runtimeLauncherPath[PATH_MAX] = {0};
     if(injectedLauncher &&
-            !ConfigureInjectedEnvironment(installedLauncherPath)) {
+            !ConfigureInjectedEnvironment(runtimeLauncherPath)) {
         return 1;
     }
 
@@ -228,7 +252,9 @@ int main(int argc, char *argv[], char *envp[]) {
     /*
      * The injected arm64 slice is byte-for-byte LiveExec32's launcher, but
      * argv[0] names the installed 32-bit application's executable. Supply
-     * the installed launcher as argv[0] so LiveExec32Shared finds its RootFS,
+     * the runtime launcher as argv[0] so LiveExec32Shared finds its RootFS
+     * (the current executable for standalone apps, the installed launcher
+     * for jailbreak-injected apps),
      * and the current universal executable as argv[1] so its ARM32 slice is
      * the guest program. Preserve arguments passed to the application.
      */
@@ -240,7 +266,7 @@ int main(int argc, char *argv[], char *envp[]) {
             "LC32: could not allocate injected application arguments\n");
         return 1;
     }
-    guestArguments[0] = installedLauncherPath;
+    guestArguments[0] = runtimeLauncherPath;
     for(int index = 0; index < argc; index++) {
         guestArguments[index + 1] = argv[index];
     }

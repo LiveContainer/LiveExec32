@@ -1,5 +1,5 @@
 LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash \
-  check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info \
+  check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info check-standalone \
   check-guest-thumb-linker check-uikit-legacy-rootless-rotation-build \
   check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading \
   check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop \
@@ -33,12 +33,15 @@ BUILD_INFO_LOGGING_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/build-info-
   present missing)
 
 .PHONY: check-guest-bootstrap check-memory-hash \
-  check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info \
+  check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info check-standalone \
   check-guest-thumb-linker check-uikit-legacy-rootless-rotation-build \
   check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading \
   check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop \
   check-foundation-ports-host check-uikit-compatibility-switch check-uikit-status-bar-orientation \
   check-guest-install check-host-selector-hooks check-uikit-screen-metrics-host
+
+check-standalone:
+	python3 ./standalone.py -v
 
 check-uikit-screen-metrics-host:
 	sh ./uikit_screen_metrics_host.sh
