@@ -157,3 +157,10 @@ Startup logs include that release version, the 7-character Git commit
 Detached CI checkouts use `GITHUB_HEAD_REF`/`GITHUB_REF_NAME` for the branch;
 source archives without Git metadata use `unknown` for the commit.
 Run `gmake -C test check-build-info` for the metadata/logging regressions.
+
+Nightly builds generate `packages/source.json` with
+`Scripts/generate-nightly-source.py` and publish it alongside the IPA and Debian
+package. The source uses the packaged app's version, build number, bundle ID,
+minimum iOS version, and IPA size, plus the current commit and workflow link.
+The nightly source is available as
+[source.json](https://github.com/LiveContainer/LiveExec32/releases/download/nightly/source.json).

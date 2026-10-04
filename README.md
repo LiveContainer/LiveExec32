@@ -4,7 +4,7 @@ Run 32-bit binaries on 64-bit iOS by passing through syscalls.
 Not all apps will work and will mostly run into missing symbols issue. Please open an issue for that.
 
 > [!NOTE]
-> Some further work in this branch is done by LLM, mainly GPT-5.6 Sol; notable for implementing GDB Stub, Native Threads, more shims, etc.
+> Some further work in this branch is done by LLM, mainly with Codex; notable for implementing GDB Stub, Native Threads, more shims, etc.
 > Its commit history is kept for later reference.
 > Last commit before LLM is [dbd36e3](https://github.com/LiveContainer/LiveExec32/commit/dbd36e3e42e4e675e6fd542d4a487b61dbdc755d)
 >
@@ -30,10 +30,55 @@ gmake -C GuestMakefile install
 gmake
 ```
 
-On the iOS device, launch an ARM32 binary with the installed app's executable:
+### IPA build
+The IPA build is only meant to be used in LiveContainer, since it provides existing app/container management and convenient JIT enabler options.
+<table>
+  <tr>
+    <td> Stable </td>
+    <td align="center">
+      Not yet available
+    </td>
+    <td align="center">
+      Not yet available
+    </td>
+  </tr>
+  <tr>
+    <td> Nightly </td>
+    <td>
+      <a href="https://altdirect.app/?url=https://github.com/LiveContainer/LiveExec32/releases/download/nightly/source.json&r=livecontainer" target="_blank">
+        <img src="https://raw.githubusercontent.com/StikStore/altdirect/refs/heads/main/assets/png/AltSource_Blue.png" alt="Add AltSource" width="200" />
+      </a>
+    </td>
+    <td>
+      <a href="https://github.com/LiveContainer/LiveExec32/releases/download/nightly/com.kdt.liveexec32_0.0.1.ipa" target="_blank">
+        <img src="https://raw.githubusercontent.com/StikStore/altdirect/refs/heads/main/assets/png/Download_Blue.png" alt="Download .ipa" width="200" />
+      </a>
+    </td>
+  </tr>
+</table>
+
+### Jailbreak tweak
+The jailbreak tweak lets you sideload decrypted 32-bit apps directly to the system and launch just like any other apps.
+During install, LiveExec32 shim is injected to 32-bit app so installd doesn't reject it and makes everything easier to handle.
+
+Releases only include iOS 15+ rootless build for now. Jailbreak repo will be added later.
+
+### Standalone runtime
+
+You can bundle LiveExec32 with a decrypted ARM32 `.app` or `.ipa` to run without
+LiveContainer or a separately installed runtime. See [Standalone runtime](docs/standalone.md)
+for instructions. Use your signer and bring your own JIT enabler method.
+
+### Command line
+Launch an ARM32 binary with the installed app's executable:
 
 ```bash
 /path/to/LiveExec32.app/LiveExec32 /path/to/arm32-binary
+```
+
+You can also launch with the 32-bit dyld_shared_cache, for example:
+```bash
+NATIVE_GUEST_THREADS=1 ROOT_PATH=/Volumes/Greensburg14G60.N41N42N48N49OS /path/to/LiveExec32.app/LiveExec32 /Volumes/Greensburg14G60.N41N42N48N49OS/usr/libexec/backboardd
 ```
 
 - [Building](docs/building.md): prerequisites, downloads, guest RootFS, and macOS testing.
@@ -60,15 +105,7 @@ host-dependent until their iOS 10 signatures are captured in the tracked
 templates.
 
 ## FAQ
-### Can this be used to run 32-bit apps & integrate to LiveContainer?
-Yes. The bundled Dynarmic revision includes the dual-mapping/TXM JIT path
-required by iOS 26+, while non-iOS hosts remain single-mapped by default.
-
-### Will this be available as a jailbreak tweak?
-Yes eta now. During install, LiveExec32 shim is injected to the pending 32-bit
-app so installd doesn't reject it and makes everything easier to handle.
-
-## Will this allow running encrypted 32-bit apps (ie directly installed from App Store)?
+### Will this allow running encrypted 32-bit apps (ie directly installed from App Store)?
 Idk, need to research into this next
 
 ## License

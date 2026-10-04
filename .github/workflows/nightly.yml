@@ -107,6 +107,14 @@ jobs:
       run: |
         printf 'subject=%s\n' "$(git log -1 --pretty=%s)" >> "$GITHUB_OUTPUT"
 
+    - name: Generate nightly app source
+      env:
+        COMMIT_SUBJECT: ${{ steps.metadata.outputs.subject }}
+        NIGHTLY_LINK: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+      run: >-
+        python3 Scripts/generate-nightly-source.py packages/*.ipa
+        --output packages/source.json
+
     - name: Upload packages
       id: artifact
       uses: actions/upload-artifact@v7
@@ -114,6 +122,7 @@ jobs:
         path: |
           packages/*.ipa
           packages/*.deb
+          packages/source.json
         if-no-files-found: error
 
   release:
@@ -149,3 +158,4 @@ jobs:
         files: |
           packages/*.ipa
           packages/*.deb
+          packages/source.json
