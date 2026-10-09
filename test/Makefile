@@ -357,6 +357,7 @@ $(eval $(call lc32_guest_test,lc32-addressbook-compat,addressbook_compat.m,Addre
 $(eval $(call lc32_guest_test,lc32-nsuuid-bytes,nsuuid_bytes.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-arc-proxy-lifetime,arc_proxy_lifetime.m arc_proxy_lifetime_support.m,Foundation UIKit LC32))
 $(eval $(call lc32_guest_test,lc32-block-bridge,block_bridge.m,Foundation LC32))
+$(eval $(call lc32_guest_test,lc32-array-sort-function,array_sort_function.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-dispatch-main-queue,dispatch_main_queue.m,Foundation CoreFoundation AVFoundation))
 $(eval $(call lc32_guest_test,lc32-dispatch-timers,dispatch_timers.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-cfarray-callbacks,cfarray_callbacks.m,Foundation CoreFoundation LC32))
