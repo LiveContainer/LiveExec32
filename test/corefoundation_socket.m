@@ -214,7 +214,7 @@ int main(void) {
             &invalidContext) == NULL);
     check("reject-unsupported-callback",
         CFSocketCreate(kCFAllocatorDefault, PF_INET, SOCK_DGRAM,
-            IPPROTO_UDP, kCFSocketReadCallBack, socketCallback,
+            IPPROTO_UDP, (CFOptionFlags)0x10, socketCallback,
             NULL) == NULL);
 
     [pool drain];

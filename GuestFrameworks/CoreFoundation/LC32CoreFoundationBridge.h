@@ -314,6 +314,7 @@ typedef enum : uint32_t {
     LC32CoreFoundationOpSocketSetAddress = 713,
     LC32CoreFoundationOpSocketSetDefaultNameRegistryPortNumber = 714,
     LC32CoreFoundationOpSocketSetSocketFlags = 715,
+    LC32CoreFoundationOpSocketCreateWithNative = 716,
 
     /* Legacy CFBitVector operations. */
     LC32CoreFoundationOpBitVectorCreate = 800,
@@ -358,6 +359,7 @@ typedef enum : uint32_t {
     LC32CoreFoundationOpURLCreateFilePathURL = 1004,
     LC32CoreFoundationOpURLCreateFileReferenceURL = 1005,
     LC32CoreFoundationOpURLCreateData = 1006,
+    LC32CoreFoundationOpURLCreateAbsoluteURLWithBytes = 1007,
 
     /* Stream constructors that do not install guest callbacks. */
     LC32CoreFoundationOpReadStreamCreateWithFile = 1100,

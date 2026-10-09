@@ -51,6 +51,188 @@ static void LC32ImageIOInvalidateDestinationData(CGImageDestinationRef destinati
 #define LC32_IMAGEIO_HOST(object) LC32ImageIOHostObject((const void *)(object))
 #define LC32_IMAGEIO_U32(value) ((uint64_t)(uint32_t)(value))
 
+// Metadata objects use the same CF ownership bridge as image sources.
+
+CFTypeID CGImageMetadataGetTypeID(void) {
+    return (CFTypeID)LC32_IMAGEIO_CALL0(LC32ImageIOOpMetadataGetTypeID);
+}
+
+CFTypeID CGImageMetadataTagGetTypeID(void) {
+    return (CFTypeID)LC32_IMAGEIO_CALL0(LC32ImageIOOpMetadataTagGetTypeID);
+}
+
+CGMutableImageMetadataRef CGImageMetadataCreateMutable(void) {
+    return (CGMutableImageMetadataRef)LC32_IMAGEIO_CALL0(LC32ImageIOOpMetadataCreateMutable);
+}
+
+CGImageMetadataRef CGImageMetadataCreateFromXMPData(CFDataRef data) {
+    if(!data) return NULL;
+    return (CGImageMetadataRef)LC32_IMAGEIO_CALL(LC32ImageIOOpMetadataCreateFromXMPData,
+        LC32_IMAGEIO_HOST(data));
+}
+
+CGMutableImageMetadataRef CGImageMetadataCreateMutableCopy(CGImageMetadataRef metadata) {
+    if(!metadata) return NULL;
+    return (CGMutableImageMetadataRef)LC32_IMAGEIO_CALL(LC32ImageIOOpMetadataCreateMutableCopy,
+        LC32_IMAGEIO_HOST(metadata));
+}
+
+CFDataRef CGImageMetadataCreateXMPData(CGImageMetadataRef metadata, CFDictionaryRef options) {
+    if(!metadata) return NULL;
+    return (CFDataRef)LC32_IMAGEIO_CALL(LC32ImageIOOpMetadataCreateXMPData,
+        LC32_IMAGEIO_HOST(metadata),
+        LC32_IMAGEIO_HOST(options));
+}
+
+CFArrayRef CGImageMetadataCopyTags(CGImageMetadataRef metadata) {
+    if(!metadata) return NULL;
+    return (CFArrayRef)LC32_IMAGEIO_CALL(LC32ImageIOOpMetadataCopyTags,
+        LC32_IMAGEIO_HOST(metadata));
+}
+
+CFStringRef CGImageMetadataTagCopyName(CGImageMetadataTagRef tag) {
+    if(!tag) return NULL;
+    return (CFStringRef)LC32_IMAGEIO_CALL(LC32ImageIOOpMetadataTagCopyName,
+        LC32_IMAGEIO_HOST(tag));
+}
+
+CFStringRef CGImageMetadataTagCopyNamespace(CGImageMetadataTagRef tag) {
+    if(!tag) return NULL;
+    return (CFStringRef)LC32_IMAGEIO_CALL(LC32ImageIOOpMetadataTagCopyNamespace,
+        LC32_IMAGEIO_HOST(tag));
+}
+
+CFStringRef CGImageMetadataTagCopyPrefix(CGImageMetadataTagRef tag) {
+    if(!tag) return NULL;
+    return (CFStringRef)LC32_IMAGEIO_CALL(LC32ImageIOOpMetadataTagCopyPrefix,
+        LC32_IMAGEIO_HOST(tag));
+}
+
+CFArrayRef CGImageMetadataTagCopyQualifiers(CGImageMetadataTagRef tag) {
+    if(!tag) return NULL;
+    return (CFArrayRef)LC32_IMAGEIO_CALL(LC32ImageIOOpMetadataTagCopyQualifiers,
+        LC32_IMAGEIO_HOST(tag));
+}
+
+CFTypeRef CGImageMetadataTagCopyValue(CGImageMetadataTagRef tag) {
+    if(!tag) return NULL;
+    return (CFTypeRef)LC32_IMAGEIO_CALL(LC32ImageIOOpMetadataTagCopyValue,
+        LC32_IMAGEIO_HOST(tag));
+}
+
+CGImageMetadataType CGImageMetadataTagGetType(CGImageMetadataTagRef tag) {
+    if(!tag) return 0;
+    return (CGImageMetadataType)LC32_IMAGEIO_CALL(LC32ImageIOOpMetadataTagGetType,
+        LC32_IMAGEIO_HOST(tag));
+}
+
+CGImageMetadataTagRef CGImageMetadataTagCreate(CFStringRef xmlns, CFStringRef prefix, CFStringRef name, CGImageMetadataType type, CFTypeRef value) {
+    if(!xmlns || !name || !value) return NULL;
+    return (CGImageMetadataTagRef)LC32_IMAGEIO_CALL(LC32ImageIOOpMetadataTagCreate,
+        LC32_IMAGEIO_HOST(xmlns),
+        LC32_IMAGEIO_HOST(prefix),
+        LC32_IMAGEIO_HOST(name),
+        LC32_IMAGEIO_U32(type),
+        LC32_IMAGEIO_HOST(value));
+}
+
+CFStringRef CGImageMetadataCopyStringValueWithPath(CGImageMetadataRef metadata, CGImageMetadataTagRef parent, CFStringRef path) {
+    if(!metadata || !path) return NULL;
+    return (CFStringRef)LC32_IMAGEIO_CALL(LC32ImageIOOpMetadataCopyStringValueWithPath,
+        LC32_IMAGEIO_HOST(metadata),
+        LC32_IMAGEIO_HOST(parent),
+        LC32_IMAGEIO_HOST(path));
+}
+
+CGImageMetadataTagRef CGImageMetadataCopyTagWithPath(CGImageMetadataRef metadata, CGImageMetadataTagRef parent, CFStringRef path) {
+    if(!metadata || !path) return NULL;
+    return (CGImageMetadataTagRef)LC32_IMAGEIO_CALL(LC32ImageIOOpMetadataCopyTagWithPath,
+        LC32_IMAGEIO_HOST(metadata),
+        LC32_IMAGEIO_HOST(parent),
+        LC32_IMAGEIO_HOST(path));
+}
+
+CGImageMetadataTagRef CGImageMetadataCopyTagMatchingImageProperty(CGImageMetadataRef metadata, CFStringRef dictionary, CFStringRef property) {
+    if(!metadata || !dictionary || !property) return NULL;
+    return (CGImageMetadataTagRef)LC32_IMAGEIO_CALL(LC32ImageIOOpMetadataCopyTagMatchingImageProperty,
+        LC32_IMAGEIO_HOST(metadata),
+        LC32_IMAGEIO_HOST(dictionary),
+        LC32_IMAGEIO_HOST(property));
+}
+
+bool CGImageMetadataRemoveTagWithPath(CGMutableImageMetadataRef metadata, CGImageMetadataTagRef parent, CFStringRef path) {
+    if(!metadata || !path) return 0;
+    return (bool)LC32_IMAGEIO_CALL(LC32ImageIOOpMetadataRemoveTagWithPath,
+        LC32_IMAGEIO_HOST(metadata),
+        LC32_IMAGEIO_HOST(parent),
+        LC32_IMAGEIO_HOST(path));
+}
+
+bool CGImageMetadataSetTagWithPath(CGMutableImageMetadataRef metadata, CGImageMetadataTagRef parent, CFStringRef path, CGImageMetadataTagRef value) {
+    if(!metadata || !path || !value) return 0;
+    return (bool)LC32_IMAGEIO_CALL(LC32ImageIOOpMetadataSetTagWithPath,
+        LC32_IMAGEIO_HOST(metadata),
+        LC32_IMAGEIO_HOST(parent),
+        LC32_IMAGEIO_HOST(path),
+        LC32_IMAGEIO_HOST(value));
+}
+
+bool CGImageMetadataSetValueWithPath(CGMutableImageMetadataRef metadata, CGImageMetadataTagRef parent, CFStringRef path, CFTypeRef value) {
+    if(!metadata || !path || !value) return 0;
+    return (bool)LC32_IMAGEIO_CALL(LC32ImageIOOpMetadataSetValueWithPath,
+        LC32_IMAGEIO_HOST(metadata),
+        LC32_IMAGEIO_HOST(parent),
+        LC32_IMAGEIO_HOST(path),
+        LC32_IMAGEIO_HOST(value));
+}
+
+bool CGImageMetadataSetValueMatchingImageProperty(CGMutableImageMetadataRef metadata, CFStringRef dictionary, CFStringRef property, CFTypeRef value) {
+    if(!metadata || !dictionary || !property || !value) return 0;
+    return (bool)LC32_IMAGEIO_CALL(LC32ImageIOOpMetadataSetValueMatchingImageProperty,
+        LC32_IMAGEIO_HOST(metadata),
+        LC32_IMAGEIO_HOST(dictionary),
+        LC32_IMAGEIO_HOST(property),
+        LC32_IMAGEIO_HOST(value));
+}
+
+CGImageMetadataRef CGImageSourceCopyMetadataAtIndex(CGImageSourceRef source, size_t index, CFDictionaryRef options) {
+    if(!source) return NULL;
+    return (CGImageMetadataRef)LC32_IMAGEIO_CALL(LC32ImageIOOpSourceCopyMetadataAtIndex,
+        LC32_IMAGEIO_HOST(source),
+        LC32_IMAGEIO_U32(index),
+        LC32_IMAGEIO_HOST(options));
+}
+
+void CGImageDestinationAddImageAndMetadata(CGImageDestinationRef destination, CGImageRef image, CGImageMetadataRef metadata, CFDictionaryRef options) {
+    if(!destination || !image) return;
+    (void)LC32_IMAGEIO_CALL(LC32ImageIOOpDestinationAddImageAndMetadata,
+        LC32_IMAGEIO_HOST(destination),
+        LC32_IMAGEIO_HOST(image),
+        LC32_IMAGEIO_HOST(metadata),
+        LC32_IMAGEIO_HOST(options));
+    LC32ImageIOInvalidateDestinationData(destination);
+}
+
+bool CGImageMetadataRegisterNamespaceForPrefix(CGMutableImageMetadataRef metadata,
+        CFStringRef xmlns, CFStringRef prefix, CFErrorRef *error) {
+    if(error) *error = NULL;
+    if(!metadata || !xmlns || !prefix) return false;
+    return LC32_IMAGEIO_CALL(LC32ImageIOOpMetadataRegisterNamespaceForPrefix,
+        LC32_IMAGEIO_HOST(metadata), LC32_IMAGEIO_HOST(xmlns),
+        LC32_IMAGEIO_HOST(prefix), LC32_IMAGEIO_U32((uintptr_t)error)) != 0;
+}
+
+bool CGImageDestinationCopyImageSource(CGImageDestinationRef destination,
+        CGImageSourceRef source, CFDictionaryRef options, CFErrorRef *error) {
+    if(error) *error = NULL;
+    if(!destination || !source) return false;
+    bool result = LC32_IMAGEIO_CALL(LC32ImageIOOpDestinationCopyImageSource,
+        LC32_IMAGEIO_HOST(destination), LC32_IMAGEIO_HOST(source),
+        LC32_IMAGEIO_HOST(options), LC32_IMAGEIO_U32((uintptr_t)error)) != 0;
+    LC32ImageIOInvalidateDestinationData(destination);
+    return result;
+}
+
 CFTypeID CGImageSourceGetTypeID(void) {
     return (CFTypeID)LC32_IMAGEIO_CALL0(LC32ImageIOOpSourceGetTypeID);
 }

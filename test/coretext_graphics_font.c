@@ -151,6 +151,27 @@ static int test_layout(CTFontRef font) {
     unsigned drawn = 0;
     for(size_t i = 3; i < sizeof(bitmap); i += 4) drawn += bitmap[i] != 0;
     failures += check("coretext-draw-glyphs-sync-bitmap", drawn > 0);
+    CGContextClearRect(context, CGRectMake(0, 0, 64, 64));
+    CGContextSetTextPosition(context, 1.25, 24.5);
+    CGContextShowGlyphsAtPoint(context, 1.25, 24.5, glyphs.values, 3);
+    const CGPoint expectedPosition = CGContextGetTextPosition(context);
+    uint8_t expectedBitmap[sizeof(bitmap)];
+    memcpy(expectedBitmap, bitmap, sizeof(bitmap));
+    CGContextClearRect(context, CGRectMake(0, 0, 64, 64));
+    CGContextSetTextPosition(context, 1.25, 24.5);
+    CGContextShowGlyphs(context, glyphs.values, 3);
+    const CGPoint actualPosition = CGContextGetTextPosition(context);
+    failures += check("show-glyphs-current-position-and-bitmap", expectedPosition.x > 1.25 &&
+        fabs(actualPosition.x - expectedPosition.x) < 0.001 &&
+        fabs(actualPosition.y - expectedPosition.y) < 0.001 &&
+        !memcmp(bitmap, expectedBitmap, sizeof(bitmap)));
+    CGContextShowGlyphs(context, NULL, 0);
+    failures += check("show-glyphs-empty", !memcmp(bitmap, expectedBitmap, sizeof(bitmap)));
+    CGContextSetCharacterSpacing(context, 2.25);
+    CGContextSetTextPosition(context, 1.25, 24.5);
+    CGContextShowGlyphs(context, glyphs.values, 3);
+    failures += check("show-glyphs-character-spacing",
+        fabs(CGContextGetTextPosition(context).x - actualPosition.x - 3 * 2.25) < 0.001);
     if(graphics) CGFontRelease(graphics);
     if(named) CGFontRelease(named);
     printf("layout-values: %.5f %.5f %.5f %.5f %.5f %.5f %.5f\n", total,

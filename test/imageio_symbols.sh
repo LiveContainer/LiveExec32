@@ -21,8 +21,7 @@ trap 'rm -rf "$TEMP_ROOT"' EXIT HUP INT TERM
 # Both OpenEXRDictionary and OpenEXRAspectRatio are macOS-only in iOS 10.3
 # headers; the latter nevertheless exists in the iOS SDK export list.
 # Include kCFErrorDomainCGImageMetadata and nullability-qualified declarations,
-# not just kCG-prefixed identifiers. Metadata keys remain usable independently
-# of the deferred metadata-object APIs.
+# not just kCG-prefixed identifiers. Metadata keys cover the object bridge too.
 perl -0777 -ne '
     s@/\*.*?\*/@@gs;
     s@//[^\n]*@@g;
@@ -36,9 +35,8 @@ xcrun nm -arch armv7s -gjU "$IMAGEIO_STUB" |
     sed -n 's/^_//p' | LC_ALL=C sort -u > "$TEMP_ROOT/sdk"
 comm -12 "$TEMP_ROOT/header-constants" "$TEMP_ROOT/sdk" > "$TEMP_ROOT/constants"
 
-# Public source/destination entry points implemented by the initial bridge.
-# Metadata objects, metadata enumeration callbacks, and metadata-copy helpers
-# are intentionally outside this shortlist. Provider/consumer arguments are
+# Public source/destination and metadata entry points. Block-based metadata
+# enumeration remains deferred. Provider/consumer arguments are
 # existing CoreGraphics objects, not new ImageIO callback registrations.
 functions='CGImageSourceGetTypeID
 CGImageSourceCopyTypeIdentifiers
@@ -65,16 +63,42 @@ CGImageDestinationCreateWithURL
 CGImageDestinationSetProperties
 CGImageDestinationAddImage
 CGImageDestinationAddImageFromSource
-CGImageDestinationFinalize'
+CGImageDestinationFinalize
+CGImageDestinationAddImageAndMetadata
+CGImageDestinationCopyImageSource
+CGImageMetadataCopyStringValueWithPath
+CGImageMetadataCopyTagMatchingImageProperty
+CGImageMetadataCopyTagWithPath
+CGImageMetadataCopyTags
+CGImageMetadataCreateFromXMPData
+CGImageMetadataCreateMutable
+CGImageMetadataCreateMutableCopy
+CGImageMetadataCreateXMPData
+CGImageMetadataGetTypeID
+CGImageMetadataRegisterNamespaceForPrefix
+CGImageMetadataRemoveTagWithPath
+CGImageMetadataSetTagWithPath
+CGImageMetadataSetValueMatchingImageProperty
+CGImageMetadataSetValueWithPath
+CGImageMetadataTagCopyName
+CGImageMetadataTagCopyNamespace
+CGImageMetadataTagCopyPrefix
+CGImageMetadataTagCopyQualifiers
+CGImageMetadataTagCopyValue
+CGImageMetadataTagCreate
+CGImageMetadataTagGetType
+CGImageMetadataTagGetTypeID
+CGImageSourceCopyMetadataAtIndex'
 printf '%s\n' "$functions" | LC_ALL=C sort -u > "$TEMP_ROOT/functions"
 
 perl -0777 -ne '
     s@/\*.*?\*/@@gs;
     s@//[^\n]*@@g;
-    while(/\bIMAGEIO_EXTERN\s+[^;]+?\b(CGImage(?:Source|Destination)\w+)\s*\(/g) {
+    while(/\bIMAGEIO_EXTERN\s+[^;]+?\b(CGImage(?:Source|Destination|Metadata)\w+)\s*\(/g) {
         print "$1\n";
     }
-' "$IMAGEIO_HEADERS/CGImageSource.h" "$IMAGEIO_HEADERS/CGImageDestination.h" |
+' "$IMAGEIO_HEADERS/CGImageSource.h" "$IMAGEIO_HEADERS/CGImageDestination.h" \
+    "$IMAGEIO_HEADERS/CGImageMetadata.h" |
     LC_ALL=C sort -u > "$TEMP_ROOT/header-functions"
 
 for public_set in sdk header-functions; do
@@ -88,8 +112,8 @@ done
 
 constant_count=$(awk 'END { print NR + 0 }' "$TEMP_ROOT/constants")
 function_count=$(awk 'END { print NR + 0 }' "$TEMP_ROOT/functions")
-if [ "$constant_count" -ne 367 ] || [ "$function_count" -ne 26 ]; then
-    echo "ImageIO public baseline changed: expected 367 strings + 26 functions, " \
+if [ "$constant_count" -ne 367 ] || [ "$function_count" -ne 51 ]; then
+    echo "ImageIO public baseline changed: expected 367 strings + 51 functions, " \
          "got $constant_count strings + $function_count functions" >&2
     exit 1
 fi

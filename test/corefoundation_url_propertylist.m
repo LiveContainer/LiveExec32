@@ -11,8 +11,52 @@ static void check(const char *name, BOOL condition) {
     failures += !condition;
 }
 
+static void testAbsoluteURLBytes(void) {
+    CFURLRef base = CFURLCreateWithString(kCFAllocatorDefault,
+        CFSTR("https://example.test/a/"), NULL);
+    const char relative[] = "../b?q=one%20two";
+    CFURLRef absolute = CFURLCreateAbsoluteURLWithBytes(kCFAllocatorDefault,
+        (const UInt8 *)relative, sizeof(relative) - 1,
+        kCFStringEncodingUTF8, base, false);
+    const UInt8 bounded[] = {'c', 'h', 'i', 'l', 'd', 'x'};
+    CFURLRef exact = CFURLCreateAbsoluteURLWithBytes(kCFAllocatorDefault,
+        bounded, 5, kCFStringEncodingUTF8, base, false);
+    const char sameScheme[] = "https:child";
+    CFURLRef strict = CFURLCreateAbsoluteURLWithBytes(kCFAllocatorDefault,
+        (const UInt8 *)sameScheme, sizeof(sameScheme) - 1,
+        kCFStringEncodingUTF8, base, false);
+    CFURLRef compatible = CFURLCreateAbsoluteURLWithBytes(kCFAllocatorDefault,
+        (const UInt8 *)sameScheme, sizeof(sameScheme) - 1,
+        kCFStringEncodingUTF8, base, true);
+    const UInt8 latin1[] = {'c', 'a', 'f', 0xe9};
+    CFURLRef encoded = CFURLCreateAbsoluteURLWithBytes(kCFAllocatorDefault,
+        latin1, sizeof(latin1), kCFStringEncodingISOLatin1, base, false);
+    if(base) CFRelease(base);
+
+    check("url-absolute-bytes-relative-owned", absolute &&
+        [(NSString *)CFURLGetString(absolute)
+            isEqualToString:@"https://example.test/b?q=one%20two"] &&
+        !CFURLGetBaseURL(absolute));
+    check("url-absolute-bytes-exact-length", exact &&
+        [(NSString *)CFURLGetString(exact)
+            isEqualToString:@"https://example.test/a/child"]);
+    check("url-absolute-bytes-strict", strict &&
+        [(NSString *)CFURLGetString(strict) isEqualToString:@"https:child"]);
+    check("url-absolute-bytes-compatible", compatible &&
+        [(NSString *)CFURLGetString(compatible)
+            isEqualToString:@"https://example.test/a/child"]);
+    check("url-absolute-bytes-encoding", encoded &&
+        [[(NSURL *)encoded absoluteString] hasSuffix:@"/caf%C3%A9"]);
+    if(absolute) CFRelease(absolute);
+    if(exact) CFRelease(exact);
+    if(strict) CFRelease(strict);
+    if(compatible) CFRelease(compatible);
+    if(encoded) CFRelease(encoded);
+}
+
 int main(void) {
     NSAutoreleasePool *pool = [NSAutoreleasePool new];
+    testAbsoluteURLBytes();
 
     CFURLRef base = CFURLCreateWithString(kCFAllocatorDefault,
         CFSTR("https://example.test/a/"), NULL);

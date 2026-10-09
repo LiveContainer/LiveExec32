@@ -124,6 +124,19 @@ CFURLRef CFURLCreateWithBytes(CFAllocatorRef allocator,
         LC32_CF_U32(encoding), LC32_CF_HOST(baseURL));
 }
 
+CFURLRef CFURLCreateAbsoluteURLWithBytes(CFAllocatorRef allocator,
+        const UInt8 *relativeURLBytes, CFIndex length,
+        CFStringEncoding encoding, CFURLRef baseURL,
+        Boolean useCompatibilityMode) {
+    (void)allocator;
+    if(length < 0 || (length && !relativeURLBytes)) return NULL;
+    return (CFURLRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCreateAbsoluteURLWithBytes,
+        LC32_CF_U32((uintptr_t)relativeURLBytes), LC32_CF_U32(length),
+        LC32_CF_U32(encoding), LC32_CF_HOST(baseURL),
+        LC32_CF_U32(useCompatibilityMode));
+}
+
 CFStringRef CFURLCopyPathExtension(CFURLRef url) {
     return url ? (CFStringRef)LC32_CF_CALL(
         LC32CoreFoundationOpURLCopyPathExtension,

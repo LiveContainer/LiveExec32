@@ -26,24 +26,18 @@ static uint64_t LC32CFSocketDoubleBits(double value) {
 
 static Boolean LC32CFSocketSupportsCallbackTypes(
         CFOptionFlags callbackTypes) {
-    /* kCFSocketDataCallBack has the numeric value 3 rather than a unique
-     * bit, so validate the supported combinations explicitly. */
-    return callbackTypes == kCFSocketNoCallBack ||
-           callbackTypes == kCFSocketDataCallBack ||
-           callbackTypes == kCFSocketConnectCallBack ||
-           callbackTypes ==
-               (kCFSocketDataCallBack | kCFSocketConnectCallBack);
+    /* The low two bits select read/accept/data, not independent flags. */
+    return !(callbackTypes & ~(kCFSocketDataCallBack |
+        kCFSocketConnectCallBack | kCFSocketWriteCallBack));
 }
 
-CFSocketRef CFSocketCreate(CFAllocatorRef allocator,
+static CFSocketRef LC32CFSocketCreate(LC32CoreFoundationOpcode opcode,
                            SInt32 protocolFamily,
                            SInt32 socketType,
                            SInt32 protocol,
                            CFOptionFlags callbackTypes,
                            CFSocketCallBack callout,
                            const CFSocketContext *context) {
-    /* A native allocator cannot own guest context storage or callbacks. */
-    (void)allocator;
     if(!LC32CFSocketSupportsCallbackTypes(callbackTypes) ||
        (callbackTypes != kCFSocketNoCallBack && !callout)) {
         return NULL;
@@ -63,13 +57,30 @@ CFSocketRef CFSocketCreate(CFAllocatorRef allocator,
     /* The host consumes this retained context even when native creation
      * fails, matching the Create ownership transfer used by run-loop shims. */
     return (CFSocketRef)LC32_CF_CALL(
-        LC32CoreFoundationOpSocketCreate,
+        opcode,
         LC32_CF_U32(protocolFamily), LC32_CF_U32(socketType),
         LC32_CF_U32(protocol), LC32_CF_U32(callbackTypes),
         LC32_CF_U32((uintptr_t)callout),
         LC32_CF_U32((uintptr_t)retainedInfo),
         LC32_CF_U32((uintptr_t)snapshot.release),
         LC32_CF_U32((uintptr_t)snapshot.copyDescription));
+}
+
+CFSocketRef CFSocketCreate(CFAllocatorRef allocator, SInt32 protocolFamily,
+        SInt32 socketType, SInt32 protocol, CFOptionFlags callbackTypes,
+        CFSocketCallBack callout, const CFSocketContext *context) {
+    /* A native allocator cannot own guest context storage or callbacks. */
+    (void)allocator;
+    return LC32CFSocketCreate(LC32CoreFoundationOpSocketCreate, protocolFamily,
+        socketType, protocol, callbackTypes, callout, context);
+}
+
+CFSocketRef CFSocketCreateWithNative(CFAllocatorRef allocator,
+        CFSocketNativeHandle handle, CFOptionFlags callbackTypes,
+        CFSocketCallBack callout, const CFSocketContext *context) {
+    (void)allocator;
+    return LC32CFSocketCreate(LC32CoreFoundationOpSocketCreateWithNative,
+        handle, 0, 0, callbackTypes, callout, context);
 }
 
 CFSocketError CFSocketConnectToAddress(CFSocketRef socket,

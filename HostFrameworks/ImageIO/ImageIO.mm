@@ -120,6 +120,196 @@ extern "C" u32 LC32_ImageIO_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
     if(!ReadImageIOCall(guestCall, call)) return 0;
 
     switch(static_cast<LC32ImageIOOpcode>(opcodeValue)) {
+    case LC32ImageIOOpMetadataGetTypeID: {
+        if(call.slotCount != 0) return 0;
+        return static_cast<u32>(LC32_IMAGEIO_NATIVE(CGImageMetadataGetTypeID()));
+    }
+    case LC32ImageIOOpMetadataTagGetTypeID: {
+        if(call.slotCount != 0) return 0;
+        return static_cast<u32>(LC32_IMAGEIO_NATIVE(CGImageMetadataTagGetTypeID()));
+    }
+    case LC32ImageIOOpMetadataCreateMutable: {
+        if(call.slotCount != 0) return 0;
+        return GuestForCreatedObject(LC32_IMAGEIO_NATIVE(CGImageMetadataCreateMutable()));
+    }
+    case LC32ImageIOOpMetadataCreateFromXMPData: {
+        if(call.slotCount != 1) return 0;
+        CFDataRef data = SlotHostObject<CFDataRef>(call, 0);
+        if(!data) return 0;
+        return GuestForCreatedObject(LC32_IMAGEIO_NATIVE(CGImageMetadataCreateFromXMPData(data)));
+    }
+    case LC32ImageIOOpMetadataCreateMutableCopy: {
+        if(call.slotCount != 1) return 0;
+        CGImageMetadataRef metadata = SlotHostObject<CGImageMetadataRef>(call, 0);
+        if(!metadata) return 0;
+        return GuestForCreatedObject(LC32_IMAGEIO_NATIVE(CGImageMetadataCreateMutableCopy(metadata)));
+    }
+    case LC32ImageIOOpMetadataCreateXMPData: {
+        if(call.slotCount != 2) return 0;
+        CGImageMetadataRef metadata = SlotHostObject<CGImageMetadataRef>(call, 0);
+        CFDictionaryRef options = SlotHostObject<CFDictionaryRef>(call, 1);
+        if(!metadata) return 0;
+        return GuestForCreatedObject(LC32_IMAGEIO_NATIVE(CGImageMetadataCreateXMPData(metadata, options)));
+    }
+    case LC32ImageIOOpMetadataCopyTags: {
+        if(call.slotCount != 1) return 0;
+        CGImageMetadataRef metadata = SlotHostObject<CGImageMetadataRef>(call, 0);
+        if(!metadata) return 0;
+        return GuestForCreatedObject(LC32_IMAGEIO_NATIVE(CGImageMetadataCopyTags(metadata)));
+    }
+    case LC32ImageIOOpMetadataTagCopyName: {
+        if(call.slotCount != 1) return 0;
+        CGImageMetadataTagRef tag = SlotHostObject<CGImageMetadataTagRef>(call, 0);
+        if(!tag) return 0;
+        return GuestForCreatedObject(LC32_IMAGEIO_NATIVE(CGImageMetadataTagCopyName(tag)));
+    }
+    case LC32ImageIOOpMetadataTagCopyNamespace: {
+        if(call.slotCount != 1) return 0;
+        CGImageMetadataTagRef tag = SlotHostObject<CGImageMetadataTagRef>(call, 0);
+        if(!tag) return 0;
+        return GuestForCreatedObject(LC32_IMAGEIO_NATIVE(CGImageMetadataTagCopyNamespace(tag)));
+    }
+    case LC32ImageIOOpMetadataTagCopyPrefix: {
+        if(call.slotCount != 1) return 0;
+        CGImageMetadataTagRef tag = SlotHostObject<CGImageMetadataTagRef>(call, 0);
+        if(!tag) return 0;
+        return GuestForCreatedObject(LC32_IMAGEIO_NATIVE(CGImageMetadataTagCopyPrefix(tag)));
+    }
+    case LC32ImageIOOpMetadataTagCopyQualifiers: {
+        if(call.slotCount != 1) return 0;
+        CGImageMetadataTagRef tag = SlotHostObject<CGImageMetadataTagRef>(call, 0);
+        if(!tag) return 0;
+        return GuestForCreatedObject(LC32_IMAGEIO_NATIVE(CGImageMetadataTagCopyQualifiers(tag)));
+    }
+    case LC32ImageIOOpMetadataTagCopyValue: {
+        if(call.slotCount != 1) return 0;
+        CGImageMetadataTagRef tag = SlotHostObject<CGImageMetadataTagRef>(call, 0);
+        if(!tag) return 0;
+        return GuestForCreatedObject(LC32_IMAGEIO_NATIVE(CGImageMetadataTagCopyValue(tag)));
+    }
+    case LC32ImageIOOpMetadataTagGetType: {
+        if(call.slotCount != 1) return 0;
+        CGImageMetadataTagRef tag = SlotHostObject<CGImageMetadataTagRef>(call, 0);
+        if(!tag) return 0;
+        return static_cast<u32>(LC32_IMAGEIO_NATIVE(CGImageMetadataTagGetType(tag)));
+    }
+    case LC32ImageIOOpMetadataTagCreate: {
+        if(call.slotCount != 5) return 0;
+        CFStringRef xmlns = SlotHostObject<CFStringRef>(call, 0);
+        CFStringRef prefix = SlotHostObject<CFStringRef>(call, 1);
+        CFStringRef name = SlotHostObject<CFStringRef>(call, 2);
+        CGImageMetadataType type = static_cast<CGImageMetadataType>(SlotU32(call, 3));
+        CFTypeRef value = SlotHostObject<CFTypeRef>(call, 4);
+        if(!xmlns || !name || !value) return 0;
+        return GuestForCreatedObject(LC32_IMAGEIO_NATIVE(CGImageMetadataTagCreate(xmlns, prefix, name, type, value)));
+    }
+    case LC32ImageIOOpMetadataCopyStringValueWithPath: {
+        if(call.slotCount != 3) return 0;
+        CGImageMetadataRef metadata = SlotHostObject<CGImageMetadataRef>(call, 0);
+        CGImageMetadataTagRef parent = SlotHostObject<CGImageMetadataTagRef>(call, 1);
+        CFStringRef path = SlotHostObject<CFStringRef>(call, 2);
+        if(!metadata || !path) return 0;
+        return GuestForCreatedObject(LC32_IMAGEIO_NATIVE(CGImageMetadataCopyStringValueWithPath(metadata, parent, path)));
+    }
+    case LC32ImageIOOpMetadataCopyTagWithPath: {
+        if(call.slotCount != 3) return 0;
+        CGImageMetadataRef metadata = SlotHostObject<CGImageMetadataRef>(call, 0);
+        CGImageMetadataTagRef parent = SlotHostObject<CGImageMetadataTagRef>(call, 1);
+        CFStringRef path = SlotHostObject<CFStringRef>(call, 2);
+        if(!metadata || !path) return 0;
+        return GuestForCreatedObject(LC32_IMAGEIO_NATIVE(CGImageMetadataCopyTagWithPath(metadata, parent, path)));
+    }
+    case LC32ImageIOOpMetadataCopyTagMatchingImageProperty: {
+        if(call.slotCount != 3) return 0;
+        CGImageMetadataRef metadata = SlotHostObject<CGImageMetadataRef>(call, 0);
+        CFStringRef dictionary = SlotHostObject<CFStringRef>(call, 1);
+        CFStringRef property = SlotHostObject<CFStringRef>(call, 2);
+        if(!metadata || !dictionary || !property) return 0;
+        return GuestForCreatedObject(LC32_IMAGEIO_NATIVE(CGImageMetadataCopyTagMatchingImageProperty(metadata, dictionary, property)));
+    }
+    case LC32ImageIOOpMetadataRemoveTagWithPath: {
+        if(call.slotCount != 3) return 0;
+        CGMutableImageMetadataRef metadata = SlotHostObject<CGMutableImageMetadataRef>(call, 0);
+        CGImageMetadataTagRef parent = SlotHostObject<CGImageMetadataTagRef>(call, 1);
+        CFStringRef path = SlotHostObject<CFStringRef>(call, 2);
+        if(!metadata || !path) return 0;
+        return static_cast<u32>(LC32_IMAGEIO_NATIVE(CGImageMetadataRemoveTagWithPath(metadata, parent, path)));
+    }
+    case LC32ImageIOOpMetadataSetTagWithPath: {
+        if(call.slotCount != 4) return 0;
+        CGMutableImageMetadataRef metadata = SlotHostObject<CGMutableImageMetadataRef>(call, 0);
+        CGImageMetadataTagRef parent = SlotHostObject<CGImageMetadataTagRef>(call, 1);
+        CFStringRef path = SlotHostObject<CFStringRef>(call, 2);
+        CGImageMetadataTagRef value = SlotHostObject<CGImageMetadataTagRef>(call, 3);
+        if(!metadata || !path || !value) return 0;
+        return static_cast<u32>(LC32_IMAGEIO_NATIVE(CGImageMetadataSetTagWithPath(metadata, parent, path, value)));
+    }
+    case LC32ImageIOOpMetadataSetValueWithPath: {
+        if(call.slotCount != 4) return 0;
+        CGMutableImageMetadataRef metadata = SlotHostObject<CGMutableImageMetadataRef>(call, 0);
+        CGImageMetadataTagRef parent = SlotHostObject<CGImageMetadataTagRef>(call, 1);
+        CFStringRef path = SlotHostObject<CFStringRef>(call, 2);
+        CFTypeRef value = SlotHostObject<CFTypeRef>(call, 3);
+        if(!metadata || !path || !value) return 0;
+        return static_cast<u32>(LC32_IMAGEIO_NATIVE(CGImageMetadataSetValueWithPath(metadata, parent, path, value)));
+    }
+    case LC32ImageIOOpMetadataSetValueMatchingImageProperty: {
+        if(call.slotCount != 4) return 0;
+        CGMutableImageMetadataRef metadata = SlotHostObject<CGMutableImageMetadataRef>(call, 0);
+        CFStringRef dictionary = SlotHostObject<CFStringRef>(call, 1);
+        CFStringRef property = SlotHostObject<CFStringRef>(call, 2);
+        CFTypeRef value = SlotHostObject<CFTypeRef>(call, 3);
+        if(!metadata || !dictionary || !property || !value) return 0;
+        return static_cast<u32>(LC32_IMAGEIO_NATIVE(CGImageMetadataSetValueMatchingImageProperty(metadata, dictionary, property, value)));
+    }
+    case LC32ImageIOOpSourceCopyMetadataAtIndex: {
+        if(call.slotCount != 3) return 0;
+        CGImageSourceRef source = SlotHostObject<CGImageSourceRef>(call, 0);
+        size_t index = static_cast<size_t>(SlotU32(call, 1));
+        CFDictionaryRef options = SlotHostObject<CFDictionaryRef>(call, 2);
+        if(!source) return 0;
+        return GuestForCreatedObject(LC32_IMAGEIO_NATIVE(CGImageSourceCopyMetadataAtIndex(source, index, options)));
+    }
+    case LC32ImageIOOpDestinationAddImageAndMetadata: {
+        if(call.slotCount != 4) return 0;
+        CGImageDestinationRef destination = SlotHostObject<CGImageDestinationRef>(call, 0);
+        CGImageRef image = SlotHostObject<CGImageRef>(call, 1);
+        CGImageMetadataRef metadata = SlotHostObject<CGImageMetadataRef>(call, 2);
+        CFDictionaryRef options = SlotHostObject<CFDictionaryRef>(call, 3);
+        if(!destination || !image) return 0;
+        LC32_IMAGEIO_NATIVE(CGImageDestinationAddImageAndMetadata(destination, image, metadata, options));
+        return 1;
+    }
+    case LC32ImageIOOpMetadataRegisterNamespaceForPrefix:
+    case LC32ImageIOOpDestinationCopyImageSource: {
+        if(call.slotCount != 4 || !call.slots[0] || !call.slots[1]) return 0;
+        const u32 address = SlotU32(call, 3);
+        u32 guestError = 0;
+        if(address && (static_cast<uint64_t>(address) + sizeof(guestError) >
+                static_cast<uint64_t>(UINT32_MAX) + 1 ||
+            Dynarmic_mem_1write(address, sizeof(guestError),
+                reinterpret_cast<char *>(&guestError)) != 0)) return 0;
+        CFErrorRef error = nullptr;
+        bool success;
+        if(opcodeValue == LC32ImageIOOpMetadataRegisterNamespaceForPrefix) {
+            if(!call.slots[2]) return 0;
+            success = LC32_IMAGEIO_NATIVE(CGImageMetadataRegisterNamespaceForPrefix(
+                SlotHostObject<CGMutableImageMetadataRef>(call, 0),
+                SlotHostObject<CFStringRef>(call, 1),
+                SlotHostObject<CFStringRef>(call, 2), address ? &error : nullptr));
+        } else {
+            success = LC32_IMAGEIO_NATIVE(CGImageDestinationCopyImageSource(
+                SlotHostObject<CGImageDestinationRef>(call, 0),
+                SlotHostObject<CGImageSourceRef>(call, 1),
+                SlotHostObject<CFDictionaryRef>(call, 2), address ? &error : nullptr));
+        }
+        if(address) {
+            guestError = GuestForCreatedObject(error);
+            if(Dynarmic_mem_1write(address, sizeof(guestError),
+                    reinterpret_cast<char *>(&guestError)) != 0) return 0;
+        }
+        return success;
+    }
     case LC32ImageIOOpSourceGetTypeID: {
         if(call.slotCount != 0) return 0;
         return static_cast<u32>(LC32_IMAGEIO_NATIVE(CGImageSourceGetTypeID()));

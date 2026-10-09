@@ -386,6 +386,7 @@ $(eval $(call lc32_guest_test,lc32-corefoundation-run-loop-source,corefoundation
 $(eval $(call lc32_guest_test,lc32-corefoundation-run-loop-timer,corefoundation_run_loop_timer.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-runloop-suspend,corefoundation_runloop_suspend.c,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-socket,corefoundation_socket.m,Foundation CoreFoundation))
+$(eval $(call lc32_guest_test,lc32-corefoundation-socket-native,corefoundation_socket_native.m,CoreFoundation Foundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-stream-host,corefoundation_stream_host.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-string-character-set,corefoundation_string_character_set.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-string-transform,corefoundation_string_transform.m,Foundation CoreFoundation))
@@ -421,6 +422,7 @@ $(eval $(call lc32_guest_test,lc32-kvc-ivar-ownership,kvc_ivar_ownership.m kvc_i
 kvc_ivar_ownership.m_CFLAGS := -fno-objc-arc
 kvc_ivar_ownership_arc.m_CFLAGS := -fobjc-arc
 $(eval $(call lc32_guest_test,lc32-imageio-roundtrip,imageio_roundtrip.m,ImageIO CoreGraphics CoreFoundation Foundation))
+$(eval $(call lc32_guest_test,lc32-imageio-metadata,imageio_metadata.m,ImageIO CoreGraphics CoreFoundation Foundation))
 $(eval $(call lc32_guest_test,lc32-locale-constants,locale_constants.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-mobilecoreservices-uti,mobilecoreservices_uti.m,MobileCoreServices CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-mediaplayer-legacy,mediaplayer_legacy.m,MediaPlayer CFNetwork Foundation CoreFoundation LC32))
@@ -461,6 +463,8 @@ $(eval $(call lc32_guest_test,lc32-quartzcore-transform,quartzcore_transform.c,Q
 $(eval $(call lc32_guest_test,lc32-coretext-bridge,coretext_bridge.m,CoreText CoreGraphics CoreFoundation Foundation))
 $(eval $(call lc32_guest_test,lc32-coretext-font-descriptor,coretext_font_descriptor.c,CoreText CoreFoundation Foundation))
 $(eval $(call lc32_guest_test,lc32-coretext-graphics-font,coretext_graphics_font.c,CoreText CoreGraphics CoreFoundation Foundation))
+$(eval $(call lc32_guest_test,lc32-coregraphics-layer,coregraphics_layer.c,CoreGraphics CoreFoundation Foundation))
+$(eval $(call lc32_guest_test,lc32-coregraphics-queries,coregraphics_queries.c,CoreGraphics CoreFoundation Foundation))
 $(eval $(call lc32_guest_test,lc32-openal-smoke,openal_smoke.c,OpenAL))
 $(eval $(call lc32_guest_test,lc32-opengles-smoke,opengles_smoke.m opengles_es1_smoke.m opengles_es3_smoke.m opengles_drawable_smoke.m,Foundation OpenGLES QuartzCore))
 $(eval $(call lc32_guest_test,lc32-opengles-drawable,opengles_drawable_smoke.m,Foundation OpenGLES QuartzCore))
@@ -529,6 +533,7 @@ lc32-cfnetwork-host-resolution_CFLAGS := -fno-objc-arc -Wall -Wextra -Werror -Wn
 lc32-foundation-constants_CFLAGS := -fno-objc-arc -Wall -Wextra -Werror
 lc32-locale-constants_CFLAGS := -fno-objc-arc -Wall -Wextra -Werror
 lc32-imageio-roundtrip_CFLAGS := -fno-objc-arc -Wall -Wextra -Werror
+lc32-imageio-metadata_CFLAGS := -fno-objc-arc -Wall -Wextra -Werror
 lc32-gamekit-achievement-properties_USE_MODULES := 1
 lc32-gamekit-achievement-properties_CFLAGS := -fno-objc-arc \
 	-I$(abspath ../GuestFrameworks) -I$(abspath ../include)
@@ -670,7 +675,7 @@ SHORT_TESTS := $(patsubst lc32-%,%,$(TOOL_NAME))
 .PHONY: build list frameworks clean-outputs \
   abi audio corefoundation graphics threading uikit \
   check-symbols check-openal check-opengles check-security check-coretext \
-  check-graphics-symbols check-imageio-symbols check-public-constants \
+  check-graphics-symbols check-imageio-symbols check-library-expansion-symbols check-public-constants \
   check-generated-framework-symbols check-generated-gameplay-symbols \
   check-generated-ui-framework-symbols \
   check-generated-public-symbols check-generated-legacy-public-symbols \
@@ -716,7 +721,8 @@ frameworks:
 # starting overlapping recursive builds for several framework goals.
 SYMBOL_TESTS := lc32-openal-smoke lc32-opengles-smoke lc32-opengles-drawable lc32-accelerate-vdsp \
   lc32-security-secitem lc32-coretext-font-descriptor lc32-coretext-graphics-font \
-  lc32-coregraphics-bitmap lc32-quartzcore-transform \
+  lc32-coregraphics-bitmap lc32-coregraphics-layer lc32-coregraphics-queries \
+  lc32-imageio-metadata lc32-corefoundation-socket-native lc32-quartzcore-transform \
   lc32-uikit-accessibility lc32-mobilecoreservices-uti lc32-cfnetwork-http \
   lc32-foundation-zone lc32-corefoundation-low-risk \
   lc32-coremedia-time-values lc32-coremedia-sample-buffers lc32-avassetwriter-recording \
@@ -741,6 +747,9 @@ check-graphics-symbols: lc32-coregraphics-bitmap lc32-quartzcore-transform \
 check-imageio-symbols: frameworks
 	LC32_GUEST_SDK="$(ISYSROOT)" ./imageio_symbols.sh \
 		"$(GUEST_FRAMEWORK_DIR)/ImageIO.framework/ImageIO"
+check-library-expansion-symbols: frameworks
+	LC32_GUEST_SDK="$(ISYSROOT)" sh ./library_expansion_symbols.sh \
+		"$(GUEST_FRAMEWORK_DIR)"
 check-public-constants: lc32-mobilecoreservices-uti lc32-cfnetwork-http
 	GUEST_FRAMEWORK_DIR="$(GUEST_FRAMEWORK_DIR)" SDKROOT="$(ISYSROOT)" \
 		./public_guest_constants.sh
@@ -788,7 +797,7 @@ check-corefoundation-low-risk-symbols: lc32-corefoundation-low-risk
 # target serial even when the caller supplied -j.
 .NOTPARALLEL: check-symbols
 check-symbols: frameworks check-openal check-opengles check-security check-coretext check-accelerate \
-	check-graphics-symbols check-imageio-symbols check-public-constants \
+	check-graphics-symbols check-imageio-symbols check-library-expansion-symbols check-public-constants \
 	check-generated-framework-symbols check-generated-gameplay-symbols \
 	check-generated-ui-framework-symbols check-generated-public-symbols \
 	check-generated-legacy-public-symbols check-generated-nonui-public-symbols \
