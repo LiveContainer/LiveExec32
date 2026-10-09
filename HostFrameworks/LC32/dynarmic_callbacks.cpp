@@ -1965,6 +1965,11 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                     cpu->Regs()[3], cpu->Regs()[4]);
                 break;
             case SYS_bsdthread_terminate:
+                if(NativeGuestThreadIsCurrent() && cpu->IsExecuting()) {
+                    // The final native transaction flush may draw into guest code.
+                    cpu->HaltExecution(LC32HaltReasonSVC);
+                    return;
+                }
                 cpu->Regs()[0] = GuestBsdthreadTerminate(
                     cpu->Regs()[0], cpu->Regs()[1],
                     static_cast<mach_port_t>(cpu->Regs()[2]),

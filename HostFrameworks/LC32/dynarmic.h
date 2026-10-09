@@ -258,6 +258,7 @@ char *get_memory_page(u64 vaddr);
 void *get_memory(u64 vaddr);
 Dynarmic::A32::UserCallbacks *Dynarmic_current_user_callbacks();
 bool Dynarmic_guest_thread_is_registered();
+void LC32FlushHostThreadTransactions();
 /* The bridge brackets only the actual native invocation with these calls.
  * Guest argument marshalling and result copyout stay in an executing epoch. */
 bool Dynarmic_guest_host_call_quiescence_begin();

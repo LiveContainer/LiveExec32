@@ -15,6 +15,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+void LC32FlushHostThreadTransactions() {
+    [CATransaction flush];
+}
+
 typedef NS_ENUM(NSUInteger, LC32LegacyIPadGeometryMode) {
     /* Pre-root-controller applications and some early fixed-surface engines
      * keep a portrait iPad drawable and rely on UIKit's compositor turn. */

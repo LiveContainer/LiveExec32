@@ -1299,6 +1299,14 @@ u32 GuestBsdthreadTerminate(
 
     const bool nativeThread =
         NativeGuestThreadIsCurrent();
+    if (nativeThread) {
+        /* Core Animation otherwise commits implicit transactions in its
+         * pthread TLS destructor, after this guest JIT has retired. Drawing
+         * callbacks need the still-live guest and this thread's CGContext. */
+        InvokeNativeGuestHostCall([] {
+            LC32FlushHostThreadTransactions();
+        });
+    }
     if (MACH_PORT_VALID(joinSemaphore) &&
             !nativeThread) {
         const kern_return_t result =

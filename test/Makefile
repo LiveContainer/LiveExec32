@@ -469,6 +469,7 @@ lc32-opengles-drawable_CFLAGS += -DLC32_DRAWABLE_STANDALONE=1
 # UIKit and aggregate-argument bridges.
 $(eval $(call lc32_guest_test,lc32-guest-fp-return,guest_fp_return.m,Foundation UIKit LC32))
 $(eval $(call lc32_guest_test,lc32-guest-host-aggregate-arguments,guest_host_aggregate_arguments.m,Foundation UIKit CoreGraphics LC32))
+$(eval $(call lc32_guest_test,lc32-uikit-thread-exit-drawing,uikit_thread_exit_drawing.m,Foundation UIKit QuartzCore CoreGraphics LC32))
 $(eval $(call lc32_guest_test,lc32-scalar-pointer-bridge,scalar_pointer_bridge.m,Foundation UIKit CoreGraphics LC32))
 $(eval $(call lc32_guest_test,lc32-text-input-traits,text_input_traits.m,Foundation UIKit LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-appearance,uikit_appearance.m,Foundation UIKit LC32))
