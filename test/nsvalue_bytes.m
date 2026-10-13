@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <QuartzCore/QuartzCore.h>
+#import <CoreMedia/CoreMedia.h>
 #import <LC32/LC32.h>
 #import <objc/runtime.h>
 
@@ -93,6 +94,34 @@ static int CheckTransformValues(void) {
     return failed;
 }
 
+static int CheckMediaTimeValue(const void *expected, uint32_t size, const char *type) {
+    int failed = 0;
+    NSValue *guestValue = [NSValue valueWithBytes:expected objCType:type];
+    LC32HostSizedIndirectDescriptor descriptor;
+    LC32InitializeHostSizedIndirectDescriptor(&descriptor, (void *)expected, size);
+    const uint64_t hostType = LC32GuestToHostCString(type, 0);
+    NSValue *nativeValue = LC32InvokeHostObjectSelector(
+        [(id)[NSValue class] host_self],
+        LC32GetHostSelector(@selector(valueWithBytes:objCType:)),
+        LC32HostSizedIndirectArgument(&descriptor), hostType, (uint64_t)0);
+    LC32GuestToHostCStringFree(hostType);
+    failed += Check("nsvalue-media-time-create", guestValue && nativeValue);
+    if(!guestValue || !nativeValue) return failed;
+    for(NSValue *value in @[guestValue, nativeValue]) {
+        // The native box deliberately has no original guest bytes cached.
+        failed += Check("nsvalue-media-time-type", !strcmp(value.objCType, type));
+        uint32_t guarded[sizeof(CMTimeRange) / sizeof(uint32_t) + 2];
+        memset(guarded, 0xa5, sizeof(guarded));
+        [value getValue:&guarded[1]];
+        failed += Check("nsvalue-media-time-round-trip",
+            !memcmp(&guarded[1], expected, size));
+        failed += Check("nsvalue-media-time-write-width",
+            guarded[0] == UINT32_C(0xa5a5a5a5) &&
+            guarded[1 + size / sizeof(uint32_t)] == UINT32_C(0xa5a5a5a5));
+    }
+    return failed;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     NSAutoreleasePool *pool = [NSAutoreleasePool new];
@@ -151,8 +180,14 @@ int main(void) {
            pointerTypePassed ? "PASS" : "FAIL");
 
     const int transformFailures = CheckTransformValues();
+    const CMTimeRange range = {
+        {INT64_C(0x123456789), 600, kCMTimeFlags_Valid, -7},
+        {INT64_C(0x23456789a), 300, kCMTimeFlags_Valid, 0},
+    };
+    const int mediaFailures = CheckMediaTimeValue(&range.start, sizeof(range.start), @encode(CMTime)) +
+        CheckMediaTimeValue(&range, sizeof(range), @encode(CMTimeRange));
     [pool drain];
     return !(selectorPassed && canaryPassed && typePassed &&
              pointerPassed && pointerBytesPassed &&
-             pointerCanaryPassed && pointerTypePassed && !transformFailures);
+             pointerCanaryPassed && pointerTypePassed && !transformFailures && !mediaFailures);
 }

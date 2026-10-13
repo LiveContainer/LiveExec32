@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <CoreMedia/CoreMedia.h>
 #import <LC32/LC32.h>
 #import <objc/runtime.h>
 
@@ -79,7 +80,7 @@ static void LC32RejectUnsupportedValueType(const char *operation,
     CRSetCrashLogMessage(message);
 }
 
-/* Guest (ARM32) struct encodings whose layout differs on the ARM64 host. */
+/* Explicit guest/host layouts for NSValue aggregate storage. */
 typedef struct LC32ValueLayout {
     const char *guestEncoding;
     const char *hostEncoding;
@@ -151,7 +152,36 @@ static void LC32NarrowNSRangeValue(const void *host, void *guest) {
     dst[1] = (uint32_t)src[1];
 }
 
+// CoreMedia uses fixed-width fields. Unlike CGFloat/NSRange, these layouts
+// (including CMTime's epoch) are identical on ARM32 and ARM64.
+_Static_assert(sizeof(CMTime) == 24, "unexpected CMTime layout");
+_Static_assert(sizeof(CMTimeRange) == 48, "unexpected CMTimeRange layout");
+_Static_assert(offsetof(CMTime, epoch) == 16, "unexpected CMTime epoch offset");
+_Static_assert(offsetof(CMTimeRange, duration) == 24, "unexpected CMTimeRange duration offset");
+static void LC32CopyCMTime(const void *source, void *destination) {
+    memcpy(destination, source, sizeof(CMTime));
+}
+static void LC32CopyCMTimeRange(const void *source, void *destination) {
+    memcpy(destination, source, sizeof(CMTimeRange));
+}
+
 static const LC32ValueLayout LC32ValueLayouts[] = {
+    {
+        .guestEncoding = @encode(CMTime),
+        .hostEncoding = @encode(CMTime),
+        .guestSize = sizeof(CMTime),
+        .hostSize = sizeof(CMTime),
+        .guestToHost = LC32CopyCMTime,
+        .hostToGuest = LC32CopyCMTime,
+    },
+    {
+        .guestEncoding = @encode(CMTimeRange),
+        .hostEncoding = @encode(CMTimeRange),
+        .guestSize = sizeof(CMTimeRange),
+        .hostSize = sizeof(CMTimeRange),
+        .guestToHost = LC32CopyCMTimeRange,
+        .hostToGuest = LC32CopyCMTimeRange,
+    },
     {
         .guestEncoding = "{CGPoint=ff}",
         .hostEncoding = "{CGPoint=dd}",

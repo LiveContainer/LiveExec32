@@ -357,6 +357,9 @@ $(eval $(call lc32_guest_test,lc32-addressbook-compat,addressbook_compat.m,Addre
 $(eval $(call lc32_guest_test,lc32-nsuuid-bytes,nsuuid_bytes.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-arc-proxy-lifetime,arc_proxy_lifetime.m arc_proxy_lifetime_support.m,Foundation UIKit LC32))
 $(eval $(call lc32_guest_test,lc32-block-bridge,block_bridge.m,Foundation LC32))
+$(eval $(call lc32_guest_test,lc32-invocation-blocks,invocation_blocks.m,Foundation))
+$(eval $(call lc32_guest_test,lc32-attributed-string-initializers,attributed_string_initializers.m,Foundation CoreFoundation))
+$(eval $(call lc32_guest_test,lc32-coretext-attributed-callbacks,coretext_attributed_callbacks.m,Foundation CoreFoundation CoreText))
 $(eval $(call lc32_guest_test,lc32-array-sort-function,array_sort_function.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-dispatch-main-queue,dispatch_main_queue.m,Foundation CoreFoundation AVFoundation))
 $(eval $(call lc32_guest_test,lc32-dispatch-timers,dispatch_timers.m,Foundation CoreFoundation))
@@ -506,6 +509,7 @@ lc32-ownership-publication-race_CFLAGS := -fobjc-arc
 ownership_publication_race.m_CFLAGS := -fno-objc-arc
 
 lc32-block-bridge_CFLAGS := -fblocks
+lc32-invocation-blocks_CFLAGS := -fblocks
 lc32-dispatch-main-queue_CFLAGS := -fblocks -fno-objc-arc -Wall -Wextra -Werror -Wno-deprecated-declarations
 lc32-dispatch-timers_CFLAGS := -fblocks -fno-objc-arc -Wall -Wextra -Werror
 lc32-thread-modes_CFLAGS := -fblocks
