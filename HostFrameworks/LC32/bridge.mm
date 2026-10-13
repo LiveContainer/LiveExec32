@@ -5637,6 +5637,25 @@ u32 guest_class_getInstanceMethod(u32 guest_cls, u32 guest_sel) {
     return LC32InvokeGuestC(guestPtr, false, sizeof(args)/sizeof(*args), args);
 }
 
+static BOOL LC32InvokeGuestRespondsToSelector(id self, SEL command, SEL selector) {
+    if(LC32InvokeGuestSelector(self, command, (u64)selector, 0, 0, 0, 0, 0))
+        return YES;
+    if(!selector || !Dynarmic_guest_thread_is_registered()) return NO;
+
+    Class mirrorClass = object_getClass(self);
+    Class nativeClass = mirrorClass;
+    while(nativeClass && [(id)nativeClass isGuestClass])
+        nativeClass = class_getSuperclass(nativeClass);
+    if(!nativeClass || !class_getInstanceMethod(nativeClass, selector)) return NO;
+
+    // An old guest override commonly delegates to its old NSObject runtime,
+    // which cannot see newer native superclass methods (e.g. UIKit's table
+    // selection callbacks). Preserve those methods for native callers only.
+    // If the guest knows the method, its deliberate NO must still win.
+    const u32 guestSelector = guest_sel_registerName(sel_getName(selector));
+    return !guest_class_getInstanceMethod([(id)mirrorClass guest_self], guestSelector);
+}
+
 u32 guest_class_getName(u32 guest_cls) {
     if(!threadHandle.jit) return false;
     static std::atomic<u32> cache{0};
@@ -7493,6 +7512,10 @@ static const char *LC32ExpectedHostMethodTypes(Class cls, SEL selector) {
         registry.classes[cls].emplace(sel, std::move(aggregateSignature));
         implementation = (IMP)&LC32InvokeGuestSelectorAggregates;
         installedMethodTypes = aggregateHostTypes;
+    }
+    if(sel == @selector(respondsToSelector:)) {
+        implementation = (IMP)&LC32InvokeGuestRespondsToSelector;
+        installedMethodTypes = expectedHostTypes ?: installedMethodTypes;
     }
     return class_addMethod(cls, sel, implementation, installedMethodTypes) ||
         class_getInstanceMethod(cls, sel) != nullptr;
