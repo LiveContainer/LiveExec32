@@ -25,6 +25,7 @@ struct rpc_buffer {
 };
 
 _Static_assert(sizeof(struct request32) == 44, "ARM32 simple request layout");
+_Static_assert(sizeof(mach_port_context_t) == 4, "ARM32 port context width");
 static int failures;
 static const mach_msg_size_t replyCapacity = 640;
 
@@ -117,6 +118,94 @@ static void test_rename(mach_port_t receivePort) {
         MACH_PORT_RIGHT_RECEIVE, 0, &refs) == KERN_SUCCESS && refs == 1);
     report("rename-destroy-target", call_port(3205, 1, secondPort,
         0, 0, NULL) == KERN_SUCCESS);
+}
+
+static kern_return_t get_context(mach_port_t port, uint64_t *context) {
+    struct rpc_buffer buffer;
+    prepare(&buffer, mach_task_self(), 3228, 1, port, 0, 0);
+    mach_msg_return_t result = execute(&buffer, 36, replyCapacity);
+    kern_return_t code = buffer.message.reply.RetCode;
+    if(!is_reply(&buffer, result, 3228, code, code == KERN_SUCCESS ? 44 : 36))
+        return MIG_REPLY_MISMATCH;
+    if(code == KERN_SUCCESS)
+        memcpy(context, buffer.message.bytes + 36, sizeof(*context));
+    return code;
+}
+
+static void test_context(mach_port_t receivePort) {
+    uint64_t context = UINT64_MAX;
+    report("context-initial-zero", get_context(receivePort, &context) ==
+        KERN_SUCCESS && context == 0);
+    /* The public ARM32 wrapper narrows a 64-bit _kernelrpc wire value. */
+    const uint64_t sentinel = UINT64_C(0x89abcdeff1234567);
+    report("context-set-raw", call_port(3229, 3, receivePort,
+        (uint32_t)sentinel, (uint32_t)(sentinel >> 32), NULL) == KERN_SUCCESS);
+    context = 0;
+    report("context-get-raw", get_context(receivePort, &context) ==
+        KERN_SUCCESS && context == sentinel);
+    struct {
+        mach_port_context_t context;
+        uint32_t canary;
+    } output = {0, 0xa5a5a5a5U};
+    kern_return_t kr = mach_port_get_context(mach_task_self(), receivePort,
+        &output.context);
+    report("context-public-get", kr == KERN_SUCCESS &&
+        output.context == (uint32_t)sentinel && output.canary == 0xa5a5a5a5U);
+    report("context-public-set", mach_port_set_context(mach_task_self(),
+        receivePort, 0x89abcdefU) == KERN_SUCCESS);
+    context = 0;
+    report("context-public-roundtrip", get_context(receivePort, &context) ==
+        KERN_SUCCESS && context == 0x89abcdefU);
+
+    for(unsigned setter = 0; setter < 2; ++setter) {
+        const mach_msg_id_t id = setter ? 3229 : 3228;
+        const mach_msg_size_t size = setter ? 44 : 36;
+        static const char *names[2][5] = {
+            {"context-get-truncated", "context-get-extra", "context-get-ndr",
+             "context-get-complex", "context-get-short-reply"},
+            {"context-set-truncated", "context-set-extra", "context-set-ndr",
+             "context-set-complex", "context-set-short-reply"}
+        };
+        for(unsigned variant = 0; variant < 5; ++variant) {
+            struct rpc_buffer buffer;
+            prepare(&buffer, mach_task_self(), id, setter ? 3 : 1,
+                receivePort, 0x76543210U, 0);
+            mach_msg_size_t sendSize = size, receiveSize = replyCapacity;
+            switch(variant) {
+                case 0: sendSize -= 4; break;
+                case 1: sendSize += 4; break;
+                case 2: buffer.message.request.ndr.int_rep ^= 1; break;
+                case 3:
+                    buffer.message.request.head.msgh_bits |= MACH_MSGH_BITS_COMPLEX;
+                    break;
+                case 4: receiveSize = setter ? 32 : 40; break;
+            }
+            mach_msg_return_t result = execute(&buffer, sendSize, receiveSize);
+            int passed = variant == 4
+                ? result == MACH_RCV_TOO_LARGE &&
+                    buffer.message.reply.Head.msgh_size == (setter ? 36U : 44U)
+                : is_reply(&buffer, result, id, MIG_BAD_ARGUMENTS, 36);
+            context = 0;
+            passed &= get_context(receivePort, &context) ==
+                KERN_SUCCESS && context == 0x89abcdefU;
+            report(names[setter][variant], passed);
+        }
+    }
+    /* Error replies have no context payload and must not overwrite output. */
+    context = sentinel;
+    kr = get_context(MACH_PORT_NULL, &context);
+    printf("mach-simple-rpc-context-invalid-get-result: %d\n", kr);
+    report("context-get-invalid-name", kr == KERN_INVALID_RIGHT &&
+        context == sentinel);
+    kr = call_port(3229, 3, MACH_PORT_NULL, (uint32_t)sentinel,
+        (uint32_t)(sentinel >> 32), NULL);
+    printf("mach-simple-rpc-context-invalid-set-result: %d\n", kr);
+    report("context-set-invalid-name", kr == KERN_INVALID_RIGHT);
+    report("context-clear", mach_port_set_context(mach_task_self(), receivePort,
+        0) == KERN_SUCCESS);
+    context = sentinel;
+    report("context-cleared", get_context(receivePort, &context) ==
+        KERN_SUCCESS && context == 0);
 }
 
 static void test_validation(mach_port_t receivePort) {
@@ -319,6 +408,7 @@ int main(void) {
     report("allocate-name-collision", call_port(3203, 2, MACH_PORT_RIGHT_RECEIVE,
         receivePort, 0, NULL) == KERN_NAME_EXISTS);
     test_rename(receivePort);
+    test_context(receivePort);
     report("set-mscount", call_port(3210, 2, receivePort, 7, 0, NULL) == KERN_SUCCESS);
     report("set-seqno", call_port(3216, 2, receivePort, 41, 0, NULL) == KERN_SUCCESS);
     mach_port_status_t status = {0};
