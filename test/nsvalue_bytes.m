@@ -122,6 +122,46 @@ static int CheckMediaTimeValue(const void *expected, uint32_t size, const char *
     return failed;
 }
 
+static int CheckNonretainedObjectValues(void) {
+    NSObject *object = [NSObject new];
+    int failed = 0;
+    for(id expected in @[object, [NSNull null]]) {
+        if(expected == [NSNull null]) expected = nil;
+        NSValue *value = [NSValue valueWithNonretainedObject:expected];
+        failed += Check("nsvalue-nonretained-create", value != nil);
+        failed += Check("nsvalue-nonretained-object",
+            value.nonretainedObjectValue == expected);
+        failed += Check("nsvalue-nonretained-pointer",
+            value.pointerValue == (void *)expected);
+        failed += Check("nsvalue-nonretained-native-identity",
+            LC32InvokeHostSelector(value.host_self,
+                LC32GetHostSelector(@selector(pointerValue)), (uint64_t)0)
+                == [expected host_self]);
+        struct {
+            void *pointer;
+            uint32_t canary;
+        } output = { (void *)1, UINT32_C(0x51ec70a5) };
+        [value getValue:&output.pointer];
+        failed += Check("nsvalue-nonretained-bytes",
+            output.pointer == (void *)expected);
+        failed += Check("nsvalue-nonretained-write-width",
+            output.canary == UINT32_C(0x51ec70a5));
+        failed += Check("nsvalue-nonretained-type",
+            !strcmp(value.objCType, @encode(void *)));
+    }
+    NSAutoreleasePool *inner = [NSAutoreleasePool new];
+    NSValue *boxed = [NSValue valueWithNonretainedObject:object];
+    NSArray *array = [[NSArray alloc] initWithObjects:boxed, nil];
+    [inner drain];
+    NSValue *returned = [array objectAtIndex:0];
+    failed += Check("nsvalue-nonretained-container-round-trip",
+        returned.pointerValue == (void *)object &&
+        returned.nonretainedObjectValue == object);
+    [array release];
+    [object release];
+    return failed;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     NSAutoreleasePool *pool = [NSAutoreleasePool new];
@@ -184,10 +224,12 @@ int main(void) {
         {INT64_C(0x123456789), 600, kCMTimeFlags_Valid, -7},
         {INT64_C(0x23456789a), 300, kCMTimeFlags_Valid, 0},
     };
+    const int nonretainedFailures = CheckNonretainedObjectValues();
     const int mediaFailures = CheckMediaTimeValue(&range.start, sizeof(range.start), @encode(CMTime)) +
         CheckMediaTimeValue(&range, sizeof(range), @encode(CMTimeRange));
     [pool drain];
     return !(selectorPassed && canaryPassed && typePassed &&
              pointerPassed && pointerBytesPassed &&
-             pointerCanaryPassed && pointerTypePassed && !transformFailures && !mediaFailures);
+             pointerCanaryPassed && pointerTypePassed && !transformFailures &&
+             !mediaFailures && !nonretainedFailures);
 }

@@ -557,6 +557,22 @@ static id LC32InstallGuestValueStorage(id value, const void *bytes,
         @encode(void *));
 }
 
++ (instancetype)valueWithNonretainedObject:(id)object {
+    // Native Foundation stores the host object address in a ^v box. Keep
+    // the guest identity too: legacy callers also read these boxes through
+    // -pointerValue and -getValue:, not just -nonretainedObjectValue.
+    // Neither the native box nor this byte storage retains the object.
+    const uint32_t guestPointer = (uint32_t)(uintptr_t)object;
+    static uint64_t hostCommand __attribute__((aligned(8)));
+    const uint64_t command = LC32CachedHostSelector(
+        &hostCommand, _cmd, NO);
+    id result = LC32InvokeHostObjectSelector(
+        self.host_self, command, [object host_self], (uint64_t)0);
+    return LC32InstallGuestValueStorage(
+        result, &guestPointer, sizeof(guestPointer), sizeof(uint64_t),
+        @encode(void *));
+}
+
 - (void)getValue:(void *)value {
     if(!value) {
         LC32RejectUnsupportedValueType("getValue:", NULL);

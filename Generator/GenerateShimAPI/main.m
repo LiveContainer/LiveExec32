@@ -953,7 +953,8 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
             return [selector isEqualToString:
                         @"valueWithBytes:objCType:"] ||
                    [selector isEqualToString:@"value:withObjCType:"] ||
-                   [selector isEqualToString:@"valueWithPointer:"];
+                   [selector isEqualToString:@"valueWithPointer:"] ||
+                   [selector isEqualToString:@"valueWithNonretainedObject:"];
         }
         return [selector isEqualToString:@"getValue:"] ||
                [selector isEqualToString:@"objCType"] ||
