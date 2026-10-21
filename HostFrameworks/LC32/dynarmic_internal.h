@@ -182,6 +182,7 @@ struct DebuggerMachCall {
     std::atomic<DebuggerMachCallPhase> phase{
         DebuggerMachCallPhase::Idle};
     std::atomic<bool> interruptRequested{false};
+    std::atomic<bool> threadStateInterruptRequested{false};
     mach_port_t thread = MACH_PORT_NULL;
     gdb_thread_id_t guestThreadId = 0;
     bool forceAbort = false;
@@ -389,7 +390,11 @@ auto InvokeNativeGuestHostCall(Function &&function)
 
 template <typename Result, typename Function>
 Result debugger_aware_host_wait(
-        Function &&function, Result interruptedResult) {
+        Function &&function, Result interruptedResult,
+        bool *threadStateInterrupted = nullptr) {
+    if (threadStateInterrupted != nullptr) {
+        *threadStateInterrupted = false;
+    }
     if (!guestDebuggerEnabled.load(std::memory_order_acquire) &&
             !NativeGuestThreadsEnabled()) {
         return function();
@@ -430,11 +435,24 @@ Result debugger_aware_host_wait(
             nativeShutdownRequested.load(std::memory_order_acquire) ||
             guestProcessExitRequested.load(std::memory_order_acquire);
     };
+    const auto pauseIfNeeded = [&] {
+        // Latch the cause before acknowledging the snapshot/suspension. Its
+        // request may already have been released when the host call returns.
+        const bool threadStatePause =
+            call.threadStateInterruptRequested.load(std::memory_order_acquire) ||
+            NativeThreadStatePauseRequestedForCurrent();
+        if (threadStateInterrupted != nullptr) {
+            *threadStateInterrupted = threadStatePause;
+        }
+        if (threadStatePause || stopRequested()) {
+            (void)NativeThreadStatePauseHostWaitIfNeeded();
+            (void)NativeDebuggerPauseHostWaitIfNeeded();
+        }
+    };
 
     if (stopRequested()) {
         finishCall();
-        (void)NativeThreadStatePauseHostWaitIfNeeded();
-        (void)NativeDebuggerPauseHostWaitIfNeeded();
+        pauseIfNeeded();
         return interruptedResult;
     }
     call.phase.store(
@@ -442,17 +460,13 @@ Result debugger_aware_host_wait(
         std::memory_order_release);
     if (stopRequested()) {
         finishCall();
-        (void)NativeThreadStatePauseHostWaitIfNeeded();
-        (void)NativeDebuggerPauseHostWaitIfNeeded();
+        pauseIfNeeded();
         return interruptedResult;
     }
 
     Result result = function();
     finishCall();
-    if (stopRequested()) {
-        (void)NativeThreadStatePauseHostWaitIfNeeded();
-        (void)NativeDebuggerPauseHostWaitIfNeeded();
-    }
+    pauseIfNeeded();
     return result;
 }
 
@@ -638,7 +652,8 @@ extern "C" int ValidateGuestMunmapRange(u64 address, u64 size);
 void HaltAllGuestJits(Dynarmic::HaltReason reason);
 void ClearAllGuestJitHalts(Dynarmic::HaltReason reason);
 void InterruptDebuggerMachCalls();
-void InterruptNativeThreadStateHostCalls(gdb_thread_id_t threadId);
+void InterruptNativeThreadStateHostCalls(
+    gdb_thread_id_t threadId, bool threadStatePause = true);
 void DrainDebuggerMachCalls();
 void ScheduleMainGuestWorkqueueTransition();
 void DestroyNativeGuestJit(NativeGuestJit *runtime);

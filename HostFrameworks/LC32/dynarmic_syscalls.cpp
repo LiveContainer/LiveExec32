@@ -587,9 +587,11 @@ void InterruptDebuggerMachCalls() {
  * Wake only the host call which belongs to the guest JIT being sampled.
  * This mirrors the debugger interruption protocol without setting any
  * process-wide debugger flags or disturbing unrelated guest pthreads.
+ * Scheduler wake-ups also use this path, but must not be classified as
+ * transparent thread-state inspection.
  */
 void InterruptNativeThreadStateHostCalls(
-        gdb_thread_id_t threadId) {
+        gdb_thread_id_t threadId, bool threadStatePause) {
     constexpr unsigned retryCount = 100;
     constexpr useconds_t retryDelayMicroseconds = 1000;
 
@@ -610,6 +612,10 @@ void InterruptNativeThreadStateHostCalls(
                 if (phase == DebuggerMachCallPhase::Arming ||
                         phase == DebuggerMachCallPhase::InCall) {
                     ++activeCalls;
+                    if (threadStatePause) {
+                        call->threadStateInterruptRequested.store(
+                            true, std::memory_order_release);
+                    }
                     call->interruptRequested.store(
                         true, std::memory_order_release);
                 }

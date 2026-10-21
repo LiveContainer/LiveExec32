@@ -37,7 +37,7 @@ void ScheduleMainGuestWorkqueueTransition() {
     /* A normal workqueue request does not set a debugger-wide stop flag, so
      * InterruptDebuggerMachCalls would deliberately do nothing here. Wake
      * only the main guest JIT's published host wait. */
-    InterruptNativeThreadStateHostCalls(1);
+    InterruptNativeThreadStateHostCalls(1, /*threadStatePause=*/false);
 }
 
 void HaltAllGuestJits(

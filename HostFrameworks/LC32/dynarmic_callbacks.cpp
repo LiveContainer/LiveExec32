@@ -4,6 +4,45 @@
 #include "crash_exception.h"
 
 namespace {
+static kern_return_t WaitForGuestSemaphore(
+        semaphore_t semaphore, const mach_timespec_t *timeout = nullptr) {
+    // Do not normalize an invalid timeout into a valid deadline.
+    if (timeout != nullptr &&
+            (timeout->tv_nsec < 0 || timeout->tv_nsec >= 1000000000)) {
+        return semaphore_timedwait_trap(
+            semaphore, timeout->tv_sec, timeout->tv_nsec);
+    }
+    using Clock = std::chrono::steady_clock;
+    const auto deadline = timeout != nullptr
+        ? Clock::now() + std::chrono::seconds(timeout->tv_sec) +
+            std::chrono::nanoseconds(timeout->tv_nsec)
+        : Clock::time_point{};
+    for (;;) {
+        bool threadStateInterrupted = false;
+        const kern_return_t result = debugger_aware_host_wait([&] {
+            if (timeout == nullptr) return semaphore_wait_trap(semaphore);
+            const auto remaining = std::max(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    deadline - Clock::now()).count(), int64_t{0});
+            return semaphore_timedwait_trap(
+                semaphore, static_cast<unsigned>(remaining / 1000000000),
+                static_cast<unsigned>(remaining % 1000000000));
+        }, static_cast<kern_return_t>(KERN_ABORTED), &threadStateInterrupted);
+        // Register inspection/suspension is invisible to the guest wait.
+        // Never consume a successful signal twice or swallow unrelated errors,
+        // guest interruptions, shutdown, scheduler transitions, or a debugger
+        // step's return boundary.
+        if (result != KERN_ABORTED || !threadStateInterrupted ||
+                nativeShutdownRequested.load(std::memory_order_acquire) ||
+                guestProcessExitRequested.load(std::memory_order_acquire) ||
+                debuggerAllStopRequested.load(std::memory_order_acquire) ||
+                GuestContextTransitionPending() ||
+                GuestCallbackExecutorDebuggerStepPending()) {
+            return result;
+        }
+    }
+}
+
 struct GuestCrashExceptionPayload {
     std::string report;
     std::string fallbackReason;
@@ -1171,12 +1210,7 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                         cpu->Regs()[0] = probe;
                     }
                 } else {
-                    cpu->Regs()[0] = debugger_aware_host_wait(
-                        [&] {
-                            return semaphore_wait_trap(
-                                cpu->Regs()[0]);
-                        },
-                        static_cast<kern_return_t>(KERN_ABORTED));
+                    cpu->Regs()[0] = WaitForGuestSemaphore(cpu->Regs()[0]);
                 }
                 break;
             case -38:
@@ -1192,13 +1226,11 @@ BE CAREFUL WHEN MOVING SYSCALL. Checklist:
                         cpu->Regs()[0] = probe;
                     }
                 } else {
-                    cpu->Regs()[0] = debugger_aware_host_wait(
-                        [&] {
-                            return semaphore_timedwait_trap(
-                                cpu->Regs()[0], cpu->Regs()[1],
-                                cpu->Regs()[2]);
-                        },
-                        static_cast<kern_return_t>(KERN_ABORTED));
+                    const mach_timespec_t timeout = {
+                        cpu->Regs()[1],
+                        static_cast<clock_res_t>(cpu->Regs()[2])};
+                    cpu->Regs()[0] = WaitForGuestSemaphore(
+                        cpu->Regs()[0], &timeout);
                 }
                 break;
             case -41:

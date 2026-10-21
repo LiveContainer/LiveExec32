@@ -320,6 +320,7 @@ $(eval $(call lc32_test,lc32-kqueue-kevent,kqueue_kevent.c,))
 $(eval $(call lc32_test,lc32-lseek-abi,lseek_abi.c,))
 $(eval $(call lc32_test,lc32-mremap-encrypted,mremap_encrypted.c,))
 $(eval $(call lc32_test,lc32-native-pthread-smoke,native_pthread_smoke.c,))
+$(eval $(call lc32_test,lc32-semaphore-thread-state,semaphore_thread_state.c,))
 $(eval $(call lc32_test,lc32-psynch-cvwait-handoff,psynch_cvwait_handoff.c,))
 $(eval $(call lc32_test,lc32-recvfrom-abi,recvfrom_abi.c,))
 $(eval $(call lc32_test,lc32-setsockopt-abi,setsockopt_abi.c,))
@@ -623,7 +624,7 @@ ABI_TESTS := \
 AUDIO_TESTS := $(filter lc32-audio-%,$(TOOL_NAME))
 COREFOUNDATION_TESTS := $(filter lc32-corefoundation-%,$(TOOL_NAME))
 GRAPHICS_TESTS := $(filter lc32-coregraphics-% lc32-quartzcore-% lc32-coretext-% lc32-corevideo-% lc32-openal-% lc32-opengles-%,$(TOOL_NAME))
-THREADING_TESTS := lc32-native-pthread-smoke lc32-ownership-publication-race lc32-thread-modes lc32-thread-perform lc32-thread-suspend lc32-thread-suspend-hostcall lc32-corefoundation-runloop-suspend
+THREADING_TESTS := lc32-native-pthread-smoke lc32-semaphore-thread-state lc32-ownership-publication-race lc32-thread-modes lc32-thread-perform lc32-thread-suspend lc32-thread-suspend-hostcall lc32-corefoundation-runloop-suspend
 UIKIT_TESTS := $(filter lc32-uikit-%,$(TOOL_NAME)) lc32-guest-fp-return lc32-guest-host-aggregate-arguments lc32-scalar-pointer-bridge lc32-text-input-traits
 
 include $(THEOS_MAKE_PATH)/tool.mk
