@@ -959,10 +959,11 @@ int LC32RunGuest(int argc, char* argv[], char* envp[]) {
         return 1;
     }
 
+    const bool isSimulator = getenv("SIMULATOR_UDID") != nullptr;
     const std::string configuredGuestHome =
         LC32GuestBootstrap::SelectConfiguredHomeDirectory(
             getenv("LC32_GUEST_HOME"), getenv("LC_HOME_PATH"),
-            getenv("HOME"), getenv("SIMULATOR_UDID") != nullptr);
+            getenv("HOME"), isSimulator);
 
     /*
      * Snapshot explicit guest variables before any setenv call can replace
@@ -977,6 +978,18 @@ int LC32RunGuest(int argc, char* argv[], char* envp[]) {
         fprintf(stderr,
             "LC32: ignoring malformed guest environment variable %s\n",
             name.c_str());
+    }
+
+    // Simulator data containers may be symlinked to a shorter /var path.
+    // Keep native Foundation search URLs consistent with the resolved home
+    // already used by guest Foundation and POSIX, without changing device
+    // path spellings. Snapshot envp above before either setenv can replace it.
+    if(isSimulator && !configuredGuestHome.empty() &&
+            (setenv("HOME", configuredGuestHome.c_str(), 1) != 0 ||
+             setenv("CFFIXED_USER_HOME", configuredGuestHome.c_str(), 1) != 0)) {
+        fprintf(stderr, "LC32: could not configure simulator home: %s\n",
+            strerror(errno));
+        return 1;
     }
     
     // NativeGuestThreadsRequested() caches this setting during initialization.

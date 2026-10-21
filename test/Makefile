@@ -354,6 +354,7 @@ $(eval $(call lc32_guest_test,lc32-audio-unit-output,audio_unit_output.c,AudioTo
 $(eval $(call lc32_guest_test,lc32-audio-unit-spatial-mixer,audio_unit_spatial_mixer.c,AudioToolbox CoreFoundation LC32))
 
 # Foundation, CoreFoundation, and bridge behavior.
+$(eval $(call lc32_guest_test,lc32-foundation-search-paths,foundation_search_paths.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-addressbook-compat,addressbook_compat.m,AddressBook Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-nsuuid-bytes,nsuuid_bytes.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-arc-proxy-lifetime,arc_proxy_lifetime.m arc_proxy_lifetime_support.m,Foundation UIKit LC32))
