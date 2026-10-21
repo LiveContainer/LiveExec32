@@ -5,7 +5,7 @@ LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash \
   check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop \
   check-foundation-ports-host check-uikit-compatibility-switch check-uikit-status-bar-orientation \
   check-guest-install check-host-selector-hooks check-uikit-screen-metrics-host \
-  check-systemconfiguration-host check-coremedia-sample-buffers-host
+  check-systemconfiguration-host check-coremedia-sample-buffers-host check-uikit-status-bar-host
 LC32_HOST_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),\
   $(if $(strip $(filter-out $(LC32_HOST_TEST_GOALS),$(MAKECMDGOALS))),,1),)
 
@@ -45,6 +45,19 @@ check-standalone:
 
 check-uikit-screen-metrics-host:
 	sh ./uikit_screen_metrics_host.sh
+
+.PHONY: check-uikit-status-bar-host
+check-uikit-status-bar-host:
+	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
+	@set -e; for mode in 0 1; do \
+		$(HOST_CXX) $(HOST_CXXFLAGS) -fobjc-arc -fblocks \
+			-DLC32_UIKIT_COMPATIBILITY=$$mode -Istatus-bar-stubs -I../include \
+			-framework Foundation uikit_status_bar_host.mm \
+			../HostFrameworks/UIKit/GuestStatusBar.mm \
+			../HostFrameworks/LC32/host_selector_hooks.mm \
+			-o "$(HOST_TEST_OUTPUT_DIR)/uikit-status-bar-$$mode"; \
+		"$(HOST_TEST_OUTPUT_DIR)/uikit-status-bar-$$mode"; \
+	done
 
 .PHONY: check-coremedia-sample-buffers-host
 check-coremedia-sample-buffers-host:
