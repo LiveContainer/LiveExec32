@@ -1,6 +1,6 @@
 LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash \
   check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info check-standalone \
-  check-guest-thumb-linker check-uikit-legacy-rootless-rotation-build \
+  check-guest-thumb-linker check-guest-linker check-uikit-legacy-rootless-rotation-build \
   check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading \
   check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop \
   check-foundation-ports-host check-uikit-compatibility-switch check-uikit-status-bar-orientation \
@@ -154,6 +154,10 @@ $(LEGACY_NIB_LOADING_HOST_TEST): legacy_nib_loading_host.mm \
 
 check-guest-thumb-linker:
 	./guest_thumb_linker.sh
+
+.PHONY: check-guest-linker
+check-guest-linker:
+	sh ./guest_linker.sh
 
 check-uikit-legacy-rootless-rotation-build:
 	sh ./uikit_legacy_rootless_rotation.sh --build-only
