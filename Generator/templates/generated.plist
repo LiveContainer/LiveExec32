@@ -44408,6 +44408,8 @@
 			</dict>
 			<key>-</key>
 			<dict>
+				<key>achievedDescription</key>
+				<string>@8@0:4</string>
 				<key>dealloc</key>
 				<string>v8@0:4</string>
 				<key>description</key>
@@ -44418,8 +44420,12 @@
 				<string>@12@0:4:8</string>
 				<key>game</key>
 				<string>@8@0:4</string>
+				<key>groupIdentifier</key>
+				<string>@8@0:4</string>
 				<key>hash</key>
 				<string>I8@0:4</string>
+				<key>identifier</key>
+				<string>@8@0:4</string>
 				<key>image</key>
 				<string>@8@0:4</string>
 				<key>imageNameForIcon</key>
@@ -44436,8 +44442,14 @@
 				<string>@8@0:4</string>
 				<key>isEqual:</key>
 				<string>c12@0:4@8</string>
+				<key>isHidden</key>
+				<string>c8@0:4</string>
+				<key>isReplayable</key>
+				<string>c8@0:4</string>
 				<key>loadImageWithCompletionHandler:</key>
 				<string>v12@0:4@?8</string>
+				<key>maximumPoints</key>
+				<string>i8@0:4</string>
 				<key>methodSignatureForSelector:</key>
 				<string>@12@0:4:8</string>
 				<key>respondsToSelector:</key>
@@ -44450,6 +44462,10 @@
 				<string>v16@0:4@8@12</string>
 				<key>showBanner</key>
 				<string>v8@0:4</string>
+				<key>title</key>
+				<string>@8@0:4</string>
+				<key>unachievedDescription</key>
+				<string>@8@0:4</string>
 				<key>valueForUndefinedKey:</key>
 				<string>@12@0:4@8</string>
 			</dict>
@@ -44522,6 +44538,8 @@
 			<dict>
 				<key>alertGoalText</key>
 				<string>@8@0:4</string>
+				<key>completionDate</key>
+				<string>@8@0:4</string>
 				<key>composeGoalText</key>
 				<string>@8@0:4</string>
 				<key>dealloc</key>
@@ -44560,6 +44578,8 @@
 				<string>@8@0:4</string>
 				<key>isEqual:</key>
 				<string>c12@0:4@8</string>
+				<key>issueDate</key>
+				<string>@8@0:4</string>
 				<key>issueToPlayers:message:</key>
 				<string>v16@0:4@8@12</string>
 				<key>issuingPlayer</key>
@@ -44580,6 +44600,8 @@
 				<string>v20@0:4@8@12@?16</string>
 				<key>loadUIDetailsWithHandler:</key>
 				<string>v12@0:4@?8</string>
+				<key>message</key>
+				<string>@8@0:4</string>
 				<key>methodSignatureForSelector:</key>
 				<string>@12@0:4:8</string>
 				<key>receivingPlayer</key>
@@ -44594,6 +44616,8 @@
 				<string>v16@0:4@8@12</string>
 				<key>smallIconURLString</key>
 				<string>@8@0:4</string>
+				<key>state</key>
+				<string>i8@0:4</string>
 				<key>valueForUndefinedKey:</key>
 				<string>@12@0:4@8</string>
 			</dict>
@@ -44971,6 +44995,10 @@
 				<string>c8@0:4</string>
 				<key>methodSignatureForSelector:</key>
 				<string>@12@0:4:8</string>
+				<key>playerAttributes</key>
+				<string>I8@0:4</string>
+				<key>playerGroup</key>
+				<string>I8@0:4</string>
 				<key>respondsToSelector:</key>
 				<string>c12@0:4:8</string>
 				<key>sender</key>
@@ -45022,8 +45050,12 @@
 				<string>@8@0:4</string>
 				<key>forwardingTargetForSelector:</key>
 				<string>@12@0:4:8</string>
+				<key>groupIdentifier</key>
+				<string>@8@0:4</string>
 				<key>hash</key>
 				<string>I8@0:4</string>
+				<key>identifier</key>
+				<string>@8@0:4</string>
 				<key>imageURL</key>
 				<string>@8@0:4</string>
 				<key>incrementLoadingCountAtomically</key>
@@ -45056,6 +45088,8 @@
 				<string>@8@0:4</string>
 				<key>lock</key>
 				<string>{os_unfair_lock_s=I}8@0:4</string>
+				<key>maxRange</key>
+				<string>I8@0:4</string>
 				<key>methodSignatureForSelector:</key>
 				<string>@12@0:4:8</string>
 				<key>miniImageURL</key>
@@ -45073,6 +45107,8 @@
 				<key>scores</key>
 				<string>@8@0:4</string>
 				<key>setDelegate:</key>
+				<string>v12@0:4@8</string>
+				<key>setIdentifier:</key>
 				<string>v12@0:4@8</string>
 				<key>setInternal:</key>
 				<string>v12@0:4@8</string>
@@ -45096,6 +45132,8 @@
 				<string>v16@0:4@8@12</string>
 				<key>timeScope</key>
 				<string>i8@0:4</string>
+				<key>title</key>
+				<string>@8@0:4</string>
 				<key>valueForUndefinedKey:</key>
 				<string>@12@0:4@8</string>
 			</dict>
@@ -45125,8 +45163,12 @@
 				<string>v12@0:4@8</string>
 				<key>forwardingTargetForSelector:</key>
 				<string>@12@0:4:8</string>
+				<key>groupIdentifier</key>
+				<string>@8@0:4</string>
 				<key>hash</key>
 				<string>I8@0:4</string>
+				<key>identifier</key>
+				<string>@8@0:4</string>
 				<key>imageURL</key>
 				<string>@8@0:4</string>
 				<key>init</key>
@@ -45153,10 +45195,14 @@
 				<string>@8@0:4</string>
 				<key>respondsToSelector:</key>
 				<string>c12@0:4:8</string>
+				<key>setIdentifier:</key>
+				<string>v12@0:4@8</string>
 				<key>setInternal:</key>
 				<string>v12@0:4@8</string>
 				<key>setValue:forUndefinedKey:</key>
 				<string>v16@0:4@8@12</string>
+				<key>title</key>
+				<string>@8@0:4</string>
 				<key>valueForUndefinedKey:</key>
 				<string>@12@0:4@8</string>
 			</dict>
@@ -45311,6 +45357,8 @@
 				<key>isNewToGameCenter</key>
 				<string>c8@0:4</string>
 				<key>isShowingInGameUI</key>
+				<string>c8@0:4</string>
+				<key>isUnderage</key>
 				<string>c8@0:4</string>
 				<key>loadDefaultLeaderboardCategoryIDWithCompletionHandler:</key>
 				<string>v12@0:4@?8</string>
@@ -45707,6 +45755,8 @@
 				<string>@12@0:4^{_NSZone=}8</string>
 				<key>dealloc</key>
 				<string>v8@0:4</string>
+				<key>defaultNumberOfPlayers</key>
+				<string>I8@0:4</string>
 				<key>defaultNumberOfPlayersIsValid</key>
 				<string>c8@0:4</string>
 				<key>description</key>
@@ -45725,6 +45775,8 @@
 				<string>@12@0:4@8</string>
 				<key>internal</key>
 				<string>@8@0:4</string>
+				<key>inviteMessage</key>
+				<string>@8@0:4</string>
 				<key>inviteeResponseHandler</key>
 				<string>@?8@0:4</string>
 				<key>isEqual:</key>
@@ -45739,8 +45791,16 @@
 				<string>c12@0:4I8</string>
 				<key>loadRecipientsWithCompletionHandler:</key>
 				<string>v12@0:4@?8</string>
+				<key>maxPlayers</key>
+				<string>I8@0:4</string>
 				<key>methodSignatureForSelector:</key>
 				<string>@12@0:4:8</string>
+				<key>minPlayers</key>
+				<string>I8@0:4</string>
+				<key>playerAttributes</key>
+				<string>I8@0:4</string>
+				<key>playerGroup</key>
+				<string>I8@0:4</string>
 				<key>playersToInvite</key>
 				<string>@8@0:4</string>
 				<key>recipientResponseHandler</key>
@@ -45751,10 +45811,22 @@
 				<string>v8@0:4</string>
 				<key>respondsToSelector:</key>
 				<string>c12@0:4:8</string>
+				<key>setDefaultNumberOfPlayers:</key>
+				<string>v12@0:4I8</string>
 				<key>setInternal:</key>
+				<string>v12@0:4@8</string>
+				<key>setInviteMessage:</key>
 				<string>v12@0:4@8</string>
 				<key>setInviteeResponseHandler:</key>
 				<string>v12@0:4@?8</string>
+				<key>setMaxPlayers:</key>
+				<string>v12@0:4I8</string>
+				<key>setMinPlayers:</key>
+				<string>v12@0:4I8</string>
+				<key>setPlayerAttributes:</key>
+				<string>v12@0:4I8</string>
+				<key>setPlayerGroup:</key>
+				<string>v12@0:4I8</string>
 				<key>setPlayersToInvite:</key>
 				<string>v12@0:4@8</string>
 				<key>setRecipientResponseHandler:</key>
@@ -46266,6 +46338,8 @@
 			</dict>
 			<key>-</key>
 			<dict>
+				<key>alias</key>
+				<string>@8@0:4</string>
 				<key>cacheKey</key>
 				<string>@8@0:4</string>
 				<key>dealloc</key>
@@ -46285,6 +46359,8 @@
 				<key>forwardingTargetForSelector:</key>
 				<string>@12@0:4:8</string>
 				<key>friends</key>
+				<string>@8@0:4</string>
+				<key>guestIdentifier</key>
 				<string>@8@0:4</string>
 				<key>hasPhoto</key>
 				<string>c8@0:4</string>
@@ -46429,12 +46505,18 @@
 				<string>@12@0:4@8</string>
 				<key>canBeShared</key>
 				<string>c8@0:4</string>
+				<key>category</key>
+				<string>@8@0:4</string>
 				<key>challengeComposeControllerWithMessage:players:completionHandler:</key>
 				<string>@20@0:4@8@12@?16</string>
 				<key>challengeComposeControllerWithPlayers:message:completionHandler:</key>
 				<string>@20@0:4@8@12@?16</string>
+				<key>context</key>
+				<string>Q8@0:4</string>
 				<key>copyWithZone:</key>
 				<string>@12@0:4^{_NSZone=}8</string>
+				<key>date</key>
+				<string>@8@0:4</string>
 				<key>dealloc</key>
 				<string>v8@0:4</string>
 				<key>description</key>
@@ -46442,6 +46524,8 @@
 				<key>encodeWithCoder:</key>
 				<string>v12@0:4@8</string>
 				<key>fetchSharingInfo</key>
+				<string>@8@0:4</string>
+				<key>formattedValue</key>
 				<string>@8@0:4</string>
 				<key>forwardingTargetForSelector:</key>
 				<string>@12@0:4:8</string>
@@ -46473,26 +46557,40 @@
 				<string>c12@0:4@8</string>
 				<key>issueChallengeToPlayers:message:</key>
 				<string>v16@0:4@8@12</string>
+				<key>leaderboardIdentifier</key>
+				<string>@8@0:4</string>
 				<key>methodSignatureForSelector:</key>
 				<string>@12@0:4:8</string>
 				<key>player</key>
 				<string>@8@0:4</string>
 				<key>playerID</key>
 				<string>@8@0:4</string>
+				<key>rank</key>
+				<string>i8@0:4</string>
 				<key>reportScoreWithCompletionHandler:</key>
 				<string>v12@0:4@?8</string>
 				<key>respondsToSelector:</key>
 				<string>c12@0:4:8</string>
+				<key>setCategory:</key>
+				<string>v12@0:4@8</string>
+				<key>setContext:</key>
+				<string>v16@0:4Q8</string>
 				<key>setGame:</key>
 				<string>v12@0:4@8</string>
 				<key>setInternal:</key>
 				<string>v12@0:4@8</string>
+				<key>setLeaderboardIdentifier:</key>
+				<string>v12@0:4@8</string>
 				<key>setShouldSetDefaultLeaderboard:</key>
 				<string>v12@0:4c8</string>
+				<key>setValue:</key>
+				<string>v16@0:4q8</string>
 				<key>setValue:forUndefinedKey:</key>
 				<string>v16@0:4@8@12</string>
 				<key>shouldSetDefaultLeaderboard</key>
 				<string>c8@0:4</string>
+				<key>value</key>
+				<string>q8@0:4</string>
 				<key>valueForUndefinedKey:</key>
 				<string>@12@0:4@8</string>
 			</dict>
@@ -46669,9 +46767,15 @@
 			<dict>
 				<key>cancelWithLocalizableMessageKey:arguments:completionHandler:</key>
 				<string>v20@0:4@8@12@?16</string>
+				<key>completionDate</key>
+				<string>@8@0:4</string>
+				<key>data</key>
+				<string>@8@0:4</string>
 				<key>dealloc</key>
 				<string>v8@0:4</string>
 				<key>description</key>
+				<string>@8@0:4</string>
+				<key>exchangeID</key>
 				<string>@8@0:4</string>
 				<key>forwardingTargetForSelector:</key>
 				<string>@12@0:4:8</string>
@@ -46699,6 +46803,8 @@
 				<string>v24@0:4@8@12@16@?20</string>
 				<key>respondsToSelector:</key>
 				<string>c12@0:4:8</string>
+				<key>sendDate</key>
+				<string>@8@0:4</string>
 				<key>sender</key>
 				<string>@8@0:4</string>
 				<key>setInternal:</key>
@@ -46715,6 +46821,8 @@
 				<string>v16@0:4@8@12</string>
 				<key>status</key>
 				<string>c8@0:4</string>
+				<key>timeoutDate</key>
+				<string>@8@0:4</string>
 				<key>valueForUndefinedKey:</key>
 				<string>@12@0:4@8</string>
 			</dict>
@@ -46730,6 +46838,8 @@
 			</dict>
 			<key>-</key>
 			<dict>
+				<key>data</key>
+				<string>@8@0:4</string>
 				<key>dealloc</key>
 				<string>v8@0:4</string>
 				<key>description</key>
@@ -46753,6 +46863,8 @@
 				<key>methodSignatureForSelector:</key>
 				<string>@12@0:4:8</string>
 				<key>recipient</key>
+				<string>@8@0:4</string>
+				<key>replyDate</key>
 				<string>@8@0:4</string>
 				<key>respondsToSelector:</key>
 				<string>c12@0:4:8</string>
@@ -46808,6 +46920,8 @@
 				<key>compare:</key>
 				<string>i12@0:4@8</string>
 				<key>completedExchanges</key>
+				<string>@8@0:4</string>
+				<key>creationDate</key>
 				<string>@8@0:4</string>
 				<key>currentParticipant</key>
 				<string>@8@0:4</string>
@@ -46865,8 +46979,12 @@
 				<string>c8@0:4</string>
 				<key>localPlayerParticipant</key>
 				<string>@8@0:4</string>
+				<key>matchData</key>
+				<string>@8@0:4</string>
 				<key>matchDataMaximumSize</key>
 				<string>I8@0:4</string>
+				<key>matchID</key>
+				<string>@8@0:4</string>
 				<key>message</key>
 				<string>@8@0:4</string>
 				<key>methodSignatureForSelector:</key>
@@ -47034,6 +47152,8 @@
 				<string>c8@0:4</string>
 				<key>lastTurnDate</key>
 				<string>@8@0:4</string>
+				<key>matchOutcome</key>
+				<string>i8@0:4</string>
 				<key>matchOutcomeString</key>
 				<string>@8@0:4</string>
 				<key>matchStatusString</key>
@@ -47046,12 +47166,16 @@
 				<string>@8@0:4</string>
 				<key>respondsToSelector:</key>
 				<string>c12@0:4:8</string>
+				<key>setMatchOutcome:</key>
+				<string>v12@0:4i8</string>
 				<key>setStatus:</key>
 				<string>v12@0:4i8</string>
 				<key>setValue:forUndefinedKey:</key>
 				<string>v16@0:4@8@12</string>
 				<key>status</key>
 				<string>i8@0:4</string>
+				<key>timeoutDate</key>
+				<string>@8@0:4</string>
 				<key>valueForUndefinedKey:</key>
 				<string>@12@0:4@8</string>
 			</dict>

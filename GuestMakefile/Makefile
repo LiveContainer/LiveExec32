@@ -205,6 +205,11 @@ after-UIKit-all::
 # Compatibility policy creators deliberately return NULL when unavailable.
 Security_CFLAGS = -Wno-nonnull
 
+# Forwarded GameKit properties are absent from class_copyMethodList captures.
+# Missing bridges must not silently turn into guest-only synthesized storage.
+GameKit_CFLAGS = -Xclang -disable-objc-default-synthesize-properties \
+  -Werror=objc-property-implementation
+
 # These SDK headers require ARC for weak Objective-C properties.
 MapKit_CFLAGS = -fobjc-arc
 StoreKit_CFLAGS = -fobjc-arc

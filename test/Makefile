@@ -439,6 +439,7 @@ $(eval $(call lc32_guest_test,lc32-fast-enumeration,fast_enumeration.m,Foundatio
 $(eval $(call lc32_guest_test,lc32-filesystem-capacity,filesystem_capacity.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-gamecontroller-snapshot,gamecontroller_snapshot.m,GameController Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-gamekit-achievement-properties,gamekit_achievement_properties.m,GameKit Foundation LC32))
+$(eval $(call lc32_guest_test,lc32-gamekit-properties,gamekit_properties.m,GameKit Foundation LC32))
 $(eval $(call lc32_test,lc32-foundation-null-utf8,foundation_null_utf8.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-foundation-constants,foundation_constants.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-foundation-zone,foundation_zone.m,Foundation))
@@ -577,6 +578,9 @@ lc32-imageio-roundtrip_CFLAGS := -fno-objc-arc -Wall -Wextra -Werror
 lc32-imageio-metadata_CFLAGS := -fno-objc-arc -Wall -Wextra -Werror
 lc32-gamekit-achievement-properties_USE_MODULES := 1
 lc32-gamekit-achievement-properties_CFLAGS := -fno-objc-arc \
+	-I$(abspath ../GuestFrameworks) -I$(abspath ../include)
+lc32-gamekit-properties_USE_MODULES := 1
+lc32-gamekit-properties_CFLAGS := -fno-objc-arc \
 	-I$(abspath ../GuestFrameworks) -I$(abspath ../include)
 lc32-object-out-parameters_CFLAGS := -fno-objc-arc
 lc32-property-list-serialization_CFLAGS := -fno-objc-arc -Wno-deprecated-declarations
