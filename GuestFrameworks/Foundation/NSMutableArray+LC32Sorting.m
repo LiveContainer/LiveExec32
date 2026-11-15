@@ -1,5 +1,21 @@
 #import <Foundation/Foundation.h>
 
+@implementation NSArray (LC32Sorting)
+- (NSArray *)sortedArrayUsingFunction:(NSInteger (NS_NOESCAPE *)(id, id, void *))compare
+                             context:(void *)context {
+    return [self sortedArrayUsingComparator:^NSComparisonResult(id first, id second) {
+        return compare(first, second, context);
+    }];
+}
+
+- (NSArray *)sortedArrayUsingFunction:(NSInteger (NS_NOESCAPE *)(id, id, void *))compare
+                             context:(void *)context hint:(NSData *)hint {
+    // The hint only accelerates sorting; never expose its native buffer or
+    // the guest callback/context across the ABI boundary.
+    return [self sortedArrayUsingFunction:compare context:context];
+}
+@end
+
 @implementation NSMutableArray (LC32Sorting)
 
 - (void)sortUsingFunction:(NSInteger (NS_NOESCAPE *)(id, id, void *))compare

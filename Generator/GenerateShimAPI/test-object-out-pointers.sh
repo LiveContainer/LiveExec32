@@ -157,6 +157,53 @@ for selector in (
 require("backgroundTimeRemaining" in application,
         "Background-task filtering accidentally removed other UIApplication methods")
 
+# Manual adapters keep buffers and bundle class lookup in the guest. Do not
+# emit duplicate implementations that return native addresses or class peers.
+for class_name, manual_selectors in {
+    "NSString": (
+        "UTF8String", "cString", "cStringUsingEncoding:",
+        "getCString:maxLength:encoding:", "fileSystemRepresentation",
+        "getFileSystemRepresentation:maxLength:",
+    ),
+    "NSFileManager": (
+        "fileSystemRepresentationWithPath:",
+        "getFileSystemRepresentation:maxLength:withPath:",
+    ),
+    "NSBundle": ("classNamed:",),
+}.items():
+    source = (root / f"full/Foundation/{class_name}.m").read_text()
+    instance_selectors = set()
+    for declaration in re.findall(r"(?m)^- ([^\n]+) \{$", source):
+        selector = "".join(re.findall(r"([A-Za-z][A-Za-z0-9_]*:)", declaration))
+        instance_selectors.add(selector or declaration.rsplit(")", 1)[1].strip())
+    for selector in manual_selectors:
+        require(selector not in instance_selectors,
+                f"Manual guest adapter was generated: -[{class_name} {selector}]")
+    unrelated = {"NSString": "cStringLength", "NSBundle": "bundlePath",
+                 "NSFileManager": "stringWithFileSystemRepresentation:length:"}[class_name]
+    require(unrelated in instance_selectors,
+            f"Manual-adapter filtering removed an unrelated method: {unrelated}")
+
+# Categories supply the unsupported public pointer/aggregate APIs; generated
+# property synthesis must not silently replace them with guest-only ivars.
+for framework, cls, selectors, dynamic in (
+    ("UIKit", "UIBezierPath", ("bezierPathWithCGPath:", "CGPath", "setCGPath:"), "CGPath"),
+    ("MapKit", "MKMapView", ("region", "setRegion:", "setRegion:animated:"), "region"),
+    ("QuartzCore", "CALayer", ("renderInContext:",), None),
+    ("Foundation", "NSValue", ("valueWithSCNVector3:", "SCNVector3Value",
+        "valueWithSCNVector4:", "SCNVector4Value", "valueWithSCNMatrix4:", "SCNMatrix4Value",
+        "valueWithMKCoordinateSpan:", "MKCoordinateSpanValue"), None),
+    ("CoreFoundation", "NSArray", ("sortedArrayUsingFunction:context:",
+        "sortedArrayUsingFunction:context:hint:"), None),
+):
+    source = (root / f"full/{framework}/{cls}.m").read_text()
+    declarations = re.findall(r"(?m)^[+-] ([^\n]+) \{$", source)
+    generated = {"".join(re.findall(r"([A-Za-z][A-Za-z0-9_]*:)", decl))
+                 or decl.rsplit(")", 1)[1].strip() for decl in declarations}
+    require(not generated.intersection(selectors), f"Duplicate manual methods in {cls}")
+    if dynamic:
+        require(f"@dynamic {dynamic};" in source, f"Guest property synthesis in {cls}")
+
 for mode in ("captured", "runtime", "full"):
     log = (root / f"{mode}.log").read_text()
     summaries = re.findall(

@@ -444,6 +444,7 @@ $(eval $(call lc32_guest_test,lc32-foundation-constants,foundation_constants.m,F
 $(eval $(call lc32_guest_test,lc32-foundation-zone,foundation_zone.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-guest-proxy-lifetime,guest_proxy_lifetime.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-host-class-publication,host_class_publication.m,Foundation LC32))
+$(eval $(call lc32_guest_test,lc32-bundle-class-lookup,bundle_class_lookup.m,Foundation))
 host_class_publication.m_CFLAGS := -O2
 $(eval $(call lc32_guest_test,lc32-storekit-delegate,storekit_delegate.m,Foundation StoreKit))
 $(eval $(call lc32_guest_test,lc32-uikit-menu-classes,uikit_menu_classes.m,Foundation UIKit))
@@ -490,6 +491,13 @@ $(eval $(call lc32_guest_test,lc32-coregraphics-fill-color,coregraphics_fill_col
 $(eval $(call lc32_guest_test,lc32-coregraphics-geometry,coregraphics_geometry.c,CoreGraphics))
 $(eval $(call lc32_guest_test,lc32-coregraphics-gradient,coregraphics_gradient.c,CoreGraphics CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-quartzcore-transform,quartzcore_transform.c,QuartzCore CoreGraphics))
+$(eval $(call lc32_guest_test,lc32-graphics-method-adapters,graphics_method_adapters.m,Foundation UIKit QuartzCore CoreGraphics))
+$(eval $(call lc32_guest_test,lc32-mapkit-methods,mapkit_methods.m,Foundation MapKit CoreLocation UIKit LC32))
+$(eval $(call lc32_guest_test,lc32-framework-value-methods,framework_value_methods.m,Foundation SceneKit MapKit CoreLocation UIKit LC32))
+lc32-mapkit-methods_USE_MODULES := 1
+lc32-mapkit-methods_CFLAGS := -fno-objc-arc -I$(abspath ../GuestFrameworks) -I$(abspath ../include)
+lc32-framework-value-methods_USE_MODULES := 1
+lc32-framework-value-methods_CFLAGS := -fno-objc-arc -I$(abspath ../GuestFrameworks) -I$(abspath ../include)
 $(eval $(call lc32_guest_test,lc32-coretext-bridge,coretext_bridge.m,CoreText CoreGraphics CoreFoundation Foundation))
 $(eval $(call lc32_guest_test,lc32-coretext-font-descriptor,coretext_font_descriptor.c,CoreText CoreFoundation Foundation))
 $(eval $(call lc32_guest_test,lc32-coretext-graphics-font,coretext_graphics_font.c,CoreText CoreGraphics CoreFoundation Foundation))

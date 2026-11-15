@@ -17,8 +17,11 @@ typedef NS_ENUM(NSUInteger, LC32KnownStruct) {
     LC32KnownStructCGPoint,
     LC32KnownStructCGRect,
     LC32KnownStructCGSize,
+    LC32KnownStructCGVector,
+    LC32KnownStructCLLocationCoordinate2D,
     LC32KnownStructNSRange,
     LC32KnownStructUIEdgeInsets,
+    LC32KnownStructUIOffset,
 };
 
 static const char *LC32UnqualifiedEncoding(const char *encoding) {
@@ -84,6 +87,15 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
     if(!strncmp(encoding, "{CGSize=", sizeof("{CGSize=") - 1)) {
         return LC32KnownStructCGSize;
     }
+    // These named two-component PODs use the bridge's existing two-double
+    // aggregate path. Require the actual public layouts, not just a name.
+    if(!strcmp(encoding, "{CGVector=ff}") ||
+       !strcmp(encoding, "{CGVector=dd}")) {
+        return LC32KnownStructCGVector;
+    }
+    if(!strcmp(encoding, "{CLLocationCoordinate2D=dd}")) {
+        return LC32KnownStructCLLocationCoordinate2D;
+    }
     if(!strncmp(encoding, "{_NSRange=", sizeof("{_NSRange=") - 1) ||
        !strncmp(encoding, "{NSRange=", sizeof("{NSRange=") - 1)) {
         return LC32KnownStructNSRange;
@@ -91,17 +103,29 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
     if(!strncmp(encoding, "{UIEdgeInsets=", sizeof("{UIEdgeInsets=") - 1)) {
         return LC32KnownStructUIEdgeInsets;
     }
+    if(!strcmp(encoding, "{UIOffset=ff}") ||
+       !strcmp(encoding, "{UIOffset=dd}")) {
+        return LC32KnownStructUIOffset;
+    }
     return LC32KnownStructNone;
 }
 
 static BOOL LC32KnownStructHasFixedLayout(LC32KnownStruct type) {
-    return type == LC32KnownStructCMTime || type == LC32KnownStructCMTimeRange;
+    return type == LC32KnownStructCMTime || type == LC32KnownStructCMTimeRange ||
+           type == LC32KnownStructCLLocationCoordinate2D;
+}
+
+static BOOL LC32KnownStructIsSimpleExtension(LC32KnownStruct type) {
+    return type == LC32KnownStructCGVector || type == LC32KnownStructUIOffset ||
+           type == LC32KnownStructCLLocationCoordinate2D;
 }
 
 static unsigned LC32KnownStructFloatCount(LC32KnownStruct type) {
     switch(type) {
         case LC32KnownStructCGPoint:
         case LC32KnownStructCGSize:
+        case LC32KnownStructCGVector:
+        case LC32KnownStructUIOffset:
             return 2;
         case LC32KnownStructCGRect:
         case LC32KnownStructUIEdgeInsets:
@@ -131,6 +155,8 @@ static unsigned LC32KnownStructFloatCount(LC32KnownStruct type) {
     const LC32KnownStruct knownStruct = LC32KnownStructForEncoding(signature);
     if(knownStruct == LC32KnownStructCMTime) return @"CMTime";
     if(knownStruct == LC32KnownStructCMTimeRange) return @"CMTimeRange";
+    if(knownStruct == LC32KnownStructCLLocationCoordinate2D)
+        return @"CLLocationCoordinate2D";
     if(LC32EncodingRepresentsCGColorRef(signature)) return @"CGColorRef";
     if(LC32EncodingRepresentsCGImageRef(signature)) return @"CGImageRef";
     if(LC32EncodingIsOpaqueCFObjectPointer(signature)) {
@@ -656,15 +682,42 @@ static BOOL LC32MethodReturnsNotFoundIndex(NSString *className,
     //[self.lines addObject:[NSString stringWithFormat:@"// %@", self.method.description]];
     [self.lines addObject:[NSString stringWithFormat:@"%@ {", self.prettyName]];
 
+    // Do not newly enable a simple-struct API that exceeds the generic host
+    // trampoline's nine argument slots or eight FP registers. It has no typed
+    // FP stack-spill path yet (notably long private CLLocation initializers).
+    BOOL usesSimpleStruct = LC32KnownStructIsSimpleExtension(
+        LC32KnownStructForEncoding(self.method.returnType));
+    NSUInteger floatingSlots = 0;
+    for(MethodParameter *parameter in self.parameters) {
+        const LC32KnownStruct type = LC32KnownStructForEncoding(parameter.signature);
+        usesSimpleStruct |= LC32KnownStructIsSimpleExtension(type);
+        if(type == LC32KnownStructCGPoint || type == LC32KnownStructCGSize ||
+           LC32KnownStructIsSimpleExtension(type)) {
+            floatingSlots += 2;
+        } else if(type == LC32KnownStructCGRect || type == LC32KnownStructUIEdgeInsets) {
+            floatingSlots += 4;
+        } else if(parameter.signature[0] == 'f' || parameter.signature[0] == 'd') {
+            floatingSlots++;
+        }
+    }
+    if(usesSimpleStruct && (self.parameters.count > 9 || floatingSlots > 8)) {
+        [self.lines addObject:
+            @"  /* unhandled type: simple aggregate exceeds host argument register/slot budget */"];
+    }
+
     // debug: log calls
     [self.lines addObject:@"  if(LC32ObjCTraceEnabled()) printf(\"DBG: call [%s %s]\\n\", class_getName(self.class), sel_getName(_cmd));"];
 
-    // pull host selector
+    // A guest swizzle can move this IMP to an alias (for example Everyplay's
+    // renderbufferStorageEveryplay:fromDrawable:). The implementation still
+    // represents the original host API, regardless of the incoming _cmd.
+    // Resolving _cmd would also permanently poison this IMP's selector cache
+    // when its first invocation is through an alias.
     [self.lines addObject:
         @"  static uint64_t _host_cmd __attribute__((aligned(8)));" ];
     [self.lines addObject:[NSString stringWithFormat:
-        @"  uint64_t host_cmd = LC32CachedHostSelector(&_host_cmd, _cmd, %d);",
-        self.method.returnType[0] == '{']];
+        @"  uint64_t host_cmd = LC32CachedHostSelector(&_host_cmd, @selector(%@), %d);",
+        self.method.selectorString, self.method.returnType[0] == '{']];
 
     // pull host objects
     for(MethodParameter *param in self.parameters) {
@@ -859,6 +912,24 @@ static BOOL LC32MethodReturnsNotFoundIndex(NSString *className,
 static BOOL LC32MethodHasManualAdapter(NSString *className,
                                       LC32ObjCMethod *method) {
     NSString *selector = method.selectorString;
+    if([className isEqualToString:@"CALayer"] && method.isInstanceMethod &&
+       [selector isEqualToString:@"renderInContext:"]) return YES;
+    if([className isEqualToString:@"MKMapView"] && method.isInstanceMethod) {
+        return [selector isEqualToString:@"region"] ||
+               [selector isEqualToString:@"setRegion:"] ||
+               [selector isEqualToString:@"setRegion:animated:"];
+    }
+    if([className isEqualToString:@"NSValue"] &&
+       (method.isInstanceMethod
+        ? [@[@"SCNVector3Value", @"SCNVector4Value", @"SCNMatrix4Value", @"MKCoordinateSpanValue"] containsObject:selector]
+        : [@[@"valueWithSCNVector3:", @"valueWithSCNVector4:", @"valueWithSCNMatrix4:", @"valueWithMKCoordinateSpan:"] containsObject:selector])) {
+        return YES;
+    }
+    if([className isEqualToString:@"UIBezierPath"]) {
+        return method.isInstanceMethod
+            ? [selector isEqualToString:@"CGPath"] || [selector isEqualToString:@"setCGPath:"]
+            : [selector isEqualToString:@"bezierPathWithCGPath:"];
+    }
     if([className isEqualToString:@"AVAssetImageGenerator"] &&
        method.isInstanceMethod &&
        [selector isEqualToString:@"copyCGImageAtTime:actualTime:error:"]) {
@@ -879,7 +950,9 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
         return (!method.isInstanceMethod &&
                 [selector isEqualToString:@"arrayWithObjects:"]) ||
                (method.isInstanceMethod &&
-                [selector isEqualToString:@"initWithObjects:"]);
+                ([selector isEqualToString:@"initWithObjects:"] ||
+                 [selector isEqualToString:@"sortedArrayUsingFunction:context:"] ||
+                 [selector isEqualToString:@"sortedArrayUsingFunction:context:hint:"]));
     }
     if([className isEqualToString:@"NSSet"]) {
         return (!method.isInstanceMethod &&
@@ -914,6 +987,12 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
         return [selector isEqualToString:@"raise:format:"] ||
                [selector isEqualToString:@"raise:format:arguments:"];
     }
+    if([className isEqualToString:@"NSFileManager"] &&
+       method.isInstanceMethod) {
+        return [selector isEqualToString:@"fileSystemRepresentationWithPath:"] ||
+               [selector isEqualToString:
+                   @"getFileSystemRepresentation:maxLength:withPath:"];
+    }
     if([className isEqualToString:@"NSString"]) {
         if(!method.isInstanceMethod) {
             return [selector isEqualToString:@"stringWithFormat:"] ||
@@ -922,7 +1001,14 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
                    [selector isEqualToString:
                        @"stringWithBytes:length:encoding:"];
         }
+        // Returned bytes and caller-owned output buffers must stay in guest
+        // memory, including inherited calls from NSTaggedPointerString.
         return [selector isEqualToString:@"UTF8String"] ||
+               [selector isEqualToString:@"cString"] ||
+               [selector isEqualToString:@"cStringUsingEncoding:"] ||
+               [selector isEqualToString:@"getCString:maxLength:encoding:"] ||
+               [selector isEqualToString:@"fileSystemRepresentation"] ||
+               [selector isEqualToString:@"getFileSystemRepresentation:maxLength:"] ||
                [selector isEqualToString:@"getCharacters:"] ||
                [selector isEqualToString:@"getCharacters:range:"] ||
                [selector isEqualToString:
@@ -1027,6 +1113,11 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
         return YES;
     }
     if([className isEqualToString:@"NSBundle"]) {
+        if(method.isInstanceMethod &&
+           [selector isEqualToString:@"classNamed:"]) {
+            // Load and resolve guest classes, never a native superclass proxy.
+            return YES;
+        }
         if(!method.isInstanceMethod &&
            [selector isEqualToString:@"mainBundle"]) {
             return YES;
@@ -1305,6 +1396,7 @@ static BOOL LC32MethodHasIndirectObjectBuffer(NSString *className,
     [string appendFormat:@"#endif\n"];
     [string appendFormat:@"#import <LC32/LC32.h>\n"];
     [string appendString:@"#import <CoreMedia/CoreMedia.h>\n"];
+    [string appendString:@"#import <CoreLocation/CLLocation.h>\n"];
     [string appendFormat:@"#import <CoreGraphics/CoreGraphics+LC32.h>\n"];
     [string appendFormat:@"#import <UIKit/UIKit+LC32.h>\n"];
     [string appendString:
@@ -1347,6 +1439,12 @@ static BOOL LC32MethodHasIndirectObjectBuffer(NSString *className,
     }
     if([self.className isEqualToString:@"UIImage"]) {
         [string appendString:@"@dynamic CGImage;\n"];
+    }
+    if([self.className isEqualToString:@"UIBezierPath"]) {
+        [string appendString:@"@dynamic CGPath;\n"];
+    }
+    if([self.className isEqualToString:@"MKMapView"]) {
+        [string appendString:@"@dynamic region;\n"];
     }
     if([self.className isEqualToString:@"UIScreen"]) {
         [string appendString:@"@dynamic bounds, applicationFrame, scale;\n"];

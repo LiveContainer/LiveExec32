@@ -11,6 +11,16 @@ trap 'rm -rf "$work"' EXIT HUP INT TERM
 cat > "$work/expected" <<'EOF'
 NSDefaultRunLoopMode Foundation CoreFoundation
 NSFontAttributeName Foundation UIKit
+OBJC_CLASS_$_NSLayoutAnchor UIKit Foundation
+OBJC_METACLASS_$_NSLayoutAnchor UIKit Foundation
+OBJC_CLASS_$_NSLayoutConstraint UIKit Foundation
+OBJC_METACLASS_$_NSLayoutConstraint UIKit Foundation
+OBJC_CLASS_$_NSLayoutDimension UIKit Foundation
+OBJC_METACLASS_$_NSLayoutDimension UIKit Foundation
+OBJC_CLASS_$_NSLayoutXAxisAnchor UIKit Foundation
+OBJC_METACLASS_$_NSLayoutXAxisAnchor UIKit Foundation
+OBJC_CLASS_$_NSLayoutYAxisAnchor UIKit Foundation
+OBJC_METACLASS_$_NSLayoutYAxisAnchor UIKit Foundation
 NSGregorianCalendar Foundation CoreFoundation
 NSBuddhistCalendar Foundation CoreFoundation
 NSChineseCalendar Foundation CoreFoundation
@@ -82,8 +92,8 @@ kCFStreamSocketSecurityLevelTLSv1 CFNetwork CoreFoundation
 EOF
 
 expected_count=$(wc -l < "$work/expected" | tr -d ' ')
-if [ "$expected_count" -ne 70 ]; then
-    echo "Framework ownership manifest changed: expected 70 moves, got $expected_count" >&2
+if [ "$expected_count" -ne 80 ]; then
+    echo "Framework ownership manifest changed: expected 80 moves, got $expected_count" >&2
     exit 1
 fi
 

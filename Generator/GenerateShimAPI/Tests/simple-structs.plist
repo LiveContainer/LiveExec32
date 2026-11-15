@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>UIKit</key>
+	<dict>
+		<key>LC32SimpleStructFixture</key>
+		<dict>
+			<key>-</key>
+			<dict>
+				<key>vector</key>
+				<string>{CGVector=ff}8@0:4</string>
+				<key>setVector:</key>
+				<string>v16@0:4{CGVector=ff}8</string>
+				<key>offset</key>
+				<string>{UIOffset=ff}8@0:4</string>
+				<key>setOffset:</key>
+				<string>v16@0:4{UIOffset=ff}8</string>
+				<key>coordinate</key>
+				<string>{CLLocationCoordinate2D=dd}8@0:4</string>
+				<key>setCoordinate:</key>
+				<string>v24@0:4{CLLocationCoordinate2D=dd}8</string>
+				<key>coordinateWithVector:offset:scale:</key>
+				<string>{CLLocationCoordinate2D=dd}28@0:4{CGVector=ff}8{UIOffset=ff}16f24</string>
+				<key>point</key><string>{CGPoint=ff}8@0:4</string>
+				<key>setPoint:</key><string>v16@0:4{CGPoint=ff}8</string>
+				<key>size</key><string>{CGSize=ff}8@0:4</string>
+				<key>setSize:</key><string>v16@0:4{CGSize=ff}8</string>
+				<key>rect</key><string>{CGRect={CGPoint=ff}{CGSize=ff}}8@0:4</string>
+				<key>setRect:</key><string>v24@0:4{CGRect={CGPoint=ff}{CGSize=ff}}8</string>
+				<key>insets</key><string>{UIEdgeInsets=ffff}8@0:4</string>
+				<key>setInsets:</key><string>v24@0:4{UIEdgeInsets=ffff}8</string>
+				<key>transform</key><string>{CGAffineTransform=ffffff}8@0:4</string>
+				<key>setTransform:</key><string>v32@0:4{CGAffineTransform=ffffff}8</string>
+			</dict>
+		</dict>
+		<key>LC32UnsupportedStructFixture</key>
+		<dict>
+			<key>-</key>
+			<dict>
+				<key>wrongVector</key>
+				<string>{CGVector=ii}8@0:4</string>
+				<key>wrongOffset</key>
+				<string>{UIOffset=ii}8@0:4</string>
+				<key>wrongCoordinate</key>
+				<string>{CLLocationCoordinate2D=ff}8@0:4</string>
+				<key>anonymousPair</key>
+				<string>{?=dd}8@0:4</string>
+				<key>floatVector3</key>
+				<string>{SCNVector3=fff}8@0:4</string>
+				<key>matrix</key>
+				<string>{CATransform3D=ffffffffffffffff}8@0:4</string>
+				<key>setCoordinatePointer:</key>
+				<string>v12@0:4^{CLLocationCoordinate2D=dd}8</string>
+				<key>setNineFloatingSlots:a:b:c:d:e:f:g:</key>
+				<string>v52@0:4{CGVector=ff}8f16f20f24f28f32f36f40</string>
+				<key>setTenArguments:a:b:c:d:e:f:g:h:i:</key>
+				<string>v52@0:4{CGVector=ff}8I16I20I24I28I32I36I40I44I48</string>
+			</dict>
+		</dict>
+	</dict>
+</dict>
+</plist>

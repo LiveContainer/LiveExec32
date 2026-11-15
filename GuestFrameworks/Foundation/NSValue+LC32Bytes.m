@@ -122,7 +122,24 @@ static void LC32CopyCMTimeRange(const void *source, void *destination) {
     memcpy(destination, source, sizeof(CMTimeRange));
 }
 
+// SceneKit uses float even on ARM64 iOS/Catalyst; MKCoordinateSpan is two
+// doubles on both ABIs. These boxes need no CGFloat widening.
+static void LC32Copy12(const void *source, void *destination) {
+    memcpy(destination, source, 12);
+}
+static void LC32Copy16(const void *source, void *destination) {
+    memcpy(destination, source, 16);
+}
+static void LC32Copy64(const void *source, void *destination) {
+    memcpy(destination, source, 64);
+}
+
 static const LC32ValueLayout LC32ValueLayouts[] = {
+    { "{SCNVector3=fff}", "{SCNVector3=fff}", 12, 12, LC32Copy12, LC32Copy12 },
+    { "{SCNVector4=ffff}", "{SCNVector4=ffff}", 16, 16, LC32Copy16, LC32Copy16 },
+    { "{SCNMatrix4=ffffffffffffffff}", "{SCNMatrix4=ffffffffffffffff}",
+        64, 64, LC32Copy64, LC32Copy64 },
+    { "{?=dd}", "{?=dd}", 16, 16, LC32Copy16, LC32Copy16 },
     {
         .guestEncoding = @encode(CMTime),
         .hostEncoding = @encode(CMTime),

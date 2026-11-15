@@ -52,6 +52,17 @@ int main(void) {
     @autoreleasepool {
         SortContext context = { .direction = 1 };
         context.expected = &context;
+        NSArray *immutable = @[@3, @1, @2, @1];
+        NSArray *sorted = [immutable sortedArrayUsingFunction:compareNumbers context:&context];
+        check("array-sort-immutable-result", [sorted isEqual:@[@1, @1, @2, @3]]);
+        check("array-sort-immutable-input", [immutable isEqual:@[@3, @1, @2, @1]]);
+        context.direction = -1;
+        sorted = [immutable sortedArrayUsingFunction:compareNumbers context:&context
+            hint:immutable.sortedArrayHint];
+        check("array-sort-immutable-hint", [sorted isEqual:@[@3, @2, @1, @1]]);
+        sorted = [immutable sortedArrayUsingFunction:compareNumbers context:NULL hint:nil];
+        check("array-sort-immutable-null-hint", [sorted isEqual:@[@1, @1, @2, @3]]);
+        context.direction = 1;
         NSMutableArray *values = [NSMutableArray arrayWithObjects:@3, @1, @2, @1, nil];
         id original = values;
         [values sortUsingFunction:compareNumbers context:&context];

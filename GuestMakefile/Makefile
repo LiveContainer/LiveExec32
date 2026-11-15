@@ -177,7 +177,7 @@ OpenGLES_LDFLAGS = \
   -compatibility_version 1.0.0 \
   -current_version 1.0.0
 
-QuartzCore_FRAMEWORKS = LC32
+QuartzCore_FRAMEWORKS = LC32 CoreGraphics
 QuartzCore_LDFLAGS = \
   -compatibility_version 1.6.0 \
   -current_version 1.6.0

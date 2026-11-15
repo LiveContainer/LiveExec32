@@ -1,4 +1,11 @@
 #import <MapKit/MapKit.h>
+#import <LC32/LC32.h>
+
+__attribute__((constructor))
+static void LC32InitializeMapKit(void) {
+    // NSValue's MapKit categories must exist before the first boxed coordinate.
+    LC32LoadHostFramework("MapKit");
+}
 
 #define LC32_MAPKIT_STRING(symbol, value) \
     NSString *const LC32_MAPKIT_##symbol __asm__("_" #symbol) = value;

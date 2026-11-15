@@ -147,6 +147,18 @@
 
 	<key>JavaScriptCore/MyClass</key>
 	<string>-</string>
+	<!-- UIKit declares these classes, but iOS 10 exports their class and
+	     metaclass symbols from Foundation. Preserve that two-level ownership. -->
+	<key>UIKit/NSLayoutAnchor</key>
+	<string>Foundation</string>
+	<key>UIKit/NSLayoutConstraint</key>
+	<string>Foundation</string>
+	<key>UIKit/NSLayoutDimension</key>
+	<string>Foundation</string>
+	<key>UIKit/NSLayoutXAxisAnchor</key>
+	<string>Foundation</string>
+	<key>UIKit/NSLayoutYAxisAnchor</key>
+	<string>Foundation</string>
 	<key>UIKit/NSFileProviderExtension</key>
 	<string>FileProvider</string>
 </dict>
