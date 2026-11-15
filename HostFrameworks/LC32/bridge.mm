@@ -5500,11 +5500,13 @@ static u64 LC32ReadGuestScalarIvar(
         case 's': return (u64)(int64_t)(int16_t)
             callbacks->MemoryRead16(address);
         case 'I':
+        case 'f':
         case 'L': return callbacks->MemoryRead32(address);
         case 'i':
         case 'l': return (u64)(int64_t)(int32_t)
             callbacks->MemoryRead32(address);
-        case 'Q': return callbacks->MemoryRead64(address);
+        case 'Q':
+        case 'd': return callbacks->MemoryRead64(address);
         case 'q': return (u64)(int64_t)callbacks->MemoryRead64(address);
         default: return 0;
     }
@@ -5522,9 +5524,11 @@ static void LC32WriteGuestScalarIvar(
         case 's': callbacks->MemoryWrite16(address, (u16)value); break;
         case 'I':
         case 'L':
+        case 'f':
         case 'i':
         case 'l': callbacks->MemoryWrite32(address, (u32)value); break;
         case 'Q':
+        case 'd':
         case 'q': callbacks->MemoryWrite64(address, value); break;
         default: break;
     }
@@ -5558,6 +5562,23 @@ u64 LC32GetGuestScalarIvar(id self, SEL _cmd) {
     LC32GuestIvarBinding binding;
     if(!LC32GuestIvarBindingForReceiver(self, _cmd, &binding)) return 0;
     return LC32ReadGuestScalarIvar([self guest_self], binding);
+}
+
+// Native KVC uses FP registers for these accessors, unlike the integer IMPs.
+// Copy the bits without widening guest float storage (including CGFloat).
+template<typename T>
+static void LC32SetGuestFloatingIvar(id self, SEL _cmd, T value) {
+    u64 bits = 0;
+    memcpy(&bits, &value, sizeof(value));
+    LC32SetGuestScalarIvar(self, _cmd, bits);
+}
+
+template<typename T>
+static T LC32GetGuestFloatingIvar(id self, SEL _cmd) {
+    const u64 bits = LC32GetGuestScalarIvar(self, _cmd);
+    T value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
 }
 
 u32 guest_dlsym(const char *host_name) {
@@ -7252,6 +7273,12 @@ static const char *LC32ExpectedHostMethodTypes(Class cls, SEL selector) {
         case 's':
             setterImplementation = (IMP)&LC32SetGuestScalarIvar;
             break;
+        case 'f':
+            setterImplementation = (IMP)&LC32SetGuestFloatingIvar<float>;
+            break;
+        case 'd':
+            setterImplementation = (IMP)&LC32SetGuestFloatingIvar<double>;
+            break;
         default:
             printf("LC32: skipping ivar %s with unhandled type %s\n", name.hostPtr, typeEncoding.hostPtr);
             break;
@@ -7315,6 +7342,12 @@ static const char *LC32ExpectedHostMethodTypes(Class cls, SEL selector) {
         case 'q':
         case 's':
             getterImplementation = (IMP)&LC32GetGuestScalarIvar;
+            break;
+        case 'f':
+            getterImplementation = (IMP)&LC32GetGuestFloatingIvar<float>;
+            break;
+        case 'd':
+            getterImplementation = (IMP)&LC32GetGuestFloatingIvar<double>;
             break;
         default:
             break;

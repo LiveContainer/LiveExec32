@@ -449,6 +449,7 @@ host_class_publication.m_CFLAGS := -O2
 $(eval $(call lc32_guest_test,lc32-storekit-delegate,storekit_delegate.m,Foundation StoreKit))
 $(eval $(call lc32_guest_test,lc32-uikit-menu-classes,uikit_menu_classes.m,Foundation UIKit))
 $(eval $(call lc32_guest_test,lc32-kvo-bridge,kvo_bridge.m,Foundation))
+$(eval $(call lc32_guest_test,lc32-kvc-floating-ivars,kvc_floating_ivars.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-kvc-ivar-ownership,kvc_ivar_ownership.m kvc_ivar_ownership_arc.m,Foundation UIKit CoreGraphics LC32))
 kvc_ivar_ownership.m_CFLAGS := -fno-objc-arc
 kvc_ivar_ownership_arc.m_CFLAGS := -fobjc-arc
