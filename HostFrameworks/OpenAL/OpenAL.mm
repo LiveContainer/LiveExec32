@@ -6,6 +6,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cfloat>
+#include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -46,15 +49,8 @@ std::unordered_map<void *, uint32_t> gContextTokens;
 std::atomic<uint32_t> gSilentCurrentContextToken{0};
 
 static bool UseSilentSimulatorContext() {
-    // Permit testing native Simulator audio after Apple fixes the RemoteIO
-    // failure, and permit forcing the crash-safe path on other host setups.
-    if (const char *overrideValue =
-            getenv("LC32_OPENAL_SILENT_CONTEXT")) {
-        return overrideValue[0] != '\0' &&
-               strcmp(overrideValue, "0") != 0;
-    }
 #if TARGET_OS_SIMULATOR
-    return true;
+    const bool isSimulator = true;
 #else
     // LiveExec32 is built as an iPhoneOS binary and then converted to a dylib
     // for LiveContainer, so TARGET_OS_SIMULATOR remains false in that path.
@@ -62,8 +58,11 @@ static bool UseSilentSimulatorContext() {
     static const bool isSimulator =
         getenv("SIMULATOR_UDID") != nullptr ||
         getenv("SIMULATOR_DEVICE_NAME") != nullptr;
-    return isSimulator;
 #endif
+    if(!isSimulator) return false;
+    // Opt out only for diagnostics; never enable the silent renderer on device.
+    const char *overrideValue = getenv("LC32_OPENAL_SILENT_CONTEXT");
+    return !overrideValue || (overrideValue[0] && strcmp(overrideValue, "0"));
 }
 
 static std::unordered_map<void *, uint32_t> &ReverseHandles(HandleKind kind) {
@@ -365,6 +364,8 @@ static ALCcontext *ContextForToken(uint32_t token, bool *valid) {
     return static_cast<ALCcontext *>(pointer);
 }
 
+#include "SilentContext.h"
+
 } // namespace
 
 extern "C" __attribute__((visibility("default")))
@@ -375,6 +376,12 @@ uint32_t LC32_OpenAL_Dispatch(uint32_t opcode, uint32_t guestPacket,
 
     uint32_t *const w = packet.words;
     bool valid = false;
+
+    if(UseSilentSimulatorContext() && opcode > LC32_OPENAL_OP_INVALID &&
+       opcode < LC32_OPENAL_OP_alcCreateContext) {
+        return DispatchSilentAL(opcode, packet) &&
+            WriteGuest(guestPacket, &packet, sizeof(packet)) ? 1u : 0u;
+    }
 
     switch (opcode) {
         case LC32_OPENAL_OP_alEnable:
@@ -810,6 +817,11 @@ uint32_t LC32_OpenAL_Dispatch(uint32_t opcode, uint32_t guestPacket,
                 device, attributes.empty() ? nullptr : attributes.data());
             w[0] = RegisterHandle(context, HandleKind::Context);
             if (context != nullptr && w[0] == 0) alcDestroyContext(context);
+            if(w[0] && UseSilentSimulatorContext()) {
+                std::lock_guard<std::mutex> lock(gSilentMutex);
+                gSilentContexts[w[0]].device = device;
+                gSilentDevices.try_emplace(device);
+            }
             break;
         }
         case LC32_OPENAL_OP_alcMakeContextCurrent: {
@@ -818,10 +830,8 @@ uint32_t LC32_OpenAL_Dispatch(uint32_t opcode, uint32_t guestPacket,
             if (UseSilentSimulatorContext()) {
                 // Simulator RemoteIO can synchronously time out and abort while
                 // making Apple's OpenAL context current from LiveContainer.
-                // Keep guest-visible ALC bookkeeping coherent without
-                // activating the host audio device. This is deliberately a
-                // crash-avoidance fallback, not an audio backend: native AL
-                // calls have no current context and fail/no-op safely.
+                // AL operations use our clocked silent renderer instead.
+                // Native ALC still owns the device/context handle lifecycle.
                 if (valid) gSilentCurrentContextToken.store(token);
                 w[0] = valid ? ALC_TRUE : ALC_FALSE;
             } else {
@@ -831,12 +841,16 @@ uint32_t LC32_OpenAL_Dispatch(uint32_t opcode, uint32_t guestPacket,
         }
         case LC32_OPENAL_OP_alcProcessContext: {
             ALCcontext *context = ContextForToken(w[0], &valid);
+            if(UseSilentSimulatorContext() && valid && context)
+                SuspendSilentContext(w[0], false);
             if (!UseSilentSimulatorContext() && valid && context != nullptr)
                 alcProcessContext(context);
             break;
         }
         case LC32_OPENAL_OP_alcSuspendContext: {
             ALCcontext *context = ContextForToken(w[0], &valid);
+            if(UseSilentSimulatorContext() && valid && context)
+                SuspendSilentContext(w[0], true);
             if (!UseSilentSimulatorContext() && valid && context != nullptr)
                 alcSuspendContext(context);
             break;
@@ -845,6 +859,10 @@ uint32_t LC32_OpenAL_Dispatch(uint32_t opcode, uint32_t guestPacket,
             const uint32_t token = w[0];
             ALCcontext *context = ContextForToken(token, &valid);
             if (valid && context != nullptr) {
+                if(UseSilentSimulatorContext()) {
+                    std::lock_guard<std::mutex> lock(gSilentMutex);
+                    gSilentContexts.erase(token);
+                }
                 alcDestroyContext(context);
                 ForgetHandle(token, HandleKind::Context);
                 if (UseSilentSimulatorContext()) {
@@ -895,9 +913,24 @@ uint32_t LC32_OpenAL_Dispatch(uint32_t opcode, uint32_t guestPacket,
         case LC32_OPENAL_OP_alcCloseDevice: {
             const uint32_t token = w[0];
             ALCdevice *device = DeviceForToken(token, &valid);
+            if(UseSilentSimulatorContext()) {
+                std::lock_guard<std::mutex> lock(gSilentMutex);
+                for(const auto &entry : gSilentContexts) {
+                    if(entry.second.device == device) {
+                        w[0] = ALC_FALSE;
+                        return WriteGuest(guestPacket, &packet, sizeof(packet)) ? 1u : 0u;
+                    }
+                }
+            }
             const ALCboolean result = valid && device != nullptr
                 ? alcCloseDevice(device) : ALC_FALSE;
-            if (result == ALC_TRUE) ForgetHandle(token, HandleKind::Device);
+            if (result == ALC_TRUE) {
+                if(UseSilentSimulatorContext()) {
+                    std::lock_guard<std::mutex> lock(gSilentMutex);
+                    gSilentDevices.erase(device);
+                }
+                ForgetHandle(token, HandleKind::Device);
+            }
             w[0] = result;
             break;
         }

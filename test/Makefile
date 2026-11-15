@@ -508,6 +508,7 @@ $(eval $(call lc32_guest_test,lc32-coretext-graphics-font,coretext_graphics_font
 $(eval $(call lc32_guest_test,lc32-coregraphics-layer,coregraphics_layer.c,CoreGraphics CoreFoundation Foundation))
 $(eval $(call lc32_guest_test,lc32-coregraphics-queries,coregraphics_queries.c,CoreGraphics CoreFoundation Foundation))
 $(eval $(call lc32_guest_test,lc32-openal-smoke,openal_smoke.c,OpenAL))
+$(eval $(call lc32_guest_test,lc32-openal-streaming,openal_streaming.c,OpenAL))
 $(eval $(call lc32_guest_test,lc32-opengles-smoke,opengles_smoke.m opengles_es1_smoke.m opengles_es3_smoke.m opengles_drawable_smoke.m,Foundation OpenGLES QuartzCore))
 $(eval $(call lc32_guest_test,lc32-opengles-drawable,opengles_drawable_smoke.m,Foundation OpenGLES QuartzCore))
 lc32-opengles-drawable_CFLAGS += -DLC32_DRAWABLE_STANDALONE=1
