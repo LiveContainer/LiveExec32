@@ -1,4 +1,4 @@
-LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash \
+LC32_HOST_TEST_GOALS := check-float-structs check-guest-bootstrap check-memory-hash \
   check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info check-standalone \
   check-guest-thumb-linker check-guest-linker check-uikit-legacy-rootless-rotation-build \
   check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading \
@@ -32,13 +32,19 @@ OBJC_TRACE_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/objc-trace-,\
 BUILD_INFO_LOGGING_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/build-info-logging-,\
   present missing)
 
-.PHONY: check-guest-bootstrap check-memory-hash \
+.PHONY: check-float-structs check-guest-bootstrap check-memory-hash \
   check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info check-standalone \
   check-guest-thumb-linker check-uikit-legacy-rootless-rotation-build \
   check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading \
   check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop \
   check-foundation-ports-host check-uikit-compatibility-switch check-uikit-status-bar-orientation \
   check-guest-install check-host-selector-hooks check-uikit-screen-metrics-host
+
+check-float-structs:
+	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
+	$(HOST_CC) $(HOST_CFLAGS) -O2 -I../include float_structs.c \
+		-o "$(HOST_TEST_OUTPUT_DIR)/float-structs"
+	"$(HOST_TEST_OUTPUT_DIR)/float-structs"
 
 check-standalone:
 	python3 ./standalone.py -v

@@ -98,6 +98,21 @@ static BOOL LC32KnownStructHasFixedLayout(LC32KnownStruct type) {
     return type == LC32KnownStructCMTime || type == LC32KnownStructCMTimeRange;
 }
 
+static unsigned LC32KnownStructFloatCount(LC32KnownStruct type) {
+    switch(type) {
+        case LC32KnownStructCGPoint:
+        case LC32KnownStructCGSize:
+            return 2;
+        case LC32KnownStructCGRect:
+        case LC32KnownStructUIEdgeInsets:
+            return 4;
+        case LC32KnownStructCGAffineTransform:
+            return 6;
+        default:
+            return 0;
+    }
+}
+
 @interface MethodParameter : NSObject
 @property(nonatomic, retain) NSString *name;
 @property(nonatomic, retain) NSString *type;
@@ -361,9 +376,11 @@ static BOOL LC32KnownStructHasFixedLayout(LC32KnownStruct type) {
             @"LC32NSRange64 host_arg%1$d = LC32WidenNSRange(guest_arg%1$d);",
             self.index];
     }
-    if(knownStruct != LC32KnownStructNone) {
-        return [NSString stringWithFormat:@"%1$@_64 host_arg%2$d = LC32Host%1$@(guest_arg%2$d);", self.type, self.index];
-        //return [NSString stringWithFormat:@"%1$@_64 host_arg%2$d_value = LC32Host%1$@(guest_arg%2$d); uint64_t host_arg%2$d = LC32GuestToHostCString((const char *)&host_arg%2$d_value, sizeof(host_arg%2$d_value));", self.type, self.index];
+    const unsigned floatCount = LC32KnownStructFloatCount(knownStruct);
+    if(floatCount) {
+        return [NSString stringWithFormat:
+            @"LC32Floats%1$u_64 host_arg%2$d; LC32Host%1$uFloats(&guest_arg%2$d, &host_arg%2$d);",
+            floatCount, self.index];
     }
 
     return [NSString stringWithFormat:@"/* %s: unhandled type %@ */", sel_getName(_cmd), self.type];
@@ -709,7 +726,12 @@ static BOOL LC32MethodReturnsNotFoundIndex(NSString *className,
             [call appendString:
                 @"LC32NSRange64 host_ret; LC32InvokeHostSelector(self.host_self, host_cmd, &host_ret, sizeof(host_ret)"];
         } else {
-            [call appendFormat:@"%@_64 host_ret; LC32InvokeHostSelector(self.host_self, host_cmd, &host_ret, sizeof(host_ret)", self.returnType];
+            const unsigned floatCount = LC32KnownStructFloatCount(
+                LC32KnownStructForEncoding(self.method.returnType));
+            NSString *hostType = floatCount
+                ? [NSString stringWithFormat:@"LC32Floats%u_64", floatCount]
+                : [self.returnType stringByAppendingString:@"_64"];
+            [call appendFormat:@"%@ host_ret; LC32InvokeHostSelector(self.host_self, host_cmd, &host_ret, sizeof(host_ret)", hostType];
         }
     } else if(returnsBorrowedObject) {
         [call appendString:
@@ -794,8 +816,11 @@ static BOOL LC32MethodReturnsNotFoundIndex(NSString *className,
     if(knownStruct == LC32KnownStructNSRange) {
         return @"return LC32NarrowNSRange(host_ret);";
     }
-    if(knownStruct != LC32KnownStructNone) {
-        return [NSString stringWithFormat:@"return LC32Guest%@(host_ret);", self.returnType];
+    const unsigned floatCount = LC32KnownStructFloatCount(knownStruct);
+    if(floatCount) {
+        return [NSString stringWithFormat:
+            @"%@ guest_ret; LC32Guest%uFloats(&host_ret, &guest_ret); return guest_ret;",
+            self.returnType, floatCount];
     }
 
     return [NSString stringWithFormat:@"/* %s: unhandled type %@ */", sel_getName(_cmd), self.returnType];
