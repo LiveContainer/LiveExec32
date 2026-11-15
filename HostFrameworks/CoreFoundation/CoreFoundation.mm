@@ -3211,6 +3211,27 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             CFDataIncreaseLength(data, SlotU32(call, 1));
             return 1;
         }
+        case LC32CoreFoundationOpDataCompareGuestBytes: {
+            if(!RequireSlots(call, 3)) return 0;
+            const uint64_t left = SlotU32(call, 0);
+            const uint64_t right = SlotU32(call, 1);
+            const uint32_t length = SlotU32(call, 2);
+            if(length > kMaximumDataBytes ||
+               (length && (!left || !right)) ||
+               left + length > (UINT64_C(1) << 32) ||
+               right + length > (UINT64_C(1) << 32)) return 0;
+            // Bounded native staging handles discontiguous guest mappings;
+            // neither ARM32 address is ever dereferenced by host memcmp.
+            char leftBytes[16384], rightBytes[16384];
+            for(uint32_t offset = 0; offset < length;) {
+                const uint32_t count = MIN(length - offset, sizeof(leftBytes));
+                if(Dynarmic_mem_1read(left + offset, count, leftBytes) ||
+                   Dynarmic_mem_1read(right + offset, count, rightBytes)) return 0;
+                if(memcmp(leftBytes, rightBytes, count)) return 2;
+                offset += count;
+            }
+            return 1;
+        }
         case LC32CoreFoundationOpDataReplaceBytes: {
             if(!RequireSlots(call, 5)) return 0;
             CFMutableDataRef data =

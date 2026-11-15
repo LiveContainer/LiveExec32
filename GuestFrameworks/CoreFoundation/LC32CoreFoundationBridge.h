@@ -397,6 +397,9 @@ typedef enum : uint32_t {
     LC32CoreFoundationOpUUIDCreateFromBytes = 1602,
     LC32CoreFoundationOpUUIDGetBytes = 1603,
     LC32CoreFoundationOpUUIDCreateString = 1604,
+
+    /* Two guest byte buffers: 0 = invalid, 1 = equal, 2 = different. */
+    LC32CoreFoundationOpDataCompareGuestBytes = 1700,
 } LC32CoreFoundationOpcode;
 
 typedef enum : uint32_t {

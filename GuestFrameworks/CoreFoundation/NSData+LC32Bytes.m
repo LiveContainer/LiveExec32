@@ -103,7 +103,7 @@ UInt8 *LC32GetMutableDataGuestBytes(NSMutableData *data) {
     if(buffer && buffer->_valid) {
         /*
          * Raw writes cannot be observed, so this remains set for the pointer's
-         * lifetime. Every later guest-to-host conversion re-copies the current
+         * lifetime. Every later guest-to-host conversion checks the current
          * bytes; clearing it after one sync would miss writes made afterward.
          */
         buffer->_mutableBytesExposed = YES;
@@ -118,8 +118,22 @@ uint64_t LC32SynchronizeMutableDataGuestBytes(NSMutableData *data) {
     objc_sync_enter(data);
     LC32DataGuestBuffer *buffer = LC32GetDataGuestBuffer(data, NO);
     if(buffer && buffer->_valid && buffer->_mutableBytesExposed &&
-       !buffer->_synchronizing && buffer->_length != 0 &&
-       memcmp(buffer->_bytes, buffer->_baseline, buffer->_length) != 0) {
+       !buffer->_synchronizing && buffer->_length != 0) {
+        // Repeated read-only conversions must not scan megabytes through the
+        // ARM32 JIT. Compare natively, but keep checking for later raw writes.
+        const uint64_t comparison[] = {
+            (uint32_t)(uintptr_t)buffer->_bytes,
+            (uint32_t)(uintptr_t)buffer->_baseline,
+            buffer->_length,
+        };
+        const uint32_t state = LC32CoreFoundationDispatch(
+            LC32CoreFoundationOpDataCompareGuestBytes, comparison, 3);
+        if(state != 2) {
+            if(!state) CRSetCrashLogMessage(
+                "LC32: could not compare mutable CFData bytes");
+            objc_sync_exit(data);
+            return rawHostSelf;
+        }
         buffer->_synchronizing = YES;
         const uint64_t slots[] = {
             rawHostSelf,
