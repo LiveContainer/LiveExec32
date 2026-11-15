@@ -71,6 +71,12 @@ require_line \
     'if(guest_arg2) *guest_arg2 = (float)host_arg2;' \
     "$NSSTRING_SOURCE"
 
+# Counted UTF-16 arrays use manual buffer adapters, not scalar ^S staging.
+if grep -Eq '^[-+] .*([sS]tringWithCharacters|initWithCharacters)' "$NSSTRING_SOURCE"; then
+    echo "Manual NSString UTF-16 constructors still have generated methods" >&2
+    exit 1
+fi
+
 require_line '@dynamic userInterfaceIdiom;' "$UIDEVICE_SOURCE"
 if grep -Fq -- '- (int)userInterfaceIdiom' "$UIDEVICE_SOURCE"; then
     echo "Manual UIDevice property adapter still has a generated method" >&2

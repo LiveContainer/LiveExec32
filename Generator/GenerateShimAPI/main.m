@@ -998,6 +998,7 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
             return [selector isEqualToString:@"stringWithFormat:"] ||
                    [selector isEqualToString:@"stringWithFormat:locale:"] ||
                    [selector isEqualToString:@"localizedStringWithFormat:"] ||
+                   [selector isEqualToString:@"stringWithCharacters:length:"] ||
                    [selector isEqualToString:
                        @"stringWithBytes:length:encoding:"];
         }
@@ -1011,6 +1012,9 @@ static BOOL LC32MethodHasManualAdapter(NSString *className,
                [selector isEqualToString:@"getFileSystemRepresentation:maxLength:"] ||
                [selector isEqualToString:@"getCharacters:"] ||
                [selector isEqualToString:@"getCharacters:range:"] ||
+               [selector isEqualToString:@"initWithCharacters:length:"] ||
+               [selector isEqualToString:
+                   @"initWithCharactersNoCopy:length:freeWhenDone:"] ||
                [selector isEqualToString:
                    @"getBytes:maxLength:filledLength:encoding:allowLossyConversion:range:remainingRange:"] ||
                [selector isEqualToString:

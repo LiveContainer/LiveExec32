@@ -44,8 +44,17 @@
         </dict>
         <key>NSString</key>
         <dict>
+            <key>+</key>
+            <dict>
+                <key>stringWithCharacters:length:</key>
+                <string>@16@0:4r^S8I12</string>
+            </dict>
             <key>-</key>
             <dict>
+                <key>initWithCharacters:length:</key>
+                <string>@16@0:4r^S8I12</string>
+                <key>initWithCharactersNoCopy:length:freeWhenDone:</key>
+                <string>@20@0:4^S8I12c16</string>
                 <key>sizeWithFont:minFontSize:actualFontSize:forWidth:lineBreakMode:</key>
                 <string>{CGSize=ff}28@0:4@8f12^f16f20i24</string>
             </dict>

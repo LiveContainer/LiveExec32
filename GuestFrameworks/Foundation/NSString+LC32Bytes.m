@@ -29,6 +29,36 @@ static id LC32InitializeStringWithHostData(NSString *receiver, NSData *data,
 
 @implementation NSString (LC32Bytes)
 
+- (instancetype)initWithCharacters:(const unichar *)characters
+                             length:(NSUInteger)length {
+    // A counted UTF-16 array is not a single unsigned-short pointer. Reuse
+    // CF's buffer bridge, preserving code units (including unmatched
+    // surrogates) without passing a guest address to native Foundation.
+    if(length > INT32_MAX) return LC32DisposeFailedInit(self);
+    CFStringRef string = CFStringCreateWithCharacters(
+        kCFAllocatorDefault, characters, (CFIndex)length);
+    if(!string) return LC32DisposeFailedInit(self);
+    id result = [self initWithString:(NSString *)string];
+    CFRelease(string);
+    return result;
+}
+
+- (instancetype)initWithCharactersNoCopy:(unichar *)characters
+                                   length:(NSUInteger)length
+                             freeWhenDone:(BOOL)freeWhenDone {
+    // Native Foundation cannot retain or free ARM32 storage. Copy first and
+    // discharge any transferred ownership in the guest allocator.
+    id result = [self initWithCharacters:characters length:length];
+    if(freeWhenDone) free(characters);
+    return result;
+}
+
++ (instancetype)stringWithCharacters:(const unichar *)characters
+                               length:(NSUInteger)length {
+    return [[[self alloc] initWithCharacters:characters length:length]
+        autorelease];
+}
+
 - (void)getCharacters:(unichar *)buffer range:(NSRange)range {
     /*
      * The generated selector bridge cannot pass an ARM32 output pointer to

@@ -476,6 +476,7 @@ $(eval $(call lc32_guest_test,lc32-pointer-out-params,pointer_out_params.m,Found
 $(eval $(call lc32_guest_test,lc32-predicate-variadic,predicate_variadic.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-property-list-serialization,property_list_serialization.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-string-bytes,string_bytes.m,Foundation))
+$(eval $(call lc32_guest_test,lc32-string-characters,string_characters.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-string-format,string_format.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-vm-protect,vm_protect.c,))
 $(eval $(call lc32_guest_test,lc32-foundation-ports,foundation_ports.m,Foundation))
