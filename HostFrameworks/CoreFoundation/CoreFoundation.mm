@@ -536,6 +536,8 @@ CFTypeID KnownTypeID(uint32_t typeValue) {
             return CFSocketGetTypeID();
         case LC32CoreFoundationTypeAllocator:
             return CFAllocatorGetTypeID();
+        case LC32CoreFoundationTypeUUID:
+            return CFUUIDGetTypeID();
     }
     return 0;
 }
@@ -3900,6 +3902,64 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             }
             return WriteGuestCreatedObject(
                 guestWriteStream, writeStream);
+        }
+        case LC32CoreFoundationOpRetain: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFTypeRef object = SlotHostObject<CFTypeRef>(call, 0);
+            return object ? LC32GuestObjectForOwnedHostObject(CFRetain(object)) : 0;
+        }
+        case LC32CoreFoundationOpRelease: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFTypeRef object = SlotHostObject<CFTypeRef>(call, 0);
+            if(object) CFRelease(object);
+            return 0;
+        }
+        case LC32CoreFoundationOpEqual: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFTypeRef object = SlotHostObject<CFTypeRef>(call, 0);
+            CFTypeRef other = SlotHostObject<CFTypeRef>(call, 1);
+            return object && other && CFEqual(object, other);
+        }
+        case LC32CoreFoundationOpHash: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFTypeRef object = SlotHostObject<CFTypeRef>(call, 0);
+            return object ? static_cast<u32>(CFHash(object)) : 0;
+        }
+        case LC32CoreFoundationOpCopyDescription: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFTypeRef object = SlotHostObject<CFTypeRef>(call, 0);
+            return object ? GuestForCreatedObject(CFCopyDescription(object)) : 0;
+        }
+        case LC32CoreFoundationOpUUIDCreate:
+            return RequireSlots(call, 0)
+                ? GuestForCreatedObject(CFUUIDCreate(kCFAllocatorDefault)) : 0;
+        case LC32CoreFoundationOpUUIDCreateFromString: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFStringRef string = SlotHostObject<CFStringRef>(call, 0);
+            return string ? GuestForCreatedObject(CFUUIDCreateFromString(
+                kCFAllocatorDefault, string)) : 0;
+        }
+        case LC32CoreFoundationOpUUIDCreateFromBytes: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFUUIDBytes bytes = {};
+            static_assert(sizeof(bytes) == 16);
+            const u32 address = SlotU32(call, 0);
+            if(!GuestRangeIsValid(address, sizeof(bytes)) ||
+               Dynarmic_mem_1read(address, sizeof(bytes),
+                   reinterpret_cast<char *>(&bytes)) != 0) return 0;
+            return GuestForCreatedObject(CFUUIDCreateFromUUIDBytes(
+                kCFAllocatorDefault, bytes));
+        }
+        case LC32CoreFoundationOpUUIDGetBytes: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFUUIDRef uuid = SlotHostObject<CFUUIDRef>(call, 0);
+            return uuid && WriteGuestValue(SlotU32(call, 1), CFUUIDGetUUIDBytes(uuid));
+        }
+        case LC32CoreFoundationOpUUIDCreateString: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFUUIDRef uuid = SlotHostObject<CFUUIDRef>(call, 0);
+            return uuid ? GuestForCreatedObject(CFUUIDCreateString(
+                kCFAllocatorDefault, uuid)) : 0;
         }
         case LC32CoreFoundationOpGetTypeID: {
             if(!RequireSlots(call, 1)) return 0;

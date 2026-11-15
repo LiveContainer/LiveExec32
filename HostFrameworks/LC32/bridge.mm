@@ -6830,6 +6830,25 @@ static Class LC32NativeProxyPhysicalClass(id object) {
     return Nil;
 }
 
+static bool LC32HostObjectIsOpaqueCF(id object) {
+    return object_getClass(object) == objc_getClass("__NSCFType");
+}
+
+// Caller holds the peer's monitor and guarantees its native lifetime.
+// Publication remains provisional unless a lifetime pin is installed.
+static u32 LC32CreateGuestProxy(id hostObject, u32 guestClass) {
+    static std::atomic<u32> guestSetHostSelfCache{0};
+    const u32 selector = LC32CachedGuestSelector(
+        guestSetHostSelfCache, "initWithHostSelf:");
+    u32 ptr = guest_class_createInstance(guestClass, 0);
+    if(!ptr) return 0;
+    u32 args[] = {ptr, selector, (u32)(u64)hostObject,
+        (u32)((u64)hostObject >> 32)};
+    ptr = guest_objc_msgSend(sizeof(args) / sizeof(*args), args);
+    if(ptr) [hostObject setGuest_self:ptr];
+    return ptr;
+}
+
 @implementation NSObject(LC32)
 - (NSMethodSignature *)LC32_nativeMethodSignatureForSelector:(SEL)selector
                                            instanceMethods:(BOOL)instanceMethods {
@@ -6964,20 +6983,25 @@ static Class LC32NativeProxyPhysicalClass(id object) {
         return self.guest_self = ptr;
     }
 
-    static std::atomic<u32> guestSetHostSelfCache{0};
-    const u32 guest_setHost_self = LC32CachedGuestSelector(
-        guestSetHostSelfCache, "initWithHostSelf:");
-    ptr = guest_class_createInstance(ptr, 0);
+    // Opaque CF objects neither support weak promotion nor reliably destroy
+    // Objective-C associations. Give their proxy its own native reference;
+    // a native-owned lifetime pin would survive CF deallocation indefinitely.
+    const bool opaqueCF = LC32HostObjectIsOpaqueCF(self);
+    if(opaqueCF) CFRetain((CFTypeRef)self);
+    ptr = LC32CreateGuestProxy(self, ptr);
 
-    //guest_objc_performSelector(ptr, guest_setHost_self, (u32)(u64)self, (u32)((u64)self >> 32));
-    {
-        u32 args[] = {ptr, guest_setHost_self, (u32)(u64)self, (u32)((u64)self >> 32)};
-        ptr = guest_objc_msgSend(sizeof(args)/sizeof(*args), args);
+    if(!ptr) {
+        if(opaqueCF) CFRelease((CFTypeRef)self);
+        return 0;
     }
 
-    if(!ptr) return 0;
-
-    self.guest_self = ptr;
+    if(opaqueCF) {
+        // initWithHostSelf: published a provisional mapping. Its final guest
+        // release clears both maps while this paired native +1 is still live.
+        // Supply +0 return semantics without tying lifetime to CF associations.
+        LC32ScheduleGuestAutoreleaseNow(nil, ptr);
+        return ptr;
+    }
     /*
      * Host-to-guest conversion is a borrowed (+0) operation.  Consume the
      * class_createInstance +1 as a lifetime pin owned by the native object,
@@ -7003,23 +7027,29 @@ extern "C" u32 LC32GuestObjectForOwnedHostObject(CFTypeRef object) {
     id hostObject = (id)object;
     u32 guestObject = 0;
     @synchronized(hostObject) {
-        /*
-         * -guest_self is always a borrowed conversion whose initial guest +1
-         * belongs to the native lifetime pin.  A Create/Copy result carries a
-         * separate native +1, so add the corresponding guest-only +1 whether
-         * this call created or reused the proxy.  The public guest release
-         * will later decrement both sides exactly once.
-         *
-         * Keep conversion and ownership transfer under the same object lock:
-         * another native guest thread may otherwise change the reverse
-         * mapping between those operations.
-         */
-        guestObject = [hostObject guest_self];
-        if(guestObject) {
-            LC32AdjustGuestReferenceNow(guestObject, true);
-            LC32OperationTraceLiveObject(
-                "owned-result-add-guest-reference",
-                hostObject, guestObject);
+        if(LC32HostObjectIsOpaqueCF(hostObject) &&
+                ![hostObject guest_selfOrNull]) {
+            // Adopt a CF Create/Copy +1 directly. An extra autoreleased
+            // native reference would postpone final release callbacks.
+            const u32 guestClass = guest_objc_getClass("__NSCFType");
+            if(guestClass) guestObject = LC32CreateGuestProxy(hostObject, guestClass);
+        } else {
+            /*
+             * -guest_self is a borrowed conversion whose initial guest +1
+             * belongs to the native lifetime pin (or an autoreleased paired
+             * reference for opaque CF objects). Add the guest half of this
+             * separate Create/Copy +1, whether the proxy is new or reused.
+             * Keep conversion and ownership transfer under the same object
+             * lock so another thread cannot change the reverse mapping in
+             * between. Public guest release decrements both halves once.
+             */
+            guestObject = [hostObject guest_self];
+            if(guestObject) {
+                LC32AdjustGuestReferenceNow(guestObject, true);
+                LC32OperationTraceLiveObject(
+                    "owned-result-add-guest-reference",
+                    hostObject, guestObject);
+            }
         }
     }
 

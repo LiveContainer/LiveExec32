@@ -466,6 +466,7 @@ $(eval $(call lc32_guest_test,lc32-forwarding-structs,forwarding_structs.m,Found
 $(eval $(call lc32_guest_test,lc32-host-self-sidetable-race,host_self_sidetable_race.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-nullable-guest-cstring,nullable_guest_cstring.c,LC32))
 $(eval $(call lc32_guest_test,lc32-native-proxy-release,native_proxy_release.m,Foundation LC32))
+$(eval $(call lc32_guest_test,lc32-cf-type-ownership,cf_type_ownership.m,Foundation CoreFoundation CoreGraphics LC32))
 $(eval $(call lc32_guest_test,lc32-object-out-parameters,object_out_parameters.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-owned-create-copy,owned_create_copy.m,CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-ownership-publication-race,ownership_publication_race.m ownership_publication_race_weak.m,Foundation LC32))
@@ -615,6 +616,9 @@ lc32-iconv-smoke_LDFLAGS += -liconv
 lc32-guest-proxy-lifetime_CFLAGS := -I$(abspath ../include)
 lc32-native-proxy-release_USE_MODULES := 1
 lc32-native-proxy-release_CFLAGS := -fno-objc-arc \
+	-I$(abspath ../GuestFrameworks) -I$(abspath ../include)
+lc32-cf-type-ownership_USE_MODULES := 1
+lc32-cf-type-ownership_CFLAGS := -fno-objc-arc \
 	-I$(abspath ../GuestFrameworks) -I$(abspath ../include)
 # Theos has one recursive instance per executable. Its DEBUG schema adds -O0
 # after target CFLAGS, so select the optimization for this instance explicitly.

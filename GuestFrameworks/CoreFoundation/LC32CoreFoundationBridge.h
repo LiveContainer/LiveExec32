@@ -383,6 +383,20 @@ typedef enum : uint32_t {
     LC32CoreFoundationOpStringTokenizerAdvanceToNextToken = 1401,
     LC32CoreFoundationOpStringTokenizerGetCurrentTokenRange = 1402,
     LC32CoreFoundationOpStringTokenizerCopyBestStringLanguage = 1403,
+
+    /* Opaque CF objects may reject Objective-C weak references. */
+    LC32CoreFoundationOpRetain = 1500,
+    LC32CoreFoundationOpRelease = 1501,
+    LC32CoreFoundationOpEqual = 1502,
+    LC32CoreFoundationOpHash = 1503,
+    LC32CoreFoundationOpCopyDescription = 1504,
+
+    /* CFUUID is not toll-free bridged to NSUUID. */
+    LC32CoreFoundationOpUUIDCreate = 1600,
+    LC32CoreFoundationOpUUIDCreateFromString = 1601,
+    LC32CoreFoundationOpUUIDCreateFromBytes = 1602,
+    LC32CoreFoundationOpUUIDGetBytes = 1603,
+    LC32CoreFoundationOpUUIDCreateString = 1604,
 } LC32CoreFoundationOpcode;
 
 typedef enum : uint32_t {
@@ -416,6 +430,7 @@ typedef enum : uint32_t {
     LC32CoreFoundationTypeRunLoopTimer = 18,
     LC32CoreFoundationTypeSocket = 19,
     LC32CoreFoundationTypeAllocator = 20,
+    LC32CoreFoundationTypeUUID = 21,
 } LC32CoreFoundationKnownType;
 
 #endif
