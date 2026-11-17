@@ -3,6 +3,7 @@
 #import <objc/runtime.h>
 #include "LC32UIKitCompatibilityConfig.h"
 #include "LC32ClassicPresentation.h"
+#include "LC32LegacyRotation.h"
 #if LC32_UIKIT_COMPATIBILITY
 #include "bridge.h"
 #include "LC32NativeViewGeometry.h"
@@ -16,6 +17,9 @@
 @end
 @interface UIWindow (LC32ClassicPrivate)
 - (void)_updateTransformLayer;
+- (UIInterfaceOrientation)interfaceOrientation;
+- (void)_updateToInterfaceOrientation:(UIInterfaceOrientation)orientation
+    duration:(NSTimeInterval)duration force:(BOOL)force;
 @end
 @interface NSObject (LC32ClassicSettings)
 - (id)settings;
@@ -106,7 +110,7 @@ void Capture(UIWindow *window) {
     objc_setAssociatedObject(screen, StateKey, state, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
-void Restore(UIWindow *window) {
+void Restore(UIWindow *window, bool refreshLayout = false) {
     LC32ClassicWindowState *state = objc_getAssociatedObject(window, StateKey);
     if(!normalized || activationPending || !state.scene || state.restoring ||
             state.scene != window.windowScene) return;
@@ -125,6 +129,13 @@ void Restore(UIWindow *window) {
                 LC32NativeSetViewTransform(window, transform);
                 LC32NativeSetViewCenter(window, center);
                 layer.contentsScale = state.contentScale;
+                // The turn that exposed Classic loss may already have sized
+                // the native rotation client from the physical screen. Once
+                // activation finishes, reflow that client using the saved
+                // metrics without sending the guest another rotation pair.
+                if(refreshLayout && LC32NativeLegacyRotationEnabled() &&
+                        [window respondsToSelector:@selector(_updateToInterfaceOrientation:duration:force:)])
+                    [window _updateToInterfaceOrientation:window.interfaceOrientation duration:0 force:YES];
             });
         }];
     } @finally {
@@ -158,6 +169,9 @@ void NormalizeScene() {
                 activationPending = false;
                 normalized = success;
                 if(!success) NSLog(@"LC32: Classic presentation restore failed: %@", error);
+                if(success) {
+                    for(UIWindow *window in windows.allObjects) Restore(window, true);
+                }
                 ScheduleUpdate();
             });
         }];

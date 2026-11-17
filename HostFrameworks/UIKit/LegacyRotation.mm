@@ -310,11 +310,16 @@ void UpdateWindow(UIWindow *window, UIInterfaceOrientation orientation,
             // before the next guest frame can perform a competing manual turn.
             // Native containers already dispatch their children's lifecycle.
             SEL current = sel_registerName("interfaceOrientation");
-            bool initialSync = initializing && RegisteredClass(object_getClass(controller)) &&
+            const bool sameOrientation =
                 ((UIInterfaceOrientation (*)(id, SEL))objc_msgSend)(window, current) == orientation;
+            bool initialSync = initializing && RegisteredClass(object_getClass(controller)) &&
+                sameOrientation;
             if(initialSync) [controller willRotateToInterfaceOrientation:orientation duration:0];
+            // Force only a same-orientation layout refresh. For an actual turn,
+            // UIKit's forced path skips the client's rotation lifecycle, leaving
+            // renderer layout and touch coordinates in the previous orientation.
             ((void (*)(id, SEL, UIInterfaceOrientation, NSTimeInterval, BOOL))objc_msgSend)(
-                window, rotate, orientation, 0, YES);
+                window, rotate, orientation, 0, sameOrientation);
             if(initialSync) [controller didRotateFromInterfaceOrientation:orientation];
         } else {
             [UIViewController attemptRotationToDeviceOrientation];

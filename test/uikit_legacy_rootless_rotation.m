@@ -44,6 +44,11 @@ static BOOL explicitRootCase;
 static BOOL expectedEnabled;
 static BOOL originalNativeRotationPolicy;
 static NSString *testCase;
+static UIDeviceOrientation requestedDeviceOrientation;
+static UIDeviceOrientation deviceOrientationProbe(id device, SEL selector) {
+    (void)device; (void)selector;
+    return requestedDeviceOrientation;
+}
 
 /* The production original-method aliases are replaced only during the
  * synchronous ownership probe. No UIKit work runs with these stubs installed.
@@ -820,6 +825,37 @@ static UIViewController *backingProbeContainer(UIViewController *content, unsign
     puts("rootless-rotation-direct-lifecycle-scope: callback forwarding only; "
          "this case does not claim an automatic compositor rotation");
 }
+- (void)checkAcceptedTurnLifecycle {
+    // Exercise the production notification -> UpdateWindow -> UIKit path,
+    // rather than invoking the lifecycle forwarding aliases directly.
+    RootlessRotationTrackingController *subject = (id)self.controller;
+    Method orientationMethod = class_getInstanceMethod(UIDevice.class, @selector(orientation));
+    IMP saved = method_setImplementation(orientationMethod, (IMP)deviceOrientationProbe);
+    @try {
+        for(unsigned turn = 0; turn < 2; ++turn) {
+            UIInterfaceOrientation previous = subject.interfaceOrientation;
+            UIInterfaceOrientation target = previous == UIInterfaceOrientationLandscapeLeft
+                ? UIInterfaceOrientationLandscapeRight : UIInterfaceOrientationLandscapeLeft;
+            requestedDeviceOrientation = (UIDeviceOrientation)target;
+            unsigned willBefore = subject.recordedWillCalls;
+            unsigned didBefore = subject.recordedDidCalls;
+            [NSNotificationCenter.defaultCenter postNotificationName:
+                UIDeviceOrientationDidChangeNotification object:UIDevice.currentDevice];
+            check("accepted-turn-updates-interface", subject.interfaceOrientation == target);
+            check("accepted-turn-delivers-one-will", subject.recordedWillCalls == willBefore + 1);
+            check("accepted-turn-delivers-one-did", subject.recordedDidCalls == didBefore + 1);
+            check("accepted-turn-callback-orientations", subject.recordedWillOrientation == target &&
+                subject.recordedDidOrientation == previous);
+            [NSNotificationCenter.defaultCenter postNotificationName:
+                UIDeviceOrientationDidChangeNotification object:UIDevice.currentDevice];
+            check("same-orientation-refresh-does-not-repeat-lifecycle",
+                subject.recordedWillCalls == willBefore + 1 &&
+                subject.recordedDidCalls == didBefore + 1);
+        }
+    } @finally {
+        method_setImplementation(orientationMethod, saved);
+    }
+}
 - (void)checkRotationUpdateOrdering {
     SEL originalSelector = sel_registerName("lc32_updateToInterfaceOrientation:duration:force:");
     SEL selector = sel_registerName("_updateToInterfaceOrientation:duration:force:");
@@ -1277,6 +1313,7 @@ static UIViewController *backingProbeContainer(UIViewController *content, unsign
             UIInterfaceOrientationIsLandscape(self.controller.interfaceOrientation));
         check("explicit-root-still-preserved", self.window.rootViewController == self.controller);
         [self checkNativeBackingGeometry];
+        if([testCase isEqualToString:@"explicit"]) [self checkAcceptedTurnLifecycle];
     }
     if([testCase isEqualToString:@"replacement"]) {
         check("replacement-startup-state-does-not-retain-previous-controller",
