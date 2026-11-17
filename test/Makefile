@@ -1,4 +1,4 @@
-LC32_HOST_TEST_GOALS := check-float-structs check-guest-bootstrap check-memory-hash \
+LC32_HOST_TEST_GOALS := check-jit-code-memory-mode check-float-structs check-guest-bootstrap check-memory-hash \
   check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info check-standalone \
   check-guest-thumb-linker check-guest-linker check-uikit-legacy-rootless-rotation-build \
   check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading \
@@ -48,6 +48,16 @@ check-float-structs:
 
 check-standalone:
 	python3 ./standalone.py -v
+
+.PHONY: check-jit-code-memory-mode
+check-jit-code-memory-mode:
+	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
+	$(HOST_CC) $(HOST_CFLAGS) -Istandalone-stubs jit_code_memory_mode.c \
+		-o "$(HOST_TEST_OUTPUT_DIR)/jit-code-memory-mode"
+	"$(HOST_TEST_OUTPUT_DIR)/jit-code-memory-mode"
+	$(HOST_CC) $(HOST_CFLAGS) -Istandalone-stubs -DLC32_JAILBREAK_PACKAGE=1 \
+		jit_code_memory_mode.c -o "$(HOST_TEST_OUTPUT_DIR)/jit-code-memory-mode-jb"
+	"$(HOST_TEST_OUTPUT_DIR)/jit-code-memory-mode-jb"
 
 check-uikit-screen-metrics-host:
 	sh ./uikit_screen_metrics_host.sh
