@@ -58,21 +58,25 @@ bool RegisteredClass(Class cls) {
     return false;
 }
 
-bool UsesLegacyRotationPolicy(Class cls) {
-    if(!RegisteredClass(cls)) return false;
-    if(class_getMethodImplementation(cls, @selector(shouldAutorotateToInterfaceOrientation:)) ==
-            class_getMethodImplementation(UIViewController.class,
-                @selector(shouldAutorotateToInterfaceOrientation:))) return false;
+bool UsesModernRotationPolicy(Class cls) {
     // Recheck the actual subclass: a guest can inherit the old callback but
     // deliberately replace its policy with the modern orientation API.
     IMP supported = class_getMethodImplementation(
         cls, @selector(supportedInterfaceOrientations));
     IMP should = class_getMethodImplementation(cls, @selector(shouldAutorotate));
-    return (supported == (IMP)LegacySupportedOrientations ||
-            supported == class_getMethodImplementation(UIViewController.class,
-                @selector(supportedInterfaceOrientations))) &&
-        should == class_getMethodImplementation(UIViewController.class,
+    return (supported != (IMP)LegacySupportedOrientations &&
+            supported != class_getMethodImplementation(UIViewController.class,
+                @selector(supportedInterfaceOrientations))) ||
+        should != class_getMethodImplementation(UIViewController.class,
             @selector(shouldAutorotate));
+}
+
+bool UsesLegacyRotationPolicy(Class cls) {
+    return RegisteredClass(cls) &&
+        class_getMethodImplementation(cls, @selector(shouldAutorotateToInterfaceOrientation:)) !=
+            class_getMethodImplementation(UIViewController.class,
+                @selector(shouldAutorotateToInterfaceOrientation:)) &&
+        !UsesModernRotationPolicy(cls);
 }
 
 NSHashTable<UIViewController *> *Controllers() {
@@ -434,6 +438,7 @@ extern "C" void LC32FinishNativeLegacyRotationStartup(void) {
 @end
 
 @interface UIWindow (LC32NativeLegacyRotation)
+- (void)lc32_rotationSetRootViewController:(UIViewController *)controller;
 - (void)lc32_updateToInterfaceOrientation:(UIInterfaceOrientation)orientation
     duration:(NSTimeInterval)duration force:(BOOL)force;
 - (void)lc32_configureRootLayer:(CALayer *)root sceneTransformLayer:(CALayer *)scene
@@ -446,6 +451,27 @@ extern "C" void LC32FinishNativeLegacyRotationStartup(void) {
 @end
 
 @implementation UIWindow (LC32NativeLegacyRotation)
+- (void)lc32_rotationSetRootViewController:(UIViewController *)controller {
+    [self lc32_rotationSetRootViewController:controller];
+    if(startupFinished || !pthread_main_np()) return;
+    UIViewController *content = BackingContentController(controller);
+    if(!content || !UsesModernRotationPolicy(object_getClass(content))) return;
+    UIView *view = NativeView(controller);
+    if(!view || NativeWindow(view) != self) return;
+    // Modern-policy controllers already have the window's orientation, but
+    // scene-era UIKit defers applying it to a newly installed legacy root's
+    // view. Complete that same-orientation layout before the caller sizes a
+    // fixed renderer from its bounds. Do not request a new orientation or
+    // advance the deferred lifecycle of renderer-owned legacy controllers.
+    SEL orientation = sel_registerName("interfaceOrientation");
+    SEL update = sel_registerName("_updateToInterfaceOrientation:duration:force:");
+    if([self respondsToSelector:update]) {
+        UIInterfaceOrientation current =
+            ((UIInterfaceOrientation (*)(id, SEL))objc_msgSend)(self, orientation);
+        ((void (*)(id, SEL, UIInterfaceOrientation, NSTimeInterval, BOOL))objc_msgSend)(
+            self, update, current, 0, YES);
+    }
+}
 - (void)lc32_updateToInterfaceOrientation:(UIInterfaceOrientation)orientation
         duration:(NSTimeInterval)duration force:(BOOL)force {
     // Scene-owned windows do not run the old backing update as part of their
@@ -490,6 +516,8 @@ extern "C" void LC32FinishNativeLegacyRotationStartup(void) {
 }
 + (void)load {
     if(!LC32NativeLegacyRotationEnabled()) return;
+    Swizzle(self, @selector(setRootViewController:),
+        @selector(lc32_rotationSetRootViewController:));
     // Controller-managed status bars were introduced in iOS 7. Modern UIKit
     // defaults to them even for older guests, losing UIStatusBarHidden and
     // UIApplication's setters. Preserve an explicit opt-in/out in the bundle.

@@ -455,6 +455,7 @@ static UIViewController *backingProbeContainer(UIViewController *content, unsign
 @property(nonatomic, strong) UIViewController *safetyRoot;
 @property(nonatomic, strong) UIViewController *modalController;
 @property(nonatomic, strong) UIView *content;
+@property(nonatomic, strong) UIView *startupRenderer;
 @property(nonatomic, weak) UIViewController *replacedController;
 @property(nonatomic) CGRect initialContentFrame;
 @property(nonatomic) CGRect initialContentBounds;
@@ -566,7 +567,8 @@ static UIViewController *backingProbeContainer(UIViewController *content, unsign
     Class controllerClass = RootlessRotationLegacyController.class;
     if([testCase isEqualToString:@"modern"])
         controllerClass = RootlessRotationModernController.class;
-    if([testCase isEqualToString:@"modern-explicit"])
+    if([testCase isEqualToString:@"modern-explicit"] ||
+            [testCase isEqualToString:@"modern-startup"])
         controllerClass = RootlessRotationRegisteredModernController.class;
     if([testCase isEqualToString:@"modern-only"])
         controllerClass = RootlessRotationPolicyOnlyController.class;
@@ -589,17 +591,33 @@ static UIViewController *backingProbeContainer(UIViewController *content, unsign
     self.initialContentBounds = self.content.bounds;
     self.content.backgroundColor = UIColor.blueColor;
     [self.controller setView:self.content];
-    if([testCase isEqualToString:@"modern-explicit"]) {
+    if([testCase isEqualToString:@"modern-explicit"] ||
+            ([testCase isEqualToString:@"modern-startup"] && !expectedEnabled)) {
         /* First let native UIKit configure a visible window with a non-guest
          * root, then attach the registered modern root after that setup. */
         self.safetyRoot = [[RootlessRotationNativeModernController alloc] init];
         self.window.rootViewController = self.safetyRoot;
-    } else if(explicitRootCase)
+    } else if(explicitRootCase && ![testCase isEqualToString:@"modern-startup"])
         self.window.rootViewController = self.controller;
     else
         [self.window addSubview:self.content];
     [self dumpState:"before-visible"];
     [self.window makeKeyAndVisible];
+    if([testCase isEqualToString:@"modern-startup"]) {
+        // iOS 6 engines attach the view, show the window, assign the root,
+        // then immediately create a fixed-size renderer from its bounds.
+        guestCallsAllowed = NO;
+        self.window.rootViewController = self.controller;
+        self.startupRenderer = [[UIView alloc] initWithFrame:self.content.bounds];
+        [self.content addSubview:self.startupRenderer];
+        RootlessRotationTrackingController *subject = (id)self.controller;
+        check("startup-does-not-deliver-legacy-callbacks", subject.recordedQueries == 0 &&
+            subject.recordedWillCalls == 0 && subject.recordedDidCalls == 0);
+        if(expectedEnabled)
+            check("startup-root-is-landscape-before-renderer-creation",
+                self.content.bounds.size.width > self.content.bounds.size.height);
+        guestCallsAllowed = YES;
+    }
     if([testCase isEqualToString:@"modern-explicit"]) {
         check("modern-explicit-native-root-was-present", self.window.rootViewController == self.safetyRoot);
         self.window.rootViewController = self.controller;
@@ -1149,6 +1167,12 @@ static UIViewController *backingProbeContainer(UIViewController *content, unsign
             check("modern-only-legacy-lifecycle-delivered", willRotateCalls > 0 && didRotateCalls > 0);
             [self checkNativeBackingGeometry];
         }
+    } else if([testCase isEqualToString:@"modern-startup"]) {
+        check("startup-renderer-has-no-autoresizing", self.startupRenderer.autoresizingMask == 0);
+        check("startup-fixed-renderer-still-fits-root",
+            CGRectEqualToRect(self.startupRenderer.frame, self.content.bounds));
+        check("startup-root-preserved", self.window.rootViewController == self.controller);
+        if(expectedEnabled) [self checkNativeBackingGeometry];
     } else if([testCase isEqualToString:@"modern-explicit"]) {
         check("modern-explicit-root-preserved", self.window.rootViewController == self.controller);
         check("modern-explicit-mask-preserved", self.controller.supportedInterfaceOrientations ==
@@ -1251,12 +1275,13 @@ int main(int argc, char **argv) {
         for(int index = 1; index + 1 < argc; ++index) {
             if(!strcmp(argv[index], "--case")) testCase = @(argv[index + 1]);
         }
-        if(![@[@"rootless", @"explicit", @"modern", @"modern-explicit", @"modern-only", @"modern-refresh", @"unregistered", @"manual", @"manual-controller",
+        if(![@[@"rootless", @"explicit", @"modern", @"modern-explicit", @"modern-startup", @"modern-only", @"modern-refresh", @"unregistered", @"manual", @"manual-controller",
                 @"modal", @"manual-disabled", @"lifecycle", @"ownership", @"replacement", @"statusbar"]
                 containsObject:testCase]) return 2;
         manualRotation = [testCase isEqualToString:@"manual"] ||
             [testCase isEqualToString:@"manual-disabled"];
         explicitRootCase = [testCase isEqualToString:@"explicit"] ||
+            [testCase isEqualToString:@"modern-startup"] ||
             [testCase isEqualToString:@"modern-explicit"] ||
             [testCase isEqualToString:@"modern-only"] ||
             [testCase isEqualToString:@"modern-refresh"] ||
