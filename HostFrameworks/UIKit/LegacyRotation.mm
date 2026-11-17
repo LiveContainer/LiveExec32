@@ -515,6 +515,22 @@ extern "C" void LC32FinishNativeLegacyRotationStartup(void) {
     configuringLegacyWindow = self;
     @try {
         [self lc32_configureRootLayer:root sceneTransformLayer:scene transformLayer:transform];
+        // A scene host may discard its CAContext root layer's transform.
+        // Express the same mapping below that boundary instead: publish an
+        // upright root extent and carry its transform on the existing child.
+        // This preserves the legacy window/view coordinate system, including
+        // hit testing, without depending on the host's root-transform policy.
+        CGAffineTransform rotation = root.affineTransform;
+        if(!CGAffineTransformIsIdentity(rotation)) {
+            CGRect frame = root.frame;
+            CGPoint position = [root convertPoint:scene.position toLayer:root.superlayer];
+            scene.affineTransform = CGAffineTransformConcat(scene.affineTransform, rotation);
+            root.affineTransform = CGAffineTransformIdentity;
+            root.bounds = (CGRect){CGPointZero, frame.size};
+            root.frame = frame;
+            scene.position = CGPointMake(position.x - frame.origin.x,
+                position.y - frame.origin.y);
+        }
     } @finally {
         configuringLegacyWindow = previous;
     }

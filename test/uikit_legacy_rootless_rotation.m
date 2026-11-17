@@ -1034,6 +1034,8 @@ static UIViewController *backingProbeContainer(UIViewController *content, unsign
         CALayer *root = CALayer.layer;
         CALayer *scene = CALayer.layer;
         CALayer *transform = CALayer.layer;
+        [root addSublayer:scene];
+        [scene addSublayer:transform];
         ownershipOtherWindow = otherWindow;
         ownershipExpectedRoot = root;
         ownershipExpectedScene = scene;
@@ -1042,9 +1044,24 @@ static UIViewController *backingProbeContainer(UIViewController *content, unsign
         IMP savedOrientation = method_setImplementation(savedOrientationMethod, (IMP)nativeDoesNotOwnOrientation);
         IMP savedTransform = method_setImplementation(savedTransformMethod, (IMP)nativeDoesNotOwnOrientation);
         @try {
-            for(unsigned attempt = 0; attempt < 2; ++attempt) {
-                ownershipThrow = attempt != 0;
+            for(unsigned attempt = 0; attempt < 4; ++attempt) {
+                ownershipThrow = (attempt & 1) != 0;
                 ownershipCalls = 0;
+                // Nonzero origins, an off-center anchor and a preexisting
+                // child transform exercise composition, not a screen size.
+                root.bounds = CGRectMake(7, 11, 317, 509);
+                root.anchorPoint = CGPointMake(0.3, 0.6);
+                root.position = CGPointMake(271, 199);
+                root.affineTransform = CGAffineTransformMakeRotation(
+                    attempt < 2 ? M_PI_2 : -M_PI_2);
+                scene.bounds = CGRectMake(3, 5, 317, 509);
+                scene.position = CGPointMake(171, 219);
+                scene.affineTransform = CGAffineTransformMakeScale(0.8, 1.2);
+                CGRect originalFrame = root.frame;
+                CGPoint points[] = {{3, 5}, {89, 173}, {320, 514}};
+                CGPoint expectedPoints[3];
+                for(unsigned point = 0; point < 3; ++point)
+                    expectedPoints[point] = [scene convertPoint:points[point] toLayer:nil];
                 BOOL caught = NO;
                 @try {
                     ((void (*)(id, SEL, CALayer *, CALayer *, CALayer *))objc_msgSend)(
@@ -1069,6 +1086,21 @@ static UIViewController *backingProbeContainer(UIViewController *content, unsign
                 check("ownership-other-window-unchanged",
                     !ownershipObservedOtherOrientation && !ownershipObservedOtherTransform);
                 check("ownership-original-exception-preserved", caught == ownershipThrow);
+                check("backing-root-normalized-only-for-successful-legacy-call",
+                    CGAffineTransformIsIdentity(root.affineTransform) ==
+                        (backingEligible && !ownershipThrow));
+                CGRect actualFrame = root.frame;
+                check("backing-root-frame-preserved",
+                    fabs(actualFrame.origin.x - originalFrame.origin.x) < 0.001 &&
+                    fabs(actualFrame.origin.y - originalFrame.origin.y) < 0.001 &&
+                    fabs(actualFrame.size.width - originalFrame.size.width) < 0.001 &&
+                    fabs(actualFrame.size.height - originalFrame.size.height) < 0.001);
+                for(unsigned point = 0; point < 3; ++point) {
+                    CGPoint actual = [scene convertPoint:points[point] toLayer:nil];
+                    check("backing-point-mapping-preserved",
+                        fabs(actual.x - expectedPoints[point].x) < 0.001 &&
+                        fabs(actual.y - expectedPoints[point].y) < 0.001);
+                }
                 check("ownership-restored-after-original-returns-or-throws",
                     !nativeBoolGetter(window, "_windowOwnsInterfaceOrientation") &&
                     !nativeBoolGetter(window, "_windowOwnsInterfaceOrientationTransform"));
@@ -1102,22 +1134,21 @@ static UIViewController *backingProbeContainer(UIViewController *content, unsign
     check("native-backing-layer-chain-present", root && scene && transform);
     if(!root || !scene || !transform) return;
     const CGFloat epsilon = 0.001;
-    CGAffineTransform rotation = root.affineTransform;
-    CGRect bounds = root.bounds;
-    check("native-backing-root-has-portrait-bounds",
+    CGAffineTransform rotation = scene.affineTransform;
+    CGRect bounds = scene.bounds;
+    check("native-backing-scene-has-portrait-bounds",
         isfinite(bounds.size.width) && isfinite(bounds.size.height) &&
         bounds.size.width > 0 && bounds.size.width < bounds.size.height);
-    check("native-backing-root-quarter-turn",
+    check("native-backing-child-carries-quarter-turn",
         fabs(rotation.a) < epsilon && fabs(rotation.d) < epsilon &&
         fabs(fabs(rotation.b) - 1) < epsilon &&
         fabs(rotation.b + rotation.c) < epsilon &&
         fabs(rotation.tx) < epsilon && fabs(rotation.ty) < epsilon);
     check("native-backing-layer-bounds-match",
-        CGRectEqualToRect(bounds, scene.bounds) &&
         CGRectEqualToRect(bounds, transform.bounds) &&
         CGRectEqualToRect(bounds, windowLayer.bounds));
     check("native-backing-inner-layers-identity",
-        CGAffineTransformIsIdentity(scene.affineTransform) &&
+        CGAffineTransformIsIdentity(root.affineTransform) &&
         CGAffineTransformIsIdentity(transform.affineTransform) &&
         CGAffineTransformIsIdentity(windowLayer.affineTransform));
     check("native-backing-root-position-matches-landscape-extent",
@@ -1125,9 +1156,12 @@ static UIViewController *backingProbeContainer(UIViewController *content, unsign
         fabs(root.position.y - bounds.size.width * 0.5) < epsilon);
     const CGPoint center = CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds));
     check("native-backing-inner-layers-centered",
-        CGPointEqualToPoint(scene.position, center) &&
+        CGPointEqualToPoint(scene.position, CGPointMake(
+            CGRectGetMidX(root.bounds), CGRectGetMidY(root.bounds))) &&
         CGPointEqualToPoint(transform.position, center) &&
         CGPointEqualToPoint(windowLayer.position, center));
+    check("native-backing-root-extent-contains-rotated-scene",
+        CGRectEqualToRect(scene.frame, root.bounds));
 }
 - (void)finish {
     if([testCase isEqualToString:@"modern-refresh"] && !self.completedRefreshProbe) {

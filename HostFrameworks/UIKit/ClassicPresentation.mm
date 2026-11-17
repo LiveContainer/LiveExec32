@@ -172,7 +172,10 @@ void ScheduleUpdate() {
         if(!backgrounded) {
             for(UIWindow *window in application.windows) Capture(window);
         }
-        if(!normalized && backgrounded && !activationPending && !attemptedActivation &&
+        // A scene can leave Classic during rotation or overlay dismissal too,
+        // without backgrounding the application. The verified saved state and
+        // live presentation metadata, not a lifecycle event, establish loss.
+        if(!normalized && !activationPending && !attemptedActivation &&
                 application.applicationState == UIApplicationStateActive) {
             for(UIWindow *window in windows.allObjects) {
                 LC32ClassicWindowState *state = objc_getAssociatedObject(window, StateKey);
