@@ -41,6 +41,7 @@
 
 extern "C" void LC32ConfigureLegacyAppTransportSecurity(
     uint32_t guestSDKVersion);
+extern "C" void LC32MountFoundationTemporaryDirectory();
 
 static uint32_t guestExecutableSDKVersion;
 
@@ -943,6 +944,7 @@ void setupPathEnvs(char* argv0) {
         // redirecting symlink doesn't work currently, so we add both
         sharedHandle.fs->addMountpoint("/private/var", "/private/var");
         sharedHandle.fs->addMountpoint("/var", "/var");
+        LC32MountFoundationTemporaryDirectory();
     }
     
     // resolve default dyld path to ${ROOT_PATH}/usr/lib/dyld

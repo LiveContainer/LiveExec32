@@ -78,7 +78,7 @@ LiveExec32Shared_FILES = \
 	../Accelerate/Accelerate.mm \
 	../OpenAL/OpenAL.mm ../OpenGLES/OpenGLES.mm ../UIKit/UIKit.mm \
 	../UIKit/LegacyAutoLayout.mm ../UIKit/LegacyFonts.mm ../UIKit/LegacyAlerts.mm \
-	../UIKit/LegacyRotation.mm ../UIKit/LegacyNibLoading.mm ../UIKit/GuestSelectorHooks.mm \
+	../UIKit/LegacyRotation.mm ../UIKit/LegacyNibLoading.mm ../UIKit/LegacyNibClasses.mm ../UIKit/GuestSelectorHooks.mm \
 	../UIKit/GuestScreenMetrics.mm ../UIKit/GuestStatusBar.mm
 LiveExec32Shared_CFLAGS = \
 	-I. -I$(DYNARMIC_ROOT)/src -I../../include -DDYNARMIC_MASTER \

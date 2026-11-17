@@ -149,6 +149,10 @@ $(MACH_EXCEPTION_PORTS_HOST_TEST): mach_exception_ports_host.cpp \
 check-legacy-nib-loading: $(LEGACY_NIB_LOADING_HOST_TEST)
 	"$(LEGACY_NIB_LOADING_HOST_TEST)"
 
+.PHONY: check-legacy-nib-classes
+check-legacy-nib-classes:
+	sh ./uikit_legacy_nib_classes.sh $(SIMULATOR_UDID)
+
 $(LEGACY_NIB_LOADING_HOST_TEST): legacy_nib_loading_host.mm \
   ../HostFrameworks/UIKit/LegacyNibLoading.mm \
   ../HostFrameworks/UIKit/LegacyNibLoading.h ../include/LC32UIKitCompatibilityConfig.h
@@ -400,6 +404,7 @@ $(eval $(call lc32_guest_test,lc32-collection-object-buffers,collection_object_b
 $(eval $(call lc32_guest_test,lc32-class-cluster-reuse,class_cluster_reuse.m,Foundation CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-guest-input-stream,guest_input_stream.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-stream-io,stream_io.m,Foundation CoreFoundation LC32))
+$(eval $(call lc32_guest_test,lc32-foundation-temporary-files,foundation_temporary_files.m,Foundation))
 lc32-stream-io_CFLAGS := -DLC32_TEST_STREAM_BOUNDS
 $(eval $(call lc32_guest_test,lc32-root-dealloc-reentry,root_dealloc_reentry.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-collection-variadic,collection_variadic.m,Foundation))
