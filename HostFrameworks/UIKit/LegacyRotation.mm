@@ -1,4 +1,5 @@
 #import "LC32LegacyRotation.h"
+#import "LC32ClassicPresentation.h"
 #include "../../include/LC32UIKitCompatibilityConfig.h"
 #if LC32_UIKIT_COMPATIBILITY
 #import <objc/message.h>
@@ -432,8 +433,18 @@ extern "C" void LC32FinishNativeLegacyRotationStartup(void) {
     // Legacy controller bounds/center still use the default status-bar height
     // when the bar is hidden. Keep that nonexistent inset out of both queries;
     // shrinking just the renderer desynchronizes its projection and touches.
-    return [self lc32_applicationFrameForInterfaceOrientation:orientation
+    CGRect frame = [self lc32_applicationFrameForInterfaceOrientation:orientation
         usingStatusbarHeight:height ignoreStatusBar:ignore || UIApplication.sharedApplication.statusBarHidden];
+    LC32ClassicScreenGeometry saved;
+    if(LC32GetClassicScreenGeometry(self, &saved)) {
+        // Legacy controller rotation derives its renderer size and center
+        // from this screen query, not UIWindow.bounds. Retain UIKit's insets
+        // but use the captured logical extent after the host leaves Classic.
+        CGRect native = self.bounds;
+        frame.size.width += saved.bounds.size.width - native.size.width;
+        frame.size.height += saved.bounds.size.height - native.size.height;
+    }
+    return frame;
 }
 @end
 

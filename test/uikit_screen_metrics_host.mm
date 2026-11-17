@@ -1,9 +1,18 @@
 #import "screen-metrics-stubs/UIKit/UIKit.h"
 #import "../HostFrameworks/LC32/host_selector_hooks.h"
+#import "../HostFrameworks/UIKit/LC32ClassicPresentation.h"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+static bool restoredClassic;
+static LC32ClassicScreenGeometry classicGeometry;
+bool LC32GetClassicScreenGeometry(UIScreen *screen, LC32ClassicScreenGeometry *geometry) {
+    if(!restoredClassic || screen != UIScreen.mainScreen) return false;
+    *geometry=classicGeometry;
+    return true;
+}
 
 extern "C" bool LC32NativeLegacyRotationEnabled(void) {
     const char *value = getenv("LC32_TEST_LEGACY");
@@ -51,6 +60,10 @@ static CGSize guestSize(UIScreenMode *mode) {
     selector = selector ?: @selector(size);
     return ((CGSize (*)(id, SEL))LC32NativeHostMethod(mode, selector))(mode, selector);
 }
+static CGRect guestRect(UIScreen *screen, SEL native) {
+    SEL selector = LC32FindHostSelectorHook(object_getClass(screen), native).replacement ?: native;
+    return ((CGRect (*)(id, SEL))LC32NativeHostMethod(screen, selector))(screen, selector);
+}
 int main() {
     @autoreleasepool {
         const bool enabled = LC32_UIKIT_COMPATIBILITY && LC32NativeLegacyRotationEnabled();
@@ -62,14 +75,33 @@ int main() {
         screen.testScale = 3;
         screen.currentMode = mode;
         screen.availableModes = @[mode];
-        check("scale-registration", !!LC32FindHostSelectorHook(UIScreen.class, @selector(scale)).replacement == enabled);
-        check("mode-registration", !!LC32FindHostSelectorHook(UIScreenMode.class, @selector(size)).replacement == enabled);
+        check("scale-registration", !!LC32FindHostSelectorHook(UIScreen.class, @selector(scale)).replacement == !!LC32_UIKIT_COMPATIBILITY);
+        check("mode-registration", !!LC32FindHostSelectorHook(UIScreenMode.class, @selector(size)).replacement == !!LC32_UIKIT_COMPATIBILITY);
         check("classic-scale", guestScale(screen) == (enabled ? 2 : 3));
         check("classic-mode", CGSizeEqualToSize(guestSize(mode), enabled ? mode.applicationPixels : mode.pixels));
         check("level-zero", mode.lastLevel == (enabled && LC32_TEST_MODE_SPI ? 0 : -1));
         check("native-unchanged", screen.scale == 3 && CGSizeEqualToSize(mode.size, mode.pixels));
         check("other-selector", !LC32FindHostSelectorHook(UIScreen.class, @selector(currentMode)).replacement);
         check("other-class", !LC32FindHostSelectorHook(NSString.class, @selector(size)).replacement);
+        screen.bounds=CGRectMake(0,0,440,956);
+        screen.applicationFrame=screen.bounds;
+        classicGeometry={CGRectMake(0,0,320,568),CGRectMake(0,20,320,548),
+            enabled ? CGSizeMake(640,1136) : mode.pixels, enabled ? 2.0 : 3.0};
+        restoredClassic=true;
+        mode.pixels=CGSizeMake(1320,2868);
+        check("restored-bounds", CGRectEqualToRect(guestRect(screen,@selector(bounds)),
+            LC32_UIKIT_COMPATIBILITY ? classicGeometry.bounds : screen.bounds));
+        check("restored-application-frame", CGRectEqualToRect(guestRect(screen,@selector(applicationFrame)),
+            LC32_UIKIT_COMPATIBILITY ? classicGeometry.applicationFrame : screen.applicationFrame));
+        check("restored-mode", CGSizeEqualToSize(guestSize(mode), LC32_UIKIT_COMPATIBILITY
+            ? classicGeometry.modeSize : mode.pixels));
+        classicGeometry.scale=1;
+        classicGeometry.modeSize=CGSizeMake(320,568);
+        check("restored-original-application-scale", guestScale(screen)==(LC32_UIKIT_COMPATIBILITY ? 1 : 3));
+        check("restored-original-application-pixels", CGSizeEqualToSize(guestSize(mode),
+            LC32_UIKIT_COMPATIBILITY ? classicGeometry.modeSize : mode.pixels));
+        check("restored-native-unaffected", screen.bounds.size.width==440 && mode.size.width==1320);
+        restoredClassic=false;
         mode.pixels = CGSizeMake(1536,2048);
         mode.applicationPixels = mode.pixels;
         screen.testScale = 2;

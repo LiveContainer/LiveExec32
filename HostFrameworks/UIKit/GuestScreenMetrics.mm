@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import "../LC32/host_selector_hooks.h"
 #import "LC32LegacyRotation.h"
+#import "LC32ClassicPresentation.h"
 #include "../../include/LC32UIKitCompatibilityConfig.h"
 #if LC32_UIKIT_COMPATIBILITY
 #include <cmath>
@@ -15,10 +16,13 @@
 
 @interface UIScreen (LC32GuestScreenMetrics)
 - (CGFloat)lc32_guestScreenScale;
+- (CGRect)lc32_classicScreenBounds;
+- (CGRect)lc32_classicApplicationFrame;
 @end
 
 namespace {
 bool hasApplicationModeSize;
+bool usesLegacyMetrics;
 
 CGFloat NativeScale(UIScreen *screen) {
     const SEL selector = @selector(scale);
@@ -30,13 +34,20 @@ CGFloat LegacyScale(UIScreen *screen, CGFloat nativeScale) {
     // Preserve the pre-iOS-8 main-display contract (before 3x displays), not
     // a game-specific scale or resolution. External screens remain native.
     constexpr CGFloat legacyMaximumScale = 2;
-    return std::isfinite(nativeScale) && nativeScale > legacyMaximumScale &&
+    return usesLegacyMetrics && std::isfinite(nativeScale) && nativeScale > legacyMaximumScale &&
         screen == UIScreen.mainScreen ? legacyMaximumScale : nativeScale;
 }
 }
 
 @implementation UIScreenMode (LC32GuestScreenMetrics)
 - (CGSize)lc32_guestScreenModeSize {
+    UIScreen *main = UIScreen.mainScreen;
+    LC32ClassicScreenGeometry saved;
+    if(self == main.currentMode && LC32GetClassicScreenGeometry(main, &saved)) return saved.modeSize;
+    if(!usesLegacyMetrics) {
+        const SEL selector = @selector(size);
+        return ((CGSize (*)(id, SEL))LC32NativeHostMethod(self, selector))(self, selector);
+    }
     if(!hasApplicationModeSize) {
         const SEL selector = @selector(size);
         CGSize size = ((CGSize (*)(id, SEL))LC32NativeHostMethod(self, selector))(self, selector);
@@ -63,7 +74,10 @@ CGFloat LegacyScale(UIScreen *screen, CGFloat nativeScale) {
 
 @implementation UIScreen (LC32GuestScreenMetrics)
 - (CGFloat)lc32_guestScreenScale {
+    LC32ClassicScreenGeometry saved;
+    if(LC32GetClassicScreenGeometry(self, &saved)) return saved.scale;
     const CGFloat scale = NativeScale(self);
+    if(!usesLegacyMetrics) return scale;
     if(!hasApplicationModeSize) return LegacyScale(self, scale);
     const SEL modeSelector = @selector(currentMode);
     using ModeGetter = UIScreenMode *(*)(id, SEL);
@@ -85,13 +99,37 @@ CGFloat LegacyScale(UIScreen *screen, CGFloat nativeScale) {
         return scale;
     return scale * (appSize.width / nativeSize.width);
 }
+- (CGRect)lc32_classicScreenBounds {
+    LC32ClassicScreenGeometry saved;
+    if(LC32GetClassicScreenGeometry(self, &saved)) return saved.bounds;
+    const SEL selector = @selector(bounds);
+    return ((CGRect (*)(id, SEL))LC32NativeHostMethod(self, selector))(self, selector);
+}
+- (CGRect)lc32_classicApplicationFrame {
+    LC32ClassicScreenGeometry saved;
+    if(LC32GetClassicScreenGeometry(self, &saved)) return saved.applicationFrame;
+    const SEL selector = @selector(applicationFrame);
+    return ((CGRect (*)(id, SEL))LC32NativeHostMethod(self, selector))(self, selector);
+}
 @end
+
+LC32ClassicScreenGeometry LC32CaptureGuestScreenGeometry(UIScreen *screen) {
+    // Preserve the effective application scale, including older UIKit's
+    // caller-sensitive mode API; do not reconstruct it from the native scale
+    // after the host has changed presentation.
+    return {screen.bounds, screen.applicationFrame,
+        [screen.currentMode lc32_guestScreenModeSize], [screen lc32_guestScreenScale]};
+}
 
 @interface LC32GuestScreenMetricsHooks : NSObject
 @end
 @implementation LC32GuestScreenMetricsHooks
 + (void)load {
-    if(!LC32NativeLegacyRotationEnabled()) return;
+    LC32RegisterHostSelectorHook(objc_getClass("UIScreen"), @selector(bounds),
+        {@selector(lc32_classicScreenBounds), nullptr});
+    LC32RegisterHostSelectorHook(objc_getClass("UIScreen"), @selector(applicationFrame),
+        {@selector(lc32_classicApplicationFrame), nullptr});
+    usesLegacyMetrics = LC32NativeLegacyRotationEnabled();
     // Runtime lookups avoid initializing UIScreen during the runtime's dlopen.
     Class mode = objc_getClass("UIScreenMode");
     hasApplicationModeSize = class_getInstanceMethod(mode, @selector(_sizeWithLevel:)) != nullptr;

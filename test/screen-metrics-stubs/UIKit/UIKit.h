@@ -14,4 +14,6 @@
 @property(nonatomic, strong) UIScreenMode *currentMode;
 @property(nonatomic, copy) NSArray<UIScreenMode *> *availableModes;
 - (CGFloat)scale;
+@property(nonatomic) CGRect bounds;
+@property(nonatomic) CGRect applicationFrame;
 @end
