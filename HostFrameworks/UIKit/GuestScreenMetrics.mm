@@ -17,8 +17,40 @@
 - (CGFloat)lc32_guestScreenScale;
 @end
 
+namespace {
+bool hasApplicationModeSize;
+
+CGFloat NativeScale(UIScreen *screen) {
+    const SEL selector = @selector(scale);
+    return ((CGFloat (*)(id, SEL))LC32NativeHostMethod(screen, selector))(screen, selector);
+}
+
+CGFloat LegacyScale(UIScreen *screen, CGFloat nativeScale) {
+    // New UIKit has removed the caller-sensitive application-scale API.
+    // Preserve the pre-iOS-8 main-display contract (before 3x displays), not
+    // a game-specific scale or resolution. External screens remain native.
+    constexpr CGFloat legacyMaximumScale = 2;
+    return std::isfinite(nativeScale) && nativeScale > legacyMaximumScale &&
+        screen == UIScreen.mainScreen ? legacyMaximumScale : nativeScale;
+}
+}
+
 @implementation UIScreenMode (LC32GuestScreenMetrics)
 - (CGSize)lc32_guestScreenModeSize {
+    if(!hasApplicationModeSize) {
+        const SEL selector = @selector(size);
+        CGSize size = ((CGSize (*)(id, SEL))LC32NativeHostMethod(self, selector))(self, selector);
+        UIScreen *screen = UIScreen.mainScreen;
+        if(self != screen.currentMode && ![screen.availableModes containsObject:self]) return size;
+        const CGFloat nativeScale = NativeScale(screen);
+        const CGFloat scale = LegacyScale(screen, nativeScale);
+        if(nativeScale > 0 && std::isfinite(nativeScale)) {
+            const CGFloat ratio = scale / nativeScale;
+            size.width *= ratio;
+            size.height *= ratio;
+        }
+        return size;
+    }
     // Level zero asks for the application's legacy scale without inspecting
     // the native caller's image. The external emulator is not the executable
     // (or a framework inside its bundle), so -size can otherwise expose 3x
@@ -31,10 +63,8 @@
 
 @implementation UIScreen (LC32GuestScreenMetrics)
 - (CGFloat)lc32_guestScreenScale {
-    using ScaleGetter = CGFloat (*)(id, SEL);
-    const SEL scaleSelector = @selector(scale);
-    const CGFloat scale = ((ScaleGetter)LC32NativeHostMethod(self, scaleSelector))(
-        self, scaleSelector);
+    const CGFloat scale = NativeScale(self);
+    if(!hasApplicationModeSize) return LegacyScale(self, scale);
     const SEL modeSelector = @selector(currentMode);
     using ModeGetter = UIScreenMode *(*)(id, SEL);
     UIScreenMode *mode = ((ModeGetter)LC32NativeHostMethod(self, modeSelector))(
@@ -64,7 +94,7 @@
     if(!LC32NativeLegacyRotationEnabled()) return;
     // Runtime lookups avoid initializing UIScreen during the runtime's dlopen.
     Class mode = objc_getClass("UIScreenMode");
-    if(!class_getInstanceMethod(mode, @selector(_sizeWithLevel:))) return;
+    hasApplicationModeSize = class_getInstanceMethod(mode, @selector(_sizeWithLevel:)) != nullptr;
     LC32RegisterHostSelectorHook(mode, @selector(size),
         {@selector(lc32_guestScreenModeSize), nullptr});
     LC32RegisterHostSelectorHook(objc_getClass("UIScreen"), @selector(scale),

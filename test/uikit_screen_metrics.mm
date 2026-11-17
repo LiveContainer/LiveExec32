@@ -73,16 +73,31 @@ static bool close(CGSize a, CGSize b) { return close(a.width,b.width) && close(a
         const Metrics native = read(screen, false), guest = read(screen, true);
         const bool hasSPI = class_getInstanceMethod(objc_getClass("UIScreenMode"),
             sel_registerName("_sizeWithLevel:")) != nullptr;
-        const bool enabled = LC32NativeLegacyRotationEnabled() && [info[@"LC32Hooks"] boolValue] && hasSPI;
-        printf("screen-metrics-private-api: %s\n", hasSPI ? "available" : "unavailable; native fallback");
+        const bool enabled = LC32NativeLegacyRotationEnabled() && [info[@"LC32Hooks"] boolValue];
+        CGFloat expectedScale = native.scale;
+        CGSize expectedMode = native.modeSize;
+        if(enabled) {
+            if(hasSPI) {
+                expectedScale = appScale;
+                expectedMode = appMode;
+            } else {
+                // The newer native app getter no longer applies the old SDK
+                // contract. Verify the emulated pre-3x contract explicitly.
+                expectedScale = fmin(native.scale, 2);
+                const CGFloat ratio = expectedScale / native.scale;
+                expectedMode.width *= ratio;
+                expectedMode.height *= ratio;
+            }
+        }
+        printf("screen-metrics-private-api: %s\n", hasSPI ? "available" : "unavailable; legacy main-display fallback");
         printf("screen-metrics: idiom=%ld enabled=%d app=%.3f/%.0fx%.0f external=%.3f/%.0fx%.0f guest=%.3f/%.0fx%.0f\n",
             (long)UIDevice.currentDevice.userInterfaceIdiom, enabled,
             (double)appScale, (double)appMode.width, (double)appMode.height,
             (double)native.scale, (double)native.modeSize.width, (double)native.modeSize.height,
             (double)guest.scale, (double)guest.modeSize.width, (double)guest.modeSize.height);
         check("registration-gate", guest.scaleHook == enabled && guest.modeHook == enabled);
-        check("scale", close(guest.scale, enabled ? appScale : native.scale));
-        check("mode", close(guest.modeSize, enabled ? appMode : native.modeSize));
+        check("scale", close(guest.scale, expectedScale));
+        check("mode", close(guest.modeSize, expectedMode));
         check("native-scale-unchanged", close(screen.scale, appScale));
         check("native-mode-unchanged", close(screen.currentMode.size, appMode));
         check("external-call-unchanged", close(read(screen, false).scale, native.scale));

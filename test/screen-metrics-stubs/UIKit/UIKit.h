@@ -9,7 +9,9 @@
 - (CGSize)size;
 @end
 @interface UIScreen : NSObject
++ (instancetype)mainScreen;
 @property(nonatomic) CGFloat testScale;
 @property(nonatomic, strong) UIScreenMode *currentMode;
+@property(nonatomic, copy) NSArray<UIScreenMode *> *availableModes;
 - (CGFloat)scale;
 @end

@@ -25,6 +25,10 @@ extern "C" bool LC32NativeLegacyRotationEnabled(void) {
 #endif
 @end
 @implementation UIScreen
++ (instancetype)mainScreen {
+    static UIScreen *screen = [UIScreen new];
+    return screen;
+}
 - (CGFloat)scale { return self.testScale; }
 @end
 @interface ExternalTestScreen : UIScreen
@@ -49,19 +53,20 @@ static CGSize guestSize(UIScreenMode *mode) {
 }
 int main() {
     @autoreleasepool {
-        const bool enabled = LC32_UIKIT_COMPATIBILITY && LC32_TEST_MODE_SPI && LC32NativeLegacyRotationEnabled();
+        const bool enabled = LC32_UIKIT_COMPATIBILITY && LC32NativeLegacyRotationEnabled();
         UIScreenMode *mode = [UIScreenMode new];
         mode.pixels = CGSizeMake(960,1704);
         mode.applicationPixels = CGSizeMake(640,1136);
         mode.lastLevel = -1;
-        UIScreen *screen = [UIScreen new];
+        UIScreen *screen = UIScreen.mainScreen;
         screen.testScale = 3;
         screen.currentMode = mode;
+        screen.availableModes = @[mode];
         check("scale-registration", !!LC32FindHostSelectorHook(UIScreen.class, @selector(scale)).replacement == enabled);
         check("mode-registration", !!LC32FindHostSelectorHook(UIScreenMode.class, @selector(size)).replacement == enabled);
         check("classic-scale", guestScale(screen) == (enabled ? 2 : 3));
         check("classic-mode", CGSizeEqualToSize(guestSize(mode), enabled ? mode.applicationPixels : mode.pixels));
-        check("level-zero", mode.lastLevel == (enabled ? 0 : -1));
+        check("level-zero", mode.lastLevel == (enabled && LC32_TEST_MODE_SPI ? 0 : -1));
         check("native-unchanged", screen.scale == 3 && CGSizeEqualToSize(mode.size, mode.pixels));
         check("other-selector", !LC32FindHostSelectorHook(UIScreen.class, @selector(currentMode)).replacement);
         check("other-class", !LC32FindHostSelectorHook(NSString.class, @selector(size)).replacement);
@@ -73,6 +78,15 @@ int main() {
         external.testScale = 1.5;
         external.currentMode = mode;
         check("external-display-subclass", guestScale(external) == 1.5);
+        external.testScale = 3;
+        check("external-high-density-unchanged", guestScale(external) == 3);
+        UIScreenMode *externalMode = [UIScreenMode new];
+        externalMode.pixels = externalMode.applicationPixels = CGSizeMake(3840,2160);
+        external.currentMode = externalMode;
+        check("external-mode-unchanged", CGSizeEqualToSize(guestSize(externalMode), externalMode.pixels));
+        screen.testScale = 1;
+        check("non-retina-preserved", guestScale(screen) == 1);
+        screen.testScale = 2;
         screen.currentMode = nil;
         check("no-mode", guestScale(screen) == 2);
         screen.currentMode = mode;
@@ -85,6 +99,19 @@ int main() {
         check("zero-application-width", guestScale(screen) == 2);
         mode.applicationPixels = CGSizeMake(NAN,2048);
         check("nan-application-width", guestScale(screen) == 2);
+        screen.testScale = INFINITY;
+        check("invalid-scale-preserved", std::isinf(guestScale(screen)));
+        if(enabled && !LC32_TEST_MODE_SPI) {
+            check("invalid-scale-mode-preserved", CGSizeEqualToSize(guestSize(mode), mode.pixels));
+            screen.testScale = 4;
+            mode.pixels = CGSizeMake(1280,2272);
+            check("fallback-ratio-not-resolution", guestScale(screen) == 2 &&
+                CGSizeEqualToSize(guestSize(mode), CGSizeMake(640,1136)));
+            UIScreenMode *alternate = [UIScreenMode new];
+            alternate.pixels = CGSizeMake(1920,1080);
+            screen.availableModes = @[mode, alternate];
+            check("alternate-main-mode", CGSizeEqualToSize(guestSize(alternate), CGSizeMake(960,540)));
+        }
     }
     printf("screen-metrics-host: %u checks, %u failures\n", checks, failures);
     return failures != 0;
