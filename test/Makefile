@@ -498,6 +498,7 @@ $(eval $(call lc32_guest_test,lc32-property-list-serialization,property_list_ser
 $(eval $(call lc32_guest_test,lc32-string-bytes,string_bytes.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-string-characters,string_characters.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-string-format,string_format.m,Foundation))
+$(eval $(call lc32_guest_test,lc32-string-format-lifetime,string_format_lifetime.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-vm-protect,vm_protect.c,))
 $(eval $(call lc32_guest_test,lc32-foundation-ports,foundation_ports.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-audio-graph,audio_graph.c,AudioToolbox Foundation LC32))

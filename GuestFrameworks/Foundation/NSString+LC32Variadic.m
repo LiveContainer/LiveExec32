@@ -74,9 +74,7 @@ static id LC32InvokeNSStringFormatObject(id receiver,
     uint64_t result = LC32InvokeNSStringFormat(
         self, hostSelector, format, nil, arguments, 0);
     va_end(arguments);
-    if(!result) return nil;
-    self.host_self = result;
-    return self;
+    return LC32AdoptHostInitializerResult(self, result);
 }
 
 - (instancetype)initWithFormat:(NSString *)format
@@ -86,9 +84,7 @@ static id LC32InvokeNSStringFormatObject(id receiver,
     uint64_t result = LC32InvokeNSStringFormat(
         self, hostSelector, format, nil, arguments,
         LC32NSStringFormatOptionArgumentsList);
-    if(!result) return nil;
-    self.host_self = result;
-    return self;
+    return LC32AdoptHostInitializerResult(self, result);
 }
 
 - (instancetype)initWithFormat:(NSString *)format locale:(id)locale, ... {
@@ -100,9 +96,7 @@ static id LC32InvokeNSStringFormatObject(id receiver,
         self, hostSelector, format, locale, arguments,
         LC32NSStringFormatOptionHasLocale);
     va_end(arguments);
-    if(!result) return nil;
-    self.host_self = result;
-    return self;
+    return LC32AdoptHostInitializerResult(self, result);
 }
 
 - (instancetype)initWithFormat:(NSString *)format
@@ -114,9 +108,7 @@ static id LC32InvokeNSStringFormatObject(id receiver,
         self, hostSelector, format, locale, arguments,
         LC32NSStringFormatOptionHasLocale |
             LC32NSStringFormatOptionArgumentsList);
-    if(!result) return nil;
-    self.host_self = result;
-    return self;
+    return LC32AdoptHostInitializerResult(self, result);
 }
 
 - (NSString *)stringByAppendingFormat:(NSString *)format, ... {
