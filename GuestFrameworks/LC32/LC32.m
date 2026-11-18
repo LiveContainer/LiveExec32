@@ -909,8 +909,8 @@ void *LC32GetAssociatedGuestBuffer(id object, uint32_t requiredCapacity) {
 
 - (void)LC32_dealloc {
     /* The original root implementation still destroys guest C++ ivars and
-     * associations before disposing the ARM32 allocation. Detach a dead
-     * native peer's guest key before that allocation becomes reusable; the
+     * associations before disposing the ARM32 allocation. Detach a retiring
+     * lifetime pin's guest key before that allocation becomes reusable; the
      * host_self creation guard rejects reentry from this remaining cleanup.
      * This never sends -dealloc to the native peer. */
     LC32GuestDeallocFrame frame = {

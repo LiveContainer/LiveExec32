@@ -1570,16 +1570,22 @@ static u32 LC32FinishGuestMappingTeardown(
     return 1;
 }
 
-static bool LC32DetachDeadNativePeerGuestKey(u32 guestObject) {
+static bool LC32DetachRetiringGuestKey(u32 guestObject) {
     LC32HostWeakRegistry &registry = LC32HostWeakMappings();
     std::lock_guard<std::mutex> lock(registry.mutex);
     auto iterator = registry.entries.find(guestObject);
     if(iterator == registry.entries.end() ||
        iterator->second->state != LC32HostWeakMappingState::Retiring ||
-       iterator->second->retirementProvenance !=
-            LC32HostMappingRetirementProvenance::NativePeerDeallocating) {
+       (iterator->second->retirementProvenance !=
+            LC32HostMappingRetirementProvenance::NativePeerDeallocating &&
+        iterator->second->retirementProvenance !=
+            LC32HostMappingRetirementProvenance::GuestMirrorWithTransferredReference)) {
         return true;
     }
+    /* Both pin-driven teardown paths can free the guest allocation before
+     * their native cleanup returns. Detach its key now: another guest thread
+     * may reuse that address immediately, before generation-based finalization.
+     * Keep the native-address tombstone until the old teardown finishes. */
     try {
         registry.retiringEntries.emplace(
             iterator->second->generation, iterator->second);
@@ -1619,7 +1625,7 @@ extern "C" u32 LC32UpdateHostMapping(
             return LC32FinishGuestMappingTeardown(
                 guestObject, static_cast<u32>(hostObject), true);
         case LC32HostMappingGuestRootDealloc:
-            return LC32DetachDeadNativePeerGuestKey(guestObject);
+            return LC32DetachRetiringGuestKey(guestObject);
         case LC32HostMappingReleaseNativeProxy:
             return LC32ReleaseNativeProxyOwnership(
                 guestObject, hostObject, true);
