@@ -14,6 +14,7 @@
 
 @interface UIScene (LC32ClassicScene)
 - (id)_FBSScene;
+- (BOOL)_canDynamicallySpecifySupportedInterfaceOrientations;
 @end
 @interface UIWindow (LC32ClassicPrivate)
 - (void)_updateTransformLayer;
@@ -23,6 +24,9 @@
 @end
 @interface NSObject (LC32ClassicSettings)
 - (id)settings;
+- (id)clientSettings;
+- (NSInteger)interfaceOrientationMode;
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations;
 - (id)valueForProperty:(SEL)property expectedClass:(Class)cls;
 - (CGRect)sceneFrameInKeyboardReferenceSpace;
 @end
@@ -52,6 +56,7 @@
 
 namespace {
 const void *StateKey = &StateKey;
+const void *OrientationRequestKey = &OrientationRequestKey;
 NSHashTable<UIWindow *> *windows;
 bool backgrounded, activationPending, attemptedActivation, updatePending;
 std::atomic<bool> normalized{false};
@@ -66,9 +71,8 @@ void WithoutWindowAutoresizing(UIWindow *window, void (^update)(void)) {
     }
 }
 
-bool Presentation(UIWindow *window, CGRect *rectangle, CGFloat *scale) {
+bool Presentation(UIWindowScene *scene, CGRect *rectangle, CGFloat *scale) {
     *rectangle = CGRectZero;
-    UIWindowScene *scene = window.windowScene;
     if(![scene respondsToSelector:@selector(_FBSScene)]) return false;
     id settings = [[scene _FBSScene] settings];
     if(![settings respondsToSelector:@selector(valueForProperty:expectedClass:)]) return false;
@@ -76,8 +80,54 @@ bool Presentation(UIWindow *window, CGRect *rectangle, CGFloat *scale) {
                                expectedClass:NSValue.class];
     if(!value) return false;
     *rectangle = value.CGRectValue;
-    return LC32ClassicPresentationScale(window.screen.fixedCoordinateSpace.bounds,
+    return LC32ClassicPresentationScale(scene.screen.fixedCoordinateSpace.bounds,
         *rectangle, scale);
+}
+
+// The multitasking host's "always all" mode ignores controller policy.
+// Other modes (including an explicit orientation lock) stay with UIKit.
+bool UsesHostOrientationMask(UIWindowScene *scene) {
+    if(![scene respondsToSelector:@selector(_FBSScene)]) return false;
+    id settings = [[scene _FBSScene] settings];
+    constexpr NSInteger alwaysAll = 2;
+    return [settings respondsToSelector:@selector(interfaceOrientationMode)] &&
+        [settings interfaceOrientationMode] == alwaysAll;
+}
+
+using SceneOrientationPolicy = BOOL (*)(UIWindowScene *, SEL);
+SceneOrientationPolicy nativeOrientationPolicy;
+
+BOOL CanSpecifySupportedOrientations(UIWindowScene *scene, SEL selector) {
+    if(nativeOrientationPolicy(scene, selector)) return YES;
+    if(scene.screen != UIScreen.mainScreen || !UsesHostOrientationMask(scene)) return NO;
+    LC32ClassicWindowState *saved = objc_getAssociatedObject(scene.screen, StateKey);
+    CGRect rectangle;
+    CGFloat scale;
+    return (normalized && saved.scene == scene) || Presentation(scene, &rectangle, &scale);
+}
+
+void RequestSupportedOrientation(UIWindowScene *scene) {
+    if(@available(iOS 16.0, *)) {
+        if(scene.activationState != UISceneActivationStateForegroundActive ||
+                !nativeOrientationPolicy || !UsesHostOrientationMask(scene)) return;
+        id fbs = [scene _FBSScene];
+        if(![fbs respondsToSelector:@selector(clientSettings)]) return;
+        id settings = [fbs clientSettings];
+        if(![settings respondsToSelector:@selector(supportedInterfaceOrientations)]) return;
+        // This is the policy UIKit has published for the active window,
+        // including its delegate and controllers, not the broader Info.plist.
+        UIInterfaceOrientationMask mask = [settings supportedInterfaceOrientations];
+        UIInterfaceOrientation current = scene.interfaceOrientation;
+        if(!mask || current == UIInterfaceOrientationUnknown) return;
+        if(mask & (1UL << current)) {
+            objc_setAssociatedObject(scene, OrientationRequestKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            return;
+        }
+        if([objc_getAssociatedObject(scene, OrientationRequestKey) unsignedIntegerValue] == mask) return;
+        objc_setAssociatedObject(scene, OrientationRequestKey, @(mask), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [scene requestGeometryUpdateWithPreferences:[[UIWindowSceneGeometryPreferencesIOS alloc]
+            initWithInterfaceOrientations:mask] errorHandler:nil];
+    }
 }
 
 void Capture(UIWindow *window) {
@@ -86,7 +136,7 @@ void Capture(UIWindow *window) {
             !window.windowScene || window.screen != UIScreen.mainScreen) return;
     CGRect presentation;
     CGFloat scale;
-    if(!Presentation(window, &presentation, &scale)) return;
+    if(!Presentation(window.windowScene, &presentation, &scale)) return;
     CALayer *layer = LC32NativeViewLayer(window);
     LC32ClassicWindowGeometry geometry = {LC32NativeViewBounds(window),
         LC32NativeViewCenter(window), LC32NativeViewTransform(window),
@@ -116,7 +166,7 @@ void Restore(UIWindow *window, bool refreshLayout = false) {
             state.scene != window.windowScene) return;
     CGRect presentation;
     CGFloat scale;
-    if(Presentation(window, &presentation, &scale) || !LC32ClassicValidRect(presentation)) return;
+    if(Presentation(window.windowScene, &presentation, &scale) || !LC32ClassicValidRect(presentation)) return;
     CALayer *layer = LC32NativeViewLayer(window);
     CGPoint center;
     CGAffineTransform transform;
@@ -196,13 +246,18 @@ void ScheduleUpdate() {
                 CGRect rectangle;
                 CGFloat scale;
                 if(state.scene && state.scene == window.windowScene &&
-                        !Presentation(window, &rectangle, &scale) && LC32ClassicValidRect(rectangle)) {
+                        !Presentation(window.windowScene, &rectangle, &scale) && LC32ClassicValidRect(rectangle)) {
                     NormalizeScene();
                     break;
                 }
             }
         }
-        for(UIWindow *window in windows.allObjects) Restore(window);
+        for(UIWindow *window in windows.allObjects) {
+            LC32ClassicWindowState *state = objc_getAssociatedObject(window, StateKey);
+            if(!activationPending && state.scene && state.scene == window.windowScene)
+                RequestSupportedOrientation(state.scene);
+            Restore(window);
+        }
     });
 }
 }
@@ -237,6 +292,16 @@ bool LC32GetClassicWindowGeometry(UIWindow *window, CGRect *bounds, CGRect *scen
     if(!override || strtol(override, nullptr, 10) <= 0) return;
     Method original = class_getInstanceMethod(self, @selector(_updateTransformLayer));
     if(!original) return;
+    if(@available(iOS 16.0, *)) {
+        SEL selector = @selector(_canDynamicallySpecifySupportedInterfaceOrientations);
+        Method method = class_getInstanceMethod(UIWindowScene.class, selector);
+        if(method && LC32NativeLegacyRotationEnabled()) {
+            nativeOrientationPolicy = (SceneOrientationPolicy)method_getImplementation(method);
+            // Exchanging an inherited Method would change UIScene itself; override only UIWindowScene.
+            class_replaceMethod(UIWindowScene.class, selector,
+                (IMP)CanSpecifySupportedOrientations, method_getTypeEncoding(method));
+        }
+    }
     method_exchangeImplementations(original,
         class_getInstanceMethod(self, @selector(lc32_classicUpdateTransformLayer)));
     NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
@@ -262,6 +327,8 @@ bool LC32GetClassicWindowGeometry(UIWindow *window, CGRect *bounds, CGRect *scen
     if((state && !state.restoring) || (!backgrounded && self.guest_selfOrNull)) ScheduleUpdate();
 }
 + (void)lc32_classicApplicationActive:(NSNotification *)notification {
+    for(UIWindow *window in windows.allObjects)
+        objc_setAssociatedObject(window.windowScene, OrientationRequestKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ScheduleUpdate();
 }
 + (void)lc32_classicApplicationResigning:(NSNotification *)notification {
