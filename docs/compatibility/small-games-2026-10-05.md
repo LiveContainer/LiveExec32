@@ -402,3 +402,124 @@ Before committing on October 9, the host build, UIKit compatibility compile
 checks in modes 0 and 1, 99-function library export audit, ImageIO export audit,
 and `git diff --check` were rerun successfully. Gameplay was not rerun during
 the commit-only pass.
+
+## Clickteam Fusion sample — November 15, 2026
+
+Installed [Five Nights at Freddy's 1.0](https://legacystore.app/app/912536422),
+Legacy Store copy `17838` (41,081,256 bytes / 39.18 MiB). Its catalog SHA-1
+`f9aca736594046fb6af959dcbf36d247f444fd5f` matches the download; ZIP integrity
+passes, and the executable contains an unencrypted ARMv7 slice. Fusion runtime
+classes (`CRunApp`, `CRunFrame`, `CRun`, `CEventProgram`) and `Application.cci`
+are present.
+
+The app bundle is installed as a new `fusion17838.app` symlink, without
+replacing another game or save. LC created its metadata and data container.
+Testing uses the iPhone simulator above, Classic Mode enabled in LC settings,
+the executable's original SDK 7.1 (`459008`), and the current shared simulator runtime
+`lc32-forlorn-20261114.app`. LLDB confirms that runtime is loaded; its RootFS
+links to the repository's packaged RootFS.
+
+**Startup crash fixed; Night 1 gameplay reached.** The original failure reproduced
+with and without touch input: guest `pc=0`, `lr=0x1106a565`, through
+`-[CRun getExpression]`. The engine's extension-object lookup returned nil,
+leaving an expression argument unconsumed; the subsequent closing token
+(`0xfffeffff`) reached a deliberately empty dispatch-table slot. Those null
+slots are also present in the original executable, not damaged relocations.
+
+The root cause was NSString's generated `initWithCharacters:length:` adapter.
+It treated `const unichar *` as one scalar, staging only the first UTF-16 code
+unit while still passing the full character count to native Foundation. This
+corrupted strings read from the Fusion data file, including extension names;
+both extension-loader slots remained nil. Native range-lookup inspection
+also showed a path reduced to `C`. A standalone ARM32 construction of `kcini`
+reproduced the corruption independently of the game.
+
+`NSString+LC32Bytes.m` now implements the counted UTF-16 initializer, factory,
+and no-copy initializer using the existing CoreFoundation character-buffer
+bridge and `initWithString:`. This preserves code units without decoding via
+a byte encoding, keeps mutable receivers mutable, and handles transferred
+buffers with the guest allocator. The generator excludes all three manual
+adapters. No host hook, game-name check, executable patch, or null-dispatch
+bypass was added.
+
+Validation:
+
+- `string-characters --probe` fails on the previous runtime and passes after
+  rebuilding Foundation. All 19 full-suite checks pass on both native ARM64
+  and translated ARM32, including embedded NUL, paired/unpaired surrogates,
+  mutable strings, empty buffers, ownership, and a multi-page input.
+- Existing `string-bytes`, `string-range`, `string-get-bytes`, and all 117
+  `gamekit-properties` checks pass.
+- Scalar-pointer generator fixture (including manual-constructor exclusions)
+  and the object-out-pointer fixture/disabled-method ratchet pass. Shared-shim
+  regeneration, guest Foundation build, packaging, and `git diff --check` pass.
+- Normal LC URL launch, SDK 7.1 and Classic Mode unchanged: the warning screen
+  progresses to the upright title menu. Its internal label says `v 1.13`,
+  although the catalog and bundle version say `1.0`.
+- New Game progresses through the newspaper to the Night 1 office. The clock
+  advances to 4 AM; door open/close, camera open/close, and switching from
+  CAM 1A to CAM 5 respond. The Fusion INI extension writes `freddy` with
+  `[freddy]` / `level=1` in this new game's data container.
+- The initial command-line resume preserves the process and gameplay; the
+  camera can still close afterward. However, the viewport shifts right and
+  becomes clipped. Follow-up inspection shows that plain `simctl launch`
+  can leave this run with a native 440x956 canvas despite LC's Classic setting.
+  LC metadata alone is not proof that Classic Mode is active.
+- A subsequent normal LC URL launch, without an extra `simctl launch`, has
+  a verified 320x568 window/screen and a matching scene display configuration.
+  Continue loads the saved Night 1. Returning through the simulator Home
+  screen's LC icon keeps that 320x568 geometry and the same process, but the
+  visible game loses its centered/scaled presentation and sits at the upper
+  left. The game keeps advancing. Calling native `_updateTransformLayer`
+  does not correct it. This is not a clean resume-layout pass.
+
+**Classic resume investigation:** on this iOS 27 simulator, both class and
+instance `UIApplication _classicMode` implementations consist of `mov x0, #0`
+and `ret`; `_isClassic` also returns NO even in the verified 320x568 launch.
+They cannot safely gate a saved-geometry workaround on this runtime. The
+native `_UISceneClassicModeExternalSettingsModifier` exists, but querying
+`UISSceneHostingExternalSettingsModifierClient` for LC's process identity
+returns nil modifiers/error both after resume and on a fresh launch. Presence
+of the class is not evidence that a particular scene uses Classic Mode.
+No scene/window snapshot hook or orientation change was added: the observed
+failure is not just a window-size change, and a reliable mode-specific guard
+for the newer scene path is still unresolved. A debugger `recursiveDescription`
+evaluation during guest execution also aborted one diagnostic run; it is not
+counted as a reproduced normal-launch game crash.
+
+**Loading performance:** sampling and a JIT-to-guest-PC trace identified
+`__platform_memcmp` called by `LC32SynchronizeMutableDataGuestBytes`. Once
+`mutableBytes` is exposed, every host conversion compares the buffer against
+its baseline, even for read-only operations. The comparison was running as
+translated ARM32 code; clearing exposure after a single sync would be incorrect
+because a retained raw pointer can be written again later.
+
+The comparison now uses a CoreFoundation bridge operation with bounded native
+16 KiB staging buffers and VM-aware guest reads. It still checks every exposed
+buffer and preserves the existing dirty-copy/baseline-update behavior. Guest
+addresses are not cast to native pointers; null, oversized, and overflowing
+ranges are rejected. There is no game-specific bypass.
+
+Validation after rebuilding both sides and refreshing the shared runtime:
+
+- `data-bytes` passes, including unaligned comparisons, mismatches around the
+  staging boundary, invalid arguments, repeated writes through the same raw
+  pointer, unchanged reads, and shrink/regrow cases.
+- In the same simulator, 64 unchanged conversions of a 4 MiB buffer took
+  0.111 seconds before and 0.016 seconds after (about 7x faster for this
+  microbenchmark, not an end-to-end game loading-speed claim).
+- `corefoundation-common-wrappers` and all 19 `string-characters` checks pass.
+- A fresh normal LC URL launch reaches the title; Continue reaches the Night 1
+  office, and opening the camera screen works. The post-Continue sample is
+  mostly run-loop waiting and native simulator OpenGL rendering, rather than
+  the previously traced guest buffer comparison. Remaining rendering overhead
+  and the separate Classic resume issue are not fixed by this change.
+
+This is a simulator startup/gameplay smoke test, not a physical-device or
+full-night completion certification.
+
+Package/source metadata are retained in `tmp/fusion-game-20261115.xwhC5l/`;
+screenshots, metadata backups, regression/build logs, and crash snapshots are
+in `/private/tmp/lc32-fusion-checks.TfUz9y/`. Early initialization traces from
+diagnostic argument-based launches are under that simulator's
+`data/tmp/lc32-fusion-checks.TfUz9y/`; visual retesting uses normal URL launches.

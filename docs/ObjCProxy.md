@@ -85,7 +85,9 @@ the guest runtime and, when appropriate:
 
 Guest ivars remain in the ARM32 object. They are not copied into the native
 object layout. Synthetic KVC accessors retain class-specific bindings and
-read or write the original guest memory.
+read or write the original guest memory. Float/double accessors use typed
+native IMPs for the ARM64 floating-point registers while preserving the
+guest ivar's width and bits; they do not widen float storage to CGFloat.
 
 Methods present during class registration are installed proactively. Dynamic
 `+resolveClassMethod:` and `+resolveInstanceMethod:` can query guest libobjc
@@ -156,6 +158,15 @@ Class objects are peers too, but use permanent mappings. Native dispatch data
 is intentionally exposed as guest `NSData`, whose manual byte-copy adapter
 flattens the native object without relying on its private allocation layout.
 
+Opaque `__NSCFType` peers are an exception to native lifetime pins: they can
+reject Objective-C weak references and do not reliably tear down associated
+objects when CF releases them. Their proxies instead hold paired native CF
+references with provisional mappings. A newly imported borrowed result gets
+an autoreleased guest/native pair; explicit retains and Create/Copy results
+add paired ownership. Final guest release clears both mappings before releasing
+the native reference. A native-only owner may outlive the proxy and be imported
+again later. Ordinary Objective-C peers retain the lifetime-pin behavior.
+
 Blocks bypass general NSObject peer creation, the guest-to-host registry, and
 ordinary lifetime pins. The native wrapper still stores the reverse
 `guest_self` association so it can recover its copied guest block, whose
@@ -168,11 +179,12 @@ Identity and ownership are separate. The important result contracts are:
 | Native contract | Bridge path | Guest result |
 |---|---|---|
 | Borrowed Objective-C `+0` | `LC32InvokeHostObjectSelector` | Reuses or creates the proxy without adding a guest retain/autorelease. |
+| Borrowed opaque CF `+0` | CF/host-object conversion | A new proxy owns an autoreleased paired CF reference instead of a native lifetime pin. |
 | `alloc`/`new`/`copy`/`mutableCopy` or CF Create/Copy `+1` | `LC32HostToGuestOwnedObject` | Transfers the native `+1` and adds exactly one corresponding guest reference. |
 | Initializer | `LC32AdoptHostInitializerResult` | Moves the allocated guest receiver's ownership to the canonical result proxy. |
 | Block | Block bridge | Uses copied-block ownership, not NSObject retain/release pairing. |
 
-A borrowed object is converted before the host invocation's SVC frame ends,
+An ordinary borrowed Objective-C object is converted before the host invocation's SVC frame ends,
 while the native autorelease-return lifetime is still valid. The host object
 owns the proxy's initial guest lifetime pin, so manufacturing another guest
 retain/autorelease would duplicate the native `+0` lifetime and can
