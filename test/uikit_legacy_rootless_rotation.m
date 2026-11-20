@@ -11,7 +11,32 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <xpc/xpc.h>
 #include "LC32LegacyRotation.h"
+
+@interface NSObject (LC32SceneFixture)
+@property(nonatomic, copy) id settings;
+@property(nonatomic, copy) id clientSettings;
+@property(nonatomic) UIInterfaceOrientation interfaceOrientation;
+@property(nonatomic) CGRect frame;
+- (void)encodeWithXPCDictionary:(xpc_object_t)dictionary;
+- (instancetype)initWithXPCDictionary:(xpc_object_t)dictionary;
+@end
+
+static id sceneParametersRoundTrip(UIInterfaceOrientation orientation) {
+    id parameters = [objc_getClass("FBSMutableSceneParameters") new];
+    id settings = [objc_getClass("UIMutableApplicationSceneSettings") new];
+    id client = [objc_getClass("UIMutableApplicationSceneClientSettings") new];
+    [settings setInterfaceOrientation:orientation];
+    [settings setFrame:CGRectMake(11, 13, 101, 203)];
+    [client setInterfaceOrientation:orientation];
+    [parameters setSettings:settings];
+    [parameters setClientSettings:client];
+    xpc_object_t dictionary = xpc_dictionary_create(NULL, NULL, 0);
+    [parameters encodeWithXPCDictionary:dictionary];
+    return [[objc_getClass("FBSSceneParameters") alloc] initWithXPCDictionary:dictionary];
+}
 
 /* Native-only fixture: compile the actual LegacyRotation.mm implementation,
  * not the emulator or guest selector bridge. Explicit registration stands in
@@ -50,6 +75,64 @@ static UIDeviceOrientation deviceOrientationProbe(id device, SEL selector) {
     return requestedDeviceOrientation;
 }
 
+static BOOL startupDeviceGenerating;
+static unsigned startupDeviceSetterCalls;
+static BOOL startupDeviceAnimated;
+static BOOL startupDeviceGeneratingProbe(id object, SEL selector) {
+    (void)object; (void)selector;
+    return startupDeviceGenerating;
+}
+static void startupDeviceSetterProbe(id device, SEL selector,
+        UIDeviceOrientation orientation, BOOL animated) {
+    (void)selector;
+    ++startupDeviceSetterCalls;
+    startupDeviceAnimated |= animated;
+    if(!startupDeviceGenerating || requestedDeviceOrientation == orientation) return;
+    requestedDeviceOrientation = orientation;
+    [NSNotificationCenter.defaultCenter postNotificationName:
+        UIDeviceOrientationDidChangeNotification object:device];
+}
+
+static NSDictionary *orientationProbeInfo;
+static id orientationInfoProbe(id object, SEL selector) {
+    (void)object; (void)selector;
+    return orientationProbeInfo;
+}
+static UIInterfaceOrientation portraitStatusBarProbe(id object, SEL selector) {
+    (void)object; (void)selector;
+    return UIInterfaceOrientationPortrait;
+}
+static UIInterfaceOrientation startupSceneOrientation;
+// A controllable refresh clock; the production adapter still owns target
+// selection, delivery, timeout and the identity of the callback's sender.
+@interface StartupLinkFixture : NSObject
+@property(nonatomic, strong) id target;
+@property(nonatomic) SEL action;
+@property(nonatomic) CFTimeInterval timestamp;
+@property(nonatomic, weak) id lastSender;
+@property(nonatomic) unsigned calls;
+@end
+@implementation StartupLinkFixture
++ (instancetype)displayLinkWithTarget:(id)target selector:(SEL)action {
+    StartupLinkFixture *link = [self new];
+    link.target = target;
+    link.action = action;
+    return link;
+}
+- (void)fire {
+    ((void (*)(id, SEL, id))objc_msgSend)(self.target, self.action, self);
+}
+- (void)record:(id)sender {
+    self.calls++;
+    self.lastSender = sender;
+}
+@end
+
+static UIInterfaceOrientation startupSceneOrientationProbe(id object, SEL selector) {
+    (void)object; (void)selector;
+    return startupSceneOrientation;
+}
+
 /* The production original-method aliases are replaced only during the
  * synchronous ownership probe. No UIKit work runs with these stubs installed.
  * A false native answer makes the scoped override observable on every runtime. */
@@ -68,6 +151,31 @@ static unsigned ownershipCalls;
 static void check(const char *name, BOOL passed) {
     printf("rootless-rotation-%s: %s\n", name, passed ? "PASS" : "FAIL");
     failures += !passed;
+}
+
+static void checkSceneOrientationPreference(UIViewController *controller, UIWindow *window) {
+    UIInterfaceOrientation sceneOrientation = window.windowScene.interfaceOrientation;
+    NSMutableDictionary *info = NSBundle.mainBundle.infoDictionary.mutableCopy;
+    NSString *opposite = sceneOrientation == UIInterfaceOrientationLandscapeRight
+        ? @"UIInterfaceOrientationLandscapeLeft" : @"UIInterfaceOrientationLandscapeRight";
+    info[@"UIInterfaceOrientation"] = opposite;
+    info[@"UISupportedInterfaceOrientations"] = @[@"UIInterfaceOrientationLandscapeLeft",
+        @"UIInterfaceOrientationLandscapeRight"];
+    [info removeObjectForKey:@"UISupportedInterfaceOrientations~ipad"];
+    orientationProbeInfo = info;
+    Method bundleInfo = class_getInstanceMethod(NSBundle.class, @selector(infoDictionary));
+    Method statusBar = class_getInstanceMethod(UIApplication.class, @selector(statusBarOrientation));
+    IMP savedInfo = method_setImplementation(bundleInfo, (IMP)orientationInfoProbe);
+    IMP savedStatus = method_setImplementation(statusBar, (IMP)portraitStatusBarProbe);
+    @try {
+        check("rootless-prefers-active-scene-over-stale-launch-orientation",
+            UIInterfaceOrientationIsLandscape(sceneOrientation) &&
+            controller.preferredInterfaceOrientationForPresentation == sceneOrientation);
+    } @finally {
+        method_setImplementation(bundleInfo, savedInfo);
+        method_setImplementation(statusBar, savedStatus);
+        orientationProbeInfo = nil;
+    }
 }
 
 static BOOL frameProbeHidden, frameProbeIgnore;
@@ -174,6 +282,36 @@ static BOOL nativeDoesNotOwnOrientation(id object, SEL selector) {
     return NO;
 }
 
+static CGFloat animationProbeAngle;
+static void nativeConfigureAnimationProbe(id window, SEL selector,
+        CALayer *root, CALayer *scene, CALayer *transform) {
+    (void)window; (void)selector; (void)transform;
+    // Native configuration installs portrait backing without actions. The
+    // production hook then rebases it below the CAContext boundary.
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    root.bounds = CGRectMake(0, 0, 317, 509);
+    root.position = CGPointMake(254.5, 158.5);
+    root.affineTransform = CGAffineTransformMakeRotation(animationProbeAngle);
+    scene.position = CGPointMake(158.5, 254.5);
+    scene.affineTransform = CGAffineTransformIdentity;
+    [CATransaction commit];
+}
+
+@interface BackingAnimationProbe : NSObject <CALayerDelegate>
+@property(nonatomic) CGAffineTransform fromTransform;
+@property(nonatomic) unsigned transformActions;
+@end
+@implementation BackingAnimationProbe
+- (id<CAAction>)actionForLayer:(CALayer *)layer forKey:(NSString *)key {
+    if([key isEqualToString:@"transform"]) {
+        self.fromTransform = layer.affineTransform;
+        ++self.transformActions;
+    }
+    return (id)NSNull.null;
+}
+@end
+
 static void nativeConfigureOwnershipProbe(id window, SEL selector,
         CALayer *root, CALayer *scene, CALayer *transform) {
     (void)selector;
@@ -251,9 +389,25 @@ static uint32_t executableSDK(void) {
     return UINT32_MAX;
 }
 
+@interface UIWindow (RootlessRotationClientProbe)
+- (void)_setRotatableClient:(UIViewController *)client
+    toOrientation:(UIInterfaceOrientation)orientation updateStatusBar:(BOOL)update
+    duration:(NSTimeInterval)duration force:(BOOL)force isRotating:(BOOL)rotating;
+@end
+
 @interface RootlessRotationWindow : UIWindow
+@property(nonatomic) unsigned clientTurns;
+@property(nonatomic) NSTimeInterval clientDuration;
 @end
 @implementation RootlessRotationWindow
+- (void)_setRotatableClient:(UIViewController *)client
+        toOrientation:(UIInterfaceOrientation)orientation updateStatusBar:(BOOL)update
+        duration:(NSTimeInterval)duration force:(BOOL)force isRotating:(BOOL)rotating {
+    ++self.clientTurns;
+    self.clientDuration = duration;
+    [super _setRotatableClient:client toOrientation:orientation updateStatusBar:update
+        duration:duration force:force isRotating:rotating];
+}
 @end
 
 @interface RootlessRotationGuestView : UIView
@@ -296,6 +450,11 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
     updateProbeRefreshes = window.refreshes;
     updateProbeArguments = orientation == UIInterfaceOrientationLandscapeLeft &&
         duration == 0.375 && force;
+}
+
+static void nativeOrientationUpdateNoop(id window, SEL selector,
+        UIInterfaceOrientation orientation, NSTimeInterval duration, BOOL force) {
+    (void)window; (void)selector; (void)orientation; (void)duration; (void)force;
 }
 
 @interface RootlessRotationTrackingController : UIViewController
@@ -577,7 +736,8 @@ static UIViewController *backingProbeContainer(UIViewController *content, unsign
         controllerClass = RootlessRotationRegisteredModernController.class;
     if([testCase isEqualToString:@"modern-only"])
         controllerClass = RootlessRotationPolicyOnlyController.class;
-    if([testCase isEqualToString:@"unregistered"])
+    if([testCase isEqualToString:@"unregistered"] ||
+            [testCase isEqualToString:@"device-unregistered"])
         controllerClass = RootlessRotationUnregisteredController.class;
     if([testCase isEqualToString:@"manual-controller"])
         controllerClass = RootlessRotationManualController.class;
@@ -657,7 +817,205 @@ static UIViewController *backingProbeContainer(UIViewController *content, unsign
         });
     return YES;
 }
+- (void)checkInitialBackingPresentation {
+    NSString *key = @"lc32.initialPresentation";
+    SEL refresh = sel_registerName("_updateTransformLayer");
+    for(NSNumber *initiallyReady in @[@NO, @YES]) {
+        startupSceneOrientation = initiallyReady.boolValue
+            ? UIInterfaceOrientationLandscapeLeft : UIInterfaceOrientationPortrait;
+        UIWindow *window = [[UIWindow alloc] initWithWindowScene:self.window.windowScene];
+        window.rootViewController = [RootlessRotationLegacyController new];
+        window.alpha = 0.75;
+        window.hidden = NO;
+        void (^configure)(void) = ^{
+            ((void (*)(id, SEL))objc_msgSend)(window, refresh);
+        };
+        configure();
+        CALayer *backing = window.layer.superlayer.superlayer;
+        CAAnimation *hold = [backing animationForKey:key];
+        BOOL shouldHold = expectedEnabled && !initiallyReady.boolValue;
+        check("only-provisional-backing-held", backing && (hold != nil) == shouldHold);
+        if(hold) check("backing-presentation-fails-open",
+            isfinite(hold.duration) && hold.duration > 0 && hold.removedOnCompletion);
+        [backing removeAnimationForKey:key];
+        configure();
+        CAAnimation *remaining = [backing animationForKey:key];
+        check("provisional-refresh-does-not-extend-hold", shouldHold
+            ? remaining && remaining.duration <= hold.duration : !remaining);
+        startupSceneOrientation = UIInterfaceOrientationLandscapeRight;
+        configure();
+        check("corrected-backing-uses-settling-transition",
+            ([backing animationForKey:key] != nil) == shouldHold);
+        CAAnimation *settling = [backing animationForKey:key];
+        startupSceneOrientation = UIInterfaceOrientationPortrait;
+        configure();
+        check("later-turn-cannot-restart-settling-hold",
+            [backing animationForKey:key].duration <= settling.duration);
+        check("guest-window-model-and-key-status-preserved",
+            !window.hidden && window.alpha == 0.75 && backing.opacity == 1 && !window.isKeyWindow);
+        window.hidden = YES;
+    }
+}
 - (void)finishStartupAndScheduleChecks {
+    if([testCase isEqualToString:@"startup-scene-race"]) {
+        Method sceneGetter = class_getInstanceMethod(UIWindowScene.class,
+            @selector(interfaceOrientation));
+        IMP saved = method_setImplementation(sceneGetter, (IMP)startupSceneOrientationProbe);
+        const unsigned queries = legacyQueries, will = willRotateCalls, did = didRotateCalls;
+        StartupLinkFixture *target = [StartupLinkFixture new];
+        StartupLinkFixture *(^makeLink)(void) = ^{
+            SEL action = @selector(record:);
+            id receiver = LC32LegacyStartupDisplayLinkTarget(target, &action);
+            return [StartupLinkFixture displayLinkWithTarget:receiver selector:action];
+        };
+        @try {
+            for(NSNumber *value in @[@(UIInterfaceOrientationUnknown),
+                    @(UIInterfaceOrientationPortrait), @(UIInterfaceOrientationPortraitUpsideDown)]) {
+                startupSceneOrientation = value.integerValue;
+                check("startup-waits-for-supported-scene",
+                    LC32NativeLegacyRotationStartupSceneReady() == !expectedEnabled);
+                LC32FinishNativeLegacyRotationStartup();
+                check("provisional-scene-does-not-initialize-guest",
+                    legacyQueries == queries && willRotateCalls == will && didRotateCalls == did);
+            }
+            StartupLinkFixture *link = makeLink();
+            check("only-provisional-legacy-links-are-wrapped",
+                (link.target != target) == expectedEnabled);
+            link.timestamp = CACurrentMediaTime();
+            [link fire];
+            BOOL boundedWait = expectedEnabled &&
+                UIApplication.sharedApplication.statusBarOrientationAnimationDuration > 0;
+            check("provisional-tick-yields-to-scene", target.calls == (boundedWait ? 0u : 1u));
+            startupSceneOrientation = UIInterfaceOrientationLandscapeLeft;
+            [link fire];
+            check("scene-change-has-a-frame-to-commit", target.calls == (boundedWait ? 0u : 2u));
+            [link fire];
+            check("original-target-receives-original-link", target.lastSender == link &&
+                target.calls == (boundedWait ? 1u : 3u));
+            check("already-supported-scene-retains-original-target", makeLink().target == target);
+            startupSceneOrientation = UIInterfaceOrientationPortrait;
+            unsigned delivered = target.calls;
+            [link fire];
+            check("later-ticks-never-start-waiting-again", target.calls == delivered + 1);
+            StartupLinkFixture *timeout = makeLink();
+            timeout.timestamp = CACurrentMediaTime();
+            [timeout fire];
+            delivered = target.calls;
+            timeout.timestamp += UIApplication.sharedApplication.statusBarOrientationAnimationDuration + 1;
+            [timeout fire];
+            check("unresolved-scene-cannot-starve-link",
+                target.calls == delivered + 1 && target.lastSender == timeout);
+            StartupLinkFixture *late = makeLink();
+            late.timestamp = timeout.timestamp + 1;
+            startupSceneOrientation = UIInterfaceOrientationLandscapeRight;
+            [late fire];
+            check("late-first-tick-is-not-delayed", target.lastSender == late);
+            [self checkInitialBackingPresentation];
+        } @finally {
+            method_setImplementation(sceneGetter, saved);
+        }
+        check("supported-scene-releases-startup", LC32NativeLegacyRotationStartupSceneReady());
+        LC32FinishNativeLegacyRotationStartup();
+        check("delayed-scene-initializes-guest",
+            expectedEnabled ? legacyQueries > queries : legacyQueries == queries);
+        unsigned settledQueries = legacyQueries;
+        LC32FinishNativeLegacyRotationStartup();
+        check("delayed-initialization-is-once-only", legacyQueries == settledQueries);
+        [self finishAndExit];
+        return;
+    }
+    if([testCase isEqualToString:@"initial-scene-update"]) {
+        [self checkRotationUpdateOrdering];
+        CALayer *probe = [CALayer layer];
+        probe.frame = self.window.layer.bounds;
+        probe.backgroundColor = UIColor.blueColor.CGColor;
+        [self.window.layer addSublayer:probe];
+        [CATransaction flush];
+        usleep(100000);
+        [CATransaction setDisableActions:YES];
+        probe.opacity = 0.375f;
+        SEL update = sel_registerName("_updateToInterfaceOrientation:duration:force:");
+        Method original = class_getInstanceMethod(UIWindow.class, expectedEnabled
+            ? sel_registerName("lc32_updateToInterfaceOrientation:duration:force:") : update);
+        // Scene-era UIKit can do nothing here for a rootless window. The
+        // production wrapper must still refresh and publish native backing.
+        IMP saved = method_setImplementation(original, (IMP)nativeOrientationUpdateNoop);
+        @try {
+            ((void (*)(id, SEL, UIInterfaceOrientation, NSTimeInterval, BOOL))objc_msgSend)(
+                self.window, update, self.window.windowScene.interfaceOrientation, 0, NO);
+        } @finally {
+            method_setImplementation(original, saved);
+        }
+        usleep(100000);
+        check("early-scene-publishes-before-guest-loading",
+            probe.presentationLayer && fabs(probe.presentationLayer.opacity -
+                (expectedEnabled ? 0.375f : 1.0f)) < 0.001);
+        check("early-scene-does-not-call-guest-rotation",
+            legacyQueries == 0 && willRotateCalls == 0 && didRotateCalls == 0);
+        if(expectedEnabled) [self checkNativeBackingGeometry];
+        [self finishAndExit];
+        return;
+    }
+    if([testCase isEqualToString:@"initial-backing"]) {
+        if(expectedEnabled) [self checkNativeBackingGeometry];
+        check("initial-backing-does-not-call-guest-rotation",
+            legacyQueries == 0 && willRotateCalls == 0 && didRotateCalls == 0);
+        [self finishAndExit];
+        return;
+    }
+    if([testCase isEqualToString:@"scene-parameters"]) {
+        id initial = sceneParametersRoundTrip(UIInterfaceOrientationPortrait);
+        // Scene settings describe the host's actual orientation, not the
+        // guest's preferred side. Backing setup must not rewrite either copy.
+        check("initial-scene-keeps-native-orientation",
+            [[initial settings] interfaceOrientation] == UIInterfaceOrientationPortrait &&
+            [[initial clientSettings] interfaceOrientation] == UIInterfaceOrientationPortrait);
+        check("initial-scene-preserves-native-frame", CGRectEqualToRect(
+            [[initial settings] frame], CGRectMake(11, 13, 101, 203)));
+        id supported = sceneParametersRoundTrip(UIInterfaceOrientationLandscapeLeft);
+        check("initial-scene-keeps-supported-orientation",
+            [[supported settings] interfaceOrientation] == UIInterfaceOrientationLandscapeLeft &&
+            [[supported clientSettings] interfaceOrientation] == UIInterfaceOrientationLandscapeLeft);
+        LC32FinishNativeLegacyRotationStartup();
+        id later = sceneParametersRoundTrip(UIInterfaceOrientationPortrait);
+        check("initial-scene-does-not-override-later-scenes",
+            [[later settings] interfaceOrientation] == UIInterfaceOrientationPortrait &&
+            [[later clientSettings] interfaceOrientation] == UIInterfaceOrientationPortrait);
+        [self finishAndExit];
+        return;
+    }
+    if([testCase isEqualToString:@"startup-commit"]) {
+        // Deliberately keep the main run loop busy after startup, as a game
+        // loading assets does. Presentation must not wait for another idle.
+        CALayer *probe = [CALayer layer];
+        probe.frame = self.window.layer.bounds;
+        probe.backgroundColor = UIColor.blueColor.CGColor;
+        [self.window.layer addSublayer:probe];
+        [CATransaction flush];
+        usleep(100000);
+        [CATransaction setDisableActions:YES];
+        probe.opacity = 0.375f;
+        LC32FinishNativeLegacyRotationStartup();
+        usleep(100000);
+        check("startup-publishes-before-next-run-loop-turn",
+            probe.presentationLayer && fabs(probe.presentationLayer.opacity -
+                (expectedEnabled ? 0.375f : 1.0f)) < 0.001);
+        [CATransaction setDisableActions:YES];
+        probe.opacity = 0.625f;
+        LC32FinishNativeLegacyRotationStartup();
+        usleep(100000);
+        check("startup-publication-is-once-only",
+            probe.presentationLayer && fabs(probe.presentationLayer.opacity -
+                (expectedEnabled ? 0.375f : 1.0f)) < 0.001);
+        [probe removeFromSuperlayer];
+        [self finishAndExit];
+        return;
+    }
+    if([testCase hasPrefix:@"device-"]) {
+        [self checkInitialDeviceOrientation];
+        [self finishAndExit];
+        return;
+    }
     if([testCase isEqualToString:@"modal"]) {
         check("modal-presented-before-startup",
             self.controller.presentedViewController == self.modalController &&
@@ -673,6 +1031,61 @@ static UIViewController *backingProbeContainer(UIViewController *content, unsign
             else
                 [self finish];
         });
+}
+- (void)checkInitialDeviceOrientation {
+    UIDeviceOrientation physical = UIDeviceOrientationFaceUp;
+    if([testCase isEqualToString:@"device-face-down"]) physical = UIDeviceOrientationFaceDown;
+    if([testCase isEqualToString:@"device-unknown"]) physical = UIDeviceOrientationUnknown;
+    if([testCase isEqualToString:@"device-portrait"]) physical = UIDeviceOrientationPortrait;
+    if([testCase isEqualToString:@"device-landscape"]) physical = UIDeviceOrientationLandscapeLeft;
+    UIInterfaceOrientation scene = self.window.windowScene.interfaceOrientation;
+    check("initial-device-scene-is-landscape", UIInterfaceOrientationIsLandscape(scene));
+    startupDeviceGenerating = ![testCase isEqualToString:@"device-no-observers"];
+    guestCallsAllowed = ![testCase isEqualToString:@"device-disabled"];
+    requestedDeviceOrientation = physical;
+    Method getter = class_getInstanceMethod(UIDevice.class, @selector(orientation));
+    Method generating = class_getInstanceMethod(UIDevice.class,
+        @selector(isGeneratingDeviceOrientationNotifications));
+    Method setter = class_getInstanceMethod(UIDevice.class, sel_registerName("setOrientation:animated:"));
+    check("initial-device-native-methods-present", getter && generating && setter);
+    if(!getter || !generating || !setter) return;
+    IMP oldGetter = method_setImplementation(getter, (IMP)deviceOrientationProbe);
+    IMP oldGenerating = method_setImplementation(generating, (IMP)startupDeviceGeneratingProbe);
+    IMP oldSetter = method_setImplementation(setter, (IMP)startupDeviceSetterProbe);
+    NSMutableArray<NSNumber *> *events = [NSMutableArray array];
+    id observer = [NSNotificationCenter.defaultCenter addObserverForName:
+        UIDeviceOrientationDidChangeNotification object:UIDevice.currentDevice queue:nil
+        usingBlock:^(NSNotification *note) {
+            [events addObject:@([(UIDevice *)note.object orientation])];
+        }];
+    BOOL shouldInitialize = expectedEnabled && startupDeviceGenerating && guestCallsAllowed &&
+        !UIDeviceOrientationIsLandscape(physical) &&
+        ![testCase isEqualToString:@"device-unregistered"];
+    @try {
+        LC32FinishNativeLegacyRotationStartup();
+        NSArray *expected = shouldInitialize ? @[@(scene), @(physical)] : @[];
+        check("initial-device-scene-event-then-physical-reading", [events isEqual:expected]);
+        check("initial-device-only-native-notification-path",
+            startupDeviceSetterCalls == (shouldInitialize ? 2u : 0u));
+        check("initial-device-no-startup-animation", !startupDeviceAnimated);
+        check("initial-device-physical-reading-restored", UIDevice.currentDevice.orientation == physical);
+        unsigned calls = startupDeviceSetterCalls;
+        LC32FinishNativeLegacyRotationStartup();
+        check("initial-device-bootstrap-is-once-only", startupDeviceSetterCalls == calls &&
+            [events isEqual:expected]);
+        if(shouldInitialize) {
+            check("initial-device-controller-keeps-scene-orientation",
+                self.controller.interfaceOrientation == scene);
+            check("initial-device-layout-remains-landscape",
+                self.content.bounds.size.width > self.content.bounds.size.height);
+        }
+    } @finally {
+        [NSNotificationCenter.defaultCenter removeObserver:observer];
+        method_setImplementation(getter, oldGetter);
+        method_setImplementation(generating, oldGenerating);
+        method_setImplementation(setter, oldSetter);
+        guestCallsAllowed = YES;
+    }
 }
 - (void)replaceRootlessController {
     RootlessRotationTrackingController *previous = (id)self.controller;
@@ -825,36 +1238,51 @@ static UIViewController *backingProbeContainer(UIViewController *content, unsign
     puts("rootless-rotation-direct-lifecycle-scope: callback forwarding only; "
          "this case does not claim an automatic compositor rotation");
 }
-- (void)checkAcceptedTurnLifecycle {
+- (void)checkAcceptedTurnLifecycle:(unsigned)turn {
     // Exercise the production notification -> UpdateWindow -> UIKit path,
     // rather than invoking the lifecycle forwarding aliases directly.
     RootlessRotationTrackingController *subject = (id)self.controller;
     Method orientationMethod = class_getInstanceMethod(UIDevice.class, @selector(orientation));
     IMP saved = method_setImplementation(orientationMethod, (IMP)deviceOrientationProbe);
-    @try {
-        for(unsigned turn = 0; turn < 2; ++turn) {
-            UIInterfaceOrientation previous = subject.interfaceOrientation;
-            UIInterfaceOrientation target = previous == UIInterfaceOrientationLandscapeLeft
-                ? UIInterfaceOrientationLandscapeRight : UIInterfaceOrientationLandscapeLeft;
-            requestedDeviceOrientation = (UIDeviceOrientation)target;
-            unsigned willBefore = subject.recordedWillCalls;
-            unsigned didBefore = subject.recordedDidCalls;
-            [NSNotificationCenter.defaultCenter postNotificationName:
-                UIDeviceOrientationDidChangeNotification object:UIDevice.currentDevice];
-            check("accepted-turn-updates-interface", subject.interfaceOrientation == target);
-            check("accepted-turn-delivers-one-will", subject.recordedWillCalls == willBefore + 1);
-            check("accepted-turn-delivers-one-did", subject.recordedDidCalls == didBefore + 1);
-            check("accepted-turn-callback-orientations", subject.recordedWillOrientation == target &&
-                subject.recordedDidOrientation == previous);
-            [NSNotificationCenter.defaultCenter postNotificationName:
-                UIDeviceOrientationDidChangeNotification object:UIDevice.currentDevice];
-            check("same-orientation-refresh-does-not-repeat-lifecycle",
-                subject.recordedWillCalls == willBefore + 1 &&
-                subject.recordedDidCalls == didBefore + 1);
-        }
-    } @finally {
-        method_setImplementation(orientationMethod, saved);
+    UIInterfaceOrientation previous = subject.interfaceOrientation;
+    UIInterfaceOrientation target = previous == UIInterfaceOrientationLandscapeLeft
+        ? UIInterfaceOrientationLandscapeRight : UIInterfaceOrientationLandscapeLeft;
+    requestedDeviceOrientation = (UIDeviceOrientation)target;
+    unsigned willBefore = subject.recordedWillCalls;
+    unsigned didBefore = subject.recordedDidCalls;
+    unsigned turnsBefore = self.window.clientTurns;
+    [NSNotificationCenter.defaultCenter postNotificationName:
+        UIDeviceOrientationDidChangeNotification object:UIDevice.currentDevice];
+    check("accepted-turn-updates-interface", subject.interfaceOrientation == target);
+    check("accepted-turn-delivers-one-will", subject.recordedWillCalls == willBefore + 1);
+    if(!self.window.rootViewController) {
+        check("rootless-turn-uses-native-animation-duration", self.window.clientDuration ==
+            UIApplication.sharedApplication.statusBarOrientationAnimationDuration);
+        [NSNotificationCenter.defaultCenter postNotificationName:
+            UIDeviceOrientationDidChangeNotification object:UIDevice.currentDevice];
+        check("rootless-duplicate-does-not-restart-native-turn",
+            self.window.clientTurns == turnsBefore + 1);
     }
+    // Yield the main queue so UIKit can commit the animation and deliver its
+    // completion. A nested run loop cannot drain this main-queue finish block.
+    NSTimeInterval wait = fmin(2, fmax(0, subject.recordedDuration)) + 0.1;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, wait * NSEC_PER_SEC),
+        dispatch_get_main_queue(), ^{
+        check("accepted-turn-delivers-one-did", subject.recordedDidCalls == didBefore + 1);
+        check("accepted-turn-callback-orientations", subject.recordedWillOrientation == target &&
+            subject.recordedDidOrientation == previous);
+        [NSNotificationCenter.defaultCenter postNotificationName:
+            UIDeviceOrientationDidChangeNotification object:UIDevice.currentDevice];
+        check("same-orientation-refresh-does-not-repeat-lifecycle",
+            subject.recordedWillCalls == willBefore + 1 &&
+            subject.recordedDidCalls == didBefore + 1);
+        if(!self.window.rootViewController)
+            check("rootless-settled-duplicate-does-not-force-layout",
+                self.window.clientTurns == turnsBefore + 1);
+        method_setImplementation(orientationMethod, saved);
+        if(turn == 0) [self checkAcceptedTurnLifecycle:1];
+        else [self finishAndExit];
+    });
 }
 - (void)checkRotationUpdateOrdering {
     SEL originalSelector = sel_registerName("lc32_updateToInterfaceOrientation:duration:force:");
@@ -893,7 +1321,8 @@ static UIViewController *backingProbeContainer(UIViewController *content, unsign
             method_setImplementation(original, saved);
         }
         BOOL guest = layout < 5 && cls != RootlessRotationNativeModernController.class &&
-            (!rootless || cls == RootlessRotationPolicyOnlyController.class);
+            (!rootless || cls == RootlessRotationPolicyOnlyController.class ||
+                [testCase isEqualToString:@"initial-scene-update"]);
         check("rotation-update-original-called-once", updateProbeCalls == 1);
         check("rotation-update-arguments-preserved", updateProbeArguments);
         check("rotation-update-backing-before-client", updateProbeRefreshes == (guest ? 1u : 0u));
@@ -1160,6 +1589,63 @@ static UIViewController *backingProbeContainer(UIViewController *content, unsign
         window.hidden = YES;
     }
 }
+- (void)checkBackingAnimation {
+    if(!expectedEnabled) return;
+    UIWindow *window = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, 317, 509)];
+    window.rootViewController = [RootlessRotationLegacyController new];
+    CALayer *root = CALayer.layer, *scene = CALayer.layer, *transform = CALayer.layer;
+    [root addSublayer:scene];
+    [scene addSublayer:transform];
+    BackingAnimationProbe *rootProbe = [BackingAnimationProbe new];
+    BackingAnimationProbe *sceneProbe = [BackingAnimationProbe new];
+    SEL configure = sel_registerName("_configureRootLayer:sceneTransformLayer:transformLayer:");
+    Method original = class_getInstanceMethod(UIWindow.class,
+        sel_registerName("lc32_configureRootLayer:sceneTransformLayer:transformLayer:"));
+    IMP saved = method_setImplementation(original, (IMP)nativeConfigureAnimationProbe);
+    @try {
+        for(unsigned turn = 0; turn < 4; ++turn) {
+            BOOL disabled = turn >= 2;
+            animationProbeAngle = (turn & 1) ? -M_PI_2 : M_PI_2;
+            CGAffineTransform previous = CGAffineTransformMakeRotation(-animationProbeAngle);
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            root.bounds = CGRectMake(0, 0, 509, 317);
+            root.position = CGPointMake(254.5, 158.5);
+            root.affineTransform = CGAffineTransformIdentity;
+            scene.bounds = CGRectMake(0, 0, 317, 509);
+            scene.position = CGPointMake(254.5, 158.5);
+            scene.affineTransform = previous;
+            [CATransaction commit];
+            root.delegate = rootProbe;
+            scene.delegate = sceneProbe;
+            rootProbe.transformActions = sceneProbe.transformActions = 0;
+            [CATransaction begin];
+            [CATransaction setDisableActions:disabled];
+            [CATransaction setAnimationDuration:0.6];
+            ((void (*)(id, SEL, CALayer *, CALayer *, CALayer *))objc_msgSend)(
+                window, configure, root, scene, transform);
+            check("backing-animation-preserves-transaction-policy",
+                CATransaction.disableActions == disabled && CATransaction.animationDuration == 0.6);
+            [CATransaction commit];
+            check("backing-animation-root-remains-upright", CGAffineTransformIsIdentity(root.affineTransform));
+            check("backing-animation-scene-final-transform", CGAffineTransformEqualToTransform(
+                scene.affineTransform, CGAffineTransformMakeRotation(animationProbeAngle)));
+            if(disabled) {
+                check("backing-animation-disabled-actions-preserved",
+                    !rootProbe.transformActions && !sceneProbe.transformActions);
+            } else {
+                check("backing-animation-no-temporary-root-start",
+                    !rootProbe.transformActions || CGAffineTransformIsIdentity(rootProbe.fromTransform));
+                check("backing-animation-starts-at-previous-scene-transform",
+                    sceneProbe.transformActions == 1 &&
+                    CGAffineTransformEqualToTransform(sceneProbe.fromTransform, previous));
+            }
+        }
+    } @finally {
+        method_setImplementation(original, saved);
+        root.delegate = scene.delegate = nil;
+    }
+}
 - (void)checkNativeBackingGeometry {
     /* These are UIKit's real configured layers, not freshly constructed probe
      * layers. Lifecycle counts alone cannot catch a sideways backing store. */
@@ -1200,6 +1686,7 @@ static UIViewController *backingProbeContainer(UIViewController *content, unsign
         CGRectEqualToRect(scene.frame, root.bounds));
 }
 - (void)finish {
+    BOOL checkAcceptedTurns = NO;
     if([testCase isEqualToString:@"modern-refresh"] && !self.completedRefreshProbe) {
         [self checkQueuedModernBackingRefresh];
         return;
@@ -1224,6 +1711,7 @@ static UIViewController *backingProbeContainer(UIViewController *content, unsign
         [self checkDirectLifecycleForwarding];
     } else if([testCase isEqualToString:@"ownership"]) {
         [self checkScopedOwnership];
+        [self checkBackingAnimation];
         [self checkModernNativePermission];
         [self checkRotationUpdateOrdering];
     } else if([testCase isEqualToString:@"modern-refresh"]) {
@@ -1289,13 +1777,24 @@ static UIViewController *backingProbeContainer(UIViewController *content, unsign
         check("rootless-exactly-one-startup-query", controller.recordedQueries == 1);
         check("rootless-received-landscape-candidate",
             UIInterfaceOrientationIsLandscape(lastLegacyOrientation));
-        check("rootless-no-forced-rotation-callbacks",
-            willRotateCalls == 0 && didRotateCalls == 0);
-        check("rootless-content-transform-unchanged",
-            CGAffineTransformIsIdentity(self.content.transform));
-        check("rootless-renderer-frame-and-bounds-preserved",
-            CGRectEqualToRect(self.content.frame, self.initialContentFrame) &&
-            CGRectEqualToRect(self.content.bounds, self.initialContentBounds));
+        if(manualRotation) {
+            check("rootless-no-forced-rotation-callbacks",
+                willRotateCalls == 0 && didRotateCalls == 0);
+            check("rootless-content-transform-unchanged",
+                CGAffineTransformIsIdentity(self.content.transform));
+            check("rootless-renderer-frame-and-bounds-preserved",
+                CGRectEqualToRect(self.content.frame, self.initialContentFrame) &&
+                CGRectEqualToRect(self.content.bounds, self.initialContentBounds));
+        } else {
+            check("rootless-accepted-controller-is-landscape",
+                UIInterfaceOrientationIsLandscape(controller.interfaceOrientation));
+            check("rootless-accepted-view-is-landscape",
+                self.content.bounds.size.width > self.content.bounds.size.height);
+            check("rootless-accepted-turn-delivers-lifecycle",
+                willRotateCalls != 0 && didRotateCalls != 0);
+            checkSceneOrientationPreference(controller, self.window);
+            checkAcceptedTurns = YES;
+        }
         [self checkNativeBackingGeometry];
     } else if(expectedEnabled) {
         id clients = nativeObjectGetter(self.window, "_clientsForRotation");
@@ -1313,7 +1812,7 @@ static UIViewController *backingProbeContainer(UIViewController *content, unsign
             UIInterfaceOrientationIsLandscape(self.controller.interfaceOrientation));
         check("explicit-root-still-preserved", self.window.rootViewController == self.controller);
         [self checkNativeBackingGeometry];
-        if([testCase isEqualToString:@"explicit"]) [self checkAcceptedTurnLifecycle];
+        if([testCase isEqualToString:@"explicit"]) checkAcceptedTurns = YES;
     }
     if([testCase isEqualToString:@"replacement"]) {
         check("replacement-startup-state-does-not-retain-previous-controller",
@@ -1327,6 +1826,10 @@ static UIViewController *backingProbeContainer(UIViewController *content, unsign
     check("native-compositor-policy-still-unchanged",
         nativeRotationPolicy() == originalNativeRotationPolicy);
     check("sdk-policy-stable", LC32NativeLegacyRotationEnabled() == expectedEnabled);
+    if(checkAcceptedTurns) [self checkAcceptedTurnLifecycle:0];
+    else [self finishAndExit];
+}
+- (void)finishAndExit {
     self.window.hidden = YES;
     printf("rootless-rotation-regression: %s\n", failures ? "FAIL" : "PASS");
     exit(failures != 0);
@@ -1347,7 +1850,9 @@ int main(int argc, char **argv) {
             if(!strcmp(argv[index], "--case")) testCase = @(argv[index + 1]);
         }
         if(![@[@"rootless", @"explicit", @"modern", @"modern-explicit", @"modern-startup", @"modern-only", @"modern-refresh", @"unregistered", @"manual", @"manual-controller",
-                @"modal", @"manual-disabled", @"lifecycle", @"ownership", @"replacement", @"statusbar"]
+                @"modal", @"manual-disabled", @"lifecycle", @"ownership", @"replacement", @"statusbar", @"startup-commit", @"startup-scene-race", @"scene-parameters", @"initial-backing", @"initial-scene-update",
+                @"device-face-up", @"device-face-down", @"device-unknown", @"device-portrait",
+                @"device-landscape", @"device-no-observers", @"device-unregistered", @"device-disabled"]
                 containsObject:testCase]) return 2;
         manualRotation = [testCase isEqualToString:@"manual"] ||
             [testCase isEqualToString:@"manual-disabled"];

@@ -2460,6 +2460,7 @@ void LC32FinishGuestOrientationStartupAfterLaunch(void) {
                 ? CFRunLoopGetNextTimerFireDate(runLoop, mode) : 0;
             if(mode) CFRelease(mode);
             if(nextTimer > 0 && nextTimer <= CFAbsoluteTimeGetCurrent()) return;
+            if(!LC32NativeLegacyRotationStartupSceneReady()) return;
             CFRunLoopObserverInvalidate(observer);
             LC32GuestOrientationStartupComplete.store(
                 true, std::memory_order_release);
