@@ -3,6 +3,82 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
+#include "../GuestFrameworks/CoreFoundation/LC32CoreFoundationBridge.h"
+
+extern uint32_t LC32CoreFoundationDispatch(LC32CoreFoundationOpcode,
+    const uint64_t *, uint32_t);
+
+static BOOL CheckNativeComparison(void) {
+    unsigned char left[32775], right[32777];
+    memset(left, 0x5a, sizeof(left));
+    memset(right, 0x5a, sizeof(right));
+    uint64_t slots[] = {(uintptr_t)(left + 1), (uintptr_t)(right + 3), 32773};
+    BOOL passed = LC32CoreFoundationDispatch(
+        LC32CoreFoundationOpDataCompareGuestBytes, slots, 3) == 1;
+    const unsigned offsets[] = {0, 16383, 16384, 32772};
+    for(unsigned i = 0; i < sizeof(offsets) / sizeof(*offsets); ++i) {
+        right[3 + offsets[i]] ^= 1;
+        passed &= LC32CoreFoundationDispatch(
+            LC32CoreFoundationOpDataCompareGuestBytes, slots, 3) == 2;
+        right[3 + offsets[i]] ^= 1;
+    }
+    slots[0] = slots[1] = slots[2] = 0;
+    passed &= LC32CoreFoundationDispatch(
+        LC32CoreFoundationOpDataCompareGuestBytes, slots, 3) == 1;
+    slots[2] = 1;
+    passed &= LC32CoreFoundationDispatch(
+        LC32CoreFoundationOpDataCompareGuestBytes, slots, 3) == 0;
+    slots[0] = slots[1] = UINT32_MAX;
+    slots[2] = 2;
+    passed &= LC32CoreFoundationDispatch(
+        LC32CoreFoundationOpDataCompareGuestBytes, slots, 3) == 0;
+    slots[2] = 256u * 1024u * 1024u + 1;
+    passed &= LC32CoreFoundationDispatch(
+        LC32CoreFoundationOpDataCompareGuestBytes, slots, 3) == 0;
+    passed &= LC32CoreFoundationDispatch(
+        LC32CoreFoundationOpDataCompareGuestBytes, slots, 2) == 0;
+    printf("native-data-compare: %s\n", passed ? "PASS" : "FAIL");
+    return passed;
+}
+
+static BOOL CheckMutableSynchronization(void) {
+    const NSUInteger length = 4 * 1024 * 1024 + 3;
+    NSMutableData *data = [[NSMutableData alloc] initWithLength:length];
+    unsigned char *bytes = data.mutableBytes;
+    BOOL passed = bytes != NULL;
+    const NSUInteger offsets[] = {0, 4095, 4096, 16383, 16384, length - 1};
+    for(unsigned pass = 1; pass <= 2 && passed; ++pass) {
+        for(unsigned i = 0; i < sizeof(offsets) / sizeof(*offsets); ++i) {
+            // Reuse the same exposed pointer after every synchronization.
+            bytes[offsets[i]] = (unsigned char)(pass * 16 + i);
+            unsigned char nativeByte = 0;
+            [data getBytes:&nativeByte range:NSMakeRange(offsets[i], 1)];
+            passed &= nativeByte == bytes[offsets[i]];
+        }
+    }
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    for(unsigned i = 0; i < 64; ++i) passed &= data.length == length;
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    printf("mutable-unchanged-4MiB-64-reads: %.3f seconds\n",
+        end.tv_sec - start.tv_sec + (end.tv_nsec - start.tv_nsec) / 1e9);
+    // No-op reads must not clear exposure and miss a subsequent raw write.
+    bytes[length - 1] = 0xe7;
+    unsigned char last = 0;
+    [data getBytes:&last range:NSMakeRange(length - 1, 1)];
+    passed &= last == 0xe7;
+    [data setLength:0];
+    passed &= data.length == 0 && data.mutableBytes != NULL;
+    [data setLength:8193];
+    bytes = data.mutableBytes;
+    bytes[8192] = 0x72;
+    [data getBytes:&last range:NSMakeRange(8192, 1)];
+    passed &= last == 0x72;
+    [data release];
+    printf("mutable-repeated-raw-sync: %s\n", passed ? "PASS" : "FAIL");
+    return passed;
+}
 
 @interface LC32CapacityMutableData : NSMutableData
 @end
@@ -12,6 +88,8 @@
 
 int main(void) {
     NSAutoreleasePool *pool = [NSAutoreleasePool new];
+    BOOL comparisonPassed = CheckNativeComparison();
+    BOOL synchronizationPassed = CheckMutableSynchronization();
 
     const char constructorSource[] = "constructor";
     NSData *constructed = [NSData dataWithBytes:constructorSource
@@ -110,7 +188,7 @@ int main(void) {
         boundedCapacityPassed ? "PASS" : "FAIL");
 
     [pool drain];
-    return !(constructorPassed && bytesPassed && wholePassed && rangePassed &&
+    return !(comparisonPassed && synchronizationPassed && constructorPassed && bytesPassed && wholePassed && rangePassed &&
              subdataPassed && mutableCapacityPassed &&
              mutableCopyCapacityPassed && objcCapacityPassed &&
              initializedCapacityPassed && subclassCapacityPassed &&

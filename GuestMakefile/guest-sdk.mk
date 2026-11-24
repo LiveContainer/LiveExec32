@@ -13,14 +13,11 @@ LC32_GUEST_SDK_STAMP := $(LC32_GUEST_SDK)/.lc32-sdk-ready
 
 ISYSROOT ?= $(LC32_GUEST_SDK)
 
-# The modern Xcode linker can drop ARM32 Thumb bits from function pointers.
-# Resolve the classic linker explicitly; -Wl,-ld_classic is ignored by Xcode 27.
-ifeq ($(origin LC32_GUEST_LINKER),undefined)
-LC32_GUEST_LINKER := $(shell xcrun --find ld-classic 2>/dev/null)
-endif
-export LC32_GUEST_LINKER
-# Validate in the build-config prerequisite, not while parsing SDK/clean goals.
-LC32_GUEST_LINKER_FLAGS = -fuse-ld="$(LC32_GUEST_LINKER)"
+# Modern ld drops Thumb bits from stored function pointers and LC_MAIN. Repair
+# its unstripped output using rebase/symbol metadata before Theos signs it.
+LC32_GUEST_LINKER_WRAPPER := $(LC32_GUEST_SDK_REPO_ROOT)/Scripts/guest-ld
+LC32_GUEST_THUMB_FIXUPS := $(LC32_GUEST_SDK_REPO_ROOT)/Scripts/arm32_thumb_fixups.py
+LC32_GUEST_LINKER_FLAGS = --ld-path="$(LC32_GUEST_LINKER_WRAPPER)"
 
 # A caller-provided ISYSROOT is intentionally left alone. This lets developers
 # use an SDK obtained through Xcode without invoking the third-party download.

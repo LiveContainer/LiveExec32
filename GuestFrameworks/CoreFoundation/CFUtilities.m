@@ -32,37 +32,6 @@ _Static_assert(offsetof(CFUUIDBytes, byte0) == 0,
 _Static_assert(offsetof(CFUUIDBytes, byte15) == 15,
                "CFUUIDBytes byte15 must be last");
 
-static int LC32CFUUIDHexValue(unsigned char character) {
-    if(character >= '0' && character <= '9') return character - '0';
-    if(character >= 'A' && character <= 'F') return character - 'A' + 10;
-    if(character >= 'a' && character <= 'f') return character - 'a' + 10;
-    return -1;
-}
-
-static Boolean LC32CFUUIDParseString(const char *text,
-                                     UInt8 rawBytes[16]) {
-    if(!text || !rawBytes) return false;
-    UInt8 parsed[16];
-    size_t byteIndex = 0;
-    int highNibble = -1;
-    for(const unsigned char *cursor = (const unsigned char *)text;
-            *cursor; ++cursor) {
-        if(*cursor == '-') continue;
-        const int nibble = LC32CFUUIDHexValue(*cursor);
-        if(nibble < 0) return false;
-        if(highNibble < 0) {
-            highNibble = nibble;
-            continue;
-        }
-        if(byteIndex == sizeof(parsed)) return false;
-        parsed[byteIndex++] = (UInt8)((highNibble << 4) | nibble);
-        highNibble = -1;
-    }
-    if(byteIndex != sizeof(parsed) || highNibble >= 0) return false;
-    memcpy(rawBytes, parsed, sizeof(parsed));
-    return true;
-}
-
 static LC32CFUUIDBytes LC32CFUUIDBytesMake(
         UInt8 byte0, UInt8 byte1, UInt8 byte2, UInt8 byte3,
         UInt8 byte4, UInt8 byte5, UInt8 byte6, UInt8 byte7,
@@ -425,24 +394,16 @@ CFRunLoopRef CFRunLoopGetCurrent(void) {
         LC32CoreFoundationOpRunLoopGetCurrent);
 }
 
+// NSUUID is not interchangeable with CFUUID in native C APIs such as
+// CFFileSecuritySetOwnerUUID. Keep factories and byte/string accessors native.
 CFTypeID CFUUIDGetTypeID(void) {
-    static CFTypeID typeID;
-    if(typeID) return typeID;
-    @synchronized([NSUUID class]) {
-        if(!typeID) {
-            CFUUIDRef uuid = CFUUIDCreate(kCFAllocatorDefault);
-            if(uuid) {
-                typeID = CFGetTypeID(uuid);
-                CFRelease(uuid);
-            }
-        }
-    }
-    return typeID;
+    return (CFTypeID)LC32_CF_CALL(LC32CoreFoundationOpGetKnownTypeID,
+        LC32_CF_U32(LC32CoreFoundationTypeUUID));
 }
 
 CFUUIDRef CFUUIDCreate(CFAllocatorRef allocator) {
     (void)allocator;
-    return (CFUUIDRef)[[NSUUID alloc] init];
+    return (CFUUIDRef)LC32_CF_CALL0(LC32CoreFoundationOpUUIDCreate);
 }
 
 CFUUIDRef CFUUIDCreateWithBytes(
@@ -460,8 +421,9 @@ CFUUIDRef CFUUIDCreateWithBytes(
 CFUUIDRef CFUUIDCreateFromString(CFAllocatorRef allocator,
                                  CFStringRef uuidString) {
     (void)allocator;
-    return uuidString ? (CFUUIDRef)[[NSUUID alloc]
-        initWithUUIDString:(NSString *)uuidString] : NULL;
+    return uuidString ? (CFUUIDRef)LC32_CF_CALL(
+        LC32CoreFoundationOpUUIDCreateFromString,
+        LC32_CF_HOST(uuidString)) : NULL;
 }
 
 CFUUIDRef CFUUIDGetConstantUUIDWithBytes(
@@ -474,7 +436,7 @@ CFUUIDRef CFUUIDGetConstantUUIDWithBytes(
         byte0, byte1, byte2, byte3, byte4, byte5, byte6, byte7,
         byte8, byte9, byte10, byte11, byte12, byte13, byte14, byte15);
 
-    @synchronized([NSUUID class]) {
+    @synchronized([__NSCFType class]) {
         for(LC32CFConstantUUIDEntry *entry = LC32CFConstantUUIDs;
                 entry; entry = entry->next) {
             if(memcmp(entry->storage.rawBytes, storage.rawBytes,
@@ -502,40 +464,22 @@ CFUUIDRef CFUUIDGetConstantUUIDWithBytes(
 
 CFUUIDRef CFUUIDCreateFromUUIDBytes(CFAllocatorRef allocator,
                                     CFUUIDBytes bytes) {
-    static const char digits[] = "0123456789ABCDEF";
-    const LC32CFUUIDBytes storage = {.bytes = bytes};
-    char text[37];
-    size_t output = 0;
-    for(size_t index = 0; index < sizeof(storage.rawBytes); ++index) {
-        if(index == 4 || index == 6 || index == 8 || index == 10) {
-            text[output++] = '-';
-        }
-        text[output++] = digits[storage.rawBytes[index] >> 4];
-        text[output++] = digits[storage.rawBytes[index] & 0x0f];
-    }
-    text[output] = '\0';
-
-    CFStringRef string = CFStringCreateWithBytes(
-        allocator, (const UInt8 *)text, (CFIndex)output,
-        kCFStringEncodingASCII, false);
-    if(!string) return NULL;
-    CFUUIDRef uuid = (CFUUIDRef)[[NSUUID alloc]
-        initWithUUIDString:(NSString *)string];
-    CFRelease(string);
-    return uuid;
+    (void)allocator;
+    return (CFUUIDRef)LC32_CF_CALL(LC32CoreFoundationOpUUIDCreateFromBytes,
+        LC32_CF_U32((uintptr_t)&bytes));
 }
 
 CFUUIDBytes CFUUIDGetUUIDBytes(CFUUIDRef uuid) {
-    LC32CFUUIDBytes result = {0};
-    if(!uuid) return result.bytes;
-    NSString *string = [(NSUUID *)uuid UUIDString];
-    LC32CFUUIDParseString(string.UTF8String, result.rawBytes);
-    return result.bytes;
+    CFUUIDBytes result = {0};
+    if(uuid) LC32_CF_CALL(LC32CoreFoundationOpUUIDGetBytes,
+        LC32_CF_HOST(uuid), LC32_CF_U32((uintptr_t)&result));
+    return result;
 }
 
 CFStringRef CFUUIDCreateString(CFAllocatorRef allocator, CFUUIDRef uuid) {
     (void)allocator;
-    return uuid ? (CFStringRef)[[(NSUUID *)uuid UUIDString] copy] : NULL;
+    return uuid ? (CFStringRef)LC32_CF_CALL(
+        LC32CoreFoundationOpUUIDCreateString, LC32_CF_HOST(uuid)) : NULL;
 }
 
 CFStringRef CFURLCreateStringByAddingPercentEscapes(

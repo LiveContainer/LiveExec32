@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <QuartzCore/QuartzCore.h>
+#import <CoreMedia/CoreMedia.h>
 #import <LC32/LC32.h>
 #import <objc/runtime.h>
 
@@ -93,6 +94,74 @@ static int CheckTransformValues(void) {
     return failed;
 }
 
+static int CheckMediaTimeValue(const void *expected, uint32_t size, const char *type) {
+    int failed = 0;
+    NSValue *guestValue = [NSValue valueWithBytes:expected objCType:type];
+    LC32HostSizedIndirectDescriptor descriptor;
+    LC32InitializeHostSizedIndirectDescriptor(&descriptor, (void *)expected, size);
+    const uint64_t hostType = LC32GuestToHostCString(type, 0);
+    NSValue *nativeValue = LC32InvokeHostObjectSelector(
+        [(id)[NSValue class] host_self],
+        LC32GetHostSelector(@selector(valueWithBytes:objCType:)),
+        LC32HostSizedIndirectArgument(&descriptor), hostType, (uint64_t)0);
+    LC32GuestToHostCStringFree(hostType);
+    failed += Check("nsvalue-media-time-create", guestValue && nativeValue);
+    if(!guestValue || !nativeValue) return failed;
+    for(NSValue *value in @[guestValue, nativeValue]) {
+        // The native box deliberately has no original guest bytes cached.
+        failed += Check("nsvalue-media-time-type", !strcmp(value.objCType, type));
+        uint32_t guarded[sizeof(CMTimeRange) / sizeof(uint32_t) + 2];
+        memset(guarded, 0xa5, sizeof(guarded));
+        [value getValue:&guarded[1]];
+        failed += Check("nsvalue-media-time-round-trip",
+            !memcmp(&guarded[1], expected, size));
+        failed += Check("nsvalue-media-time-write-width",
+            guarded[0] == UINT32_C(0xa5a5a5a5) &&
+            guarded[1 + size / sizeof(uint32_t)] == UINT32_C(0xa5a5a5a5));
+    }
+    return failed;
+}
+
+static int CheckNonretainedObjectValues(void) {
+    NSObject *object = [NSObject new];
+    int failed = 0;
+    for(id expected in @[object, [NSNull null]]) {
+        if(expected == [NSNull null]) expected = nil;
+        NSValue *value = [NSValue valueWithNonretainedObject:expected];
+        failed += Check("nsvalue-nonretained-create", value != nil);
+        failed += Check("nsvalue-nonretained-object",
+            value.nonretainedObjectValue == expected);
+        failed += Check("nsvalue-nonretained-pointer",
+            value.pointerValue == (void *)expected);
+        failed += Check("nsvalue-nonretained-native-identity",
+            LC32InvokeHostSelector(value.host_self,
+                LC32GetHostSelector(@selector(pointerValue)), (uint64_t)0)
+                == [expected host_self]);
+        struct {
+            void *pointer;
+            uint32_t canary;
+        } output = { (void *)1, UINT32_C(0x51ec70a5) };
+        [value getValue:&output.pointer];
+        failed += Check("nsvalue-nonretained-bytes",
+            output.pointer == (void *)expected);
+        failed += Check("nsvalue-nonretained-write-width",
+            output.canary == UINT32_C(0x51ec70a5));
+        failed += Check("nsvalue-nonretained-type",
+            !strcmp(value.objCType, @encode(void *)));
+    }
+    NSAutoreleasePool *inner = [NSAutoreleasePool new];
+    NSValue *boxed = [NSValue valueWithNonretainedObject:object];
+    NSArray *array = [[NSArray alloc] initWithObjects:boxed, nil];
+    [inner drain];
+    NSValue *returned = [array objectAtIndex:0];
+    failed += Check("nsvalue-nonretained-container-round-trip",
+        returned.pointerValue == (void *)object &&
+        returned.nonretainedObjectValue == object);
+    [array release];
+    [object release];
+    return failed;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     NSAutoreleasePool *pool = [NSAutoreleasePool new];
@@ -151,8 +220,16 @@ int main(void) {
            pointerTypePassed ? "PASS" : "FAIL");
 
     const int transformFailures = CheckTransformValues();
+    const CMTimeRange range = {
+        {INT64_C(0x123456789), 600, kCMTimeFlags_Valid, -7},
+        {INT64_C(0x23456789a), 300, kCMTimeFlags_Valid, 0},
+    };
+    const int nonretainedFailures = CheckNonretainedObjectValues();
+    const int mediaFailures = CheckMediaTimeValue(&range.start, sizeof(range.start), @encode(CMTime)) +
+        CheckMediaTimeValue(&range, sizeof(range), @encode(CMTimeRange));
     [pool drain];
     return !(selectorPassed && canaryPassed && typePassed &&
              pointerPassed && pointerBytesPassed &&
-             pointerCanaryPassed && pointerTypePassed && !transformFailures);
+             pointerCanaryPassed && pointerTypePassed && !transformFailures &&
+             !mediaFailures && !nonretainedFailures);
 }

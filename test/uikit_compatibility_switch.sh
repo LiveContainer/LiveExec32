@@ -22,11 +22,12 @@ for mode in 0 1; do
         -o "$workdir/nib-$mode"
     "$workdir/nib-$mode"
 
-    for unit in LegacyAutoLayout LegacyFonts LegacyAlerts LegacyRotation GuestSelectorHooks GuestScreenMetrics; do
+    for unit in LegacyAutoLayout LegacyFonts LegacyAlerts LegacyRotation GuestSelectorHooks GuestScreenMetrics GuestStatusBar ClassicPresentation; do
         xcrun --sdk iphoneos clang++ -arch arm64 -miphoneos-version-min=15.0 \
             -std=c++17 -fobjc-arc -Wno-deprecated-declarations \
             -DLC32_UIKIT_COMPATIBILITY="$mode" -I"$repo_root/include" \
             -DDYNARMIC_MASTER -I"$repo_root/External/dynarmic/src" \
+            -I"$repo_root/HostFrameworks/LC32" \
             -I"$repo_root/External/mini-gdbstub/include" \
             -c "$repo_root/HostFrameworks/UIKit/$unit.mm" -o "$workdir/$unit.o"
         case "$unit" in

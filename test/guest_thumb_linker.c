@@ -18,6 +18,11 @@ uint32_t lc32_thumb_callback(uint32_t value) {
 uint32_t (* volatile lc32_thumb_callback_pointer)(uint32_t) =
     lc32_thumb_callback;
 
+__attribute__((noinline))
+static uint32_t (*computed_callback(void))(uint32_t) {
+    return lc32_thumb_callback;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     const int constructor_ok = constructor_value == UINT32_C(0x13579bdf);
@@ -32,5 +37,10 @@ int main(void) {
         lc32_thumb_callback_pointer(UINT32_C(0x12345678)) ==
             (UINT32_C(0x12345678) ^ UINT32_C(0xa5a55a5a));
     printf("guest-thumb-indirect-call: %s\n", callback_ok ? "PASS" : "FAIL");
-    return !(constructor_ok && thumb_ok && callback_ok);
+    uint32_t (*volatile computed)(uint32_t) = computed_callback();
+    const int computed_ok = ((uintptr_t)computed & 1) &&
+        computed(UINT32_C(0x12345678)) ==
+            (UINT32_C(0x12345678) ^ UINT32_C(0xa5a55a5a));
+    printf("guest-thumb-computed-pointer: %s\n", computed_ok ? "PASS" : "FAIL");
+    return !(constructor_ok && thumb_ok && callback_ok && computed_ok);
 }

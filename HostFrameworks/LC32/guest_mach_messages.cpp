@@ -13,8 +13,9 @@
 namespace {
 
 /* Wire layouts and IDs are from the iOS 10.3 SDK's mach/{mach_host,
- * mach_port,clock}.h. Keep them independent of the host SDK's LP64 MIG
- * structs: even _host_page_size widens its vm_size_t result on arm64. */
+ * mach_port,clock}.h and libsystem_kernel's _kernelrpc stubs. Keep them
+ * independent of the host SDK's LP64 MIG structs: even _host_page_size
+ * widens its vm_size_t result on arm64. */
 template<size_t Count>
 struct __attribute__((packed, aligned(4))) ScalarRequest32 {
     mach_msg_header_t Head;
@@ -22,11 +23,12 @@ struct __attribute__((packed, aligned(4))) ScalarRequest32 {
     uint32_t values[Count];
 };
 
+template<typename T>
 struct __attribute__((packed, aligned(4))) ScalarReply32 {
     mach_msg_header_t Head;
     NDR_record_t NDR;
     kern_return_t RetCode;
-    uint32_t value;
+    T value;
 };
 
 struct __attribute__((packed, aligned(4))) ClockAttributesReply32 {
@@ -51,7 +53,9 @@ static_assert(sizeof(mig_reply_error_t) == 36);
 static_assert(sizeof(ScalarRequest32<1>) == 36);
 static_assert(sizeof(ScalarRequest32<2>) == 40);
 static_assert(sizeof(ScalarRequest32<3>) == 44);
-static_assert(sizeof(ScalarReply32) == 40);
+static_assert(sizeof(ScalarReply32<uint32_t>) == 40);
+static_assert(sizeof(ScalarReply32<uint64_t>) == 44);
+static_assert(offsetof(ScalarReply32<uint64_t>, value) == 36);
 static_assert(sizeof(ClockAttributesReply32) == 44);
 static_assert(offsetof(KernelVersionReply32, version) == 44);
 static_assert(sizeof(KernelVersionReply32) == 556);
@@ -80,10 +84,11 @@ public:
         std::memcpy(message_, &reply, sizeof(reply));
     }
 
-    void scalar(kern_return_t code, uint32_t value) {
+    template<typename T>
+    void scalar(kern_return_t code, T value) {
         if(code != KERN_SUCCESS) return error(code);
-        if(!require(sizeof(ScalarReply32))) return;
-        ScalarReply32 reply = {};
+        if(!require(sizeof(ScalarReply32<T>))) return;
+        ScalarReply32<T> reply = {};
         reply.Head = header(sizeof(reply));
         reply.NDR = NDR_record;
         reply.RetCode = KERN_SUCCESS;
@@ -112,18 +117,22 @@ bool HandleGuestSimpleMachMessage(
         mach_msg_return_t *result) {
     if(!message || !result) return false;
     unsigned argumentCount;
-    bool scalarReply = false;
+    mach_msg_size_t replySize = sizeof(mig_reply_error_t);
     switch(message->msgh_id) {
         case 201: // host_kernel_version
             argumentCount = 0;
             break;
         case 202: // _host_page_size
             argumentCount = 0;
-            scalarReply = true;
+            replySize = sizeof(ScalarReply32<uint32_t>);
             break;
         case 3204: // mach_port_allocate
             argumentCount = 1;
-            scalarReply = true;
+            replySize = sizeof(ScalarReply32<uint32_t>);
+            break;
+        case 3228: // mach_port_get_context
+            argumentCount = 1;
+            replySize = sizeof(ScalarReply32<uint64_t>);
             break;
         case 3205: // mach_port_destroy
         case 3206: // mach_port_deallocate
@@ -131,7 +140,7 @@ bool HandleGuestSimpleMachMessage(
             break;
         case 3207: // mach_port_get_refs
             argumentCount = 2;
-            scalarReply = true;
+            replySize = sizeof(ScalarReply32<uint32_t>);
             break;
         case 1001: // clock_get_attributes
         case 3202: // mach_port_rename
@@ -144,6 +153,7 @@ bool HandleGuestSimpleMachMessage(
             argumentCount = 2;
             break;
         case 3208: // mach_port_mod_refs
+        case 3229: // mach_port_set_context
             argumentCount = 3;
             break;
         default:
@@ -173,8 +183,7 @@ bool HandleGuestSimpleMachMessage(
 
     /* Preflight replies before namespace mutations, notably allocate: do not
      * create a right whose returned name cannot fit in the guest's buffer. */
-    if(!reply.require(scalarReply ? sizeof(ScalarReply32)
-                                 : sizeof(mig_reply_error_t))) return true;
+    if(!reply.require(replySize)) return true;
     const mach_port_t target = message->msgh_remote_port;
     kern_return_t code;
     switch(message->msgh_id) {
@@ -284,6 +293,19 @@ bool HandleGuestSimpleMachMessage(
             break;
         case 3227:
             reply.error(mach_port_extract_member(target, arguments[0], arguments[1]));
+            break;
+        case 3228: {
+            mach_port_context_t context = 0;
+            code = mach_port_get_context(target, arguments[0], &context);
+            // libsystem_kernel's _kernelrpc wire ABI uses 64 bits even though
+            // the public ARM32 mach_port_context_t is only 32 bits.
+            reply.scalar(code, static_cast<uint64_t>(context));
+            break;
+        }
+        case 3229:
+            reply.error(mach_port_set_context(target, arguments[0],
+                static_cast<uint64_t>(arguments[1]) |
+                (static_cast<uint64_t>(arguments[2]) << 32)));
             break;
     }
     return true;

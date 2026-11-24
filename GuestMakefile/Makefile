@@ -177,7 +177,7 @@ OpenGLES_LDFLAGS = \
   -compatibility_version 1.0.0 \
   -current_version 1.0.0
 
-QuartzCore_FRAMEWORKS = LC32
+QuartzCore_FRAMEWORKS = LC32 CoreGraphics
 QuartzCore_LDFLAGS = \
   -compatibility_version 1.6.0 \
   -current_version 1.6.0
@@ -205,6 +205,11 @@ after-UIKit-all::
 # Compatibility policy creators deliberately return NULL when unavailable.
 Security_CFLAGS = -Wno-nonnull
 
+# Forwarded GameKit properties are absent from class_copyMethodList captures.
+# Missing bridges must not silently turn into guest-only synthesized storage.
+GameKit_CFLAGS = -Xclang -disable-objc-default-synthesize-properties \
+  -Werror=objc-property-implementation
+
 # These SDK headers require ARC for weak Objective-C properties.
 MapKit_CFLAGS = -fobjc-arc
 StoreKit_CFLAGS = -fobjc-arc
@@ -228,6 +233,7 @@ libiconv: $(LC32_LIBICONV_PRODUCTS)
 
 $(LC32_LIBICONV_CONFIG): lc32-libiconv-config-force
 	@set -e; \
+	guest_linker=$$(xcrun --find ld); \
 	mkdir -p "$(@D)"; \
 	tmp="$@.$$$$"; \
 	{ \
@@ -236,7 +242,7 @@ $(LC32_LIBICONV_CONFIG): lc32-libiconv-config-force
 		printf '%s\n' "url=$(LC32_LIBICONV_URL)"; \
 		printf '%s\n' "sha256=$(LC32_LIBICONV_SHA256)"; \
 		printf '%s\n' "sdk=$(abspath $(ISYSROOT))"; \
-		printf '%s\n' "linker=$(LC32_GUEST_LINKER)"; \
+		cksum "$$guest_linker" "$(LC32_GUEST_LINKER_WRAPPER)" "$(LC32_GUEST_THUMB_FIXUPS)"; \
 	} > "$$tmp"; \
 	if [ -f "$@" ] && cmp -s "$$tmp" "$@"; then \
 		rm -f "$$tmp"; \
@@ -247,7 +253,6 @@ $(LC32_LIBICONV_CONFIG): lc32-libiconv-config-force
 $(LC32_LIBICONV_PRODUCTS) &: build-libiconv.sh guest-sdk.mk \
   $(LC32_GUEST_SDK_DEPENDENCY) $(LC32_LIBICONV_CONFIG)
 	@LC32_GUEST_SDK="$(ISYSROOT)" \
-	LC32_GUEST_LINKER="$(LC32_GUEST_LINKER)" \
 	LC32_LIBICONV_COMMIT="$(LC32_LIBICONV_COMMIT)" \
 	LC32_LIBICONV_ARCHIVE="$(LC32_LIBICONV_ARCHIVE)" \
 	LC32_LIBICONV_URL="$(LC32_LIBICONV_URL)" \

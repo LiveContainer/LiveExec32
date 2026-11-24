@@ -114,6 +114,36 @@ int UpdateManagedInnerAlias(int home, const char *resolvedBundle,
         resolvedBundle, existing);
 }
 
+int EnsureDirectBundleAlias(int home, const char *name, const char *relativeTarget,
+                            const struct stat &bundleMetadata) {
+    auto checkExistingAlias = [&]() {
+        struct stat entry = {};
+        if(fstatat(home, name, &entry, AT_SYMLINK_NOFOLLOW) != 0) return errno;
+        if(!S_ISLNK(entry.st_mode)) return EEXIST;
+        struct stat target = {};
+        if(fstatat(home, name, &target, 0) == 0 &&
+                target.st_dev == bundleMetadata.st_dev &&
+                target.st_ino == bundleMetadata.st_ino) {
+            char firstCharacter;
+            if(readlinkat(home, name, &firstCharacter,
+                    sizeof(firstCharacter)) < 0) return errno;
+            // Migrate an older absolute alias only after confirming it still
+            // names this bundle. Other existing relative links stay intact.
+            if(firstCharacter == '/') {
+                return ReplaceExistingAlias(home, name, relativeTarget, entry);
+            }
+            return 0;
+        }
+        return EEXIST;
+    };
+
+    const int existingError = checkExistingAlias();
+    if(existingError != ENOENT) return existingError;
+    if(symlinkat(relativeTarget, home, name) == 0) return 0;
+    // Another launch may have created the same alias after our lookup.
+    return errno == EEXIST ? checkExistingAlias() : errno;
+}
+
 std::string RelativeBundleTarget(const char *resolvedHome,
                                  const char *resolvedBundle) {
     // Canonical paths avoid counting symlink aliases (including /var) as
@@ -220,38 +250,14 @@ int EnsureLegacyBundleLayout(
     }
     const std::string relativeTarget =
         RelativeBundleTarget(resolvedHome, resolvedBundle);
-    auto checkExistingAlias = [&]() {
-        struct stat entry = {};
-        if(fstatat(home.value, LegacyBundleAliasName, &entry,
-                AT_SYMLINK_NOFOLLOW) != 0) {
-            return errno;
-        }
-        if(!S_ISLNK(entry.st_mode)) return EEXIST;
-        struct stat target = {};
-        if(fstatat(home.value, LegacyBundleAliasName, &target, 0) == 0 &&
-                target.st_dev == bundleMetadata.st_dev &&
-                target.st_ino == bundleMetadata.st_ino) {
-            char firstCharacter;
-            if(readlinkat(home.value, LegacyBundleAliasName,
-                    &firstCharacter, sizeof(firstCharacter)) < 0) return errno;
-            // Migrate an older absolute alias only after confirming it still
-            // names this bundle. Other existing relative links stay intact.
-            if(firstCharacter == '/') {
-                return ReplaceExistingAlias(home.value, LegacyBundleAliasName,
-                    relativeTarget.c_str(), entry);
-            }
-            return 0;
-        }
-        return EEXIST;
-    };
-
-    const int existingError = checkExistingAlias();
-    if(existingError != ENOENT) return existingError;
-    if(symlinkat(relativeTarget.c_str(), home.value, LegacyBundleAliasName) == 0) {
-        return 0;
-    }
-    // Another launch may have created the same alias after our lookup.
-    return errno == EEXIST ? checkExistingAlias() : errno;
+    const int error = EnsureDirectBundleAlias(home.value, LegacyBundleAliasName,
+        relativeTarget.c_str(), bundleMetadata);
+    if(error != 0) return error;
+    // Some games construct HOME/<executable>.app instead of enumerating HOME.
+    // LiveContainer can rename the installed bundle, so use the binary's name.
+    const std::string namedAlias = executableName + ".app";
+    return EnsureDirectBundleAlias(home.value, namedAlias.c_str(),
+        relativeTarget.c_str(), bundleMetadata);
 }
 
 EnvironmentSelection CollectEnvironment(char *const environment[]) {

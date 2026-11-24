@@ -10,6 +10,8 @@ extern "C" {
  * backing-layer setup, independently of modern-host canvas compensation. */
 bool LC32NativeLegacyRotationEnabled(void);
 void LC32PrepareNativeLegacyRotationClass(Class cls);
+bool LC32NativeLegacyRotationStartupSceneReady(void);
+id LC32LegacyStartupDisplayLinkTarget(id target, SEL *action);
 void LC32FinishNativeLegacyRotationStartup(void);
 
 /* Supplied by the emulator: native layout callbacks can arrive before the

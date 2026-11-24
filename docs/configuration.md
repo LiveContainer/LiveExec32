@@ -26,6 +26,20 @@ guest frameworks.
 For the specialized callback, block, operation, and network trace controls,
 see [proxy bridge diagnostics](ObjCProxy.md#diagnostics).
 
+## JIT code memory
+
+The launcher enables separate writable and executable JIT mappings on the iOS
+Simulator, avoiding whole-cache `mprotect` calls for each newly translated
+block. Jailbreak packages also enable this mode on iOS devices; other device
+builds and Catalyst retain Dynarmic's default policy.
+
+Set the host environment variable `DYNARMIC_DUAL_MAPPED=0` before launch to
+compare the single-mapping path, or `1` to explicitly select dual mapping.
+Existing values are preserved. This is a host JIT setting, not a
+`LC32_GUEST_ENV_` variable, and must be configured before the shared runtime
+loads. `gmake -C test check-jit-code-memory-mode` checks the launcher policy
+and overrides for simulator, device, Catalyst, and macOS platforms.
+
 ## Guest environment
 
 Host environment variables are isolated from the guest by default. To pass a
@@ -173,6 +187,6 @@ the actual linked host and guest binaries (use `1` for the normal build).
 
 ## Build troubleshooting
 
-For a missing classic linker or incorrect ARM32 Thumb initializer pointers,
-see [ARM32 linker selection](building.md#arm32-linker). For SDK download,
+For ARM32 linker or Thumb-repair errors,
+see [ARM32 linker setup](building.md#arm32-linker). For SDK download,
 checksum, and mirror overrides, see [guest SDK setup](building.md#guest-sdk).

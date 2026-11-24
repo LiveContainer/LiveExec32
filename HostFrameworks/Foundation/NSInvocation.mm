@@ -41,7 +41,6 @@ static bool LC32PrepareHostInvocationValue(const char *type, u32 guestStorage,
     if(!guestStorage) return false;
     while(type && *type && strchr("rnNoORVA", *type)) type++;
     if(!type || !*type) return false;
-    if(type[0] == '@' && type[1] == '?') return false;
 
     if(*type == '{') {
         LC32PODType guest, host;
@@ -71,6 +70,8 @@ static bool LC32PrepareHostInvocationValue(const char *type, u32 guestStorage,
             u32 guestObject = 0;
             if(!LC32ReadGuestInvocationValue(guestStorage, guestObject))
                 return false;
+            // NSBlock's guest host_self already creates a typed native
+            // wrapper owning a heap copy. This also handles @? arguments.
             const u64 hostObject = guestObject
                 ? LC32GuestToHostReturnType(
                     const_cast<char *>(type), guestObject)
@@ -251,7 +252,6 @@ static bool LC32TransferHostInvocationValue(NSInvocation *invocation,
     if(!argument && unqualified && *unqualified == 'v') return true;
     if(!unqualified || !*unqualified || !strchr("@#:BcCsSiIlLqQfd{", *unqualified))
         return false;
-    if(unqualified[0] == '@' && unqualified[1] == '?') return false;
     NSUInteger size = 0;
     NSGetSizeAndAlignment(type, &size, nullptr);
     alignas(16) LC32InvocationStorage storage = {};

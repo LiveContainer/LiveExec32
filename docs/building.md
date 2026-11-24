@@ -39,20 +39,29 @@ diagnosing an isolated Clang module-cache issue.
 
 ### ARM32 linker
 
-ARM32 guest frameworks, tests, and libiconv require a classic linker,
-resolved with `xcrun --find ld-classic`. Newer Xcode linkers can emit
-incorrect Thumb initializer pointers, and `-Wl,-ld_classic` no longer
-selects the classic linker. If the selected toolchain does not provide it,
-choose a toolchain that does or pass
-`LC32_GUEST_LINKER=/absolute/path/to/ld-classic` to `gmake` (or in the
-environment when running `GuestMakefile/build-libiconv.sh` directly).
+ARM32 guest frameworks, tests, and libiconv use `xcrun --find ld` through
+`Scripts/guest-ld`; `ld-classic` is not required. Modern ld can omit the Thumb
+bit in stored function pointers and the executable entry point. The wrapper
+repairs dyld rebase locations and `LC_MAIN` using `N_ARM_THUMB_DEF` symbols
+before Theos strips or signs the output. It does not change ARM pointers,
+data pointers, instructions, or dynamic bindings.
+
+The wrapper requires Python 3 and unstripped, thin ARM32 PIE executables,
+dylibs, or bundles with opcode-based dyld fixups. Unsupported formats fail
+before the wrapper publishes the output. Strip/sign only after linking.
+Host ARM64 builds do not use this wrapper.
 
 With the guest SDK already prepared, check the linker and its ARM32
 constructor/function-pointer output without requiring Theos:
 
 ```bash
 gmake -C test check-guest-thumb-linker
+gmake -C test check-guest-linker
 ```
+
+The second check covers parser rejection/idempotence and builds mixed
+ARM/Thumb, Objective-C, block, and C++ probes. Set `LC32_TEST_RUNTIME` to a built
+Catalyst `LiveExec32.app/LiveExec32` launcher to execute the probes as well.
 
 ### Guest SDK
 
@@ -75,8 +84,81 @@ output marshalling and the captured-template disabled-method baseline.
 Build the corresponding ARM32 runtime regression with
 `gmake -C test object-out-parameters`.
 
+`Generator/GenerateShimAPI/test-selector-alias.sh` checks generated methods
+after guest swizzling, including Everyplay's renderbuffer selector alias.
+`Generator/GenerateShimAPI/test-simple-structs.sh` checks generated geometry,
+`CGVector`, `UIOffset`, and `CLLocationCoordinate2D` argument/result marshalling
+through a host-call recorder, plus ARM32 syntax checks when the guest SDK is present.
+CGFloat-based structs share `LC32Host/Guest2Floats`, `4Floats`, and `6Floats`
+converters; `NSValue` also uses `16Floats` for `CATransform3D` storage.
+`gmake -C test check-float-structs` checks these conversions, unaligned buffers,
+write boundaries, precision, signed zero, infinities, and NaNs. Fixed-width
+coordinate/SceneKit layouts are not widened by these helpers.
+This does not replace an ARM32 runtime test of the aggregate trampoline.
+Unsupported pointer and larger struct layouts remain disabled.
+
+`sh test/bundle_class_lookup_host.sh` checks that `NSBundle classNamed:` loads
+and resolves a guest class instead of returning a native superclass proxy.
+`gmake -C test bundle-class-lookup` builds the ARM32 CoreTelephony regression
+without prelinking that framework; it skips runtimes without the native bundle.
+
+`gmake -C test graphics-method-adapters mapkit-methods framework-value-methods`
+builds ARM32 runtime checks for native path ownership, layer rendering into
+guest bitmap buffers, MapKit loading/regions, and SceneKit/MapKit value boxing.
+The value tests also exercise generated `CGVector`, `UIOffset`, and coordinate
+methods across the real guest/host bridge, including raw storage bounds for
+the new fixed-layout boxes. `array-sort-function` covers mutable and immutable
+callback sorting, including the optional hint.
+
+`gmake -C test cf-type-ownership` builds the opaque CoreFoundation ownership
+regression. It checks typed CG, CF, and Objective-C retain/release paths with
+finite-lived color spaces, including a native-only owner and final proxy
+destruction. Run it alongside `coregraphics-bitmap`, `graphics-method-adapters`,
+and `native-proxy-release` when changing CF cleanup.
+
+`gmake -C test corefoundation-uuid corefoundation-low-risk` covers native
+CFUUID creation, 16-byte ARM32 values, constant identity, and file-security
+UUID setters/copy getters. The UUID fixture also builds against native macOS
+CoreFoundation for comparison; CFUUID must not be represented by NSUUID.
+
+`gmake -C test kvc-floating-ivars kvc-ivar-ownership guest-fp-return`
+checks synthetic float/double ivar accessors, object ownership, and native
+floating-point callbacks. The floating-ivar test covers inherited and
+underscore keys, per-class bindings, real accessor precedence, exact bits,
+and adjacent storage guards. It also builds natively for KVC comparison.
+
+`gmake -C test gamekit-properties gamekit-achievement-properties` builds
+local-only ARM32 GameKit regressions. They compare guest properties with native
+state, including `GKScore`'s initialized-value flag, signed/unsigned 64-bit
+values, legacy category aliases, leaderboard and matchmaking settings, and
+read-only player, achievement, challenge, and turn-based model properties.
+No authentication, score submission, or matchmaking is performed. GameKit
+forwards many accessors dynamically, so method-list captures omit them; their
+public ARM32 signatures must still be present in the generator template.
+The guest GameKit build disables implicit property synthesis and treats missing
+accessors as errors to prevent silent guest-only storage.
+
 See [Objective-C proxy bridge](ObjCProxy.md) for the bridge design and
 marshalling contracts.
+
+`gmake -C test openal-smoke openal-streaming` builds the ARM32 OpenAL bridge
+regressions. The streaming suite checks queue completion, playback controls,
+offsets, context isolation, and object/error lifetimes. Run them in Simulator
+to exercise the clocked silent backend; real-device playback remains native.
+The silent backend produces no sound, and `LC32_OPENAL_SILENT_CONTEXT=0` opts
+out for simulator-only native-audio diagnostics.
+
+`gmake -C test foundation-temporary-files` builds the ARM32 temporary-file
+regression: guest `mkstemp`/POSIX I/O and native `NSFileHandle`/`NSData` must
+access the same files. When running it in a simulator, set `SIMCTL_CHILD_TMPDIR`
+to an existing writable directory outside the guest home and `/var` (for example,
+under the checkout's `test/.theos/`) to exercise the explicit temp-directory
+mount. Repeat with the default temp directory; both runs should pass eight checks.
+
+`gmake -C test check-legacy-nib-classes SIMULATOR_UDID=booted` runs a native
+UIKit regression for the removed `UIRoundedRectButton` nib class. It checks
+registration, preservation of existing classes, and native button decoding
+without installing or foregrounding a fixture app.
 
 ### libiconv
 
@@ -157,3 +239,10 @@ Startup logs include that release version, the 7-character Git commit
 Detached CI checkouts use `GITHUB_HEAD_REF`/`GITHUB_REF_NAME` for the branch;
 source archives without Git metadata use `unknown` for the commit.
 Run `gmake -C test check-build-info` for the metadata/logging regressions.
+
+Nightly builds generate `packages/source.json` with
+`Scripts/generate-nightly-source.py` and publish it alongside the IPA and Debian
+package. The source uses the packaged app's version, build number, bundle ID,
+minimum iOS version, and IPA size, plus the current commit and workflow link.
+The nightly source is available as
+[source.json](https://github.com/LiveContainer/LiveExec32/releases/download/nightly/source.json).

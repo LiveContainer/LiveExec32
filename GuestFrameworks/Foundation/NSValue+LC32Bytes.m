@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <CoreMedia/CoreMedia.h>
 #import <LC32/LC32.h>
 #import <objc/runtime.h>
 
@@ -7,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <LC32FloatStructs.h>
 
 /*
  * Raw NSValue storage is ABI-dependent.  In particular, SEL is four bytes in
@@ -79,7 +81,7 @@ static void LC32RejectUnsupportedValueType(const char *operation,
     CRSetCrashLogMessage(message);
 }
 
-/* Guest (ARM32) struct encodings whose layout differs on the ARM64 host. */
+/* Explicit guest/host layouts for NSValue aggregate storage. */
 typedef struct LC32ValueLayout {
     const char *guestEncoding;
     const char *hostEncoding;
@@ -88,50 +90,6 @@ typedef struct LC32ValueLayout {
     void (*guestToHost)(const void *guest, void *host);
     void (*hostToGuest)(const void *host, void *guest);
 } LC32ValueLayout;
-
-static void LC32ConvertFloats2(const void *guest, void *host) {
-    const float *src = guest;
-    double *dst = host;
-    dst[0] = src[0];
-    dst[1] = src[1];
-}
-
-static void LC32ConvertFloats4(const void *guest, void *host) {
-    const float *src = guest;
-    double *dst = host;
-    dst[0] = src[0];
-    dst[1] = src[1];
-    dst[2] = src[2];
-    dst[3] = src[3];
-}
-
-static void LC32NarrowFloats2(const void *host, void *guest) {
-    const double *src = host;
-    float *dst = guest;
-    dst[0] = (float)src[0];
-    dst[1] = (float)src[1];
-}
-
-static void LC32NarrowFloats4(const void *host, void *guest) {
-    const double *src = host;
-    float *dst = guest;
-    dst[0] = (float)src[0];
-    dst[1] = (float)src[1];
-    dst[2] = (float)src[2];
-    dst[3] = (float)src[3];
-}
-
-static void LC32ConvertFloats16(const void *guest, void *host) {
-    const float *src = guest;
-    double *dst = host;
-    for(unsigned i = 0; i < 16; i++) dst[i] = src[i];
-}
-
-static void LC32NarrowFloats16(const void *host, void *guest) {
-    const double *src = host;
-    float *dst = guest;
-    for(unsigned i = 0; i < 16; i++) dst[i] = (float)src[i];
-}
 
 static void LC32ConvertNSRange(const void *guest, void *host) {
     const uint32_t *src = guest;
@@ -151,46 +109,92 @@ static void LC32NarrowNSRangeValue(const void *host, void *guest) {
     dst[1] = (uint32_t)src[1];
 }
 
+// CoreMedia uses fixed-width fields. Unlike CGFloat/NSRange, these layouts
+// (including CMTime's epoch) are identical on ARM32 and ARM64.
+_Static_assert(sizeof(CMTime) == 24, "unexpected CMTime layout");
+_Static_assert(sizeof(CMTimeRange) == 48, "unexpected CMTimeRange layout");
+_Static_assert(offsetof(CMTime, epoch) == 16, "unexpected CMTime epoch offset");
+_Static_assert(offsetof(CMTimeRange, duration) == 24, "unexpected CMTimeRange duration offset");
+static void LC32CopyCMTime(const void *source, void *destination) {
+    memcpy(destination, source, sizeof(CMTime));
+}
+static void LC32CopyCMTimeRange(const void *source, void *destination) {
+    memcpy(destination, source, sizeof(CMTimeRange));
+}
+
+// SceneKit uses float even on ARM64 iOS/Catalyst; MKCoordinateSpan is two
+// doubles on both ABIs. These boxes need no CGFloat widening.
+static void LC32Copy12(const void *source, void *destination) {
+    memcpy(destination, source, 12);
+}
+static void LC32Copy16(const void *source, void *destination) {
+    memcpy(destination, source, 16);
+}
+static void LC32Copy64(const void *source, void *destination) {
+    memcpy(destination, source, 64);
+}
+
 static const LC32ValueLayout LC32ValueLayouts[] = {
+    { "{SCNVector3=fff}", "{SCNVector3=fff}", 12, 12, LC32Copy12, LC32Copy12 },
+    { "{SCNVector4=ffff}", "{SCNVector4=ffff}", 16, 16, LC32Copy16, LC32Copy16 },
+    { "{SCNMatrix4=ffffffffffffffff}", "{SCNMatrix4=ffffffffffffffff}",
+        64, 64, LC32Copy64, LC32Copy64 },
+    { "{?=dd}", "{?=dd}", 16, 16, LC32Copy16, LC32Copy16 },
+    {
+        .guestEncoding = @encode(CMTime),
+        .hostEncoding = @encode(CMTime),
+        .guestSize = sizeof(CMTime),
+        .hostSize = sizeof(CMTime),
+        .guestToHost = LC32CopyCMTime,
+        .hostToGuest = LC32CopyCMTime,
+    },
+    {
+        .guestEncoding = @encode(CMTimeRange),
+        .hostEncoding = @encode(CMTimeRange),
+        .guestSize = sizeof(CMTimeRange),
+        .hostSize = sizeof(CMTimeRange),
+        .guestToHost = LC32CopyCMTimeRange,
+        .hostToGuest = LC32CopyCMTimeRange,
+    },
     {
         .guestEncoding = "{CGPoint=ff}",
         .hostEncoding = "{CGPoint=dd}",
         .guestSize = 8,
         .hostSize = 16,
-        .guestToHost = LC32ConvertFloats2,
-        .hostToGuest = LC32NarrowFloats2,
+        .guestToHost = LC32Host2Floats,
+        .hostToGuest = LC32Guest2Floats,
     },
     {
         .guestEncoding = "{CGSize=ff}",
         .hostEncoding = "{CGSize=dd}",
         .guestSize = 8,
         .hostSize = 16,
-        .guestToHost = LC32ConvertFloats2,
-        .hostToGuest = LC32NarrowFloats2,
+        .guestToHost = LC32Host2Floats,
+        .hostToGuest = LC32Guest2Floats,
     },
     {
         .guestEncoding = "{CGRect={CGPoint=ff}{CGSize=ff}}",
         .hostEncoding = "{CGRect={CGPoint=dd}{CGSize=dd}}",
         .guestSize = 16,
         .hostSize = 32,
-        .guestToHost = LC32ConvertFloats4,
-        .hostToGuest = LC32NarrowFloats4,
+        .guestToHost = LC32Host4Floats,
+        .hostToGuest = LC32Guest4Floats,
     },
     {
         .guestEncoding = "{UIEdgeInsets=ffff}",
         .hostEncoding = "{UIEdgeInsets=dddd}",
         .guestSize = 16,
         .hostSize = 32,
-        .guestToHost = LC32ConvertFloats4,
-        .hostToGuest = LC32NarrowFloats4,
+        .guestToHost = LC32Host4Floats,
+        .hostToGuest = LC32Guest4Floats,
     },
     {
         .guestEncoding = "{CATransform3D=ffffffffffffffff}",
         .hostEncoding = "{CATransform3D=dddddddddddddddd}",
         .guestSize = 64,
         .hostSize = 128,
-        .guestToHost = LC32ConvertFloats16,
-        .hostToGuest = LC32NarrowFloats16,
+        .guestToHost = LC32Host16Floats,
+        .hostToGuest = LC32Guest16Floats,
     },
     {
         .guestEncoding = "{_NSRange=II}",
@@ -522,6 +526,22 @@ static id LC32InstallGuestValueStorage(id value, const void *bytes,
         &hostCommand, _cmd, NO);
     id result = LC32InvokeHostObjectSelector(
         self.host_self, command, (uint64_t)guestPointer, (uint64_t)0);
+    return LC32InstallGuestValueStorage(
+        result, &guestPointer, sizeof(guestPointer), sizeof(uint64_t),
+        @encode(void *));
+}
+
++ (instancetype)valueWithNonretainedObject:(id)object {
+    // Native Foundation stores the host object address in a ^v box. Keep
+    // the guest identity too: legacy callers also read these boxes through
+    // -pointerValue and -getValue:, not just -nonretainedObjectValue.
+    // Neither the native box nor this byte storage retains the object.
+    const uint32_t guestPointer = (uint32_t)(uintptr_t)object;
+    static uint64_t hostCommand __attribute__((aligned(8)));
+    const uint64_t command = LC32CachedHostSelector(
+        &hostCommand, _cmd, NO);
+    id result = LC32InvokeHostObjectSelector(
+        self.host_self, command, [object host_self], (uint64_t)0);
     return LC32InstallGuestValueStorage(
         result, &guestPointer, sizeof(guestPointer), sizeof(uint64_t),
         @encode(void *));

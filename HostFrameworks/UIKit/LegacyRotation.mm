@@ -1,4 +1,5 @@
 #import "LC32LegacyRotation.h"
+#import "LC32ClassicPresentation.h"
 #include "../../include/LC32UIKitCompatibilityConfig.h"
 #if LC32_UIKIT_COMPATIBILITY
 #import <objc/message.h>
@@ -10,10 +11,23 @@
 // This unit deliberately restores UIKit's deprecated pre-iOS-8 contract.
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
+enum class InitialBacking { Unseen, Provisional, Ready };
 @interface LC32LegacyRotationState : NSObject
 @property(nonatomic, weak) UIViewController *initializedController;
+@property(nonatomic) InitialBacking initialBacking;
+@property(nonatomic) CFTimeInterval initialPresentationDeadline;
 @end
 @implementation LC32LegacyRotationState
+@end
+
+@interface UIWindow (LC32LegacyRotationClient)
+- (void)_setRotatableClient:(UIViewController *)client
+    toOrientation:(UIInterfaceOrientation)orientation updateStatusBar:(BOOL)updateStatusBar
+    duration:(NSTimeInterval)duration force:(BOOL)force isRotating:(BOOL)rotating;
+@end
+
+@interface UIDevice (LC32LegacyInitialOrientation)
+- (void)setOrientation:(UIDeviceOrientation)orientation animated:(BOOL)animated;
 @end
 
 struct LC32RotationBuildVersion { uint32_t platform, version; };
@@ -26,6 +40,19 @@ bool startupFinished;
 using NativeRotationQuery = BOOL (*)(id, SEL, UIInterfaceOrientation, BOOL, BOOL *);
 NativeRotationQuery nativeRotationQuery;
 thread_local __unsafe_unretained UIWindow *configuringLegacyWindow;
+
+struct BackingGeometry {
+    CGRect bounds;
+    CGPoint position;
+    CATransform3D transform;
+    explicit BackingGeometry(CALayer *layer)
+        : bounds(layer.bounds), position(layer.position), transform(layer.transform) {}
+    void apply(CALayer *layer) const {
+        layer.bounds = bounds;
+        layer.position = position;
+        layer.transform = transform;
+    }
+};
 
 LC32LegacyRotationState *WindowState(UIWindow *window) {
     LC32LegacyRotationState *state = objc_getAssociatedObject(window, WindowStateKey);
@@ -58,21 +85,25 @@ bool RegisteredClass(Class cls) {
     return false;
 }
 
-bool UsesLegacyRotationPolicy(Class cls) {
-    if(!RegisteredClass(cls)) return false;
-    if(class_getMethodImplementation(cls, @selector(shouldAutorotateToInterfaceOrientation:)) ==
-            class_getMethodImplementation(UIViewController.class,
-                @selector(shouldAutorotateToInterfaceOrientation:))) return false;
+bool UsesModernRotationPolicy(Class cls) {
     // Recheck the actual subclass: a guest can inherit the old callback but
     // deliberately replace its policy with the modern orientation API.
     IMP supported = class_getMethodImplementation(
         cls, @selector(supportedInterfaceOrientations));
     IMP should = class_getMethodImplementation(cls, @selector(shouldAutorotate));
-    return (supported == (IMP)LegacySupportedOrientations ||
-            supported == class_getMethodImplementation(UIViewController.class,
-                @selector(supportedInterfaceOrientations))) &&
-        should == class_getMethodImplementation(UIViewController.class,
+    return (supported != (IMP)LegacySupportedOrientations &&
+            supported != class_getMethodImplementation(UIViewController.class,
+                @selector(supportedInterfaceOrientations))) ||
+        should != class_getMethodImplementation(UIViewController.class,
             @selector(shouldAutorotate));
+}
+
+bool UsesLegacyRotationPolicy(Class cls) {
+    return RegisteredClass(cls) &&
+        class_getMethodImplementation(cls, @selector(shouldAutorotateToInterfaceOrientation:)) !=
+            class_getMethodImplementation(UIViewController.class,
+                @selector(shouldAutorotateToInterfaceOrientation:)) &&
+        !UsesModernRotationPolicy(cls);
 }
 
 NSHashTable<UIViewController *> *Controllers() {
@@ -216,9 +247,52 @@ UIInterfaceOrientationMask DeclaredOrientations() {
     return mask ?: UIInterfaceOrientationMaskAllButUpsideDown;
 }
 
+bool SupportedScene(UIWindowScene *scene) {
+    return (OrientationBit(scene.interfaceOrientation) & DeclaredOrientations()) != 0;
+}
+
+void PresentInitialBacking(UIWindow *window, CALayer *backing) {
+    if(startupFinished || !window.windowScene) return;
+    LC32LegacyRotationState *state = WindowState(window);
+    InitialBacking previous = state.initialBacking;
+    if(previous == InitialBacking::Ready && !state.initialPresentationDeadline) return;
+    bool ready = previous == InitialBacking::Ready || SupportedScene(window.windowScene);
+    InitialBacking next = ready ? InitialBacking::Ready : InitialBacking::Provisional;
+    CFTimeInterval now = CACurrentMediaTime();
+
+    // A rotating rectangular backing can cut off an upright client's corners
+    // until the scene turn settles. Hold only its presentation, not the guest
+    // window's model opacity, layout, key status or display-link clock. CA
+    // removes the hold even if no scene update arrives or the guest blocks.
+    if(previous != next) {
+        state.initialBacking = next;
+        if(previous == InitialBacking::Unseen && ready) return;
+        CFTimeInterval duration = [backing animationForKey:@"transform"].duration
+            ?: UIView.inheritedAnimationDuration ?: UIApplication.sharedApplication.statusBarOrientationAnimationDuration;
+        state.initialPresentationDeadline = isfinite(duration) ? now + duration : 0;
+    }
+    CFTimeInterval remaining = state.initialPresentationDeadline - now;
+    if(remaining <= 0) {
+        state.initialPresentationDeadline = 0;
+        return;
+    }
+    NSString *key = @"lc32.initialPresentation";
+    if(previous == next && [backing animationForKey:key]) return;
+    // UIKit may replace or clear the provisional layer when ordering the
+    // window front. Restore only the remaining interval, never restart it.
+    CABasicAnimation *hold = [CABasicAnimation animationWithKeyPath:@"opacity"];
+    hold.fromValue = hold.toValue = @0;
+    hold.duration = remaining;
+    [backing addAnimation:hold forKey:key];
+}
+
 UIInterfaceOrientation PreferredOrientation() {
     UIInterfaceOrientationMask mask = DeclaredOrientations();
     UIInterfaceOrientation current = UIApplication.sharedApplication.statusBarOrientation;
+    if(OrientationBit(current) & mask) return current;
+    // A rootless legacy window may still report portrait while its scene has
+    // already launched landscape. Prefer that actual turn over plist order.
+    current = UIApplication.sharedApplication.keyWindow.windowScene.interfaceOrientation;
     if(OrientationBit(current) & mask) return current;
     current = OrientationNamed(NSBundle.mainBundle.infoDictionary[@"UIInterfaceOrientation"]);
     if(OrientationBit(current) & mask) return current;
@@ -278,10 +352,33 @@ void UpdateWindow(UIWindow *window, UIInterfaceOrientation orientation,
     if(ControllerForWindow(window, true) != controller) return;
     state.initializedController = controller;
     if(!NativeRoot(window)) {
-        // A direct-window renderer owns its view hierarchy and may perform the
-        // requested turn on its next repaint. Autopromoting it with the modern
-        // root setter resizes its view/backing store before that repaint.
-        // Keep it rootless and restore only the window's backing coordinates.
+        // A direct-window controller that accepts UIKit rotation still needs
+        // the old rotatable-client path. The scene-era window updater ignores
+        // it without a root controller. Keep the hierarchy intact, and leave
+        // NO-returning/manual renderers in charge of their own transforms.
+        if(accepted && UsesLegacyRotationPolicy(object_getClass(controller)) &&
+                [window respondsToSelector:@selector(_setRotatableClient:toOrientation:
+                    updateStatusBar:duration:force:isRotating:)]) {
+            RotationRequest request{window, controller, orientation, accepted, activeRequest};
+            activeRequest = &request;
+            @try {
+                const bool sameOrientation =
+                    ((UIInterfaceOrientation (*)(id, SEL))objc_msgSend)(window,
+                        @selector(interfaceOrientation)) == orientation;
+                // Repeated device notifications are not layout requests. A
+                // forced same-orientation turn can restart UIKit's animation.
+                if(sameOrientation && !initializing) return;
+                const bool initialSync = initializing && sameOrientation;
+                if(initialSync) [controller willRotateToInterfaceOrientation:orientation duration:0];
+                NSTimeInterval duration = initializing ? 0 :
+                    UIApplication.sharedApplication.statusBarOrientationAnimationDuration;
+                [window _setRotatableClient:controller toOrientation:orientation
+                    updateStatusBar:YES duration:duration force:sameOrientation isRotating:YES];
+                if(initialSync) [controller didRotateFromInterfaceOrientation:orientation];
+            } @finally {
+                activeRequest = request.previous;
+            }
+        }
         ((void (*)(id, SEL))objc_msgSend)(window, sel_registerName("_updateTransformLayer"));
         return;
     }
@@ -305,11 +402,16 @@ void UpdateWindow(UIWindow *window, UIInterfaceOrientation orientation,
             // before the next guest frame can perform a competing manual turn.
             // Native containers already dispatch their children's lifecycle.
             SEL current = sel_registerName("interfaceOrientation");
-            bool initialSync = initializing && RegisteredClass(object_getClass(controller)) &&
+            const bool sameOrientation =
                 ((UIInterfaceOrientation (*)(id, SEL))objc_msgSend)(window, current) == orientation;
+            bool initialSync = initializing && RegisteredClass(object_getClass(controller)) &&
+                sameOrientation;
             if(initialSync) [controller willRotateToInterfaceOrientation:orientation duration:0];
+            // Force only a same-orientation layout refresh. For an actual turn,
+            // UIKit's forced path skips the client's rotation lifecycle, leaving
+            // renderer layout and touch coordinates in the previous orientation.
             ((void (*)(id, SEL, UIInterfaceOrientation, NSTimeInterval, BOOL))objc_msgSend)(
-                window, rotate, orientation, 0, YES);
+                window, rotate, orientation, 0, sameOrientation);
             if(initialSync) [controller didRotateFromInterfaceOrientation:orientation];
         } else {
             [UIViewController attemptRotationToDeviceOrientation];
@@ -327,6 +429,33 @@ void UpdateWindows(UIInterfaceOrientation orientation, bool initialOnly) {
         if(window) [windows addObject:window];
     }
     for(UIWindow *window in windows) UpdateWindow(window, orientation, initialOnly);
+}
+
+void InitializeDeviceOrientation() {
+    // A scene can launch landscape while the sensor is flat (or portrait in
+    // a landscape-only app). Old notification-driven renderers then never
+    // receive an initial supported orientation. Bootstrap from the actual
+    // scene after their deferred launch work and controller layout finish.
+    UIWindow *window = UIApplication.sharedApplication.keyWindow;
+    UIViewController *controller = ControllerForWindow(window, true);
+    if(!controller || NativePresented(controller) || !LC32NativeLegacyRotationCanCallGuest()) return;
+    UIInterfaceOrientation initial = window.windowScene.interfaceOrientation;
+    UIInterfaceOrientationMask supported = DeclaredOrientations();
+    UIDevice *device = UIDevice.currentDevice;
+    UIDeviceOrientation physical = device.orientation;
+    if(!(OrientationBit(initial) & supported) ||
+            (OrientationBit((UIInterfaceOrientation)physical) & supported) ||
+            !device.generatesDeviceOrientationNotifications ||
+            ![device respondsToSelector:@selector(setOrientation:animated:)]) return;
+    @try {
+        // Native setter only updates the cached reading and posts the normal
+        // notification. Device/interface enum values match, not their names.
+        [device setOrientation:(UIDeviceOrientation)initial animated:NO];
+    } @finally {
+        // This is an initial presentation event, not a sensor override. Leave
+        // face-up/down readings and all subsequent physical events intact.
+        [device setOrientation:physical animated:NO];
+    }
 }
 
 void Swizzle(Class cls, SEL original, SEL replacement) {
@@ -367,10 +496,65 @@ extern "C" void LC32PrepareNativeLegacyRotationClass(Class cls) {
             method_getTypeEncoding(class_getInstanceMethod(UIViewController.class, preferred)));
 }
 
+extern "C" bool LC32NativeLegacyRotationStartupSceneReady(void) {
+    if(!LC32NativeLegacyRotationEnabled() || startupFinished) return true;
+    UIWindow *window = UIApplication.sharedApplication.keyWindow;
+    if(!ControllerForWindow(window, true) || !window.windowScene) return true;
+    // A scene can connect in an unsupported provisional orientation and
+    // deliver its initial landscape update after the first idle boundary.
+    // Do not initialize the renderer from plist order or consume its one-time
+    // device notification until the host has supplied a supported orientation.
+    return SupportedScene(window.windowScene);
+}
+
+// A guest can do synchronous loading in its first display-link callback. If
+// the link was created against provisional geometry, let UIKit publish the
+// supported scene before such a callback can monopolize the main thread.
+@interface LC32StartupDisplayLinkTarget : NSObject {
+@public
+    id _target;
+    SEL _action;
+    CFTimeInterval _deadline;
+}
+@end
+@implementation LC32StartupDisplayLinkTarget
+- (void)tick:(CADisplayLink *)link {
+    if(pthread_main_np() && _deadline) {
+        bool waiting = link.timestamp < _deadline;
+        if(waiting && !LC32NativeLegacyRotationStartupSceneReady()) return;
+        _deadline = 0;
+        // The orientation can change in this very update cycle; give its
+        // transaction one refresh. A late or previously paused link runs now.
+        if(waiting) return;
+    }
+    ((void (*)(id, SEL, CADisplayLink *))objc_msgSend)(_target, _action, link);
+}
+@end
+
+extern "C" id LC32LegacyStartupDisplayLinkTarget(id target, SEL *action) {
+    if(!target || !*action || !NSThread.isMainThread || LC32NativeLegacyRotationStartupSceneReady())
+        return target;
+    LC32StartupDisplayLinkTarget *relay = [LC32StartupDisplayLinkTarget new];
+    relay->_target = target;
+    relay->_action = *action;
+    relay->_deadline = CACurrentMediaTime() + UIApplication.sharedApplication.statusBarOrientationAnimationDuration;
+    *action = @selector(tick:);
+    return relay;
+}
+
 extern "C" void LC32FinishNativeLegacyRotationStartup(void) {
-    if(!LC32NativeLegacyRotationEnabled()) return;
+    if(!LC32NativeLegacyRotationEnabled() || !LC32NativeLegacyRotationStartupSceneReady()) return;
+    const bool initializing = !startupFinished;
     startupFinished = true;
     UpdateWindows(PreferredOrientation(), true);
+    if(initializing) {
+        InitializeDeviceOrientation();
+        // Startup finishes at the last BeforeWaiting observer, after Core
+        // Animation's normal commit. Publish the matching client/backing
+        // geometry now: the next guest callback can block on loading while
+        // the scene host is already displaying its new orientation.
+        [CATransaction flush];
+    }
 }
 
 @interface UIViewController (LC32NativeLegacyRotation)
@@ -386,7 +570,13 @@ extern "C" void LC32FinishNativeLegacyRotationStartup(void) {
     [self lc32_rotationViewDidMoveToWindow:window shouldAppearOrDisappear:appear];
     if(!window || !pthread_main_np() || !RegisteredClass(object_getClass(self))) return;
     [Controllers() addObject:self];
-    if(!startupFinished) return;
+    if(!startupFinished) {
+        // The window can configure its backing before this controller is
+        // registered. Refresh that native geometry now, before the first
+        // visible frame; only guest rotation callbacks need deferred startup.
+        ((void (*)(id, SEL))objc_msgSend)(window, sel_registerName("_updateTransformLayer"));
+        return;
+    }
     // Revalidate deferred attachment work; a replaced or detached controller
     // must not initialize the next owner of its old window.
     __weak UIViewController *pendingController = self;
@@ -428,12 +618,23 @@ extern "C" void LC32FinishNativeLegacyRotationStartup(void) {
     // Legacy controller bounds/center still use the default status-bar height
     // when the bar is hidden. Keep that nonexistent inset out of both queries;
     // shrinking just the renderer desynchronizes its projection and touches.
-    return [self lc32_applicationFrameForInterfaceOrientation:orientation
+    CGRect frame = [self lc32_applicationFrameForInterfaceOrientation:orientation
         usingStatusbarHeight:height ignoreStatusBar:ignore || UIApplication.sharedApplication.statusBarHidden];
+    LC32ClassicScreenGeometry saved;
+    if(LC32GetClassicScreenGeometry(self, &saved)) {
+        // Legacy controller rotation derives its renderer size and center
+        // from this screen query, not UIWindow.bounds. Retain UIKit's insets
+        // but use the captured logical extent after the host leaves Classic.
+        CGRect native = self.bounds;
+        frame.size.width += saved.bounds.size.width - native.size.width;
+        frame.size.height += saved.bounds.size.height - native.size.height;
+    }
+    return frame;
 }
 @end
 
 @interface UIWindow (LC32NativeLegacyRotation)
+- (void)lc32_rotationSetRootViewController:(UIViewController *)controller;
 - (void)lc32_updateToInterfaceOrientation:(UIInterfaceOrientation)orientation
     duration:(NSTimeInterval)duration force:(BOOL)force;
 - (void)lc32_configureRootLayer:(CALayer *)root sceneTransformLayer:(CALayer *)scene
@@ -446,20 +647,47 @@ extern "C" void LC32FinishNativeLegacyRotationStartup(void) {
 @end
 
 @implementation UIWindow (LC32NativeLegacyRotation)
+- (void)lc32_rotationSetRootViewController:(UIViewController *)controller {
+    [self lc32_rotationSetRootViewController:controller];
+    if(startupFinished || !pthread_main_np()) return;
+    UIViewController *content = BackingContentController(controller);
+    if(!content || !UsesModernRotationPolicy(object_getClass(content))) return;
+    UIView *view = NativeView(controller);
+    if(!view || NativeWindow(view) != self) return;
+    // Modern-policy controllers already have the window's orientation, but
+    // scene-era UIKit defers applying it to a newly installed legacy root's
+    // view. Complete that same-orientation layout before the caller sizes a
+    // fixed renderer from its bounds. Do not request a new orientation or
+    // advance the deferred lifecycle of renderer-owned legacy controllers.
+    SEL orientation = sel_registerName("interfaceOrientation");
+    SEL update = sel_registerName("_updateToInterfaceOrientation:duration:force:");
+    if([self respondsToSelector:update]) {
+        UIInterfaceOrientation current =
+            ((UIInterfaceOrientation (*)(id, SEL))objc_msgSend)(self, orientation);
+        ((void (*)(id, SEL, UIInterfaceOrientation, NSTimeInterval, BOOL))objc_msgSend)(
+            self, update, current, 0, YES);
+    }
+}
 - (void)lc32_updateToInterfaceOrientation:(UIInterfaceOrientation)orientation
         duration:(NSTimeInterval)duration force:(BOOL)force {
     // Scene-owned windows do not run the old backing update as part of their
     // view rotation. Sync its extent before resizing the client and its root
     // transform afterwards, including a same-orientation scene-size change.
-    // Old-policy rootless controllers retain their renderer-owned turn
-    // lifecycle. Controllers without that policy only need backing updates.
+    // During startup, rootless windows also need the incoming scene geometry
+    // before a deferred loader can block the main thread. This refresh does
+    // not advance their guest rotation lifecycle. Afterwards, old-policy
+    // rootless controllers retain their renderer-owned turn ordering.
     UIViewController *backingController = ControllerForWindow(self, true);
-    BOOL legacy = backingController && (NativeRoot(self) ||
+    BOOL legacy = backingController && (!startupFinished || NativeRoot(self) ||
         !UsesLegacyRotationPolicy(object_getClass(backingController)));
     SEL refresh = sel_registerName("_updateTransformLayer");
     if(legacy) ((void (*)(id, SEL))objc_msgSend)(self, refresh);
     [self lc32_updateToInterfaceOrientation:orientation duration:duration force:force];
     if(legacy) ((void (*)(id, SEL))objc_msgSend)(self, refresh);
+    // The scene host can present its new orientation while guest loading is
+    // busy. Publish the matching backing in this native update, not at the
+    // deferred guest-startup boundary or the next automatic CA commit.
+    if(legacy && !startupFinished) [CATransaction flush];
 }
 - (void)lc32_configureRootLayer:(CALayer *)root sceneTransformLayer:(CALayer *)scene
         transformLayer:(CALayer *)transform {
@@ -477,7 +705,42 @@ extern "C" void LC32FinishNativeLegacyRotationStartup(void) {
     UIWindow *previous = configuringLegacyWindow;
     configuringLegacyWindow = self;
     @try {
-        [self lc32_configureRootLayer:root sceneTransformLayer:scene transformLayer:transform];
+        const BackingGeometry oldRoot(root), oldScene(scene);
+        BackingGeometry newRoot(root), newScene(scene);
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        @try {
+            [self lc32_configureRootLayer:root sceneTransformLayer:scene transformLayer:transform];
+            // A scene host may discard its CAContext root layer's transform.
+            // Express the same mapping below that boundary instead: publish an
+            // upright root extent and carry its transform on the existing child.
+            // This preserves the legacy window/view coordinate system, including
+            // hit testing, without depending on the host's root-transform policy.
+            CGAffineTransform rotation = root.affineTransform;
+            if(!CGAffineTransformIsIdentity(rotation)) {
+                CGRect frame = root.frame;
+                CGPoint position = [root convertPoint:scene.position toLayer:root.superlayer];
+                scene.affineTransform = CGAffineTransformConcat(scene.affineTransform, rotation);
+                root.affineTransform = CGAffineTransformIdentity;
+                root.bounds = (CGRect){CGPointZero, frame.size};
+                root.frame = frame;
+                scene.position = CGPointMake(position.x - frame.origin.x,
+                    position.y - frame.origin.y);
+            }
+            newRoot = BackingGeometry(root);
+            newScene = BackingGeometry(scene);
+            oldRoot.apply(root);
+            oldScene.apply(scene);
+        } @finally {
+            [CATransaction commit];
+        }
+        // UIKit's intermediate root rotation is only a coordinate-system
+        // change. Animate from the previously published geometry to the final
+        // rebased geometry, never from that temporary portrait-layer setup.
+        // Keep the caller's animation timing and disabled-actions policy.
+        newRoot.apply(root);
+        newScene.apply(scene);
+        PresentInitialBacking(self, scene);
     } @finally {
         configuringLegacyWindow = previous;
     }
@@ -490,6 +753,8 @@ extern "C" void LC32FinishNativeLegacyRotationStartup(void) {
 }
 + (void)load {
     if(!LC32NativeLegacyRotationEnabled()) return;
+    Swizzle(self, @selector(setRootViewController:),
+        @selector(lc32_rotationSetRootViewController:));
     // Controller-managed status bars were introduced in iOS 7. Modern UIKit
     // defaults to them even for older guests, losing UIStatusBarHidden and
     // UIApplication's setters. Preserve an explicit opt-in/out in the bundle.
@@ -552,5 +817,7 @@ extern "C" void LC32FinishNativeLegacyRotationStartup(void) {
 #else
 extern "C" bool LC32NativeLegacyRotationEnabled(void) { return false; }
 extern "C" void LC32PrepareNativeLegacyRotationClass(Class) {}
+extern "C" bool LC32NativeLegacyRotationStartupSceneReady(void) { return true; }
+extern "C" id LC32LegacyStartupDisplayLinkTarget(id target, SEL *) { return target; }
 extern "C" void LC32FinishNativeLegacyRotationStartup(void) {}
 #endif // LC32_UIKIT_COMPATIBILITY

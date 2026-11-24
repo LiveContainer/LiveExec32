@@ -62,6 +62,27 @@ static uint64_t LC32DictionaryOperand(
         ? LC32_CF_U32((uintptr_t)value) : LC32_CF_HOST(value);
 }
 
+static void LC32CopyObjectDictionaryEntry(
+        const void *key, const void *value, void *context) {
+    CFDictionarySetValue((CFMutableDictionaryRef)context, key, value);
+}
+
+CFDictionaryRef LC32CopyDictionaryWithObjectEntries(CFDictionaryRef dictionary) {
+    if(!dictionary) return NULL;
+    if(LC32DictionaryKeyMode(dictionary) != LC32CoreFoundationCallbacksNull &&
+       LC32DictionaryValueMode(dictionary) != LC32CoreFoundationCallbacksNull)
+        return (CFDictionaryRef)CFRetain(dictionary);
+
+    // Raw CF containers must keep guest pointer identity for normal CF calls.
+    // Only an explicitly object-valued consumer may request this native-object
+    // snapshot. ApplyFunction decodes each side using the source's own modes;
+    // SetValue then converts the guest objects using the destination's modes.
+    CFMutableDictionaryRef copy = CFDictionaryCreateMutable(NULL, 0,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    if(copy) CFDictionaryApplyFunction(dictionary, LC32CopyObjectDictionaryEntry, copy);
+    return copy;
+}
+
 extern const void *__CFTypeCollectionRetain(CFAllocatorRef allocator,
                                              const void *ptr);
 extern void __CFTypeCollectionRelease(CFAllocatorRef allocator,

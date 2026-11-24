@@ -59,6 +59,463 @@ static uint64_t LC32CoreGraphicsHostObject(const void *object) {
 #define LC32_CG_F32(value) LC32CoreGraphicsFloat((CGFloat)(value))
 #define LC32_CG_HOST(value) LC32CoreGraphicsHostObject((const void *)(value))
 
+#pragma mark CoreGraphics geometry queries
+
+CGAffineTransform CGContextGetCTM(CGContextRef object) {
+    CGAffineTransform result = {0};
+    if(object) LC32_CG_CALL(LC32CoreGraphicsOpContextGetCTM, LC32_CG_HOST(object),
+        LC32_CG_U32((uintptr_t)&result));
+    return result;
+}
+
+CGAffineTransform CGContextGetTextMatrix(CGContextRef object) {
+    CGAffineTransform result = {0};
+    if(object) LC32_CG_CALL(LC32CoreGraphicsOpContextGetTextMatrix, LC32_CG_HOST(object),
+        LC32_CG_U32((uintptr_t)&result));
+    return result;
+}
+
+CGAffineTransform CGContextGetUserSpaceToDeviceSpaceTransform(CGContextRef object) {
+    CGAffineTransform result = {0};
+    if(object) LC32_CG_CALL(LC32CoreGraphicsOpContextGetUserSpaceToDeviceSpaceTransform, LC32_CG_HOST(object),
+        LC32_CG_U32((uintptr_t)&result));
+    return result;
+}
+
+CGRect CGContextGetClipBoundingBox(CGContextRef object) {
+    CGRect result = {0};
+    if(object) LC32_CG_CALL(LC32CoreGraphicsOpContextGetClipBoundingBox, LC32_CG_HOST(object),
+        LC32_CG_U32((uintptr_t)&result));
+    return result;
+}
+
+CGRect CGContextGetPathBoundingBox(CGContextRef object) {
+    CGRect result = {0};
+    if(object) LC32_CG_CALL(LC32CoreGraphicsOpContextGetPathBoundingBox, LC32_CG_HOST(object),
+        LC32_CG_U32((uintptr_t)&result));
+    return result;
+}
+
+CGRect CGPathGetPathBoundingBox(CGPathRef object) {
+    CGRect result = {0};
+    if(object) LC32_CG_CALL(LC32CoreGraphicsOpPathGetPathBoundingBox, LC32_CG_HOST(object),
+        LC32_CG_U32((uintptr_t)&result));
+    return result;
+}
+
+CGRect CGFontGetFontBBox(CGFontRef object) {
+    CGRect result = {0};
+    if(object) LC32_CG_CALL(LC32CoreGraphicsOpFontGetFontBBox, LC32_CG_HOST(object),
+        LC32_CG_U32((uintptr_t)&result));
+    return result;
+}
+
+CGPoint CGContextGetPathCurrentPoint(CGContextRef object) {
+    CGPoint result = {0};
+    if(object) LC32_CG_CALL(LC32CoreGraphicsOpContextGetPathCurrentPoint, LC32_CG_HOST(object),
+        LC32_CG_U32((uintptr_t)&result));
+    return result;
+}
+
+CGPoint CGPathGetCurrentPoint(CGPathRef object) {
+    CGPoint result = {0};
+    if(object) LC32_CG_CALL(LC32CoreGraphicsOpPathGetCurrentPoint, LC32_CG_HOST(object),
+        LC32_CG_U32((uintptr_t)&result));
+    return result;
+}
+
+CGSize CGLayerGetSize(CGLayerRef object) {
+    CGSize result = {0};
+    if(object) LC32_CG_CALL(LC32CoreGraphicsOpLayerGetSize, LC32_CG_HOST(object),
+        LC32_CG_U32((uintptr_t)&result));
+    return result;
+}
+
+CGPoint CGContextConvertPointToUserSpace(CGContextRef object, CGPoint value) {
+    CGPoint result = {0};
+    if(object) LC32_CG_CALL(LC32CoreGraphicsOpContextConvertPointToUserSpace, LC32_CG_HOST(object),
+        LC32_CG_U32((uintptr_t)&result), LC32_CG_F32(value.x), LC32_CG_F32(value.y));
+    return result;
+}
+
+CGPoint CGContextConvertPointToDeviceSpace(CGContextRef object, CGPoint value) {
+    CGPoint result = {0};
+    if(object) LC32_CG_CALL(LC32CoreGraphicsOpContextConvertPointToDeviceSpace, LC32_CG_HOST(object),
+        LC32_CG_U32((uintptr_t)&result), LC32_CG_F32(value.x), LC32_CG_F32(value.y));
+    return result;
+}
+
+CGSize CGContextConvertSizeToUserSpace(CGContextRef object, CGSize value) {
+    CGSize result = {0};
+    if(object) LC32_CG_CALL(LC32CoreGraphicsOpContextConvertSizeToUserSpace, LC32_CG_HOST(object),
+        LC32_CG_U32((uintptr_t)&result), LC32_CG_F32(value.width), LC32_CG_F32(value.height));
+    return result;
+}
+
+CGSize CGContextConvertSizeToDeviceSpace(CGContextRef object, CGSize value) {
+    CGSize result = {0};
+    if(object) LC32_CG_CALL(LC32CoreGraphicsOpContextConvertSizeToDeviceSpace, LC32_CG_HOST(object),
+        LC32_CG_U32((uintptr_t)&result), LC32_CG_F32(value.width), LC32_CG_F32(value.height));
+    return result;
+}
+
+CGRect CGContextConvertRectToUserSpace(CGContextRef object, CGRect value) {
+    CGRect result = {0};
+    if(object) LC32_CG_CALL(LC32CoreGraphicsOpContextConvertRectToUserSpace, LC32_CG_HOST(object),
+        LC32_CG_U32((uintptr_t)&result), LC32_CG_F32(value.origin.x), LC32_CG_F32(value.origin.y), LC32_CG_F32(value.size.width), LC32_CG_F32(value.size.height));
+    return result;
+}
+
+CGRect CGContextConvertRectToDeviceSpace(CGContextRef object, CGRect value) {
+    CGRect result = {0};
+    if(object) LC32_CG_CALL(LC32CoreGraphicsOpContextConvertRectToDeviceSpace, LC32_CG_HOST(object),
+        LC32_CG_U32((uintptr_t)&result), LC32_CG_F32(value.origin.x), LC32_CG_F32(value.origin.y), LC32_CG_F32(value.size.width), LC32_CG_F32(value.size.height));
+    return result;
+}
+
+#pragma mark Additional CoreGraphics object and drawing APIs
+
+CFTypeID CGColorGetTypeID(void) {
+    return (CFTypeID)LC32_CG_CALL0(LC32CoreGraphicsOpColorGetTypeID);
+}
+
+CFTypeID CGColorSpaceGetTypeID(void) {
+    return (CFTypeID)LC32_CG_CALL0(LC32CoreGraphicsOpColorSpaceGetTypeID);
+}
+
+CFTypeID CGContextGetTypeID(void) {
+    return (CFTypeID)LC32_CG_CALL0(LC32CoreGraphicsOpContextGetTypeID);
+}
+
+CFTypeID CGPathGetTypeID(void) {
+    return (CFTypeID)LC32_CG_CALL0(LC32CoreGraphicsOpPathGetTypeID);
+}
+
+CFTypeID CGImageGetTypeID(void) {
+    return (CFTypeID)LC32_CG_CALL0(LC32CoreGraphicsOpImageGetTypeID);
+}
+
+CFTypeID CGLayerGetTypeID(void) {
+    return (CFTypeID)LC32_CG_CALL0(LC32CoreGraphicsOpLayerGetTypeID);
+}
+
+CFTypeID CGFontGetTypeID(void) {
+    return (CFTypeID)LC32_CG_CALL0(LC32CoreGraphicsOpFontGetTypeID);
+}
+
+CFTypeID CGGradientGetTypeID(void) {
+    return (CFTypeID)LC32_CG_CALL0(LC32CoreGraphicsOpGradientGetTypeID);
+}
+
+CFTypeID CGDataProviderGetTypeID(void) {
+    return (CFTypeID)LC32_CG_CALL0(LC32CoreGraphicsOpDataProviderGetTypeID);
+}
+
+CGImageAlphaInfo CGBitmapContextGetAlphaInfo(CGContextRef object) {
+    if(!object) return 0;
+    return (CGImageAlphaInfo)LC32_CG_CALL(LC32CoreGraphicsOpBitmapContextGetAlphaInfo,
+        LC32_CG_HOST(object));
+}
+
+CGBitmapInfo CGBitmapContextGetBitmapInfo(CGContextRef object) {
+    if(!object) return 0;
+    return (CGBitmapInfo)LC32_CG_CALL(LC32CoreGraphicsOpBitmapContextGetBitmapInfo,
+        LC32_CG_HOST(object));
+}
+
+size_t CGBitmapContextGetBitsPerComponent(CGContextRef object) {
+    if(!object) return 0;
+    return (size_t)LC32_CG_CALL(LC32CoreGraphicsOpBitmapContextGetBitsPerComponent,
+        LC32_CG_HOST(object));
+}
+
+size_t CGBitmapContextGetBitsPerPixel(CGContextRef object) {
+    if(!object) return 0;
+    return (size_t)LC32_CG_CALL(LC32CoreGraphicsOpBitmapContextGetBitsPerPixel,
+        LC32_CG_HOST(object));
+}
+
+CGInterpolationQuality CGContextGetInterpolationQuality(CGContextRef object) {
+    if(!object) return 0;
+    return (CGInterpolationQuality)LC32_CG_CALL(LC32CoreGraphicsOpContextGetInterpolationQuality,
+        LC32_CG_HOST(object));
+}
+
+bool CGContextIsPathEmpty(CGContextRef object) {
+    if(!object) return 0;
+    return (bool)LC32_CG_CALL(LC32CoreGraphicsOpContextIsPathEmpty,
+        LC32_CG_HOST(object));
+}
+
+bool CGPathIsEmpty(CGPathRef object) {
+    if(!object) return 0;
+    return (bool)LC32_CG_CALL(LC32CoreGraphicsOpPathIsEmpty,
+        LC32_CG_HOST(object));
+}
+
+bool CGImageIsMask(CGImageRef object) {
+    if(!object) return 0;
+    return (bool)LC32_CG_CALL(LC32CoreGraphicsOpImageIsMask,
+        LC32_CG_HOST(object));
+}
+
+bool CGImageGetShouldInterpolate(CGImageRef object) {
+    if(!object) return 0;
+    return (bool)LC32_CG_CALL(LC32CoreGraphicsOpImageGetShouldInterpolate,
+        LC32_CG_HOST(object));
+}
+
+CGColorRenderingIntent CGImageGetRenderingIntent(CGImageRef object) {
+    if(!object) return 0;
+    return (CGColorRenderingIntent)LC32_CG_CALL(LC32CoreGraphicsOpImageGetRenderingIntent,
+        LC32_CG_HOST(object));
+}
+
+size_t CGColorSpaceGetColorTableCount(CGColorSpaceRef object) {
+    if(!object) return 0;
+    return (size_t)LC32_CG_CALL(LC32CoreGraphicsOpColorSpaceGetColorTableCount,
+        LC32_CG_HOST(object));
+}
+
+bool CGColorSpaceSupportsOutput(CGColorSpaceRef object) {
+    if(!object) return 0;
+    return (bool)LC32_CG_CALL(LC32CoreGraphicsOpColorSpaceSupportsOutput,
+        LC32_CG_HOST(object));
+}
+
+bool CGColorSpaceIsWideGamutRGB(CGColorSpaceRef object) {
+    if(!object) return 0;
+    return (bool)LC32_CG_CALL(LC32CoreGraphicsOpColorSpaceIsWideGamutRGB,
+        LC32_CG_HOST(object));
+}
+
+CGColorSpaceRef CGBitmapContextGetColorSpace(CGContextRef object) {
+    if(!object) return NULL;
+    return (CGColorSpaceRef)LC32_CG_CALL(LC32CoreGraphicsOpBitmapContextGetColorSpace,
+        LC32_CG_HOST(object));
+}
+
+CGColorSpaceRef CGColorSpaceGetBaseColorSpace(CGColorSpaceRef object) {
+    if(!object) return NULL;
+    return (CGColorSpaceRef)LC32_CG_CALL(LC32CoreGraphicsOpColorSpaceGetBaseColorSpace,
+        LC32_CG_HOST(object));
+}
+
+CFStringRef CGFontCopyFullName(CGFontRef object) {
+    if(!object) return NULL;
+    return (CFStringRef)LC32_CG_CALL(LC32CoreGraphicsOpFontCopyFullName,
+        LC32_CG_HOST(object));
+}
+
+CFStringRef CGFontCopyPostScriptName(CGFontRef object) {
+    if(!object) return NULL;
+    return (CFStringRef)LC32_CG_CALL(LC32CoreGraphicsOpFontCopyPostScriptName,
+        LC32_CG_HOST(object));
+}
+
+CFArrayRef CGFontCopyTableTags(CGFontRef object) {
+    if(!object) return NULL;
+    return (CFArrayRef)LC32_CG_CALL(LC32CoreGraphicsOpFontCopyTableTags,
+        LC32_CG_HOST(object));
+}
+
+CFArrayRef CGFontCopyVariationAxes(CGFontRef object) {
+    if(!object) return NULL;
+    return (CFArrayRef)LC32_CG_CALL(LC32CoreGraphicsOpFontCopyVariationAxes,
+        LC32_CG_HOST(object));
+}
+
+CFDictionaryRef CGFontCopyVariations(CGFontRef object) {
+    if(!object) return NULL;
+    return (CFDictionaryRef)LC32_CG_CALL(LC32CoreGraphicsOpFontCopyVariations,
+        LC32_CG_HOST(object));
+}
+
+CFStringRef CGColorSpaceCopyName(CGColorSpaceRef object) {
+    if(!object) return NULL;
+    return (CFStringRef)LC32_CG_CALL(LC32CoreGraphicsOpColorSpaceCopyName,
+        LC32_CG_HOST(object));
+}
+
+CFDataRef CGColorSpaceCopyICCData(CGColorSpaceRef object) {
+    if(!object) return NULL;
+    return (CFDataRef)LC32_CG_CALL(LC32CoreGraphicsOpColorSpaceCopyICCData,
+        LC32_CG_HOST(object));
+}
+
+CFDataRef CGColorSpaceCopyICCProfile(CGColorSpaceRef object) {
+    if(!object) return NULL;
+    return (CFDataRef)LC32_CG_CALL(LC32CoreGraphicsOpColorSpaceCopyICCProfile,
+        LC32_CG_HOST(object));
+}
+
+CGMutablePathRef CGPathCreateMutableCopy(CGPathRef object) {
+    if(!object) return NULL;
+    return (CGMutablePathRef)LC32_CG_CALL(LC32CoreGraphicsOpPathCreateMutableCopy,
+        LC32_CG_HOST(object));
+}
+
+CGPathRef CGContextCopyPath(CGContextRef object) {
+    if(!object) return NULL;
+    return (CGPathRef)LC32_CG_CALL(LC32CoreGraphicsOpContextCopyPath,
+        LC32_CG_HOST(object));
+}
+
+CGColorSpaceRef CGColorSpaceCreateWithICCProfile(CFDataRef object) {
+    if(!object) return NULL;
+    return (CGColorSpaceRef)LC32_CG_CALL(LC32CoreGraphicsOpColorSpaceCreateWithICCProfile,
+        LC32_CG_HOST(object));
+}
+
+CGColorSpaceRef CGColorSpaceCreateDeviceCMYK(void) {
+    return (CGColorSpaceRef)LC32_CG_CALL0(LC32CoreGraphicsOpColorSpaceCreateDeviceCMYK);
+}
+
+CGColorSpaceRef CGColorSpaceCreatePattern(CGColorSpaceRef base) {
+    return (CGColorSpaceRef)LC32_CG_CALL(LC32CoreGraphicsOpColorSpaceCreatePattern,
+        LC32_CG_HOST(base));
+}
+
+CGColorRef CGColorCreateCopyWithAlpha(CGColorRef color, CGFloat alpha) {
+    if(!color) return NULL;
+    return (CGColorRef)LC32_CG_CALL(LC32CoreGraphicsOpColorCreateCopyWithAlpha,
+        LC32_CG_HOST(color),
+        LC32_CG_F32(alpha));
+}
+
+CGImageRef CGImageCreateCopyWithColorSpace(CGImageRef image, CGColorSpaceRef space) {
+    if(!image || !space) return NULL;
+    return (CGImageRef)LC32_CG_CALL(LC32CoreGraphicsOpImageCreateCopyWithColorSpace,
+        LC32_CG_HOST(image),
+        LC32_CG_HOST(space));
+}
+
+CGFontRef CGFontCreateCopyWithVariations(CGFontRef font, CFDictionaryRef variations) {
+    if(!font) return NULL;
+    return (CGFontRef)LC32_CG_CALL(LC32CoreGraphicsOpFontCreateCopyWithVariations,
+        LC32_CG_HOST(font),
+        LC32_CG_HOST(variations));
+}
+
+bool CGPathEqualToPath(CGPathRef first, CGPathRef second) {
+    if(!first || !second) return 0;
+    return (bool)LC32_CG_CALL(LC32CoreGraphicsOpPathEqualToPath,
+        LC32_CG_HOST(first),
+        LC32_CG_HOST(second));
+}
+
+CFStringRef CGFontCopyGlyphNameForGlyph(CGFontRef font, CGGlyph glyph) {
+    if(!font) return NULL;
+    return (CFStringRef)LC32_CG_CALL(LC32CoreGraphicsOpFontCopyGlyphNameForGlyph,
+        LC32_CG_HOST(font),
+        LC32_CG_U32(glyph));
+}
+
+CGGlyph CGFontGetGlyphWithGlyphName(CGFontRef font, CFStringRef name) {
+    if(!font || !name) return 0;
+    return (CGGlyph)LC32_CG_CALL(LC32CoreGraphicsOpFontGetGlyphWithGlyphName,
+        LC32_CG_HOST(font),
+        LC32_CG_HOST(name));
+}
+
+void CGContextEOClip(CGContextRef context) {
+    if(!context) return;
+    (void)LC32_CG_CALL(LC32CoreGraphicsOpContextEOClip,
+        LC32_CG_HOST(context));
+}
+
+void CGContextEOFillPath(CGContextRef context) {
+    if(!context) return;
+    (void)LC32_CG_CALL(LC32CoreGraphicsOpContextEOFillPath,
+        LC32_CG_HOST(context));
+}
+
+void CGContextReplacePathWithStrokedPath(CGContextRef context) {
+    if(!context) return;
+    (void)LC32_CG_CALL(LC32CoreGraphicsOpContextReplacePathWithStrokedPath,
+        LC32_CG_HOST(context));
+}
+
+void CGContextSynchronize(CGContextRef context) {
+    if(!context) return;
+    (void)LC32_CG_CALL(LC32CoreGraphicsOpContextSynchronize,
+        LC32_CG_HOST(context));
+}
+
+void CGContextSetFlatness(CGContextRef context, CGFloat value) {
+    if(!context) return;
+    (void)LC32_CG_CALL(LC32CoreGraphicsOpContextSetFlatness,
+        LC32_CG_HOST(context),
+        LC32_CG_F32(value));
+}
+
+void CGContextSetMiterLimit(CGContextRef context, CGFloat value) {
+    if(!context) return;
+    (void)LC32_CG_CALL(LC32CoreGraphicsOpContextSetMiterLimit,
+        LC32_CG_HOST(context),
+        LC32_CG_F32(value));
+}
+
+void CGContextSetFillColorSpace(CGContextRef context, CGColorSpaceRef space) {
+    if(!context || !space) return;
+    (void)LC32_CG_CALL(LC32CoreGraphicsOpContextSetFillColorSpace,
+        LC32_CG_HOST(context),
+        LC32_CG_HOST(space));
+}
+
+void CGContextSetRenderingIntent(CGContextRef context, CGColorRenderingIntent intent) {
+    if(!context) return;
+    (void)LC32_CG_CALL(LC32CoreGraphicsOpContextSetRenderingIntent,
+        LC32_CG_HOST(context),
+        LC32_CG_U32(intent));
+}
+
+void CGContextAddQuadCurveToPoint(CGContextRef context, CGFloat cpx, CGFloat cpy, CGFloat x, CGFloat y) {
+    if(!context) return;
+    (void)LC32_CG_CALL(LC32CoreGraphicsOpContextAddQuadCurveToPoint,
+        LC32_CG_HOST(context),
+        LC32_CG_F32(cpx),
+        LC32_CG_F32(cpy),
+        LC32_CG_F32(x),
+        LC32_CG_F32(y));
+}
+
+void CGContextSetCMYKFillColor(CGContextRef context, CGFloat cyan, CGFloat magenta, CGFloat yellow, CGFloat black, CGFloat alpha) {
+    if(!context) return;
+    (void)LC32_CG_CALL(LC32CoreGraphicsOpContextSetCMYKFillColor,
+        LC32_CG_HOST(context),
+        LC32_CG_F32(cyan),
+        LC32_CG_F32(magenta),
+        LC32_CG_F32(yellow),
+        LC32_CG_F32(black),
+        LC32_CG_F32(alpha));
+}
+
+void CGContextSetCMYKStrokeColor(CGContextRef context, CGFloat cyan, CGFloat magenta, CGFloat yellow, CGFloat black, CGFloat alpha) {
+    if(!context) return;
+    (void)LC32_CG_CALL(LC32CoreGraphicsOpContextSetCMYKStrokeColor,
+        LC32_CG_HOST(context),
+        LC32_CG_F32(cyan),
+        LC32_CG_F32(magenta),
+        LC32_CG_F32(yellow),
+        LC32_CG_F32(black),
+        LC32_CG_F32(alpha));
+}
+
+CGContextRef CGContextRetain(CGContextRef object) {
+    return object ? (CGContextRef)CFRetain(object) : NULL;
+}
+
+CGColorSpaceRef CGColorSpaceRetain(CGColorSpaceRef object) {
+    return object ? (CGColorSpaceRef)CFRetain(object) : NULL;
+}
+
+CGGradientRef CGGradientRetain(CGGradientRef object) {
+    return object ? (CGGradientRef)CFRetain(object) : NULL;
+}
+
+
+
 #pragma mark CGColor
 
 CGColorRef CGColorCreate(CGColorSpaceRef space, const CGFloat *components) {
@@ -545,6 +1002,54 @@ void CGContextShowGlyphsAtPoint(CGContextRef context, CGFloat x,
         LC32CoreGraphicsOpContextShowGlyphsAtPoint,
         LC32_CG_HOST(context), LC32_CG_F32(x), LC32_CG_F32(y),
         LC32_CG_U32((uintptr_t)glyphs), LC32_CG_U32(count));
+}
+
+void CGContextShowGlyphs(CGContextRef context, const CGGlyph *glyphs,
+        size_t count) {
+    if(context && glyphs && count) LC32_CG_CALL(
+        LC32CoreGraphicsOpContextShowGlyphs, LC32_CG_HOST(context),
+        LC32_CG_U32((uintptr_t)glyphs), LC32_CG_U32(count));
+}
+
+void CGContextSetCharacterSpacing(CGContextRef context, CGFloat spacing) {
+    if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextSetCharacterSpacing,
+        LC32_CG_HOST(context), LC32_CG_F32(spacing));
+}
+
+void CGContextAddCurveToPoint(CGContextRef context, CGFloat cp1x,
+        CGFloat cp1y, CGFloat cp2x, CGFloat cp2y, CGFloat x, CGFloat y) {
+    if(context) LC32_CG_CALL(LC32CoreGraphicsOpContextAddCurveToPoint,
+        LC32_CG_HOST(context), LC32_CG_F32(cp1x), LC32_CG_F32(cp1y),
+        LC32_CG_F32(cp2x), LC32_CG_F32(cp2y),
+        LC32_CG_F32(x), LC32_CG_F32(y));
+}
+
+CGLayerRef CGLayerCreateWithContext(CGContextRef context, CGSize size,
+        CFDictionaryRef auxiliaryInfo) {
+    return context ? (CGLayerRef)LC32_CG_CALL(
+        LC32CoreGraphicsOpLayerCreateWithContext, LC32_CG_HOST(context),
+        LC32_CG_F32(size.width), LC32_CG_F32(size.height),
+        LC32_CG_HOST(auxiliaryInfo)) : NULL;
+}
+
+CGContextRef CGLayerGetContext(CGLayerRef layer) {
+    return layer ? (CGContextRef)LC32_CG_CALL(
+        LC32CoreGraphicsOpLayerGetContext, LC32_CG_HOST(layer)) : NULL;
+}
+
+CGLayerRef CGLayerRetain(CGLayerRef layer) {
+    return layer ? (CGLayerRef)CFRetain(layer) : NULL;
+}
+
+void CGLayerRelease(CGLayerRef layer) {
+    if(layer) CFRelease(layer);
+}
+
+void CGContextDrawLayerAtPoint(CGContextRef context, CGPoint point,
+        CGLayerRef layer) {
+    if(context && layer) LC32_CG_CALL(
+        LC32CoreGraphicsOpContextDrawLayerAtPoint, LC32_CG_HOST(context),
+        LC32_CG_F32(point.x), LC32_CG_F32(point.y), LC32_CG_HOST(layer));
 }
 
 void CGContextClosePath(CGContextRef context) {

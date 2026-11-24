@@ -5,7 +5,7 @@
 
 enum {
     LC32ImageIOABIVersion = 1,
-    LC32ImageIOMaxSlots = 4,
+    LC32ImageIOMaxSlots = 5,
 };
 
 // Slots carry native object addresses or zero-extended ARM32 scalar values.
@@ -43,6 +43,31 @@ typedef enum : uint32_t {
     LC32ImageIOOpDestinationAddImage = 24,
     LC32ImageIOOpDestinationAddImageFromSource = 25,
     LC32ImageIOOpDestinationFinalize = 26,
+    LC32ImageIOOpMetadataGetTypeID = 27,
+    LC32ImageIOOpMetadataTagGetTypeID = 28,
+    LC32ImageIOOpMetadataCreateMutable = 29,
+    LC32ImageIOOpMetadataCreateFromXMPData = 30,
+    LC32ImageIOOpMetadataCreateMutableCopy = 31,
+    LC32ImageIOOpMetadataCreateXMPData = 32,
+    LC32ImageIOOpMetadataCopyTags = 33,
+    LC32ImageIOOpMetadataTagCopyName = 34,
+    LC32ImageIOOpMetadataTagCopyNamespace = 35,
+    LC32ImageIOOpMetadataTagCopyPrefix = 36,
+    LC32ImageIOOpMetadataTagCopyQualifiers = 37,
+    LC32ImageIOOpMetadataTagCopyValue = 38,
+    LC32ImageIOOpMetadataTagGetType = 39,
+    LC32ImageIOOpMetadataTagCreate = 40,
+    LC32ImageIOOpMetadataCopyStringValueWithPath = 41,
+    LC32ImageIOOpMetadataCopyTagWithPath = 42,
+    LC32ImageIOOpMetadataCopyTagMatchingImageProperty = 43,
+    LC32ImageIOOpMetadataRemoveTagWithPath = 44,
+    LC32ImageIOOpMetadataSetTagWithPath = 45,
+    LC32ImageIOOpMetadataSetValueWithPath = 46,
+    LC32ImageIOOpMetadataSetValueMatchingImageProperty = 47,
+    LC32ImageIOOpSourceCopyMetadataAtIndex = 48,
+    LC32ImageIOOpDestinationAddImageAndMetadata = 49,
+    LC32ImageIOOpMetadataRegisterNamespaceForPrefix = 50,
+    LC32ImageIOOpDestinationCopyImageSource = 51,
 } LC32ImageIOOpcode;
 
 #endif

@@ -252,6 +252,17 @@ bool ReadGuestPoints(u32 guestAddress, size_t count,
     return true;
 }
 
+// Geometry is CGFloat/double on the host and tightly packed float on ARM32.
+bool WriteGuestGeometry(u32 address, const CGFloat *values, size_t count) {
+    if(!address || count > 6 || static_cast<uint64_t>(address) +
+            count * sizeof(float) > static_cast<uint64_t>(UINT32_MAX) + 1)
+        return false;
+    float narrowed[6];
+    for(size_t i = 0; i < count; ++i) narrowed[i] = static_cast<float>(values[i]);
+    return Dynarmic_mem_1write(address, count * sizeof(float),
+        reinterpret_cast<char *>(narrowed)) == 0;
+}
+
 bool WriteGuestRect(u32 guestAddress, CGRect rect) {
     if(!guestAddress || static_cast<uint64_t>(guestAddress) +
             4 * sizeof(float) > static_cast<uint64_t>(UINT32_MAX) + 1) {
@@ -847,6 +858,32 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             if(!image) return 0;
             return LC32GuestObjectForOwnedHostObject(image);
         }
+        case LC32CoreGraphicsOpLayerCreateWithContext: {
+            if(!RequireCoreGraphicsSlots(call, 4)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            CFDictionaryRef auxiliaryInfo = SlotHostObject<CFDictionaryRef>(call, 3);
+            if(!context || (auxiliaryInfo &&
+                CFGetTypeID(auxiliaryInfo) != CFDictionaryGetTypeID())) return 0;
+            CGLayerRef layer = CGLayerCreateWithContext(context,
+                CGSizeMake(SlotCGFloat(call, 1), SlotCGFloat(call, 2)), auxiliaryInfo);
+            return layer ? LC32GuestObjectForOwnedHostObject(layer) : 0;
+        }
+        case LC32CoreGraphicsOpLayerGetContext: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGLayerRef layer = SlotHostObject<CGLayerRef>(call, 0);
+            CGContextRef context = layer ? CGLayerGetContext(layer) : nullptr;
+            return context ? [(id)context guest_self] : 0;
+        }
+        case LC32CoreGraphicsOpContextDrawLayerAtPoint: {
+            if(!RequireCoreGraphicsSlots(call, 4)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            CGLayerRef layer = SlotHostObject<CGLayerRef>(call, 3);
+            if(!context || !layer) return 0;
+            CGContextDrawLayerAtPoint(context,
+                CGPointMake(SlotCGFloat(call, 1), SlotCGFloat(call, 2)), layer);
+            SyncBitmapBacking(context, FindBitmapBacking(context));
+            return 1;
+        }
         case LC32CoreGraphicsOpPathCreateMutable: {
             if(!RequireCoreGraphicsSlots(call, 0)) return 0;
             CGMutablePathRef path = CGPathCreateMutable();
@@ -1061,10 +1098,14 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
                 CGContextSetFont(context, font);
             return 0;
         }
+        case LC32CoreGraphicsOpContextSetCharacterSpacing:
         case LC32CoreGraphicsOpContextSetFontSize: {
             if(!RequireCoreGraphicsSlots(call, 2)) return 0;
             CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
-            if(context) CGContextSetFontSize(context, SlotCGFloat(call, 1));
+            if(!context) return 0;
+            if(opcode == LC32CoreGraphicsOpContextSetFontSize)
+                CGContextSetFontSize(context, SlotCGFloat(call, 1));
+            else CGContextSetCharacterSpacing(context, SlotCGFloat(call, 1));
             return 0;
         }
         case LC32CoreGraphicsOpContextSetTextDrawingMode: {
@@ -1076,11 +1117,14 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
                     static_cast<CGTextDrawingMode>(mode));
             return 0;
         }
-        case LC32CoreGraphicsOpContextShowGlyphsAtPoint: {
-            if(!RequireCoreGraphicsSlots(call, 5)) return 0;
+        case LC32CoreGraphicsOpContextShowGlyphsAtPoint:
+        case LC32CoreGraphicsOpContextShowGlyphs: {
+            const bool atPoint = opcode ==
+                LC32CoreGraphicsOpContextShowGlyphsAtPoint;
+            if(!RequireCoreGraphicsSlots(call, atPoint ? 5 : 3)) return 0;
             CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
-            const u32 guestGlyphs = SlotU32(call, 3);
-            const size_t count = SlotU32(call, 4);
+            const u32 guestGlyphs = SlotU32(call, atPoint ? 3 : 1);
+            const size_t count = SlotU32(call, atPoint ? 4 : 2);
             if(!context || !guestGlyphs || !count ||
                count > kMaximumFontGlyphs ||
                static_cast<uint64_t>(guestGlyphs) + count * sizeof(CGGlyph) >
@@ -1090,8 +1134,12 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
                     reinterpret_cast<char *>(glyphs.data())) != 0) return 0;
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            CGContextShowGlyphsAtPoint(context, SlotCGFloat(call, 1),
-                SlotCGFloat(call, 2), glyphs.data(), count);
+            if(atPoint) {
+                CGContextShowGlyphsAtPoint(context, SlotCGFloat(call, 1),
+                    SlotCGFloat(call, 2), glyphs.data(), count);
+            } else {
+                CGContextShowGlyphs(context, glyphs.data(), count);
+            }
 #pragma clang diagnostic pop
             SyncBitmapBacking(context, FindBitmapBacking(context));
             return 1;
@@ -1234,6 +1282,15 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             };
             return Dynarmic_mem_1write(guestAddress, sizeof(guestPosition),
                 reinterpret_cast<char *>(guestPosition)) == 0;
+        }
+        case LC32CoreGraphicsOpContextAddCurveToPoint: {
+            if(!RequireCoreGraphicsSlots(call, 7)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            if(!context) return 0;
+            CGContextAddCurveToPoint(context, SlotCGFloat(call, 1),
+                SlotCGFloat(call, 2), SlotCGFloat(call, 3), SlotCGFloat(call, 4),
+                SlotCGFloat(call, 5), SlotCGFloat(call, 6));
+            return 1;
         }
         case LC32CoreGraphicsOpContextAddLines: {
             if(!RequireCoreGraphicsSlots(call, 3)) return 0;
@@ -1726,6 +1783,482 @@ u32 LC32_CoreGraphics_Dispatch(u32 opcode, u32 guestCall, u32) {
             if(!path) return 0;
             CGPathRef result = CGPathCreateCopy(path);
             return result ? LC32GuestObjectForOwnedHostObject(result) : 0;
+        }
+        case LC32CoreGraphicsOpColorGetTypeID: {
+            if(!RequireCoreGraphicsSlots(call, 0)) return 0;
+            return static_cast<u32>(CGColorGetTypeID());
+        }
+        case LC32CoreGraphicsOpColorSpaceGetTypeID: {
+            if(!RequireCoreGraphicsSlots(call, 0)) return 0;
+            return static_cast<u32>(CGColorSpaceGetTypeID());
+        }
+        case LC32CoreGraphicsOpContextGetTypeID: {
+            if(!RequireCoreGraphicsSlots(call, 0)) return 0;
+            return static_cast<u32>(CGContextGetTypeID());
+        }
+        case LC32CoreGraphicsOpPathGetTypeID: {
+            if(!RequireCoreGraphicsSlots(call, 0)) return 0;
+            return static_cast<u32>(CGPathGetTypeID());
+        }
+        case LC32CoreGraphicsOpImageGetTypeID: {
+            if(!RequireCoreGraphicsSlots(call, 0)) return 0;
+            return static_cast<u32>(CGImageGetTypeID());
+        }
+        case LC32CoreGraphicsOpLayerGetTypeID: {
+            if(!RequireCoreGraphicsSlots(call, 0)) return 0;
+            return static_cast<u32>(CGLayerGetTypeID());
+        }
+        case LC32CoreGraphicsOpFontGetTypeID: {
+            if(!RequireCoreGraphicsSlots(call, 0)) return 0;
+            return static_cast<u32>(CGFontGetTypeID());
+        }
+        case LC32CoreGraphicsOpGradientGetTypeID: {
+            if(!RequireCoreGraphicsSlots(call, 0)) return 0;
+            return static_cast<u32>(CGGradientGetTypeID());
+        }
+        case LC32CoreGraphicsOpDataProviderGetTypeID: {
+            if(!RequireCoreGraphicsSlots(call, 0)) return 0;
+            return static_cast<u32>(CGDataProviderGetTypeID());
+        }
+        case LC32CoreGraphicsOpBitmapContextGetAlphaInfo: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGContextRef object = SlotHostObject<CGContextRef>(call, 0);
+            if(!object) return 0;
+            return static_cast<u32>(CGBitmapContextGetAlphaInfo(object));
+        }
+        case LC32CoreGraphicsOpBitmapContextGetBitmapInfo: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGContextRef object = SlotHostObject<CGContextRef>(call, 0);
+            if(!object) return 0;
+            return static_cast<u32>(CGBitmapContextGetBitmapInfo(object));
+        }
+        case LC32CoreGraphicsOpBitmapContextGetBitsPerComponent: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGContextRef object = SlotHostObject<CGContextRef>(call, 0);
+            if(!object) return 0;
+            return static_cast<u32>(CGBitmapContextGetBitsPerComponent(object));
+        }
+        case LC32CoreGraphicsOpBitmapContextGetBitsPerPixel: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGContextRef object = SlotHostObject<CGContextRef>(call, 0);
+            if(!object) return 0;
+            return static_cast<u32>(CGBitmapContextGetBitsPerPixel(object));
+        }
+        case LC32CoreGraphicsOpContextGetInterpolationQuality: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGContextRef object = SlotHostObject<CGContextRef>(call, 0);
+            if(!object) return 0;
+            return static_cast<u32>(CGContextGetInterpolationQuality(object));
+        }
+        case LC32CoreGraphicsOpContextIsPathEmpty: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGContextRef object = SlotHostObject<CGContextRef>(call, 0);
+            if(!object) return 0;
+            return static_cast<u32>(CGContextIsPathEmpty(object));
+        }
+        case LC32CoreGraphicsOpPathIsEmpty: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGPathRef object = SlotHostObject<CGPathRef>(call, 0);
+            if(!object) return 0;
+            return static_cast<u32>(CGPathIsEmpty(object));
+        }
+        case LC32CoreGraphicsOpImageIsMask: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGImageRef object = SlotHostObject<CGImageRef>(call, 0);
+            if(!object) return 0;
+            return static_cast<u32>(CGImageIsMask(object));
+        }
+        case LC32CoreGraphicsOpImageGetShouldInterpolate: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGImageRef object = SlotHostObject<CGImageRef>(call, 0);
+            if(!object) return 0;
+            return static_cast<u32>(CGImageGetShouldInterpolate(object));
+        }
+        case LC32CoreGraphicsOpImageGetRenderingIntent: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGImageRef object = SlotHostObject<CGImageRef>(call, 0);
+            if(!object) return 0;
+            return static_cast<u32>(CGImageGetRenderingIntent(object));
+        }
+        case LC32CoreGraphicsOpColorSpaceGetColorTableCount: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGColorSpaceRef object = SlotHostObject<CGColorSpaceRef>(call, 0);
+            if(!object) return 0;
+            return static_cast<u32>(CGColorSpaceGetColorTableCount(object));
+        }
+        case LC32CoreGraphicsOpColorSpaceSupportsOutput: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGColorSpaceRef object = SlotHostObject<CGColorSpaceRef>(call, 0);
+            if(!object) return 0;
+            return static_cast<u32>(CGColorSpaceSupportsOutput(object));
+        }
+        case LC32CoreGraphicsOpColorSpaceIsWideGamutRGB: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGColorSpaceRef object = SlotHostObject<CGColorSpaceRef>(call, 0);
+            if(!object) return 0;
+            return static_cast<u32>(CGColorSpaceIsWideGamutRGB(object));
+        }
+        case LC32CoreGraphicsOpBitmapContextGetColorSpace: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGContextRef object = SlotHostObject<CGContextRef>(call, 0);
+            if(!object) return 0;
+            CGColorSpaceRef result = CGBitmapContextGetColorSpace(object);
+            return result ? [(id)result guest_self] : 0;
+        }
+        case LC32CoreGraphicsOpColorSpaceGetBaseColorSpace: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGColorSpaceRef object = SlotHostObject<CGColorSpaceRef>(call, 0);
+            if(!object) return 0;
+            CGColorSpaceRef result = CGColorSpaceGetBaseColorSpace(object);
+            return result ? [(id)result guest_self] : 0;
+        }
+        case LC32CoreGraphicsOpFontCopyFullName: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGFontRef object = SlotHostObject<CGFontRef>(call, 0);
+            if(!object) return 0;
+            return LC32GuestObjectForOwnedHostObject(CGFontCopyFullName(object));
+        }
+        case LC32CoreGraphicsOpFontCopyPostScriptName: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGFontRef object = SlotHostObject<CGFontRef>(call, 0);
+            if(!object) return 0;
+            return LC32GuestObjectForOwnedHostObject(CGFontCopyPostScriptName(object));
+        }
+        case LC32CoreGraphicsOpFontCopyTableTags: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGFontRef object = SlotHostObject<CGFontRef>(call, 0);
+            if(!object) return 0;
+            return LC32GuestObjectForOwnedHostObject(CGFontCopyTableTags(object));
+        }
+        case LC32CoreGraphicsOpFontCopyVariationAxes: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGFontRef object = SlotHostObject<CGFontRef>(call, 0);
+            if(!object) return 0;
+            return LC32GuestObjectForOwnedHostObject(CGFontCopyVariationAxes(object));
+        }
+        case LC32CoreGraphicsOpFontCopyVariations: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGFontRef object = SlotHostObject<CGFontRef>(call, 0);
+            if(!object) return 0;
+            return LC32GuestObjectForOwnedHostObject(CGFontCopyVariations(object));
+        }
+        case LC32CoreGraphicsOpColorSpaceCopyName: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGColorSpaceRef object = SlotHostObject<CGColorSpaceRef>(call, 0);
+            if(!object) return 0;
+            return LC32GuestObjectForOwnedHostObject(CGColorSpaceCopyName(object));
+        }
+        case LC32CoreGraphicsOpColorSpaceCopyICCData: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGColorSpaceRef object = SlotHostObject<CGColorSpaceRef>(call, 0);
+            if(!object) return 0;
+            return LC32GuestObjectForOwnedHostObject(CGColorSpaceCopyICCData(object));
+        }
+        case LC32CoreGraphicsOpColorSpaceCopyICCProfile: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGColorSpaceRef object = SlotHostObject<CGColorSpaceRef>(call, 0);
+            if(!object) return 0;
+            return LC32GuestObjectForOwnedHostObject(CGColorSpaceCopyICCData(object));
+        }
+        case LC32CoreGraphicsOpPathCreateMutableCopy: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGPathRef object = SlotHostObject<CGPathRef>(call, 0);
+            if(!object) return 0;
+            return LC32GuestObjectForOwnedHostObject(CGPathCreateMutableCopy(object));
+        }
+        case LC32CoreGraphicsOpContextCopyPath: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGContextRef object = SlotHostObject<CGContextRef>(call, 0);
+            if(!object) return 0;
+            return LC32GuestObjectForOwnedHostObject(CGContextCopyPath(object));
+        }
+        case LC32CoreGraphicsOpColorSpaceCreateWithICCProfile: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CFDataRef object = SlotHostObject<CFDataRef>(call, 0);
+            if(!object) return 0;
+            return LC32GuestObjectForOwnedHostObject(CGColorSpaceCreateWithICCData(object));
+        }
+        case LC32CoreGraphicsOpColorSpaceCreateDeviceCMYK: {
+            if(!RequireCoreGraphicsSlots(call, 0)) return 0;
+            return LC32GuestObjectForOwnedHostObject(CGColorSpaceCreateDeviceCMYK());
+        }
+        case LC32CoreGraphicsOpColorSpaceCreatePattern: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGColorSpaceRef base = SlotHostObject<CGColorSpaceRef>(call, 0);
+            return LC32GuestObjectForOwnedHostObject(CGColorSpaceCreatePattern(base));
+        }
+        case LC32CoreGraphicsOpColorCreateCopyWithAlpha: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGColorRef color = SlotHostObject<CGColorRef>(call, 0);
+            CGFloat alpha = SlotCGFloat(call, 1);
+            if(!color) return 0;
+            return LC32GuestObjectForOwnedHostObject(CGColorCreateCopyWithAlpha(color, alpha));
+        }
+        case LC32CoreGraphicsOpImageCreateCopyWithColorSpace: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGImageRef image = SlotHostObject<CGImageRef>(call, 0);
+            CGColorSpaceRef space = SlotHostObject<CGColorSpaceRef>(call, 1);
+            if(!image || !space) return 0;
+            return LC32GuestObjectForOwnedHostObject(CGImageCreateCopyWithColorSpace(image, space));
+        }
+        case LC32CoreGraphicsOpFontCreateCopyWithVariations: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGFontRef font = SlotHostObject<CGFontRef>(call, 0);
+            CFDictionaryRef variations = SlotHostObject<CFDictionaryRef>(call, 1);
+            if(!font) return 0;
+            return LC32GuestObjectForOwnedHostObject(CGFontCreateCopyWithVariations(font, variations));
+        }
+        case LC32CoreGraphicsOpPathEqualToPath: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGPathRef first = SlotHostObject<CGPathRef>(call, 0);
+            CGPathRef second = SlotHostObject<CGPathRef>(call, 1);
+            if(!first || !second) return 0;
+            return static_cast<u32>(CGPathEqualToPath(first, second));
+        }
+        case LC32CoreGraphicsOpFontCopyGlyphNameForGlyph: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGFontRef font = SlotHostObject<CGFontRef>(call, 0);
+            CGGlyph glyph = static_cast<CGGlyph>(SlotU32(call, 1));
+            if(!font) return 0;
+            return LC32GuestObjectForOwnedHostObject(CGFontCopyGlyphNameForGlyph(font, glyph));
+        }
+        case LC32CoreGraphicsOpFontGetGlyphWithGlyphName: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGFontRef font = SlotHostObject<CGFontRef>(call, 0);
+            CFStringRef name = SlotHostObject<CFStringRef>(call, 1);
+            if(!font || !name) return 0;
+            return static_cast<u32>(CGFontGetGlyphWithGlyphName(font, name));
+        }
+        case LC32CoreGraphicsOpContextEOClip: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            if(!context) return 0;
+            CGContextEOClip(context);
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextEOFillPath: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            if(!context) return 0;
+            CGContextEOFillPath(context);
+            SyncBitmapBacking(context, FindBitmapBacking(context));
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextReplacePathWithStrokedPath: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            if(!context) return 0;
+            CGContextReplacePathWithStrokedPath(context);
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextSynchronize: {
+            if(!RequireCoreGraphicsSlots(call, 1)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            if(!context) return 0;
+            CGContextSynchronize(context);
+            SyncBitmapBacking(context, FindBitmapBacking(context));
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextSetFlatness: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            CGFloat value = SlotCGFloat(call, 1);
+            if(!context) return 0;
+            CGContextSetFlatness(context, value);
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextSetMiterLimit: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            CGFloat value = SlotCGFloat(call, 1);
+            if(!context) return 0;
+            CGContextSetMiterLimit(context, value);
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextSetFillColorSpace: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            CGColorSpaceRef space = SlotHostObject<CGColorSpaceRef>(call, 1);
+            if(!context || !space) return 0;
+            CGContextSetFillColorSpace(context, space);
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextSetRenderingIntent: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            CGColorRenderingIntent intent = static_cast<CGColorRenderingIntent>(SlotU32(call, 1));
+            if(!context) return 0;
+            CGContextSetRenderingIntent(context, intent);
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextAddQuadCurveToPoint: {
+            if(!RequireCoreGraphicsSlots(call, 5)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            CGFloat cpx = SlotCGFloat(call, 1);
+            CGFloat cpy = SlotCGFloat(call, 2);
+            CGFloat x = SlotCGFloat(call, 3);
+            CGFloat y = SlotCGFloat(call, 4);
+            if(!context) return 0;
+            CGContextAddQuadCurveToPoint(context, cpx, cpy, x, y);
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextSetCMYKFillColor: {
+            if(!RequireCoreGraphicsSlots(call, 6)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            CGFloat cyan = SlotCGFloat(call, 1);
+            CGFloat magenta = SlotCGFloat(call, 2);
+            CGFloat yellow = SlotCGFloat(call, 3);
+            CGFloat black = SlotCGFloat(call, 4);
+            CGFloat alpha = SlotCGFloat(call, 5);
+            if(!context) return 0;
+            CGContextSetCMYKFillColor(context, cyan, magenta, yellow, black, alpha);
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextSetCMYKStrokeColor: {
+            if(!RequireCoreGraphicsSlots(call, 6)) return 0;
+            CGContextRef context = SlotHostObject<CGContextRef>(call, 0);
+            CGFloat cyan = SlotCGFloat(call, 1);
+            CGFloat magenta = SlotCGFloat(call, 2);
+            CGFloat yellow = SlotCGFloat(call, 3);
+            CGFloat black = SlotCGFloat(call, 4);
+            CGFloat alpha = SlotCGFloat(call, 5);
+            if(!context) return 0;
+            CGContextSetCMYKStrokeColor(context, cyan, magenta, yellow, black, alpha);
+            return 1;
+        }
+        case LC32CoreGraphicsOpContextGetCTM: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef object = SlotHostObject<CGContextRef>(call, 0);
+            if(!object) return 0;
+            CGAffineTransform result = CGContextGetCTM(object);
+            const CGFloat values[] = {result.a, result.b, result.c, result.d, result.tx, result.ty};
+            return WriteGuestGeometry(SlotU32(call, 1), values, 6);
+        }
+        case LC32CoreGraphicsOpContextGetTextMatrix: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef object = SlotHostObject<CGContextRef>(call, 0);
+            if(!object) return 0;
+            CGAffineTransform result = CGContextGetTextMatrix(object);
+            const CGFloat values[] = {result.a, result.b, result.c, result.d, result.tx, result.ty};
+            return WriteGuestGeometry(SlotU32(call, 1), values, 6);
+        }
+        case LC32CoreGraphicsOpContextGetUserSpaceToDeviceSpaceTransform: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef object = SlotHostObject<CGContextRef>(call, 0);
+            if(!object) return 0;
+            CGAffineTransform result = CGContextGetUserSpaceToDeviceSpaceTransform(object);
+            const CGFloat values[] = {result.a, result.b, result.c, result.d, result.tx, result.ty};
+            return WriteGuestGeometry(SlotU32(call, 1), values, 6);
+        }
+        case LC32CoreGraphicsOpContextGetClipBoundingBox: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef object = SlotHostObject<CGContextRef>(call, 0);
+            if(!object) return 0;
+            CGRect result = CGContextGetClipBoundingBox(object);
+            const CGFloat values[] = {result.origin.x, result.origin.y, result.size.width, result.size.height};
+            return WriteGuestGeometry(SlotU32(call, 1), values, 4);
+        }
+        case LC32CoreGraphicsOpContextGetPathBoundingBox: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef object = SlotHostObject<CGContextRef>(call, 0);
+            if(!object) return 0;
+            CGRect result = CGContextGetPathBoundingBox(object);
+            const CGFloat values[] = {result.origin.x, result.origin.y, result.size.width, result.size.height};
+            return WriteGuestGeometry(SlotU32(call, 1), values, 4);
+        }
+        case LC32CoreGraphicsOpPathGetPathBoundingBox: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGPathRef object = SlotHostObject<CGPathRef>(call, 0);
+            if(!object) return 0;
+            CGRect result = CGPathGetPathBoundingBox(object);
+            const CGFloat values[] = {result.origin.x, result.origin.y, result.size.width, result.size.height};
+            return WriteGuestGeometry(SlotU32(call, 1), values, 4);
+        }
+        case LC32CoreGraphicsOpFontGetFontBBox: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGFontRef object = SlotHostObject<CGFontRef>(call, 0);
+            if(!object) return 0;
+            CGRect result = CGFontGetFontBBox(object);
+            const CGFloat values[] = {result.origin.x, result.origin.y, result.size.width, result.size.height};
+            return WriteGuestGeometry(SlotU32(call, 1), values, 4);
+        }
+        case LC32CoreGraphicsOpContextGetPathCurrentPoint: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGContextRef object = SlotHostObject<CGContextRef>(call, 0);
+            if(!object) return 0;
+            CGPoint result = CGContextGetPathCurrentPoint(object);
+            const CGFloat values[] = {result.x, result.y};
+            return WriteGuestGeometry(SlotU32(call, 1), values, 2);
+        }
+        case LC32CoreGraphicsOpPathGetCurrentPoint: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGPathRef object = SlotHostObject<CGPathRef>(call, 0);
+            if(!object) return 0;
+            CGPoint result = CGPathGetCurrentPoint(object);
+            const CGFloat values[] = {result.x, result.y};
+            return WriteGuestGeometry(SlotU32(call, 1), values, 2);
+        }
+        case LC32CoreGraphicsOpLayerGetSize: {
+            if(!RequireCoreGraphicsSlots(call, 2)) return 0;
+            CGLayerRef object = SlotHostObject<CGLayerRef>(call, 0);
+            if(!object) return 0;
+            CGSize result = CGLayerGetSize(object);
+            const CGFloat values[] = {result.width, result.height};
+            return WriteGuestGeometry(SlotU32(call, 1), values, 2);
+        }
+        case LC32CoreGraphicsOpContextConvertPointToUserSpace: {
+            if(!RequireCoreGraphicsSlots(call, 4)) return 0;
+            CGContextRef object = SlotHostObject<CGContextRef>(call, 0);
+            if(!object) return 0;
+            CGPoint input = CGPointMake(SlotCGFloat(call, 2), SlotCGFloat(call, 3));
+            CGPoint result = CGContextConvertPointToUserSpace(object, input);
+            const CGFloat values[] = {result.x, result.y};
+            return WriteGuestGeometry(SlotU32(call, 1), values, 2);
+        }
+        case LC32CoreGraphicsOpContextConvertPointToDeviceSpace: {
+            if(!RequireCoreGraphicsSlots(call, 4)) return 0;
+            CGContextRef object = SlotHostObject<CGContextRef>(call, 0);
+            if(!object) return 0;
+            CGPoint input = CGPointMake(SlotCGFloat(call, 2), SlotCGFloat(call, 3));
+            CGPoint result = CGContextConvertPointToDeviceSpace(object, input);
+            const CGFloat values[] = {result.x, result.y};
+            return WriteGuestGeometry(SlotU32(call, 1), values, 2);
+        }
+        case LC32CoreGraphicsOpContextConvertSizeToUserSpace: {
+            if(!RequireCoreGraphicsSlots(call, 4)) return 0;
+            CGContextRef object = SlotHostObject<CGContextRef>(call, 0);
+            if(!object) return 0;
+            CGSize input = CGSizeMake(SlotCGFloat(call, 2), SlotCGFloat(call, 3));
+            CGSize result = CGContextConvertSizeToUserSpace(object, input);
+            const CGFloat values[] = {result.width, result.height};
+            return WriteGuestGeometry(SlotU32(call, 1), values, 2);
+        }
+        case LC32CoreGraphicsOpContextConvertSizeToDeviceSpace: {
+            if(!RequireCoreGraphicsSlots(call, 4)) return 0;
+            CGContextRef object = SlotHostObject<CGContextRef>(call, 0);
+            if(!object) return 0;
+            CGSize input = CGSizeMake(SlotCGFloat(call, 2), SlotCGFloat(call, 3));
+            CGSize result = CGContextConvertSizeToDeviceSpace(object, input);
+            const CGFloat values[] = {result.width, result.height};
+            return WriteGuestGeometry(SlotU32(call, 1), values, 2);
+        }
+        case LC32CoreGraphicsOpContextConvertRectToUserSpace: {
+            if(!RequireCoreGraphicsSlots(call, 6)) return 0;
+            CGContextRef object = SlotHostObject<CGContextRef>(call, 0);
+            if(!object) return 0;
+            CGRect input = CGRectMake(SlotCGFloat(call, 2), SlotCGFloat(call, 3), SlotCGFloat(call, 4), SlotCGFloat(call, 5));
+            CGRect result = CGContextConvertRectToUserSpace(object, input);
+            const CGFloat values[] = {result.origin.x, result.origin.y, result.size.width, result.size.height};
+            return WriteGuestGeometry(SlotU32(call, 1), values, 4);
+        }
+        case LC32CoreGraphicsOpContextConvertRectToDeviceSpace: {
+            if(!RequireCoreGraphicsSlots(call, 6)) return 0;
+            CGContextRef object = SlotHostObject<CGContextRef>(call, 0);
+            if(!object) return 0;
+            CGRect input = CGRectMake(SlotCGFloat(call, 2), SlotCGFloat(call, 3), SlotCGFloat(call, 4), SlotCGFloat(call, 5));
+            CGRect result = CGContextConvertRectToDeviceSpace(object, input);
+            const CGFloat values[] = {result.origin.x, result.origin.y, result.size.width, result.size.height};
+            return WriteGuestGeometry(SlotU32(call, 1), values, 4);
         }
         case LC32CoreGraphicsOpPathGetBoundingBox: {
             if(!RequireCoreGraphicsSlots(call, 2)) return 0;

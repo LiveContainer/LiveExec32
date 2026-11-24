@@ -1,29 +1,33 @@
 #!/bin/sh
 set -eu
 
-# No arguments: compile and audit the fixture using the guest build's classic
-# linker selection. Arguments: read-only audit of existing unstripped, thin
+# No arguments: compile and audit the fixture using the guest linker wrapper.
+# Arguments: read-only audit of existing unstripped, thin
 # ARM32 guest images. No guest launcher or network access is required.
 SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd "$SCRIPT_DIR/.." && pwd)
 fixture=0
 if [ "$#" -eq 0 ]; then
     guest_sdk=${LC32_GUEST_SDK:-"$REPO_ROOT/tmp/iPhoneOS10.3.sdk"}
-    guest_linker=${LC32_GUEST_LINKER:-$(xcrun --find ld-classic)}
+    guest_linker=$(xcrun --find ld)
     if [ ! -d "$guest_sdk" ] || [ ! -x "$guest_linker" ]; then
-        echo "Guest SDK or classic linker missing; set LC32_GUEST_SDK/LC32_GUEST_LINKER" >&2
+        echo "Guest SDK or linker missing; set LC32_GUEST_SDK or select Xcode" >&2
         exit 1
     fi
     audit_work=$(mktemp -d "${TMPDIR:-/private/tmp}/lc32-thumb-linker.XXXXXX")
     trap 'rm -rf "$audit_work"' EXIT HUP INT TERM
     xcrun clang -target armv7s-apple-ios10.3 -mthumb -O0 \
         -Wall -Wextra -Werror -isysroot "$guest_sdk" \
-        --ld-path="$guest_linker" "$SCRIPT_DIR/guest_thumb_linker.c" \
+        --ld-path="$REPO_ROOT/Scripts/guest-ld" "$SCRIPT_DIR/guest_thumb_linker.c" \
         -o "$audit_work/guest-thumb-linker"
     echo "Guest Thumb linker: $guest_linker"
     set -- "$audit_work/guest-thumb-linker"
     fixture=1
 fi
+
+for image in "$@"; do
+    python3 "$REPO_ROOT/Scripts/arm32_thumb_fixups.py" "$image"
+done
 
 # Read pointer words directly: nm reports the function's Thumb metadata, but
 # cannot establish that the linker retained bit zero in relocated data slots.

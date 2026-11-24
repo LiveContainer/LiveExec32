@@ -388,6 +388,8 @@ int main(int argc, char **argv) {
             if(!typeIDs[index]) failed |= 8192;
         }
 
+        printf("corefoundation-low-risk: %s (failure mask 0x%x)\n",
+            failed ? "FAIL" : "PASS", (unsigned)failed);
         return failed != 0;
     }
 }

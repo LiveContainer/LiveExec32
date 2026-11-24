@@ -7,6 +7,8 @@
 #include "LiveExec32Shared.h"
 #include "LC32LegacyCanvas.h"
 #include "LC32LegacyRotation.h"
+#include "LC32NativeViewGeometry.h"
+#include "LC32ClassicPresentation.h"
 #include "../CoreGraphics/LC32CoreGraphicsHost.h"
 
 #include <atomic>
@@ -14,6 +16,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+void LC32FlushHostThreadTransactions() {
+    [CATransaction flush];
+}
 
 typedef NS_ENUM(NSUInteger, LC32LegacyIPadGeometryMode) {
     /* Pre-root-controller applications and some early fixed-surface engines
@@ -156,6 +162,8 @@ private:
     bool previous_;
 };
 
+} // namespace
+
 /*
  * Do not replace these calls with ordinary Objective-C messages. A view can
  * be an instance of a synthesized guest subclass whose override is backed by
@@ -172,28 +180,28 @@ CGRect LC32NativeViewBounds(UIView *view) {
     return view ? getter(view, @selector(bounds)) : CGRectZero;
 }
 
-UIView *LC32NativeViewSuperview(UIView *view) {
+static UIView *LC32NativeViewSuperview(UIView *view) {
     using Getter = UIView *(*)(id, SEL);
     static Getter getter = reinterpret_cast<Getter>(
         class_getMethodImplementation(UIView.class, @selector(superview)));
     return view ? getter(view, @selector(superview)) : nil;
 }
 
-NSArray<UIView *> *LC32NativeViewSubviews(UIView *view) {
+static NSArray<UIView *> *LC32NativeViewSubviews(UIView *view) {
     using Getter = NSArray<UIView *> *(*)(id, SEL);
     static Getter getter = reinterpret_cast<Getter>(
         class_getMethodImplementation(UIView.class, @selector(subviews)));
     return view ? getter(view, @selector(subviews)) : nil;
 }
 
-UIWindow *LC32NativeViewWindow(UIView *view) {
+static UIWindow *LC32NativeViewWindow(UIView *view) {
     using Getter = UIWindow *(*)(id, SEL);
     static Getter getter = reinterpret_cast<Getter>(
         class_getMethodImplementation(UIView.class, @selector(window)));
     return view ? getter(view, @selector(window)) : nil;
 }
 
-BOOL LC32NativeViewHidden(UIView *view) {
+static BOOL LC32NativeViewHidden(UIView *view) {
     using Getter = BOOL (*)(id, SEL);
     static Getter getter = reinterpret_cast<Getter>(
         class_getMethodImplementation(UIView.class, @selector(isHidden)));
@@ -207,7 +215,7 @@ CALayer *LC32NativeViewLayer(UIView *view) {
     return view ? getter(view, @selector(layer)) : nil;
 }
 
-UIApplicationState LC32NativeApplicationState(void) {
+static UIApplicationState LC32NativeApplicationState(void) {
     UIApplication *application = UIApplication.sharedApplication;
     using Getter = UIApplicationState (*)(id, SEL);
     static Getter getter = reinterpret_cast<Getter>(
@@ -256,6 +264,8 @@ void LC32NativeSetViewTransform(
                                       @selector(setTransform:)));
     if(view) setter(view, @selector(setTransform:), transform);
 }
+
+namespace {
 
 void LC32NativeSetViewAutoresizingMask(
         UIView *view, UIViewAutoresizing mask) {
@@ -966,6 +976,8 @@ void LC32InstallGuestWindowRootViewController(
 }
 
 CGRect LC32WindowSceneBounds(UIWindow *window) {
+    CGRect classicBounds, classicScene;
+    if(LC32GetClassicWindowGeometry(window, &classicBounds, &classicScene)) return classicScene;
     UIWindowScene *scene = window.windowScene;
     /* Keep this helper in scene coordinates for eligibility and orientation
      * policy. Canvas placement uses LC32LegacyViewportInView below, which
@@ -1687,6 +1699,9 @@ bool LC32UsesClassicFullScreenViewport(UIWindow *window) {
 CGRect LC32LegacyViewportInView(UIWindow *window, UIView *view) {
     const CGRect fallback = LC32NativeViewBounds(view);
     if(!window || !view || !window.windowScene) return fallback;
+    CGRect classicBounds, classicScene;
+    if(LC32GetClassicWindowGeometry(window, &classicBounds, &classicScene))
+        return [view convertRect:classicBounds fromView:window];
 
     id<UICoordinateSpace> sourceSpace = nil;
     CGRect sourceBounds = CGRectZero;
@@ -1782,6 +1797,8 @@ void LC32ScaleLegacyIPadWindow(UIWindow *window) {
             LC32LegacyIPadGeometryModePreservePhonePortraitCanvas) {
         UIScreen *screen = window.screen ?: UIScreen.mainScreen;
         CGRect viewportBounds = screen.bounds;
+        LC32ClassicScreenGeometry savedScreen;
+        if(LC32GetClassicScreenGeometry(screen, &savedScreen)) viewportBounds = savedScreen.bounds;
         if(!(viewportBounds.size.width > 0) ||
                 !(viewportBounds.size.height > 0)) {
             viewportBounds = LC32WindowSceneBounds(window);
@@ -1802,11 +1819,7 @@ void LC32ScaleLegacyIPadWindow(UIWindow *window) {
     }
     if(container && container.geometryMode ==
             LC32LegacyIPadGeometryModePreservePhoneLandscapeCanvas) {
-        CGRect sceneBounds = window.windowScene.coordinateSpace.bounds;
-        if(!(sceneBounds.size.width > 0) ||
-                !(sceneBounds.size.height > 0)) {
-            sceneBounds = LC32WindowSceneBounds(window);
-        }
+        CGRect sceneBounds = LC32WindowSceneBounds(window);
         const UIInterfaceOrientation orientation =
             LC32WindowSceneOrientation(window, sceneBounds);
         if(UIInterfaceOrientationIsLandscape(orientation) &&
@@ -2447,6 +2460,7 @@ void LC32FinishGuestOrientationStartupAfterLaunch(void) {
                 ? CFRunLoopGetNextTimerFireDate(runLoop, mode) : 0;
             if(mode) CFRelease(mode);
             if(nextTimer > 0 && nextTimer <= CFAbsoluteTimeGetCurrent()) return;
+            if(!LC32NativeLegacyRotationStartupSceneReady()) return;
             CFRunLoopObserverInvalidate(observer);
             LC32GuestOrientationStartupComplete.store(
                 true, std::memory_order_release);

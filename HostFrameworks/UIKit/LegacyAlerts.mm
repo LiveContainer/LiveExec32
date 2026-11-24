@@ -108,7 +108,7 @@ BOOL BuiltinAnimatesAlert(id animator) {
         IsAlert([(UIPresentationController *)delegate presentedViewController]);
 }
 
-BOOL UseAlertPresentationController(id, SEL) { return YES; }
+BOOL UseModernAlertPolicy(id, SEL) { return YES; }
 
 void ResumeLegacyPresentation(UIViewController *self, SEL, UIViewController *presented,
                               int transition, void (^completion)(void)) {
@@ -251,7 +251,19 @@ bool PrepareHooks(void) {
     // Presentation, layout and dismissal are a matched native flow. Install
     // nothing if this UIKit version (or an earlier hook) lacks a prerequisite.
     if(!PrepareHooks()) return;
-    Replace(alertPolicy, (IMP)UseAlertPresentationController);
+    // UIAlertView presents through a native, separate window. The modern
+    // presentation controller lays out in window coordinates, so that window
+    // must rotate its backing rather than only its root controller's view.
+    // Override the subclass policy, leaving every game window's SDK policy
+    // unchanged. UIKit supplies the geometry and touch-coordinate conversion.
+    NativeMethod shimWindowPolicy = {};
+    Dl_info nativeImage = {};
+    dladdr((__bridge const void *)UIViewController.class, &nativeImage);
+    if(Prepare(shimWindowPolicy,
+               object_getClass(NSClassFromString(@"_UIAlertControllerShimPresenterWindow")),
+               "_transformLayerRotationsAreEnabled", "B", {}, nativeImage.dli_fbase))
+        Replace(shimWindowPolicy, (IMP)UseModernAlertPolicy);
+    Replace(alertPolicy, (IMP)UseModernAlertPolicy);
     Replace(publicPresent, (IMP)Present);
     Replace(viewInit, (IMP)InitializeAlertView);
     Replace(windowPolicy, (IMP)TransformPolicy);

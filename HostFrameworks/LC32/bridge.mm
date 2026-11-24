@@ -1570,16 +1570,22 @@ static u32 LC32FinishGuestMappingTeardown(
     return 1;
 }
 
-static bool LC32DetachDeadNativePeerGuestKey(u32 guestObject) {
+static bool LC32DetachRetiringGuestKey(u32 guestObject) {
     LC32HostWeakRegistry &registry = LC32HostWeakMappings();
     std::lock_guard<std::mutex> lock(registry.mutex);
     auto iterator = registry.entries.find(guestObject);
     if(iterator == registry.entries.end() ||
        iterator->second->state != LC32HostWeakMappingState::Retiring ||
-       iterator->second->retirementProvenance !=
-            LC32HostMappingRetirementProvenance::NativePeerDeallocating) {
+       (iterator->second->retirementProvenance !=
+            LC32HostMappingRetirementProvenance::NativePeerDeallocating &&
+        iterator->second->retirementProvenance !=
+            LC32HostMappingRetirementProvenance::GuestMirrorWithTransferredReference)) {
         return true;
     }
+    /* Both pin-driven teardown paths can free the guest allocation before
+     * their native cleanup returns. Detach its key now: another guest thread
+     * may reuse that address immediately, before generation-based finalization.
+     * Keep the native-address tombstone until the old teardown finishes. */
     try {
         registry.retiringEntries.emplace(
             iterator->second->generation, iterator->second);
@@ -1619,7 +1625,7 @@ extern "C" u32 LC32UpdateHostMapping(
             return LC32FinishGuestMappingTeardown(
                 guestObject, static_cast<u32>(hostObject), true);
         case LC32HostMappingGuestRootDealloc:
-            return LC32DetachDeadNativePeerGuestKey(guestObject);
+            return LC32DetachRetiringGuestKey(guestObject);
         case LC32HostMappingReleaseNativeProxy:
             return LC32ReleaseNativeProxyOwnership(
                 guestObject, hostObject, true);
@@ -5500,11 +5506,13 @@ static u64 LC32ReadGuestScalarIvar(
         case 's': return (u64)(int64_t)(int16_t)
             callbacks->MemoryRead16(address);
         case 'I':
+        case 'f':
         case 'L': return callbacks->MemoryRead32(address);
         case 'i':
         case 'l': return (u64)(int64_t)(int32_t)
             callbacks->MemoryRead32(address);
-        case 'Q': return callbacks->MemoryRead64(address);
+        case 'Q':
+        case 'd': return callbacks->MemoryRead64(address);
         case 'q': return (u64)(int64_t)callbacks->MemoryRead64(address);
         default: return 0;
     }
@@ -5522,9 +5530,11 @@ static void LC32WriteGuestScalarIvar(
         case 's': callbacks->MemoryWrite16(address, (u16)value); break;
         case 'I':
         case 'L':
+        case 'f':
         case 'i':
         case 'l': callbacks->MemoryWrite32(address, (u32)value); break;
         case 'Q':
+        case 'd':
         case 'q': callbacks->MemoryWrite64(address, value); break;
         default: break;
     }
@@ -5558,6 +5568,23 @@ u64 LC32GetGuestScalarIvar(id self, SEL _cmd) {
     LC32GuestIvarBinding binding;
     if(!LC32GuestIvarBindingForReceiver(self, _cmd, &binding)) return 0;
     return LC32ReadGuestScalarIvar([self guest_self], binding);
+}
+
+// Native KVC uses FP registers for these accessors, unlike the integer IMPs.
+// Copy the bits without widening guest float storage (including CGFloat).
+template<typename T>
+static void LC32SetGuestFloatingIvar(id self, SEL _cmd, T value) {
+    u64 bits = 0;
+    memcpy(&bits, &value, sizeof(value));
+    LC32SetGuestScalarIvar(self, _cmd, bits);
+}
+
+template<typename T>
+static T LC32GetGuestFloatingIvar(id self, SEL _cmd) {
+    const u64 bits = LC32GetGuestScalarIvar(self, _cmd);
+    T value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
 }
 
 u32 guest_dlsym(const char *host_name) {
@@ -5635,6 +5662,25 @@ u32 guest_class_getInstanceMethod(u32 guest_cls, u32 guest_sel) {
     const u32 guestPtr = LC32CachedGuestSymbol(cache, "class_getInstanceMethod");
     u32 args[] = {guest_cls, guest_sel};
     return LC32InvokeGuestC(guestPtr, false, sizeof(args)/sizeof(*args), args);
+}
+
+static BOOL LC32InvokeGuestRespondsToSelector(id self, SEL command, SEL selector) {
+    if(LC32InvokeGuestSelector(self, command, (u64)selector, 0, 0, 0, 0, 0))
+        return YES;
+    if(!selector || !Dynarmic_guest_thread_is_registered()) return NO;
+
+    Class mirrorClass = object_getClass(self);
+    Class nativeClass = mirrorClass;
+    while(nativeClass && [(id)nativeClass isGuestClass])
+        nativeClass = class_getSuperclass(nativeClass);
+    if(!nativeClass || !class_getInstanceMethod(nativeClass, selector)) return NO;
+
+    // An old guest override commonly delegates to its old NSObject runtime,
+    // which cannot see newer native superclass methods (e.g. UIKit's table
+    // selection callbacks). Preserve those methods for native callers only.
+    // If the guest knows the method, its deliberate NO must still win.
+    const u32 guestSelector = guest_sel_registerName(sel_getName(selector));
+    return !guest_class_getInstanceMethod([(id)mirrorClass guest_self], guestSelector);
 }
 
 u32 guest_class_getName(u32 guest_cls) {
@@ -6811,6 +6857,25 @@ static Class LC32NativeProxyPhysicalClass(id object) {
     return Nil;
 }
 
+static bool LC32HostObjectIsOpaqueCF(id object) {
+    return object_getClass(object) == objc_getClass("__NSCFType");
+}
+
+// Caller holds the peer's monitor and guarantees its native lifetime.
+// Publication remains provisional unless a lifetime pin is installed.
+static u32 LC32CreateGuestProxy(id hostObject, u32 guestClass) {
+    static std::atomic<u32> guestSetHostSelfCache{0};
+    const u32 selector = LC32CachedGuestSelector(
+        guestSetHostSelfCache, "initWithHostSelf:");
+    u32 ptr = guest_class_createInstance(guestClass, 0);
+    if(!ptr) return 0;
+    u32 args[] = {ptr, selector, (u32)(u64)hostObject,
+        (u32)((u64)hostObject >> 32)};
+    ptr = guest_objc_msgSend(sizeof(args) / sizeof(*args), args);
+    if(ptr) [hostObject setGuest_self:ptr];
+    return ptr;
+}
+
 @implementation NSObject(LC32)
 - (NSMethodSignature *)LC32_nativeMethodSignatureForSelector:(SEL)selector
                                            instanceMethods:(BOOL)instanceMethods {
@@ -6945,20 +7010,25 @@ static Class LC32NativeProxyPhysicalClass(id object) {
         return self.guest_self = ptr;
     }
 
-    static std::atomic<u32> guestSetHostSelfCache{0};
-    const u32 guest_setHost_self = LC32CachedGuestSelector(
-        guestSetHostSelfCache, "initWithHostSelf:");
-    ptr = guest_class_createInstance(ptr, 0);
+    // Opaque CF objects neither support weak promotion nor reliably destroy
+    // Objective-C associations. Give their proxy its own native reference;
+    // a native-owned lifetime pin would survive CF deallocation indefinitely.
+    const bool opaqueCF = LC32HostObjectIsOpaqueCF(self);
+    if(opaqueCF) CFRetain((CFTypeRef)self);
+    ptr = LC32CreateGuestProxy(self, ptr);
 
-    //guest_objc_performSelector(ptr, guest_setHost_self, (u32)(u64)self, (u32)((u64)self >> 32));
-    {
-        u32 args[] = {ptr, guest_setHost_self, (u32)(u64)self, (u32)((u64)self >> 32)};
-        ptr = guest_objc_msgSend(sizeof(args)/sizeof(*args), args);
+    if(!ptr) {
+        if(opaqueCF) CFRelease((CFTypeRef)self);
+        return 0;
     }
 
-    if(!ptr) return 0;
-
-    self.guest_self = ptr;
+    if(opaqueCF) {
+        // initWithHostSelf: published a provisional mapping. Its final guest
+        // release clears both maps while this paired native +1 is still live.
+        // Supply +0 return semantics without tying lifetime to CF associations.
+        LC32ScheduleGuestAutoreleaseNow(nil, ptr);
+        return ptr;
+    }
     /*
      * Host-to-guest conversion is a borrowed (+0) operation.  Consume the
      * class_createInstance +1 as a lifetime pin owned by the native object,
@@ -6984,23 +7054,29 @@ extern "C" u32 LC32GuestObjectForOwnedHostObject(CFTypeRef object) {
     id hostObject = (id)object;
     u32 guestObject = 0;
     @synchronized(hostObject) {
-        /*
-         * -guest_self is always a borrowed conversion whose initial guest +1
-         * belongs to the native lifetime pin.  A Create/Copy result carries a
-         * separate native +1, so add the corresponding guest-only +1 whether
-         * this call created or reused the proxy.  The public guest release
-         * will later decrement both sides exactly once.
-         *
-         * Keep conversion and ownership transfer under the same object lock:
-         * another native guest thread may otherwise change the reverse
-         * mapping between those operations.
-         */
-        guestObject = [hostObject guest_self];
-        if(guestObject) {
-            LC32AdjustGuestReferenceNow(guestObject, true);
-            LC32OperationTraceLiveObject(
-                "owned-result-add-guest-reference",
-                hostObject, guestObject);
+        if(LC32HostObjectIsOpaqueCF(hostObject) &&
+                ![hostObject guest_selfOrNull]) {
+            // Adopt a CF Create/Copy +1 directly. An extra autoreleased
+            // native reference would postpone final release callbacks.
+            const u32 guestClass = guest_objc_getClass("__NSCFType");
+            if(guestClass) guestObject = LC32CreateGuestProxy(hostObject, guestClass);
+        } else {
+            /*
+             * -guest_self is a borrowed conversion whose initial guest +1
+             * belongs to the native lifetime pin (or an autoreleased paired
+             * reference for opaque CF objects). Add the guest half of this
+             * separate Create/Copy +1, whether the proxy is new or reused.
+             * Keep conversion and ownership transfer under the same object
+             * lock so another thread cannot change the reverse mapping in
+             * between. Public guest release decrements both halves once.
+             */
+            guestObject = [hostObject guest_self];
+            if(guestObject) {
+                LC32AdjustGuestReferenceNow(guestObject, true);
+                LC32OperationTraceLiveObject(
+                    "owned-result-add-guest-reference",
+                    hostObject, guestObject);
+            }
         }
     }
 
@@ -7203,6 +7279,12 @@ static const char *LC32ExpectedHostMethodTypes(Class cls, SEL selector) {
         case 's':
             setterImplementation = (IMP)&LC32SetGuestScalarIvar;
             break;
+        case 'f':
+            setterImplementation = (IMP)&LC32SetGuestFloatingIvar<float>;
+            break;
+        case 'd':
+            setterImplementation = (IMP)&LC32SetGuestFloatingIvar<double>;
+            break;
         default:
             printf("LC32: skipping ivar %s with unhandled type %s\n", name.hostPtr, typeEncoding.hostPtr);
             break;
@@ -7266,6 +7348,12 @@ static const char *LC32ExpectedHostMethodTypes(Class cls, SEL selector) {
         case 'q':
         case 's':
             getterImplementation = (IMP)&LC32GetGuestScalarIvar;
+            break;
+        case 'f':
+            getterImplementation = (IMP)&LC32GetGuestFloatingIvar<float>;
+            break;
+        case 'd':
+            getterImplementation = (IMP)&LC32GetGuestFloatingIvar<double>;
             break;
         default:
             break;
@@ -7493,6 +7581,10 @@ static const char *LC32ExpectedHostMethodTypes(Class cls, SEL selector) {
         registry.classes[cls].emplace(sel, std::move(aggregateSignature));
         implementation = (IMP)&LC32InvokeGuestSelectorAggregates;
         installedMethodTypes = aggregateHostTypes;
+    }
+    if(sel == @selector(respondsToSelector:)) {
+        implementation = (IMP)&LC32InvokeGuestRespondsToSelector;
+        installedMethodTypes = expectedHostTypes ?: installedMethodTypes;
     }
     return class_addMethod(cls, sel, implementation, installedMethodTypes) ||
         class_getInstanceMethod(cls, sel) != nullptr;

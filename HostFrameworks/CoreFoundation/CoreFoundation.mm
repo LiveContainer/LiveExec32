@@ -536,6 +536,8 @@ CFTypeID KnownTypeID(uint32_t typeValue) {
             return CFSocketGetTypeID();
         case LC32CoreFoundationTypeAllocator:
             return CFAllocatorGetTypeID();
+        case LC32CoreFoundationTypeUUID:
+            return CFUUIDGetTypeID();
     }
     return 0;
 }
@@ -1092,12 +1094,12 @@ void SocketClientCallback(CFSocketRef,
         return;
     }
 
-    if(type == kCFSocketConnectCallBack) {
-        GuestStackSInt32 guestError(
+    if(type == kCFSocketConnectCallBack || type == kCFSocketAcceptCallBack) {
+        GuestStackSInt32 guestValue(
             data ? *static_cast<const SInt32 *>(data) : 0);
-        if(data && !guestError.address()) {
+        if(data && !guestValue.address()) {
             fprintf(stderr,
-                "LC32: could not stage CFSocket connect error in guest "
+                "LC32: could not stage CFSocket callback integer in guest "
                 "memory\n");
             return;
         }
@@ -1105,11 +1107,18 @@ void SocketClientCallback(CFSocketRef,
             guestSocket,
             static_cast<u32>(type),
             guestAddress,
-            data ? guestError.address() : 0,
+            data ? guestValue.address() : 0,
             context->guestInfo,
         };
         (void)LC32InvokeGuestC(context->guestCallback, false,
             sizeof(arguments) / sizeof(arguments[0]), arguments);
+        return;
+    }
+
+    if(type == kCFSocketReadCallBack || type == kCFSocketWriteCallBack) {
+        u32 arguments[] = {guestSocket, static_cast<u32>(type),
+            guestAddress, 0, context->guestInfo};
+        (void)LC32InvokeGuestC(context->guestCallback, false, 5, arguments);
         return;
     }
 
@@ -1725,12 +1734,21 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
                 kCFAllocatorDefault, string,
                 SlotHostObject<CFURLRef>(call, 1))) : 0;
         }
-        case LC32CoreFoundationOpURLCreateWithBytes: {
-            if(!RequireSlots(call, 4) || SlotU32(call, 1) > INT32_MAX)
+        case LC32CoreFoundationOpURLCreateWithBytes:
+        case LC32CoreFoundationOpURLCreateAbsoluteURLWithBytes: {
+            const bool absolute = opcodeValue ==
+                LC32CoreFoundationOpURLCreateAbsoluteURLWithBytes;
+            if(!RequireSlots(call, absolute ? 5 : 4) ||
+               SlotU32(call, 1) > INT32_MAX)
                 return 0;
             std::vector<UInt8> bytes;
             if(!ReadGuestStringBytes(SlotU32(call, 0), SlotU32(call, 1),
                                      bytes)) return 0;
+            if(absolute) return GuestForCreatedObject(
+                CFURLCreateAbsoluteURLWithBytes(kCFAllocatorDefault,
+                    bytes.empty() ? nullptr : bytes.data(), bytes.size(),
+                    static_cast<CFStringEncoding>(SlotU32(call, 2)),
+                    SlotHostObject<CFURLRef>(call, 3), SlotU32(call, 4) != 0));
             return GuestForCreatedObject(CFURLCreateWithBytes(
                 kCFAllocatorDefault,
                 bytes.empty() ? nullptr : bytes.data(), bytes.size(),
@@ -2761,17 +2779,14 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             CFRunLoopWakeUp(runLoop);
             return 1;
         }
-        case LC32CoreFoundationOpSocketCreate: {
+        case LC32CoreFoundationOpSocketCreate:
+        case LC32CoreFoundationOpSocketCreateWithNative: {
             if(!RequireSlots(call, 8)) return 0;
             const CFOptionFlags callbackTypes =
                 static_cast<CFOptionFlags>(SlotU32(call, 3));
             const bool supportedCallbackTypes =
-                callbackTypes == kCFSocketNoCallBack ||
-                callbackTypes == kCFSocketDataCallBack ||
-                callbackTypes == kCFSocketConnectCallBack ||
-                callbackTypes ==
-                    (kCFSocketDataCallBack |
-                     kCFSocketConnectCallBack);
+                !(callbackTypes & ~(kCFSocketDataCallBack |
+                    kCFSocketConnectCallBack | kCFSocketWriteCallBack));
             const u32 guestCallback = SlotU32(call, 4);
             const u32 guestInfo = SlotU32(call, 5);
             const u32 guestRelease = SlotU32(call, 6);
@@ -2811,11 +2826,13 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
                 context->guestCopyDescription
                     ? CopySocketClientContextDescription : nullptr,
             };
-            CFSocketRef socket = CFSocketCreate(
-                kCFAllocatorDefault, SlotS32(call, 0),
-                SlotS32(call, 1), SlotS32(call, 2), callbackTypes,
-                guestCallback ? SocketClientCallback : nullptr,
-                &nativeContext);
+            CFSocketRef socket = opcodeValue == LC32CoreFoundationOpSocketCreate
+                ? CFSocketCreate(kCFAllocatorDefault, SlotS32(call, 0),
+                    SlotS32(call, 1), SlotS32(call, 2), callbackTypes,
+                    guestCallback ? SocketClientCallback : nullptr, &nativeContext)
+                : CFSocketCreateWithNative(kCFAllocatorDefault, SlotS32(call, 0),
+                    callbackTypes, guestCallback ? SocketClientCallback : nullptr,
+                    &nativeContext);
             const u32 guestSocket = GuestForCreatedObject(socket);
             context->guestSocket.store(
                 guestSocket, std::memory_order_release);
@@ -3192,6 +3209,27 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             if(!data || length < 0 || static_cast<uint64_t>(length) +
                     SlotU32(call, 1) > kMaximumDataBytes) return 0;
             CFDataIncreaseLength(data, SlotU32(call, 1));
+            return 1;
+        }
+        case LC32CoreFoundationOpDataCompareGuestBytes: {
+            if(!RequireSlots(call, 3)) return 0;
+            const uint64_t left = SlotU32(call, 0);
+            const uint64_t right = SlotU32(call, 1);
+            const uint32_t length = SlotU32(call, 2);
+            if(length > kMaximumDataBytes ||
+               (length && (!left || !right)) ||
+               left + length > (UINT64_C(1) << 32) ||
+               right + length > (UINT64_C(1) << 32)) return 0;
+            // Bounded native staging handles discontiguous guest mappings;
+            // neither ARM32 address is ever dereferenced by host memcmp.
+            char leftBytes[16384], rightBytes[16384];
+            for(uint32_t offset = 0; offset < length;) {
+                const uint32_t count = MIN(length - offset, sizeof(leftBytes));
+                if(Dynarmic_mem_1read(left + offset, count, leftBytes) ||
+                   Dynarmic_mem_1read(right + offset, count, rightBytes)) return 0;
+                if(memcmp(leftBytes, rightBytes, count)) return 2;
+                offset += count;
+            }
             return 1;
         }
         case LC32CoreFoundationOpDataReplaceBytes: {
@@ -3885,6 +3923,64 @@ u32 LC32_CoreFoundation_Dispatch(u32 opcodeValue, u32 guestCall, u32) {
             }
             return WriteGuestCreatedObject(
                 guestWriteStream, writeStream);
+        }
+        case LC32CoreFoundationOpRetain: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFTypeRef object = SlotHostObject<CFTypeRef>(call, 0);
+            return object ? LC32GuestObjectForOwnedHostObject(CFRetain(object)) : 0;
+        }
+        case LC32CoreFoundationOpRelease: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFTypeRef object = SlotHostObject<CFTypeRef>(call, 0);
+            if(object) CFRelease(object);
+            return 0;
+        }
+        case LC32CoreFoundationOpEqual: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFTypeRef object = SlotHostObject<CFTypeRef>(call, 0);
+            CFTypeRef other = SlotHostObject<CFTypeRef>(call, 1);
+            return object && other && CFEqual(object, other);
+        }
+        case LC32CoreFoundationOpHash: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFTypeRef object = SlotHostObject<CFTypeRef>(call, 0);
+            return object ? static_cast<u32>(CFHash(object)) : 0;
+        }
+        case LC32CoreFoundationOpCopyDescription: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFTypeRef object = SlotHostObject<CFTypeRef>(call, 0);
+            return object ? GuestForCreatedObject(CFCopyDescription(object)) : 0;
+        }
+        case LC32CoreFoundationOpUUIDCreate:
+            return RequireSlots(call, 0)
+                ? GuestForCreatedObject(CFUUIDCreate(kCFAllocatorDefault)) : 0;
+        case LC32CoreFoundationOpUUIDCreateFromString: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFStringRef string = SlotHostObject<CFStringRef>(call, 0);
+            return string ? GuestForCreatedObject(CFUUIDCreateFromString(
+                kCFAllocatorDefault, string)) : 0;
+        }
+        case LC32CoreFoundationOpUUIDCreateFromBytes: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFUUIDBytes bytes = {};
+            static_assert(sizeof(bytes) == 16);
+            const u32 address = SlotU32(call, 0);
+            if(!GuestRangeIsValid(address, sizeof(bytes)) ||
+               Dynarmic_mem_1read(address, sizeof(bytes),
+                   reinterpret_cast<char *>(&bytes)) != 0) return 0;
+            return GuestForCreatedObject(CFUUIDCreateFromUUIDBytes(
+                kCFAllocatorDefault, bytes));
+        }
+        case LC32CoreFoundationOpUUIDGetBytes: {
+            if(!RequireSlots(call, 2)) return 0;
+            CFUUIDRef uuid = SlotHostObject<CFUUIDRef>(call, 0);
+            return uuid && WriteGuestValue(SlotU32(call, 1), CFUUIDGetUUIDBytes(uuid));
+        }
+        case LC32CoreFoundationOpUUIDCreateString: {
+            if(!RequireSlots(call, 1)) return 0;
+            CFUUIDRef uuid = SlotHostObject<CFUUIDRef>(call, 0);
+            return uuid ? GuestForCreatedObject(CFUUIDCreateString(
+                kCFAllocatorDefault, uuid)) : 0;
         }
         case LC32CoreFoundationOpGetTypeID: {
             if(!RequireSlots(call, 1)) return 0;

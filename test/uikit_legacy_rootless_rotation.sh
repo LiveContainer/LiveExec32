@@ -30,7 +30,7 @@ while [ "$#" -gt 0 ]; do
         --case)
             [ "$#" -ge 2 ] || exit 2
             case "$2" in
-                rootless|explicit|modern|modern-explicit|modern-only|modern-refresh|unregistered|manual|manual-controller|modal|manual-disabled|lifecycle|ownership|replacement|statusbar)
+                rootless|explicit|modern|modern-explicit|modern-startup|modern-only|modern-refresh|unregistered|manual|manual-controller|modal|manual-disabled|lifecycle|ownership|replacement|statusbar|startup-commit|startup-scene-race|scene-parameters|initial-backing|initial-scene-update|device-face-up|device-face-down|device-unknown|device-portrait|device-landscape|device-no-observers|device-unregistered|device-disabled)
                     test_cases="$test_cases $2" ;;
                 *) exit 2 ;;
             esac
@@ -39,7 +39,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 [ -n "$sdks" ] || sdks="2 5 6.1 7 8 11"
-[ -n "$test_cases" ] || test_cases="rootless explicit modern modern-explicit modern-only modern-refresh unregistered manual manual-controller modal manual-disabled lifecycle ownership replacement statusbar"
+[ -n "$test_cases" ] || test_cases="rootless explicit modern modern-explicit modern-startup modern-only modern-refresh unregistered manual manual-controller modal manual-disabled lifecycle ownership replacement statusbar startup-commit startup-scene-race scene-parameters initial-backing initial-scene-update device-face-up device-face-down device-unknown device-portrait device-landscape device-no-observers device-unregistered device-disabled"
 case "$run_timeout" in ''|*[!0-9]*) echo "invalid timeout" >&2; exit 2 ;; esac
 [ "$run_timeout" -ge 1 ] && [ "$run_timeout" -le 60 ] || exit 2
 temp_base=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)
@@ -73,6 +73,7 @@ xcrun --sdk iphonesimulator clang -target arm64-apple-ios15.0-simulator \
     -I"$repo_root/include" -I"$repo_root/HostFrameworks/UIKit" \
     -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -lc++ \
     "$repo_root/test/uikit_legacy_rootless_rotation.m" \
+    "$repo_root/test/uikit_classic_presentation_disabled.mm" \
     "$repo_root/HostFrameworks/UIKit/LegacyAutoLayout.mm" \
     "$repo_root/HostFrameworks/UIKit/LegacyRotation.mm" -o "$workdir/test"
 

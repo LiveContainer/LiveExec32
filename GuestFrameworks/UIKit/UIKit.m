@@ -244,10 +244,12 @@ static CGRect LC32HostScreenRect(UIScreen *screen, SEL selector) {
         ? &boundsSelector : &applicationFrameSelector;
     const uint64_t hostSelector = LC32CachedHostSelector(
         storage, selector, YES);
-    CGRect_64 hostResult;
+    LC32Floats4_64 hostResult;
     LC32InvokeHostSelector(screen.host_self, hostSelector,
                            &hostResult, sizeof(hostResult), (uint64_t)0);
-    return LC32GuestCGRect(hostResult);
+    CGRect guestResult;
+    LC32Guest4Floats(&hostResult, &guestResult);
+    return guestResult;
 }
 
 #if LC32_UIKIT_COMPATIBILITY

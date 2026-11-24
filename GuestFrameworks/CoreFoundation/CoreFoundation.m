@@ -6,7 +6,37 @@ const CFAllocatorRef kCFAllocatorDefault = NULL;
 // Set CF version to iOS 10.3.3
 double kCFCoreFoundationVersionNumber = (double)1349.7;
 
+@interface NSObject (LC32OpaqueCFOwnership)
+- (void)LC32_releaseGuestOwnershipOnly;
+@end
+
 @implementation __NSCFType
+- (BOOL)isEqual:(id)other {
+    if(self == other) return YES;
+    return other && LC32_CF_CALL(LC32CoreFoundationOpEqual,
+        self.host_self, [other host_self]);
+}
+
+- (NSUInteger)hash {
+    return (NSUInteger)LC32_CF_CALL(LC32CoreFoundationOpHash, self.host_self);
+}
+
+- (NSString *)description {
+    return [(NSString *)LC32_CF_CALL(LC32CoreFoundationOpCopyDescription,
+        self.host_self) autorelease];
+}
+
+- (instancetype)retain {
+    return (id)LC32_CF_CALL(LC32CoreFoundationOpRetain, self.host_self);
+}
+
+- (oneway void)release {
+    const uint64_t host = self.host_self;
+    // Remove guest ownership (and the mapping if final) before consuming the
+    // paired native +1. Opaque CF objects have no native-owned guest pin.
+    [self LC32_releaseGuestOwnershipOnly];
+    LC32_CF_CALL(LC32CoreFoundationOpRelease, host);
+}
 @end
 
 @implementation __NSCFString
@@ -122,6 +152,19 @@ CFURLRef CFURLCreateWithBytes(CFAllocatorRef allocator,
         LC32CoreFoundationOpURLCreateWithBytes,
         LC32_CF_U32((uintptr_t)URLBytes), LC32_CF_U32(length),
         LC32_CF_U32(encoding), LC32_CF_HOST(baseURL));
+}
+
+CFURLRef CFURLCreateAbsoluteURLWithBytes(CFAllocatorRef allocator,
+        const UInt8 *relativeURLBytes, CFIndex length,
+        CFStringEncoding encoding, CFURLRef baseURL,
+        Boolean useCompatibilityMode) {
+    (void)allocator;
+    if(length < 0 || (length && !relativeURLBytes)) return NULL;
+    return (CFURLRef)LC32_CF_CALL(
+        LC32CoreFoundationOpURLCreateAbsoluteURLWithBytes,
+        LC32_CF_U32((uintptr_t)relativeURLBytes), LC32_CF_U32(length),
+        LC32_CF_U32(encoding), LC32_CF_HOST(baseURL),
+        LC32_CF_U32(useCompatibilityMode));
 }
 
 CFStringRef CFURLCopyPathExtension(CFURLRef url) {

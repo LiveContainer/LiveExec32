@@ -448,6 +448,8 @@ static void *LC32OpenALLookupALCProc(const char *name) {
     LC32_OPENAL_PROC(alcCaptureStart);
     LC32_OPENAL_PROC(alcCaptureStop);
     LC32_OPENAL_PROC(alcCaptureSamples);
+    /* Apple's static-buffer extension is also queried through the ALC API. */
+    LC32_OPENAL_PROC(alBufferDataStatic);
     return NULL;
 }
 

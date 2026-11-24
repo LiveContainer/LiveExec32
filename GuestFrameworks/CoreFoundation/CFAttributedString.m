@@ -19,9 +19,12 @@ CFAttributedStringRef CFAttributedStringCreate(
         CFDictionaryRef attributes) {
     (void)allocator;
     if(!string) return NULL;
-    return (CFAttributedStringRef)LC32_CF_CALL(
+    CFDictionaryRef objectAttributes = LC32CopyDictionaryWithObjectEntries(attributes);
+    CFAttributedStringRef result = (CFAttributedStringRef)LC32_CF_CALL(
         LC32CoreFoundationOpAttributedStringCreate,
-        LC32_CF_HOST(string), LC32_CF_HOST(attributes));
+        LC32_CF_HOST(string), LC32_CF_HOST(objectAttributes));
+    if(objectAttributes) CFRelease(objectAttributes);
+    return result;
 }
 
 CFMutableAttributedStringRef CFAttributedStringCreateMutable(

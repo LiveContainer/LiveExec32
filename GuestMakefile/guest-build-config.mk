@@ -7,15 +7,12 @@ LC32_GUEST_BUILD_CONFIG := $(THEOS_OBJ_DIR)/.$(THEOS_CURRENT_INSTANCE)-guest-bui
 .PHONY: lc32-guest-build-config-force
 $(LC32_GUEST_BUILD_CONFIG): lc32-guest-build-config-force
 	@set -e; \
-	if [ ! -f "$(LC32_GUEST_LINKER)" ] || [ ! -x "$(LC32_GUEST_LINKER)" ]; then \
-		echo 'ld-classic is unavailable; install compatible Command Line Tools or set LC32_GUEST_LINKER to its absolute path' >&2; \
-		exit 1; \
-	fi; \
+	guest_linker=$$(xcrun --find ld); \
 	mkdir -p "$(@D)"; \
 	tmp="$@.$$$$"; \
 	{ \
 		printf '%s\n' "LC32_OBJC_TRACE=$(or $(LC32_OBJC_TRACE),0)"; \
-		printf '%s\n' "LC32_GUEST_LINKER=$(LC32_GUEST_LINKER)"; \
+		cksum "$$guest_linker" "$(LC32_GUEST_LINKER_WRAPPER)" "$(LC32_GUEST_THUMB_FIXUPS)"; \
 		if [ "$(THEOS_CURRENT_INSTANCE)" = UIKit ]; then \
 			printf '%s\n' "LC32_UIKIT_COMPATIBILITY=$(or $(LC32_UIKIT_COMPATIBILITY),1)"; \
 		fi; \

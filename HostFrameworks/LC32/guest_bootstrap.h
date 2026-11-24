@@ -36,8 +36,9 @@ inline constexpr char LegacyBundleInnerAliasName[] = LC32_LEGACY_BUNDLE_INNER_AL
 // inner symlink. That symlink may be retargeted as the bundle moves; no other
 // existing entry (including a non-symlink inner entry) is replaced. Otherwise
 // use a relative direct link for LiveContainer, so moving the outer container
-// preserves it. Upgrade an existing absolute direct link only if it resolves
-// to this bundle; preserve other entries and already-valid relative links.
+// preserves it, and an executable-named .app alias for games that construct
+// their bundle path under HOME. Upgrade an absolute direct link only if it
+// resolves to this bundle; preserve other entries and already-valid relative links.
 // Returns zero for success/not applicable, or an errno value for a failure.
 int EnsureLegacyBundleLayout(
     const std::string &configuredHome,

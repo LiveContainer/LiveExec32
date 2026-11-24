@@ -56,7 +56,8 @@ body:
         - For LiveContainer: after restarting it might show you an error with `LiveExec32 guest crash report`. Hit the Share button > Copy then paste it here (depending on LiveContainer version, you might instead see the old Copy button which copies only the crash report)
         
         You may also want to upload the crash log in iOS settings > Privacy Security > Analytics Improvements > Analytics Data - Search \<AppName\>/LiveContainer/LiveProcess.
-        Change .ips to .txt and upload it.
+        Change .ips to .txt and upload it to the "Other" section.
+      render: shell
     validations:
       required: true
   - type: textarea

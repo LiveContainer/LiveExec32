@@ -58,10 +58,12 @@ static CGRect nativeScreenBounds(UIWindow *window) {
     static uint64_t selector __attribute__((aligned(8)));
     const uint64_t hostSelector = LC32CachedHostSelector(
         &selector, @selector(bounds), YES);
-    CGRect_64 bounds;
+    LC32Floats4_64 bounds;
     LC32InvokeHostSelector([screen host_self], hostSelector,
         &bounds, sizeof(bounds), (uint64_t)0);
-    return LC32GuestCGRect(bounds);
+    CGRect result;
+    LC32Guest4Floats(&bounds, &result);
+    return result;
 }
 
 @interface LC32NestedRendererView : UIView

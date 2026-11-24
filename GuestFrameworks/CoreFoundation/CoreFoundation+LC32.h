@@ -16,6 +16,10 @@ uint32_t LC32CoreFoundationDispatch(LC32CoreFoundationOpcode opcode,
                                     const uint64_t *slots,
                                     uint32_t slotCount);
 
+// For APIs whose dictionary entries are explicitly objects (e.g. text
+// attributes), translate entries even when the source uses NULL callbacks.
+CFDictionaryRef LC32CopyDictionaryWithObjectEntries(CFDictionaryRef dictionary);
+
 static inline uint64_t LC32CoreFoundationHostObject(const void *object) {
     return object ? [(id)object host_self] : 0;
 }

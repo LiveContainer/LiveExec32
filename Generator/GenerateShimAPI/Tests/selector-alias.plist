@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>UIKit</key>
+    <dict>
+        <key>LC32SelectorAliasFixture</key>
+        <dict>
+            <key>+</key>
+            <dict>
+                <key>setCurrentContext:</key>
+                <string>c12@0:4@8</string>
+            </dict>
+            <key>-</key>
+            <dict>
+                <key>renderbufferStorage:fromDrawable:</key>
+                <string>c16@0:4I8@12</string>
+            </dict>
+        </dict>
+    </dict>
+</dict>
+</plist>

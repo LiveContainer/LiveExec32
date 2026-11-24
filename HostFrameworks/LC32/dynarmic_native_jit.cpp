@@ -37,7 +37,7 @@ void ScheduleMainGuestWorkqueueTransition() {
     /* A normal workqueue request does not set a debugger-wide stop flag, so
      * InterruptDebuggerMachCalls would deliberately do nothing here. Wake
      * only the main guest JIT's published host wait. */
-    InterruptNativeThreadStateHostCalls(1);
+    InterruptNativeThreadStateHostCalls(1, /*threadStatePause=*/false);
 }
 
 void HaltAllGuestJits(
@@ -674,10 +674,6 @@ static void *RunNativeGuestThread(void *opaque) {
                     std::memory_order_acquire) &&
                 !guestProcessExitRequested.load(
                     std::memory_order_acquire)) {
-            runtime->workqueueHostBlocked.store(
-                false, std::memory_order_release);
-            runtime->workqueueCompensationPending.store(
-                false, std::memory_order_release);
             /* The registry no longer counts this worker. Fill the newly
              * available bounded slot before publishing runtime->exited; a
              * pump must never reap and pthread_join its own host thread. */
@@ -955,7 +951,6 @@ bool StartNativeGuestWorkqueueWorker(
     runtime->debuggerId = debuggerId;
     runtime->workqueue = true;
     runtime->workqueueEventManager = job.hasDelivery && job.delivery.eventManager;
-    runtime->workqueuePriority = priority;
 
     GuestThreadContext thread = {};
     thread.debuggerId = debuggerId;
@@ -1299,6 +1294,14 @@ u32 GuestBsdthreadTerminate(
 
     const bool nativeThread =
         NativeGuestThreadIsCurrent();
+    if (nativeThread) {
+        /* Core Animation otherwise commits implicit transactions in its
+         * pthread TLS destructor, after this guest JIT has retired. Drawing
+         * callbacks need the still-live guest and this thread's CGContext. */
+        InvokeNativeGuestHostCall([] {
+            LC32FlushHostThreadTransactions();
+        });
+    }
     if (MACH_PORT_VALID(joinSemaphore) &&
             !nativeThread) {
         const kern_return_t result =
@@ -1598,14 +1601,11 @@ void NativeGuestWorkqueueHostBlockEnter() {
     if (nativeGuestWorkqueueHostBlockDepth++ != 0) {
         return;
     }
-    nativeGuestRuntime->workqueueHostBlocked.store(
-        true, std::memory_order_release);
-    nativeGuestRuntime->workqueueCompensationPending.store(
-        true, std::memory_order_release);
     /*
-     * XNU compensates for a constrained workqueue thread which blocks in the
-     * kernel.  Without that compensation a single requested root worker can
-     * sleep in libnotify while unrelated dispatch work remains queued.
+     * Service outstanding requests before this worker blocks, but never
+     * invent an ordinary upcall. iOS 10 libdispatch decrements dgq_pending
+     * on worker entry; an unrequested worker underflows that counter and
+     * prevents later enqueues from requesting any workers for this queue.
      */
     (void)PumpGuestWorkqueue();
 }
@@ -1615,12 +1615,7 @@ void NativeGuestWorkqueueHostBlockExit() {
             nativeGuestWorkqueueHostBlockDepth == 0) {
         return;
     }
-    if (--nativeGuestWorkqueueHostBlockDepth == 0) {
-        nativeGuestRuntime->workqueueCompensationPending.store(
-            false, std::memory_order_release);
-        nativeGuestRuntime->workqueueHostBlocked.store(
-            false, std::memory_order_release);
-    }
+    --nativeGuestWorkqueueHostBlockDepth;
 }
 
 bool GuestWorkqueueActiveForCurrentThread() {

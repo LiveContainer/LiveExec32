@@ -314,6 +314,7 @@ typedef enum : uint32_t {
     LC32CoreFoundationOpSocketSetAddress = 713,
     LC32CoreFoundationOpSocketSetDefaultNameRegistryPortNumber = 714,
     LC32CoreFoundationOpSocketSetSocketFlags = 715,
+    LC32CoreFoundationOpSocketCreateWithNative = 716,
 
     /* Legacy CFBitVector operations. */
     LC32CoreFoundationOpBitVectorCreate = 800,
@@ -359,6 +360,7 @@ typedef enum : uint32_t {
     LC32CoreFoundationOpURLCreateFileReferenceURL = 1005,
     LC32CoreFoundationOpURLCreateData = 1006,
     LC32CoreFoundationOpURLCreatePropertyFromResource = 1007,
+    LC32CoreFoundationOpURLCreateAbsoluteURLWithBytes = 1007,
 
     /* Stream constructors that do not install guest callbacks. */
     LC32CoreFoundationOpReadStreamCreateWithFile = 1100,
@@ -382,6 +384,23 @@ typedef enum : uint32_t {
     LC32CoreFoundationOpStringTokenizerAdvanceToNextToken = 1401,
     LC32CoreFoundationOpStringTokenizerGetCurrentTokenRange = 1402,
     LC32CoreFoundationOpStringTokenizerCopyBestStringLanguage = 1403,
+
+    /* Opaque CF objects may reject Objective-C weak references. */
+    LC32CoreFoundationOpRetain = 1500,
+    LC32CoreFoundationOpRelease = 1501,
+    LC32CoreFoundationOpEqual = 1502,
+    LC32CoreFoundationOpHash = 1503,
+    LC32CoreFoundationOpCopyDescription = 1504,
+
+    /* CFUUID is not toll-free bridged to NSUUID. */
+    LC32CoreFoundationOpUUIDCreate = 1600,
+    LC32CoreFoundationOpUUIDCreateFromString = 1601,
+    LC32CoreFoundationOpUUIDCreateFromBytes = 1602,
+    LC32CoreFoundationOpUUIDGetBytes = 1603,
+    LC32CoreFoundationOpUUIDCreateString = 1604,
+
+    /* Two guest byte buffers: 0 = invalid, 1 = equal, 2 = different. */
+    LC32CoreFoundationOpDataCompareGuestBytes = 1700,
 } LC32CoreFoundationOpcode;
 
 typedef enum : uint32_t {
@@ -415,6 +434,7 @@ typedef enum : uint32_t {
     LC32CoreFoundationTypeRunLoopTimer = 18,
     LC32CoreFoundationTypeSocket = 19,
     LC32CoreFoundationTypeAllocator = 20,
+    LC32CoreFoundationTypeUUID = 21,
 } LC32CoreFoundationKnownType;
 
 #endif

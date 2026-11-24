@@ -587,9 +587,11 @@ void InterruptDebuggerMachCalls() {
  * Wake only the host call which belongs to the guest JIT being sampled.
  * This mirrors the debugger interruption protocol without setting any
  * process-wide debugger flags or disturbing unrelated guest pthreads.
+ * Scheduler wake-ups also use this path, but must not be classified as
+ * transparent thread-state inspection.
  */
 void InterruptNativeThreadStateHostCalls(
-        gdb_thread_id_t threadId) {
+        gdb_thread_id_t threadId, bool threadStatePause) {
     constexpr unsigned retryCount = 100;
     constexpr useconds_t retryDelayMicroseconds = 1000;
 
@@ -610,6 +612,10 @@ void InterruptNativeThreadStateHostCalls(
                 if (phase == DebuggerMachCallPhase::Arming ||
                         phase == DebuggerMachCallPhase::InCall) {
                     ++activeCalls;
+                    if (threadStatePause) {
+                        call->threadStateInterruptRequested.store(
+                            true, std::memory_order_release);
+                    }
                     call->interruptRequested.store(
                         true, std::memory_order_release);
                 }
@@ -4924,6 +4930,7 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
                         guest_r2, 0, 0, 0, 0);
                 },
                 return_with_carry_direct(EINTR, true));
+        case F_ADDFILESIGS:
         case F_ADDFILESIGS_RETURN:
         {
             /* Decode dyld's 32-bit ABI so an incomplete guest structure is
@@ -4949,10 +4956,10 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
              * registration needed by FairPlay is performed separately for the
              * main ARM32 image in LC32MapFile before mremap_encrypted.
              *
-             * dyld still expects successful F_ADDFILESIGS_RETURN coverage.
-             * Validate the descriptor, report the entire file as covered, and
-             * leave the host kernel untouched. The returned off_t is the first
-             * field in both the 32-bit and native fsignatures_t layouts. */
+             * Validate the descriptor for both dyld registration commands.
+             * Only F_ADDFILESIGS_RETURN writes coverage back; the older
+             * F_ADDFILESIGS (used by legacy libraries) is input-only.
+             * Leave the host kernel's signatures untouched. */
             struct stat fileStatus = {};
             if(fstat(fildes, &fileStatus) == -1) {
                 const int savedErrno = errno;
@@ -4962,7 +4969,11 @@ int guest_fcntl(int fildes, int cmd, u32 guest_r2) {
             if(fileStatus.st_size < 0) {
                 return return_with_carry_direct(EIO, true);
             }
+            if(cmd == F_ADDFILESIGS) {
+                return return_with_carry_direct(0, false);
+            }
 
+            /* The returned off_t is the first field in both ABI layouts. */
             guestSignatures.fileStart = fileStatus.st_size;
             if(!write_guest_memory_with_permissions(
                     guest_r2, &guestSignatures.fileStart,

@@ -32,11 +32,19 @@ int main(void) {
     void *alcCoreProc = alcGetProcAddress(NULL, "alcGetError");
     alBufferDataStaticProcPtr staticBuffer =
         (alBufferDataStaticProcPtr)alGetProcAddress("alBufferDataStatic");
+    alBufferDataStaticProcPtr alcStaticBuffer =
+        (alBufferDataStaticProcPtr)alcGetProcAddress(NULL, "alBufferDataStatic");
     CHECK(coreProc == (void *)(uintptr_t)&alGetError,
           "al-core-proc-address-is-guest");
     CHECK(alcCoreProc == (void *)(uintptr_t)&alcGetError,
           "alc-core-proc-address-is-guest");
     CHECK(staticBuffer != NULL, "static-buffer-extension-proc");
+    CHECK(alcStaticBuffer != NULL && alcStaticBuffer == staticBuffer,
+          "alc-static-buffer-extension-is-guest-adapter");
+    CHECK(alcGetProcAddress(NULL, NULL) == NULL,
+          "alc-null-proc-name");
+    CHECK(alcGetProcAddress(NULL, "LC32UnknownExtension") == NULL,
+          "alc-unknown-proc-name");
     CHECK(alIsExtensionPresent("AL_EXT_STATIC_BUFFER") == AL_TRUE,
           "static-buffer-extension-advertised");
     CHECK(alcGetCurrentContext() == NULL, "initial-current-context");
@@ -146,6 +154,15 @@ int main(void) {
         staticBuffer((ALint)buffer, AL_FORMAT_MONO16,
                      pcm, sizeof(pcm), 22050);
         al_ok("static-buffer-copy-semantics");
+    }
+    if (alcStaticBuffer != NULL) {
+        alcStaticBuffer((ALint)buffer, AL_FORMAT_MONO16,
+                        pcm, sizeof(pcm) / 2, 11025);
+        al_ok("alc-static-buffer-upload");
+        alGetBufferi(buffer, AL_SIZE, &size);
+        alGetBufferi(buffer, AL_FREQUENCY, &frequency);
+        CHECK(size == (ALint)(sizeof(pcm) / 2) && frequency == 11025,
+              "alc-static-buffer-data-replaced");
     }
 
 cleanup:

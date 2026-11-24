@@ -4,6 +4,7 @@
 
 #include <dispatch/dispatch.h>
 #include <pthread.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -14,13 +15,18 @@
  * state, so a timeout cannot leave a callback pointing into an expired frame. */
 typedef struct {
     unsigned count;
-    unsigned events[8];
+    unsigned events[16];
     BOOL wrongThread;
 } Events;
 
 static pthread_t mainThread;
 static pthread_mutex_t stateLock = PTHREAD_MUTEX_INITIALIZER;
 static Events fifoEvents, nestedRunLoopEvents, workerEvents, assetEvents;
+static Events globalQueueEvents;
+static Events blockedGlobalEvents;
+static Events concurrentGlobalEvents;
+static BOOL blockedGlobalStarted, blockedGlobalReadOK;
+static int blockingPipe[2];
 static BOOL workerWasBackground, assetTracksFailed, assetPlayableFailed;
 static BOOL nestedRunLoopDidNotReenter;
 static unsigned assetCompletions;
@@ -180,6 +186,78 @@ int main(void) {
             check("worker-main-callback-thread", workerResult.count == 2 &&
                 !workerResult.wrongThread);
         }
+
+        /* A worker must not consume a second, unrequested root-queue upcall
+         * when it blocks. That underflows libdispatch's pending count and
+         * strands subsequent dispatch_async calls, including ad SDK request
+         * preparation. Exercise both work submitted while blocked and later
+         * independent batches, without networking or private queue offsets. */
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            dispatch_async(dispatch_get_main_queue(), ^{
+                record(&globalQueueEvents, 1);
+            });
+        });
+        check("global-queue-main-hop", pumpUntil(&globalQueueEvents, 1, NO));
+        Events globalResult = snapshot(&globalQueueEvents);
+        check("global-queue-main-hop-once-on-main", globalResult.count == 1 &&
+            !globalResult.wrongThread);
+        int pipeResult = pipe(blockingPipe);
+        check("global-queue-blocking-pipe", pipeResult == 0);
+        if(pipeResult == 0) {
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                pthread_mutex_lock(&stateLock);
+                blockedGlobalStarted = YES;
+                pthread_mutex_unlock(&stateLock);
+                struct pollfd descriptor = {blockingPipe[0], POLLIN, 0};
+                int ready = poll(&descriptor, 1, 5000);
+                char byte = 0;
+                ssize_t count = read(blockingPipe[0], &byte, 1);
+                pthread_mutex_lock(&stateLock);
+                blockedGlobalReadOK = ready == 1 && count == 1 && byte == 'x';
+                pthread_mutex_unlock(&stateLock);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    record(&blockedGlobalEvents, 1);
+                });
+            });
+            BOOL started = NO;
+            for(unsigned i = 0; i < 200 && !started; ++i) {
+                usleep(10000);
+                pthread_mutex_lock(&stateLock);
+                started = blockedGlobalStarted;
+                pthread_mutex_unlock(&stateLock);
+            }
+            check("global-queue-blocking-worker-started", started);
+            usleep(50000);
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    record(&concurrentGlobalEvents, 1);
+                });
+            });
+            check("global-queue-progress-while-peer-blocked",
+                pumpUntil(&concurrentGlobalEvents, 1, NO));
+            check("global-queue-unblock-worker", write(blockingPipe[1], "x", 1) == 1);
+            check("global-queue-blocked-main-hop", pumpUntil(&blockedGlobalEvents, 1, NO));
+            pthread_mutex_lock(&stateLock);
+            BOOL readOK = blockedGlobalReadOK;
+            pthread_mutex_unlock(&stateLock);
+            check("global-queue-blocked-read", readOK);
+            close(blockingPipe[0]);
+            close(blockingPipe[1]);
+        }
+        for(unsigned batch = 0; batch < 3; ++batch) {
+            for(unsigned i = 0; i < 3; ++i) {
+                dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        record(&globalQueueEvents, 2 + batch * 3 + i);
+                    });
+                });
+            }
+            check("global-queue-repeated-batch", pumpUntil(&globalQueueEvents,
+                1 + (batch + 1) * 3, NO));
+        }
+        globalResult = snapshot(&globalQueueEvents);
+        check("global-queue-batches-once-on-main", globalResult.count == 10 &&
+            !globalResult.wrongThread);
 
         /* /dev/null is a file, so its child cannot exist. No media fixture,
          * network access, file creation, or hardware decoder is needed. */

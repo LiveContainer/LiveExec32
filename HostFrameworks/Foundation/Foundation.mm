@@ -1,6 +1,7 @@
 @import Foundation;
 #import "bridge.h"
 #import "MachPort.h"
+#include "filesystem.h"
 #include "../../GuestFrameworks/Foundation/LC32FoundationBridge.h"
 
 #include <cstring>
@@ -45,6 +46,17 @@ NSString *LC32UserSearchPath(NSSearchPathDirectory directory,
 } // namespace
 
 __BEGIN_DECLS
+
+void LC32MountFoundationTemporaryDirectory() {
+    // Foundation can cache a temp directory outside the selected guest home
+    // (notably LiveContainer's own container on the simulator). POSIX users of
+    // NSTemporaryDirectory must reach the same files as native Foundation.
+    NSString *directory = [NSTemporaryDirectory() stringByStandardizingPath];
+    const char *path = directory.fileSystemRepresentation;
+    if(path && path[0] == '/') {
+        sharedHandle.fs->addMountpoint(path, path);
+    }
+}
 
 u32 LC32_Foundation_AllocateMachPortPeer(void) {
     return LC32GuestObjectForOwnedHostObject((CFTypeRef)LC32AllocateMachPortPeer());

@@ -68,9 +68,9 @@ CATransform3D CATransform3DMakeRotation(CGFloat angle, CGFloat x, CGFloat y, CGF
     CGFloat length = sqrt(x*x + y*y + z*z);
     x /= length; y /= length; z /= length;
     CATransform3D result = {
-        x*x*(1-c)+  c, y*x*(1-c)-z*s, z*x*(1-c)+y*s, 0,
-        x*y*(1-c)+z*c, y*y*(1-c)+  c, z*y*(1-c)-x*s, 0,
-        x*z*(1-c)-y*s, y*z*(1-c)+x*s, z*z*(1-c)+  c, 0,
+        x*x*(1-c)+  c, y*x*(1-c)+z*s, z*x*(1-c)-y*s, 0,
+        x*y*(1-c)-z*s, y*y*(1-c)+  c, z*y*(1-c)+x*s, 0,
+        x*z*(1-c)+y*s, y*z*(1-c)-x*s, z*z*(1-c)+  c, 0,
         0, 0, 0, 1
     };
     return result;

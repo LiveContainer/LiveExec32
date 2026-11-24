@@ -19,10 +19,7 @@ GuestWorkqueuePumpResult PumpGuestWorkqueue() {
         bool startedWorker = false;
         for (;;) {
             size_t ordinaryWorkers = 0;
-            size_t blockedOrdinaryWorkers = 0;
             bool eventManagerActive = false;
-            u32 compensationPriority = 0;
-            gdb_thread_id_t compensationThreadId = 0;
             {
                 std::lock_guard<std::recursive_mutex> threadLock(
                     guestThreadMutex);
@@ -36,18 +33,6 @@ GuestWorkqueuePumpResult PumpGuestWorkqueue() {
                         continue;
                     }
                     ++ordinaryWorkers;
-                    if (thread.nativeJit->workqueueHostBlocked.load(
-                            std::memory_order_acquire)) {
-                        ++blockedOrdinaryWorkers;
-                        if (compensationThreadId == 0 &&
-                                thread.nativeJit->
-                                    workqueueCompensationPending.load(
-                                        std::memory_order_acquire)) {
-                            compensationPriority =
-                                thread.nativeJit->workqueuePriority;
-                            compensationThreadId = thread.debuggerId;
-                        }
-                    }
                 }
             }
             const bool allowOrdinary = ordinaryWorkers < MaxNativeGuestWorkqueueWorkers;
@@ -105,15 +90,6 @@ GuestWorkqueuePumpResult PumpGuestWorkqueue() {
                             job.hasDelivery = true;
                             haveJob = true;
                             retryJobOnFailure = true;
-                        } else if (allowOrdinary && ordinaryWorkers != 0 &&
-                                blockedOrdinaryWorkers == ordinaryWorkers &&
-                                compensationThreadId != 0) {
-                            /* XNU's workqueue scheduler compensates when all
-                             * constrained workers are asleep in the kernel.
-                             * Enter another root worker even though dispatch
-                             * requested only the worker which is now blocked. */
-                            job.priority = compensationPriority;
-                            haveJob = true;
                         }
                     }
                 }
@@ -133,19 +109,6 @@ GuestWorkqueuePumpResult PumpGuestWorkqueue() {
                         std::move(job));
                 }
                 break;
-            }
-            if (compensationThreadId != 0) {
-                std::lock_guard<std::recursive_mutex> threadLock(
-                    guestThreadMutex);
-                if (GuestThreadContext *blockedThread =
-                        FindGuestThread(compensationThreadId, true);
-                        blockedThread != nullptr &&
-                        blockedThread->workqueue &&
-                        blockedThread->nativeJit != nullptr) {
-                    blockedThread->nativeJit->
-                        workqueueCompensationPending.store(
-                            false, std::memory_order_release);
-                }
             }
             startedWorker = true;
         }

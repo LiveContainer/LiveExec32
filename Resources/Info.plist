@@ -61,7 +61,7 @@
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
 	<key>MinimumOSVersion</key>
-	<string>16.0</string>
+	<string>15.0</string>
 	<key>SBAppTags</key>
 	<array>
 		<string>hidden</string>

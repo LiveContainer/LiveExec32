@@ -96,6 +96,7 @@ struct BundleLayoutFixture {
         MakeDirectory(bundle);
         MakeFile(bundle + "/Info.plist");
         MakeFile(executable);
+        Track(home + "/Game.app");
     }
 
     ~BundleLayoutFixture() {
@@ -303,6 +304,7 @@ void TestLiveContainerRelativeBundleLayout() {
     fixture.MakeFile(bundle + "/Info.plist");
     fixture.MakeFile(bundle + "/Game");
     fixture.Track(alias);
+    fixture.Track(home + "/Game.app");
 
     // Different aliases of the common ancestor must not add spurious ".."
     // components. LiveContainer's HOME selects the guest container, not LC_HOME_PATH.
@@ -314,6 +316,8 @@ void TestLiveContainerRelativeBundleLayout() {
     CHECK(selected == homeSpelling);
     CHECK(EnsureLegacyBundleLayout(selected, bundle + "/Game", 0) == 0);
     CHECK(ReadLink(alias) == "../../../Documents/Applications/Game.app");
+    CHECK(ReadLink(home + "/Game.app") ==
+        "../../../Documents/Applications/Game.app");
     CHECK(!EntryExists(container + "/" + LC32GuestBootstrap::LegacyBundleAliasName));
 
     // Reinstalling/moving the whole outer container must not break this link.
@@ -338,6 +342,57 @@ void TestLiveContainerRelativeBundleLayout() {
         nullptr, moved.c_str(), shortHome.c_str(), true),
         movedBundle + "/Game", 0) == 0);
     CHECK(ReadLink(movedAlias) == "../../../Documents/Applications/Game.app");
+    CHECK(ReadLink(movedHome + "/Game.app") ==
+        "../../../Documents/Applications/Game.app");
+}
+
+void TestExecutableNamedBundleAlias() {
+    using LC32GuestBootstrap::EnsureLegacyBundleLayout;
+    for(const char *name : {"Death Rally", "LiveExec32"}) {
+        BundleLayoutFixture fixture;
+        if(fixture.root.empty()) return;
+        // Installed bundle folders may be renamed independently of the binary.
+        const std::string executable = fixture.bundle + "/" + name;
+        const std::string alias = fixture.home + "/" + name + ".app";
+        fixture.MakeFile(executable);
+        fixture.Track(fixture.alias);
+        fixture.Track(alias);
+        CHECK(EnsureLegacyBundleLayout(fixture.home, executable, 0x80000) == 0);
+        CHECK(!EntryExists(alias));
+        CHECK(EnsureLegacyBundleLayout(fixture.home, executable, 0x20000) == 0);
+        CHECK(ReadLink(alias) == "../Game.app");
+        CHECK(EntryExists(alias + "/Info.plist"));
+        CHECK(EntryExists(alias + "/" + name));
+        struct stat before = {}, after = {};
+        CHECK(lstat(alias.c_str(), &before) == 0);
+        CHECK(EnsureLegacyBundleLayout(fixture.home, executable, 0) == 0);
+        CHECK(lstat(alias.c_str(), &after) == 0);
+        CHECK(before.st_ino == after.st_ino);
+    }
+    for(int kind = 0; kind < 6; ++kind) {
+        BundleLayoutFixture fixture;
+        if(fixture.root.empty()) return;
+        const std::string alias = fixture.home + "/Game.app";
+        fixture.Track(fixture.alias);
+        if(kind == 0) fixture.MakeFile(alias);
+        else if(kind == 1) {
+            fixture.MakeDirectory(alias);
+            fixture.MakeFile(alias + "/user-data");
+        } else fixture.MakeLink(kind == 2 ? fixture.root :
+            kind == 3 ? fixture.root + "/missing" :
+            kind == 4 ? fixture.bundle : "../Game.app", alias);
+        struct stat before = {}, after = {};
+        CHECK(lstat(alias.c_str(), &before) == 0);
+        CHECK(EnsureLegacyBundleLayout(fixture.home, fixture.executable, 0) ==
+            (kind < 4 ? EEXIST : 0));
+        CHECK(ReadLink(fixture.alias) == "../Game.app");
+        CHECK(lstat(alias.c_str(), &after) == 0);
+        if(kind != 4) CHECK(before.st_ino == after.st_ino);
+        CHECK(before.st_mode == after.st_mode);
+        if(kind == 1) CHECK(EntryExists(alias + "/user-data"));
+        if(kind >= 2) CHECK(ReadLink(alias) == (kind == 2 ? fixture.root :
+            kind == 3 ? fixture.root + "/missing" : "../Game.app"));
+    }
 }
 
 void TestRelativeBundleComponents() {
@@ -411,6 +466,8 @@ void TestManagedLegacyBundleLayout() {
         CHECK(stat(fixture.bundle.c_str(), &bundle) == 0);
         CHECK(followed.st_dev == bundle.st_dev && followed.st_ino == bundle.st_ino);
         CheckOnlyManagedInnerEntry(documents);
+        // Installer-owned layouts cannot create new entries at HOME's root.
+        CHECK(!EntryExists(fixture.home + "/Game.app"));
     }
     for(int conflict = 0; conflict < 2; ++conflict) {
         BundleLayoutFixture fixture;
@@ -792,6 +849,7 @@ int main() {
     TestConfiguredHomeResolution();
     TestLegacyBundleLayout();
     TestLiveContainerRelativeBundleLayout();
+    TestExecutableNamedBundleAlias();
     TestRelativeBundleComponents();
     TestManagedLegacyBundleLayout();
     TestEnvironmentSelection();
